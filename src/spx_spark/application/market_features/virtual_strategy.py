@@ -60,15 +60,16 @@ from spx_spark.application.market_features.virtual_strategy_state import (
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.dispatcher import enqueue_notification
-from spx_spark.notifier.model import CommandRunner, default_runner
+from spx_spark.notifier.model import (
+    CommandRunner,
+    ExternalDeliveryReceipt,
+    default_runner,
+)
 from spx_spark.notifier.operator_contract import (
     operator_generation,
     operator_opportunity_id,
 )
-from spx_spark.notifier.receipts import (
-    ExternalDeliveryReceipt,
-    inspect_external_delivery_receipt,
-)
+from spx_spark.notifier.unified_delivery import inspect_external_delivery_receipt
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestState

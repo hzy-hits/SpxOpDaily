@@ -22,7 +22,7 @@ from spx_spark.application.market_features.trade_intent_runtime_support import (
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.ibkr.atm_reference import BASIS_MAX_ABS_POINTS
 from spx_spark.notifier.dispatcher import inspect_notification_event
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 
 

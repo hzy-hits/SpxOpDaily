@@ -43,7 +43,8 @@ from spx_spark.application.order_map.rth_daily_acceptance_support import (
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, MarketCalendar, MarketSession
 from spx_spark.notifier.dispatcher import EnqueueResult, enqueue_notification
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.state_io import atomic_write_json_secure
@@ -497,39 +498,43 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
             dead_letters = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_delivery_targets "
-                    "WHERE status = 'dead_letter' AND acknowledged_at IS NULL"
+                    "SELECT COUNT(*) FROM notification_events WHERE status = 'failed'"
                 ).fetchone()[0]
             )
             pending_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_delivery_targets WHERE status = 'pending'"
+                    "SELECT COUNT(*) FROM notification_events WHERE status = 'pending'"
                 ).fetchone()[0]
             )
             claimed_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_delivery_targets WHERE status = 'claimed'"
+                    "SELECT COUNT(*) FROM notification_events WHERE status = 'processing'"
+                ).fetchone()[0]
+            )
+            uncertain_targets = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM notification_events WHERE status = 'uncertain'"
                 ).fetchone()[0]
             )
             unknown_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_delivery_targets "
-                    "WHERE status NOT IN ('pending', 'claimed', 'delivered', 'dead_letter')"
+                    "SELECT COUNT(*) FROM notification_events "
+                    "WHERE status NOT IN ('pending', 'processing', 'delivered', 'failed', 'uncertain')"
                 ).fetchone()[0]
             )
             terminal_receipt_schema_present = (
                 connection.execute(
                     "SELECT 1 FROM sqlite_master "
                     "WHERE type = 'table' "
-                    "AND name = 'notification_delivery_terminal_receipts'"
+                    "AND name = 'notification_attempts'"
                 ).fetchone()
                 is not None
             )
             terminal_receipts_pending = (
                 int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM notification_delivery_terminal_receipts "
-                        "WHERE recorded_at IS NULL"
+                        "SELECT COUNT(*) FROM notification_attempts "
+                        "WHERE finished_at IS NULL"
                     ).fetchone()[0]
                 )
                 if terminal_receipt_schema_present
@@ -548,6 +553,7 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         and journal_mode == "delete"
         and pending_targets == 0
         and claimed_targets == 0
+        and uncertain_targets == 0
         and dead_letters == 0
         and unknown_targets == 0
         and terminal_receipt_schema_present
@@ -560,6 +566,7 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             "journal_mode": journal_mode,
             "pending_targets": pending_targets,
             "claimed_targets": claimed_targets,
+            "uncertain_targets": uncertain_targets,
             "dead_letter_targets": dead_letters,
             "unknown_targets": unknown_targets,
             "terminal_receipt_schema_present": terminal_receipt_schema_present,
@@ -570,6 +577,7 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             "journal_mode": "delete",
             "pending_targets": 0,
             "claimed_targets": 0,
+            "uncertain_targets": 0,
             "dead_letter_targets": 0,
             "unknown_targets": 0,
             "terminal_receipt_schema_present": True,
@@ -579,6 +587,7 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         reason=(
             f"outbox quick_check={quick_check}, journal_mode={journal_mode}, "
             f"pending_targets={pending_targets}, claimed_targets={claimed_targets}, "
+            f"uncertain_targets={uncertain_targets}, "
             f"dead_letter_targets={dead_letters}, unknown_targets={unknown_targets}, "
             f"terminal_receipt_schema_present={terminal_receipt_schema_present}, "
             f"terminal_receipts_pending={terminal_receipts_pending}"
@@ -826,8 +835,8 @@ def main(argv: list[str] | None = None) -> int:
         storage.data_root,
         trading_date=_resolve_trading_date(args.date, now=now),
         level_policy=app_settings.level_decision,
-        outbox_path=notification.delivery_outbox_path,
-        receipt_path=notification.delivery_receipt_path,
+        outbox_path=notification.notification_database_path,
+        receipt_path=None,
         now=now,
         spring_required=spring_required,
     )

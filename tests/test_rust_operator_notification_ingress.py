@@ -11,8 +11,8 @@ import uuid
 
 from spx_spark.application.market_features.virtual_strategy_support import _episode
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier.delivery_outbox_contract import DeliveryJob
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import DeliveryJob
+from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.notifier.rust_ingress import (
     build_operator_cancellation_message,
     build_operator_ingress_message,

@@ -1,6 +1,5 @@
 """通知管道:选取→审阅→gate→双通道投递。"""
 
-from spx_spark.notifier.missed_queue import append_missed, flush_missed
 from spx_spark.notifier.deepseek import run_deepseek_reviewer
 from spx_spark.notifier.dispatcher import (
     DispatchResult,
@@ -12,12 +11,13 @@ from spx_spark.notifier.dispatcher import (
 )
 from spx_spark.notifier.model import (
     CommandRunner,
+    NotificationEnvelope,
     NotificationResult,
     SinkResult,
     default_runner,
 )
 from spx_spark.notifier.pipeline import notify_payload
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.notifier.policy import (
     alert_key,
     alerts_are_latency_critical,
@@ -52,11 +52,9 @@ from spx_spark.notifier.state import (
 )
 
 __all__ = [
-    "append_missed",
     "CommandRunner",
     "DispatchResult",
     "EnqueueResult",
-    "flush_missed",
     "NotificationResult",
     "NotificationEnvelope",
     "SinkResult",

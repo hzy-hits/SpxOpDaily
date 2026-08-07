@@ -33,11 +33,11 @@ from spx_spark.application.market_features.virtual_strategy import (
 from spx_spark.application.market_features.virtual_strategy_rth import (
     trade_intent_action_snapshot as _trade_intent_action_snapshot,
 )
-from spx_spark.notifier.receipts import (
+from spx_spark.notifier.model import (
     ExternalDeliveryReceipt,
     ExternalDeliveryReceiptLookup,
-    find_external_delivery_receipt,
 )
+from spx_spark.notifier.unified_delivery import inspect_external_delivery_receipt
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.settings.market_features import MarketFeatureSettings
 
@@ -2074,11 +2074,11 @@ def test_rust_external_receipt_requires_joined_human_channel_delivery(tmp_path: 
             ),
         )
 
-    receipt = find_external_delivery_receipt(
+    receipt = inspect_external_delivery_receipt(
         "intent:ready:notify:one",
         rust_owner=True,
         rust_ledger_path=str(ledger),
-    )
+    ).receipt
 
     assert receipt is not None
     assert receipt.receipt_id == "receipt-feishu"

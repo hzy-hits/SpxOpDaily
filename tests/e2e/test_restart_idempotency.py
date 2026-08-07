@@ -1,15 +1,25 @@
-"""Restart / kill-before-ack notifier idempotency tests."""
+"""Restart behavior for the unified notification queue."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
 
-from spx_spark.application.notifications.outbox_consumer import IdempotentOutboxConsumer
+from spx_spark.config import NotificationSettings
 from spx_spark.domain.events import DomainEvent, EventKind
-from spx_spark.infrastructure.ledger.outbox import SqliteEventOutbox
+from spx_spark.infrastructure.notifications import (
+    NotificationEventQueue,
+    begin_attempt,
+    create_engine,
+    event_rows,
+    metadata,
+    recover_incomplete_attempts,
+)
+from spx_spark.notifier.unified_delivery import deliver_notification_event
 
 
-NOW = datetime(2026, 7, 11, 16, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
 
 
 def _alert(event_id: str) -> DomainEvent:
@@ -21,79 +31,37 @@ def _alert(event_id: str) -> DomainEvent:
         available_at=NOW,
         aggregate_id="spx",
         sequence=1,
-        payload={"kind": "price_move", "alert_id": event_id},
+        payload={"alerts": []},
     )
 
 
-def test_kill_restart_notifier_does_not_lose_or_double_send(tmp_path) -> None:
-    db = tmp_path / "outbox.sqlite"
-    outbox = SqliteEventOutbox(db, max_attempts=5)
-    outbox.append([_alert("a1"), _alert("a2")])
+def test_restart_recovers_only_pre_transport_attempt(tmp_path: Path) -> None:
+    store = create_engine(tmp_path)
+    metadata.create_all(store)
+    scheduled: list[int] = []
+    queue = NotificationEventQueue(store, schedule=scheduled.append)
+    assert queue.append([_alert("a1")]).accepted == 1
+    event_id = scheduled[0]
+    assert begin_attempt(store, event_id, now=NOW) is not None
 
-    sent: list[str] = []
-    processed: set[str] = set()
+    recovery = recover_incomplete_attempts(store, now=NOW)
 
-    def deliver(event: DomainEvent) -> bool:
-        sent.append(event.event_id)
-        return True
-
-    # First claim both, deliver only the first, then "crash" before ack of a2.
-    claimed = outbox.claim(consumer_id="notifier", limit=2, now=NOW)
-    assert len(claimed) == 2
-    assert deliver(claimed[0]) is True
-    processed.add(claimed[0].event_id)
-    outbox.ack([claimed[0].event_id], consumer_id="notifier")
-    # a2 remains CLAIMED — simulate kill.
-
-    # Restart: new process with durable processed set, reclaim stale claims.
-    later = NOW + timedelta(seconds=5)
-    restarted = IdempotentOutboxConsumer(
-        SqliteEventOutbox(db, max_attempts=5),
-        consumer_id="notifier",
-        deliver=deliver,
-        processed_ids=set(processed),
-        claim_stale_after_seconds=1.0,
-    )
-    result = restarted.consume(
-        limit=10,
-        kinds=(EventKind.ALERT_CANDIDATE,),
-        now=later,
-    )
-    assert result.delivered == 1
-    assert result.acked_ids == ["a2"]
-    assert sent == ["a1", "a2"]
-
-    # Replaying / reclaiming again must not double-send.
-    third = restarted.consume(kinds=(EventKind.ALERT_CANDIDATE,), now=later)
-    assert third.claimed == 0
-    assert third.delivered == 0
-    assert sent == ["a1", "a2"]
+    assert recovery.retry_event_ids == (event_id,)
+    settings = replace(NotificationSettings.from_env(), notification_queue_enabled=True)
+    result = deliver_notification_event(event_id, settings=settings, engine=store, now=NOW)
+    assert result.ok is True
+    assert next(iter(event_rows(store, "a1")))["status"] == "delivered"
 
 
-def test_duplicate_claim_after_ack_is_skipped(tmp_path) -> None:
-    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite")
-    outbox.append([_alert("once")])
-    sent: list[str] = []
-    processed: set[str] = set()
+def test_duplicate_append_uses_one_idempotent_row(tmp_path: Path) -> None:
+    store = create_engine(tmp_path)
+    metadata.create_all(store)
+    scheduled: list[int] = []
+    queue = NotificationEventQueue(store, schedule=scheduled.append)
 
-    def deliver(event: DomainEvent) -> bool:
-        sent.append(event.event_id)
-        return True
+    first = queue.append([_alert("once")])
+    second = queue.append([_alert("once")])
 
-    consumer = IdempotentOutboxConsumer(
-        outbox,
-        consumer_id="n",
-        deliver=deliver,
-        processed_ids=processed,
-    )
-    first = consumer.consume(kinds=(EventKind.ALERT_CANDIDATE,), now=NOW)
-    assert first.delivered == 1
-    # Force a pending re-insert attempt via duplicate append + manual pending
-    # is blocked by PRIMARY KEY; instead put a second claim cycle on same id
-    # by replaying from dead letter path is N/A. Simulate processed-set hit:
-    processed.add("once")
-    # Manually re-open as claimed then consume path for duplicate_skipped:
-    outbox.append([_alert("once")])  # duplicate ignored
-    second = consumer.consume(kinds=(EventKind.ALERT_CANDIDATE,), now=NOW)
-    assert second.claimed == 0
-    assert sent == ["once"]
+    assert first.accepted == 1
+    assert second.duplicate == 1
+    assert len(event_rows(store, "once")) == 1

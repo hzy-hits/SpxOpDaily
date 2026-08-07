@@ -1,11 +1,8 @@
 import json
 import os
-import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import MaintenanceSettings, NotificationSettings
-from spx_spark.domain.events import DomainEvent, EventKind
-from spx_spark.infrastructure.ledger.outbox import OutboxStatus, SqliteEventOutbox
 from spx_spark.maintenance import (
     MaintenanceReport,
     action_level,
@@ -14,7 +11,6 @@ from spx_spark.maintenance import (
     execute_prune,
     is_protected_path,
     maybe_send_disk_alert,
-    purge_outbox,
     trim_review_audit_file,
 )
 
@@ -286,58 +282,6 @@ def test_disk_alert_undelivered_does_not_raise_or_burn_cooldown(tmp_path, monkey
     )
     assert retried["sent"] is True
     assert len(calls) == 1
-
-
-def _outbox_event(event_id: str, *, at: datetime) -> DomainEvent:
-    return DomainEvent(
-        schema_version=1,
-        event_id=event_id,
-        kind=EventKind.ALERT_CANDIDATE,
-        source_at=at,
-        available_at=at,
-        aggregate_id="spx",
-        sequence=1,
-        payload={"alert": event_id},
-    )
-
-
-def _ack_with_updated_at(outbox: SqliteEventOutbox, event_id: str, *, at: datetime) -> None:
-    outbox.append([_outbox_event(event_id, at=at)])
-    outbox.claim(consumer_id="test", now=at)
-    assert outbox.ack([event_id], consumer_id="test", outcome="consumed") == 1
-    with sqlite3.connect(outbox.path) as connection:
-        connection.execute(
-            "UPDATE domain_event_outbox SET updated_at = ? WHERE event_id = ?",
-            (at.isoformat(), event_id),
-        )
-
-
-def test_purge_outbox_deletes_only_expired_acked_rows(tmp_path) -> None:
-    settings = make_settings(tmp_path)
-    outbox_path = tmp_path / "data" / "ledger" / "domain_event_outbox.sqlite"
-    outbox = SqliteEventOutbox(outbox_path)
-    old = NOW - timedelta(days=40)
-    _ack_with_updated_at(outbox, "old-acked", at=old)
-    _ack_with_updated_at(outbox, "recent-acked", at=NOW - timedelta(days=2))
-    outbox.append([_outbox_event("still-pending", at=old)])
-
-    payload = purge_outbox(settings)
-
-    assert payload["exists"] is True
-    assert payload["retention_days"] == 30
-    assert payload["deleted"] == 1
-    counts = outbox.count_by_status()
-    assert counts.get(OutboxStatus.ACKED.value) == 1
-    assert counts.get(OutboxStatus.PENDING.value) == 1
-
-
-def test_purge_outbox_missing_file_is_a_noop(tmp_path) -> None:
-    settings = make_settings(tmp_path)
-
-    payload = purge_outbox(settings)
-
-    assert payload["exists"] is False
-    assert payload["deleted"] == 0
 
 
 def test_trim_review_audit_file_drops_only_expired_entries(tmp_path) -> None:

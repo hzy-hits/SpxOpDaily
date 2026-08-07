@@ -86,7 +86,6 @@ SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 def make_settings(
     state_path: str,
     *,
-    missed_queue_path: str = "",
     agent_enabled: bool = False,
     bark_enabled: bool = False,
     feishu_enabled: bool = True,
@@ -131,14 +130,11 @@ def make_settings(
         else "",
         feishu_secret="",
         feishu_timeout_seconds=10.0,
-        missed_queue_path=missed_queue_path,
     )
     return replace(
         settings,
-        delivery_receipt_path=f"{state_path}.receipts.sqlite",
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=f"{state_path}.delivery.sqlite",
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=f"{state_path}.delivery.sqlite",
     )
 
 
@@ -2221,7 +2217,7 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
     monkeypatch.setattr(
         order_map_module.NotificationSettings,
         "from_env",
-        classmethod(lambda cls: object()),
+        classmethod(lambda cls: make_settings(str(tmp_path / "notify-state.json"))),
     )
 
     def enqueue_status(settings, **kwargs):
@@ -2286,7 +2282,7 @@ def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapsho
     monkeypatch.setattr(
         order_map_module.NotificationSettings,
         "from_env",
-        classmethod(lambda cls: object()),
+        classmethod(lambda cls: make_settings(str(tmp_path / "notify-state.json"))),
     )
 
     def enqueue_status(settings, **kwargs):
@@ -4641,7 +4637,7 @@ def test_send_order_map_only_enqueues_without_calling_feishu(tmp_path: Path, mon
     )
     template = render_template(payload)
     missed_path = str(tmp_path / "missed.jsonl")
-    settings = make_settings(str(tmp_path / "notify-state.json"), missed_queue_path=missed_path)
+    settings = make_settings(str(tmp_path / "notify-state.json"))
 
     result = send_order_map(
         payload,

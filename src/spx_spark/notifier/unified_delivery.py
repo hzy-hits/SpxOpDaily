@@ -8,29 +8,36 @@ from functools import lru_cache
 from pathlib import Path
 import hashlib
 import json
+import sqlite3
 from typing import Callable, Mapping, Sequence
 
 from sqlalchemy import Engine
 
 from spx_spark.app_settings import get_settings
 from spx_spark.config import NotificationSettings
+from spx_spark.domain.events import DomainEvent, EventKind
 from spx_spark.infrastructure.notifications import (
     CANCELLATION_CHANNEL,
     NotificationDraft,
     NotificationStatus,
     begin_attempt,
     cancel,
-    create_engine,
+    create_database_engine,
     enqueue,
     event_rows,
     mark_transport_started,
+    metadata,
     recover_incomplete_attempts,
     settle,
 )
-from spx_spark.notifier.delivery_outbox_contract import DeliveryEventInspection
+from spx_spark.notifier.model import (
+    DeliveryEventInspection,
+    ExternalDeliveryReceipt,
+    ExternalDeliveryReceiptLookup,
+)
 from spx_spark.notifier.human_policy import quiet_window_suppresses
 from spx_spark.notifier.model import SinkResult
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.notifier.rust_ingress import (
     deliver_operator_template,
     operator_notification_role,
@@ -39,6 +46,172 @@ from spx_spark.notifier.sinks import deliver_trade_push, delivery_target_names
 
 
 MAX_DELIVERY_ATTEMPTS = 3
+
+
+def notification_event_id(
+    kind: str,
+    *,
+    source: str,
+    occurred_at: datetime,
+    identity: str,
+) -> str:
+    """Stable semantic delivery id; message text is deliberately excluded."""
+
+    occurred = occurred_at.astimezone(timezone.utc).isoformat(timespec="seconds")
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+    return f"notify:{source}:{kind}:{occurred}:{digest}"
+
+
+def inspect_external_delivery_receipt(
+    event_id: str,
+    *,
+    rust_owner: bool,
+    rust_ledger_path: str = "",
+    python_ledger_path: str = "",
+) -> ExternalDeliveryReceiptLookup:
+    """Read the earliest proved Bark/Feishu delivery without mutating ledgers."""
+
+    normalized = event_id.strip()
+    if not normalized:
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="external_delivery_event_id_unavailable",
+        )
+    if rust_owner:
+        return _inspect_rust_external_receipt(normalized, rust_ledger_path)
+    return _inspect_python_external_receipt(normalized, python_ledger_path)
+
+
+def _inspect_rust_external_receipt(
+    event_id: str,
+    path: str,
+) -> ExternalDeliveryReceiptLookup:
+    if not path:
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_ledger_path_unavailable",
+        )
+    database = Path(path)
+    if not database.is_file():
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_ledger_unavailable",
+        )
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1.0) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            row = connection.execute(
+                """
+                SELECT r.receipt_id, r.target_key, r.channel, r.occurred_at_us
+                FROM delivery_receipts AS r
+                JOIN notification_events AS e ON e.event_id = r.intent_id
+                WHERE r.intent_id = ?
+                  AND r.outcome = 'delivered'
+                  AND r.attempted = 1
+                  AND r.ok = 1
+                  AND r.channel IN ('bark', 'feishu')
+                ORDER BY r.occurred_at_us, r.receipt_id
+                LIMIT 1
+                """,
+                (event_id,),
+            ).fetchone()
+    except (OSError, sqlite3.Error, ValueError):
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_ledger_query_failed",
+        )
+    if row is None:
+        return ExternalDeliveryReceiptLookup(observable=True, receipt=None)
+    try:
+        delivered_at = datetime.fromtimestamp(int(row[3]) / 1_000_000, tz=timezone.utc)
+    except (OSError, OverflowError, TypeError, ValueError):
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="rust_delivery_receipt_timestamp_invalid",
+        )
+    return ExternalDeliveryReceiptLookup(
+        observable=True,
+        receipt=ExternalDeliveryReceipt(
+            event_id=event_id,
+            receipt_id=str(row[0]),
+            delivered_at=delivered_at,
+            sink=str(row[1]),
+            channel=str(row[2]),
+            ledger="rust_operations",
+        ),
+    )
+
+
+def _inspect_python_external_receipt(
+    event_id: str,
+    path: str,
+) -> ExternalDeliveryReceiptLookup:
+    if not path:
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="python_notification_ledger_path_unavailable",
+        )
+    database = Path(path)
+    if not database.is_file():
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="python_notification_ledger_unavailable",
+        )
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1.0) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            row = connection.execute(
+                """
+                SELECT a.id, e.channel, a.finished_at
+                FROM notification_events AS e
+                JOIN notification_attempts AS a ON a.event_id = e.id
+                WHERE e.logical_event_id = ?
+                  AND e.channel IN ('bark', 'feishu')
+                  AND a.outcome = 'delivered'
+                  AND a.attempted = 1
+                  AND a.ok = 1
+                ORDER BY a.finished_at, a.id
+                LIMIT 1
+                """,
+                (event_id,),
+            ).fetchone()
+    except (OSError, sqlite3.Error, ValueError):
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="python_notification_ledger_query_failed",
+        )
+    if row is None:
+        return ExternalDeliveryReceiptLookup(observable=True, receipt=None)
+    try:
+        delivered_at = datetime.fromisoformat(str(row[2]))
+        if delivered_at.tzinfo is None:
+            delivered_at = delivered_at.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return ExternalDeliveryReceiptLookup(
+            observable=False,
+            receipt=None,
+            error="python_notification_receipt_timestamp_invalid",
+        )
+    channel = str(row[1])
+    return ExternalDeliveryReceiptLookup(
+        observable=True,
+        receipt=ExternalDeliveryReceipt(
+            event_id=event_id,
+            receipt_id=f"python-notification-attempt:{row[0]}",
+            delivered_at=delivered_at.astimezone(timezone.utc),
+            sink=channel,
+            channel=channel,
+            ledger="python_notifications",
+        ),
+    )
 
 
 class RetryableDeliveryError(RuntimeError):
@@ -67,20 +240,30 @@ class UnifiedDeliveryResult:
 
 @lru_cache(maxsize=4)
 def _engine(path: str) -> Engine:
-    return create_engine(Path(path))
+    return create_database_engine(Path(path))
 
 
 def default_engine() -> Engine:
-    root = get_settings().data_root
-    return _engine(str(root))
+    return _engine(str(get_settings().data_root / "spx.sqlite"))
+
+
+def settings_use_default_database(settings: NotificationSettings) -> bool:
+    configured = settings.notification_database_path
+    return not configured or Path(configured) == get_settings().data_root / "spx.sqlite"
 
 
 def engine_for_settings(settings: NotificationSettings) -> Engine:
-    """Keep explicitly isolated legacy settings isolated during cutover."""
+    """Use the configured operational database, including isolated test stores."""
 
-    legacy_path = Path(settings.delivery_outbox_path) if settings.delivery_outbox_path else None
-    if legacy_path is not None and legacy_path.parent.name != "ledger":
-        return _engine(str(legacy_path.parent))
+    configured_path = (
+        Path(settings.notification_database_path)
+        if settings.notification_database_path
+        else None
+    )
+    if configured_path is not None and not settings_use_default_database(settings):
+        isolated = _engine(str(configured_path))
+        metadata.create_all(isolated)
+        return isolated
     return default_engine()
 
 
@@ -412,6 +595,14 @@ def deliver_notification_event(
     if attempt is None:
         return UnifiedDeliveryResult(event_id, None, "not_due", False, False)
     payload = attempt.payload
+    if attempt.channel == "alert_pipeline":
+        return _deliver_alert_pipeline(
+            store,
+            attempt,
+            payload,
+            settings=settings,
+            now=at,
+        )
     envelope = _envelope_from_dict(_mapping(payload.get("envelope")))
     if quiet_window_suppresses(envelope, now=at):
         settle(
@@ -450,6 +641,69 @@ def deliver_notification_event(
         )
         return UnifiedDeliveryResult(event_id, attempt.channel, "uncertain", True, False)
     return _settle_sink(store, attempt, sink, now=at)
+
+
+def _deliver_alert_pipeline(
+    store: Engine,
+    attempt,
+    payload: Mapping[str, object],
+    *,
+    settings: NotificationSettings | None,
+    now: datetime,
+) -> UnifiedDeliveryResult:
+    from spx_spark.notifier.alert_candidate_delivery import (
+        make_deliver_alert_candidate,
+    )
+
+    event = _domain_event_from_dict(_mapping(payload.get("domain_event")))
+    try:
+        disposition = make_deliver_alert_candidate(
+            settings or NotificationSettings.from_env()
+        )(event)
+    except Exception as exc:
+        outcome = "alert_review_failed"
+        settle(
+            store,
+            attempt.attempt_id,
+            status=NotificationStatus.FAILED,
+            outcome=outcome,
+            ok=False,
+            error_code=outcome,
+            error_detail=f"{type(exc).__name__}:{exc}",
+            now=now,
+        )
+        if attempt.attempt_no < MAX_DELIVERY_ATTEMPTS:
+            raise RetryableDeliveryError(str(exc)) from exc
+        return UnifiedDeliveryResult(attempt.event_id, attempt.channel, outcome, False, False)
+    if disposition.settled:
+        outcome = f"alert_{disposition.outcome}"
+        settle(
+            store,
+            attempt.attempt_id,
+            status=NotificationStatus.DELIVERED,
+            outcome=outcome,
+            ok=True,
+            now=now,
+        )
+        return UnifiedDeliveryResult(attempt.event_id, attempt.channel, outcome, False, True)
+    settle(
+        store,
+        attempt.attempt_id,
+        status=NotificationStatus.FAILED,
+        outcome="alert_review_retryable",
+        ok=False,
+        error_code="alert_review_retryable",
+        now=now,
+    )
+    if attempt.attempt_no < MAX_DELIVERY_ATTEMPTS:
+        raise RetryableDeliveryError("alert candidate review did not settle")
+    return UnifiedDeliveryResult(
+        attempt.event_id,
+        attempt.channel,
+        "alert_review_retryable",
+        False,
+        False,
+    )
 
 
 def _deliver_one(
@@ -567,3 +821,19 @@ def _envelope_from_dict(value: Mapping[str, object]) -> NotificationEnvelope:
     )
     envelope.validate()
     return envelope
+
+
+def _domain_event_from_dict(value: Mapping[str, object]) -> DomainEvent:
+    payload = value.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("alert candidate payload is missing")
+    return DomainEvent(
+        schema_version=int(value["schema_version"]),
+        event_id=str(value["event_id"]),
+        kind=EventKind(str(value["kind"])),
+        source_at=datetime.fromisoformat(str(value["source_at"])),
+        available_at=datetime.fromisoformat(str(value["available_at"])),
+        aggregate_id=str(value["aggregate_id"]),
+        sequence=int(value["sequence"]),
+        payload=dict(payload),
+    )

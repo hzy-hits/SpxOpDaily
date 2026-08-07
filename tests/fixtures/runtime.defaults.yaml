@@ -746,12 +746,6 @@ service_loop:
   realtime_engine_interval_seconds:
     value: 15
     description: Cadence for RealtimeEngine tick and outbox drain.
-  notification_recovery_enabled:
-    value: true
-    description: Enables an independent missed-message recovery task so queued Feishu notifications do not depend on a later direct alert.
-  notification_recovery_interval_seconds:
-    value: 60
-    description: Cadence in seconds for retrying the durable missed-message queue.
   hyperliquid_interval_seconds:
     value: 30
     description: Cadence for lightweight overnight proxy context collection.
@@ -1162,39 +1156,9 @@ notification:
   cooldown_seconds:
     value: 900
     description: Per-alert cooldown in seconds; the RealtimeEngine outbox event bucket is injected from this same value.
-  outbox_max_attempts:
-    value: 5
-    description: Maximum attempts for a non-terminal notification candidate before dead-lettering.
-  outbox_retry_base_seconds:
-    value: 60.0
-    description: Initial retry delay for reviewer timeouts, invalid output, or failed human delivery.
-  outbox_retry_max_seconds:
-    value: 900.0
-    description: Maximum exponential retry delay for a notification candidate.
-  outbox_claim_stale_after_seconds:
-    value: 180.0
-    description: Age after which an abandoned outbox claim may be recovered following process failure.
-  delivery_outbox_enabled:
+  queue_enabled:
     value: true
-    description: Durably enqueues every human-facing notification before network delivery.
-  delivery_outbox_max_attempts:
-    value: 8
-    description: Maximum attempts for each individual Bark or Feishu target before dead-lettering.
-  delivery_outbox_retry_schedule_seconds:
-    value: [15.0, 60.0, 300.0, 900.0]
-    description: Per-target retry delays; the final delay repeats until attempts or age are exhausted.
-  delivery_outbox_dead_letter_after_seconds:
-    value: 86400.0
-    description: Maximum age of an undelivered sink target before it becomes a dead letter.
-  delivery_outbox_claim_stale_after_seconds:
-    value: 180.0
-    description: Age after which an abandoned sink claim is recovered following process failure.
-  delivery_outbox_recovery_batch_size:
-    value: 50
-    description: Maximum number of due sink targets processed by each 60-second recovery cycle.
-  delivery_outbox_legacy_shadow_enabled:
-    value: true
-    description: Mirrors pending delivery event IDs to the legacy JSONL queue during the rollout window for rollback safety.
+    description: Durably enqueues every human-facing notification in spx.sqlite before network delivery.
   rust_trader_notification_owner:
     value: false
     description: Routes trader-facing setup, trade-ready, and exit cards through Rust.

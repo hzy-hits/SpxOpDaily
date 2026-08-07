@@ -66,7 +66,7 @@ from spx_spark.notifier.operator_contract import (
 from spx_spark.notifier.operator_cards import (
     parse_time,
 )
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.marketdata import Provider, choose_best_quote, instrument_matches_id
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
@@ -103,8 +103,8 @@ def process_trade_intent(
     delivery_event_id = _trade_ready_delivery_event_id(intent) if ready else ""
     notification = settings or NotificationSettings.from_env()
     outbox_configured = bool(
-        getattr(notification, "delivery_outbox_enabled", False)
-        and getattr(notification, "delivery_outbox_path", "")
+        getattr(notification, "notification_queue_enabled", False)
+        and getattr(notification, "notification_database_path", "")
     )
     expiry_reason = (
         _ready_contract_reason(

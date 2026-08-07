@@ -26,7 +26,7 @@ from spx_spark.notifier.llm_writer import (
 )
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 
 
 def enqueue_strategy_decision(

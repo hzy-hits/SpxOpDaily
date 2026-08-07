@@ -20,7 +20,7 @@ from spx_spark.application.market_features.virtual_strategy_support import (
     _time,
     _utc,
 )
-from spx_spark.notifier.receipts import ExternalDeliveryReceipt
+from spx_spark.notifier.model import ExternalDeliveryReceipt
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestState, configured_quote_use_decision
 from spx_spark.strategy_contract import (

@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -6,6 +8,7 @@ from typer.testing import CliRunner
 
 from spx_spark.app_settings import AppSettings
 from spx_spark.cli import app
+from spx_spark.config import NotificationSettings
 
 
 @pytest.fixture
@@ -51,3 +54,40 @@ def test_core_runtime_paths_are_typed_and_cli_is_registered(
     result = CliRunner().invoke(app, ["core", "--help"])
     assert result.exit_code == 0
     assert "run" in result.stdout
+
+
+def test_notify_test_queues_one_real_verification_event(
+    settings_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[object] = []
+    monkeypatch.setattr(
+        NotificationSettings,
+        "from_env",
+        classmethod(lambda _cls: object()),
+    )
+
+    def enqueue(settings, envelope, **kwargs):
+        captured.append((settings, envelope, kwargs))
+        return SimpleNamespace(
+            accepted=True,
+            outcome="pending",
+            targets=("bark", "feishu"),
+        )
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.dispatcher.enqueue_notification",
+        enqueue,
+    )
+
+    result = CliRunner().invoke(app, ["notify", "test"])
+
+    assert result.exit_code == 0
+    output = json.loads(result.stdout.strip())
+    assert output["accepted"] is True
+    assert output["outcome"] == "pending"
+    assert output["targets"] == ["bark", "feishu"]
+    _settings, envelope, kwargs = captured[0]
+    assert envelope.source == "spx_cli"
+    assert envelope.kind == "notification_test"
+    assert envelope.lane == "execution_safety"
+    assert kwargs["title"] == "SPX notification test"

@@ -1908,9 +1908,8 @@ def test_intraday_shock_audit_does_not_enqueue_on_hot_path(tmp_path, monkeypatch
         make_settings(str(tmp_path / "notify-state.json")),
         deepseek_enabled=True,
         direct_push_llm_enabled=False,
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(outbox_path),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(outbox_path),
     )
     monkeypatch.setattr(
         "spx_spark.notifier.pipeline.dispatch_notification",
@@ -1955,9 +1954,8 @@ def test_async_alert_without_source_event_id_keeps_stable_outbox_identity(tmp_pa
     outbox_path = tmp_path / "delivery-outbox.sqlite"
     settings = replace(
         make_settings(str(tmp_path / "notify-state.json")),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(outbox_path),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(outbox_path),
     )
 
     def runner(*_args, **_kwargs) -> subprocess.CompletedProcess[str]:
@@ -1980,10 +1978,11 @@ def test_async_alert_without_source_event_id_keeps_stable_outbox_identity(tmp_pa
 
     with sqlite3.connect(outbox_path) as connection:
         rows = connection.execute(
-            "SELECT event_id, occurred_at FROM notification_delivery_events"
+            "SELECT logical_event_id, payload_json FROM notification_events"
         ).fetchall()
     assert len(rows) == 1
-    assert rows[0][1] == source_at.isoformat(timespec="microseconds")
+    payload = json.loads(rows[0][1])
+    assert payload["envelope"]["occurred_at"] == source_at.isoformat()
 
 
 def test_call_path_delivers_without_reviewer_and_records_strategy_ack(tmp_path) -> None:

@@ -12,7 +12,7 @@ from spx_spark.config import NotificationSettings
 from spx_spark.infrastructure.notifications import create_engine, event_rows
 from spx_spark.notifier import dispatcher
 from spx_spark.notifier.model import SinkResult
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
@@ -43,7 +43,7 @@ def settings() -> NotificationSettings:
         feishu_enabled=True,
         feishu_webhook_url="https://feishu.invalid/hook",
         bark_friend_enabled=False,
-        delivery_outbox_enabled=True,
+        notification_queue_enabled=True,
         rust_trader_notification_owner=False,
     )
 
@@ -65,7 +65,11 @@ def test_enqueue_is_network_free_and_inspect_uses_same_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scheduled: list[int] = []
-    monkeypatch.setattr(dispatcher, "_schedule_event", scheduled.append)
+    monkeypatch.setattr(
+        dispatcher,
+        "_schedule_event",
+        lambda _settings, event_id: scheduled.append(event_id),
+    )
     monkeypatch.setattr(
         dispatcher,
         "deliver_trade_push",
@@ -97,7 +101,7 @@ def test_consumer_delivers_one_frozen_target_per_cycle(
     settings: NotificationSettings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(dispatcher, "_schedule_event", lambda _event_id: None)
+    monkeypatch.setattr(dispatcher, "_schedule_event", lambda _settings, _event_id: None)
     delivered: list[str] = []
 
     def send(_settings, *, targets, **_kwargs):
@@ -127,7 +131,7 @@ def test_cancellation_fence_blocks_late_enqueue(
     settings: NotificationSettings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(dispatcher, "_schedule_event", lambda _event_id: None)
+    monkeypatch.setattr(dispatcher, "_schedule_event", lambda _settings, _event_id: None)
     assert dispatcher.cancel_pending_notification(
         settings,
         envelope().event_id,

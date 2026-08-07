@@ -59,7 +59,6 @@ def make_settings(
         feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/test",
         feishu_secret="",
         feishu_timeout_seconds=10.0,
-        missed_queue_path="",
     )
 
 

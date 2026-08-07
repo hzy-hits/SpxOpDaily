@@ -30,8 +30,9 @@ from spx_spark.application.market_features.virtual_strategy_support import (
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.dispatcher import cancel_pending_notification
-from spx_spark.notifier.receipts import (
-    ExternalDeliveryReceiptLookup,
+from spx_spark.notifier.model import ExternalDeliveryReceiptLookup
+from spx_spark.notifier.unified_delivery import (
+    engine_for_settings,
     inspect_external_delivery_receipt,
 )
 from spx_spark.state_io import (
@@ -459,11 +460,16 @@ def _external_ready_receipt(
     settings: NotificationSettings,
     event_id: str,
 ):
+    database = (
+        engine_for_settings(settings).url.database
+        if getattr(settings, "notification_database_path", "")
+        else ""
+    )
     return inspect_external_delivery_receipt(
         event_id,
         rust_owner=bool(getattr(settings, "rust_trader_notification_owner", False)),
         rust_ledger_path=str(getattr(settings, "rust_delivery_ledger_path", "") or ""),
-        python_receipt_path=str(getattr(settings, "delivery_receipt_path", "") or ""),
+        python_ledger_path=str(database),
     )
 
 

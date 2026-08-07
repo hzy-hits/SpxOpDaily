@@ -12,7 +12,7 @@ from spx_spark.config import NotificationSettings
 from spx_spark.infrastructure.notifications import create_engine, event_rows
 from spx_spark.notifier import dispatcher
 from spx_spark.notifier.model import SinkResult
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
@@ -29,7 +29,7 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     engine = create_engine(tmp_path)
     monkeypatch.setattr(dispatcher, "_store", lambda _settings: engine)
-    monkeypatch.setattr(dispatcher, "_schedule_event", lambda _event_id: None)
+    monkeypatch.setattr(dispatcher, "_schedule_event", lambda _settings, _event_id: None)
     yield engine
     engine.dispose()
 
@@ -44,7 +44,7 @@ def settings() -> NotificationSettings:
         feishu_enabled=True,
         feishu_webhook_url="https://feishu.invalid/hook",
         bark_friend_enabled=False,
-        delivery_outbox_enabled=True,
+        notification_queue_enabled=True,
         rust_trader_notification_owner=False,
     )
 

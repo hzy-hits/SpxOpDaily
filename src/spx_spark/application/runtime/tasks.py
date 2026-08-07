@@ -106,7 +106,6 @@ DEFAULT_TASK_CRITICALITY: dict[str, TaskCriticality] = {
     "iv_surface": TaskCriticality.OPTIONAL,
     "alert_engine": TaskCriticality.IMPORTANT,
     "realtime_engine": TaskCriticality.IMPORTANT,
-    "notification_recovery": TaskCriticality.IMPORTANT,
     "greek_shadow": TaskCriticality.OPTIONAL,
     "steven": TaskCriticality.OPTIONAL,
     "ibkr_positions": TaskCriticality.OPTIONAL,

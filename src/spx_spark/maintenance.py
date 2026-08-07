@@ -11,11 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from spx_spark.config import MaintenanceSettings, NotificationSettings, StorageSettings
-from spx_spark.infrastructure.ledger.outbox import SqliteEventOutbox
 from spx_spark.marketdata import Provider
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.notifier.review_audit import review_audit_path
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestMarketProjectionStore
@@ -523,38 +523,6 @@ def print_disk_alert(result: dict[str, object], *, json_mode: bool) -> None:
     print(message, file=sys.stderr if json_mode else sys.stdout)
 
 
-def purge_outbox(
-    settings: MaintenanceSettings,
-    *,
-    days: int | None = None,
-    vacuum: bool = False,
-) -> dict[str, object]:
-    """Purge acked domain-event outbox rows past retention.
-
-    ``vacuum`` rewrites the sqlite file to reclaim space; it takes an
-    exclusive lock, so it belongs in the weekly off-market pass only.
-    """
-
-    retention_days = days if days is not None else settings.outbox_retention_days
-    path = Path(settings.data_root) / "ledger" / "domain_event_outbox.sqlite"
-    payload: dict[str, object] = {
-        "path": str(path),
-        "exists": path.exists(),
-        "retention_days": retention_days,
-        "vacuum": vacuum,
-        "deleted": 0,
-        "bytes_before": 0,
-        "bytes_after": 0,
-    }
-    if not payload["exists"]:
-        return payload
-    payload["bytes_before"] = path.stat().st_size
-    outbox = SqliteEventOutbox(path)
-    payload["deleted"] = outbox.purge_acked_older_than(days=retention_days, vacuum=vacuum)
-    payload["bytes_after"] = path.stat().st_size
-    return payload
-
-
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temp_name = tempfile.mkstemp(
@@ -665,22 +633,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Provider id to purge from latest state (e.g. mock, ibkr).",
     )
     purge_latest.add_argument("--json", action="store_true", help="Print JSON result to stdout.")
-    purge_outbox_parser = subparsers.add_parser(
-        "purge-outbox",
-        help="Delete acked domain-event outbox rows older than retention.",
-    )
-    purge_outbox_parser.add_argument(
-        "--days",
-        type=int,
-        default=None,
-        help="Retention window in days (default: MAINTENANCE_OUTBOX_RETENTION_DAYS).",
-    )
-    purge_outbox_parser.add_argument(
-        "--vacuum",
-        action="store_true",
-        help="Rebuild the sqlite file after purge (slow, exclusive lock; weekly only).",
-    )
-    purge_outbox_parser.add_argument("--json", action="store_true", help="Print JSON result.")
     trim_audit = subparsers.add_parser(
         "trim-review-audit",
         help="Trim the alert review audit JSONL to its retention window.",
@@ -733,18 +685,6 @@ def run(argv: list[str] | None = None) -> int:
             print(
                 f"Purged provider={payload['provider']} from latest state "
                 f"({payload['best_quote_count']} best quotes remain)."
-            )
-        return 0
-    if args.command == "purge-outbox":
-        payload = purge_outbox(settings, days=args.days, vacuum=args.vacuum)
-        if args.json:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            print(
-                f"Outbox purge: deleted {payload['deleted']} acked rows older than "
-                f"{payload['retention_days']} days from {payload['path']} "
-                f"({human_bytes(int(payload['bytes_before']))} -> "
-                f"{human_bytes(int(payload['bytes_after']))})"
             )
         return 0
     if args.command == "trim-review-audit":

@@ -11,9 +11,9 @@ from dataclasses import replace
 from typing import Mapping
 
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier.delivery_outbox_contract import DeliveryJob
+from spx_spark.notifier.model import DeliveryJob
 from spx_spark.notifier.model import SinkResult
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 
 
 _OPERATOR_SUCCESS_DISPOSITIONS = frozenset(

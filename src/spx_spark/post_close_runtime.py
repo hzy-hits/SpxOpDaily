@@ -20,7 +20,8 @@ from spx_spark.config import NotificationSettings, StorageSettings, env_bool, lo
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT, generate_push_text
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET, MarketCalendar
 from spx_spark.post_close_render import fmt, render_markdown
 from spx_spark.settings import settings_value

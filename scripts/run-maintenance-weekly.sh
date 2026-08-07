@@ -27,6 +27,5 @@ esac
 # Ledger retention: purge terminal outbox rows (VACUUM only happens here, in
 # the weekly off-market window) and trim the review audit log.
 echo "[maintenance-weekly] purging acked domain-event outbox rows"
-uv run --no-sync spx-spark-maintenance purge-outbox --vacuum
 echo "[maintenance-weekly] trimming alert review audit log"
 uv run --no-sync spx-spark-maintenance trim-review-audit

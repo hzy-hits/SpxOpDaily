@@ -612,10 +612,6 @@ def load_settings(
         alerts_enabled=bool(get("service_loop.alerts_enabled")),
         realtime_engine_enabled=bool(get("service_loop.realtime_engine_enabled")),
         realtime_engine_interval_seconds=int(get("service_loop.realtime_engine_interval_seconds")),
-        notification_recovery_enabled=bool(get("service_loop.notification_recovery_enabled")),
-        notification_recovery_interval_seconds=int(
-            get("service_loop.notification_recovery_interval_seconds")
-        ),
         hyperliquid_interval_seconds=int(get("service_loop.hyperliquid_interval_seconds")),
         polymarket_interval_seconds=int(get("service_loop.polymarket_interval_seconds")),
         ibkr_interval_seconds=int(get("service_loop.ibkr_interval_seconds")),

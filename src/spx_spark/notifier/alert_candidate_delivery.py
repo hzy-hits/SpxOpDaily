@@ -1,4 +1,4 @@
-"""Outbox deliver fn: DomainEvent ALERT_CANDIDATE → notifier.notify_payload."""
+"""DomainEvent ALERT_CANDIDATE to the final notification producer."""
 
 from __future__ import annotations
 

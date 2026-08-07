@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import replace
+from pathlib import Path
 
-from spx_spark.application.notifications.deliver import (
+from spx_spark.notifier.alert_candidate_delivery import (
     deliver_alert_candidate,
     notification_settled,
 )
@@ -15,11 +16,10 @@ from spx_spark.application.realtime.alert_evaluator import (
 )
 from spx_spark.application.realtime.composition import (
     build_realtime_runtime,
-    resolve_deliver_fn,
-    log_only_deliver,
 )
 from spx_spark.config import NotificationSettings, StorageSettings
-from spx_spark.domain.events import DomainEvent, EventKind
+from spx_spark.domain.events import EventKind
+from spx_spark.infrastructure.notifications import create_engine, event_rows, metadata
 from spx_spark.notifier.model import NotificationResult
 
 
@@ -156,11 +156,11 @@ def test_deliver_alert_candidate_calls_notify_payload(monkeypatch) -> None:
         acks.append(tuple(ids))
 
     monkeypatch.setattr(
-        "spx_spark.application.notifications.deliver.notify_payload",
+        "spx_spark.notifier.alert_candidate_delivery.notify_payload",
         fake_notify,
     )
     monkeypatch.setattr(
-        "spx_spark.application.notifications.deliver.reconcile_position_event_acknowledgements",
+        "spx_spark.notifier.alert_candidate_delivery.reconcile_position_event_acknowledgements",
         fake_reconcile,
     )
     event = domain_events_from_payload(_payload("price_move_from_close"), now=NOW)[0]
@@ -169,25 +169,6 @@ def test_deliver_alert_candidate_calls_notify_payload(monkeypatch) -> None:
     assert len(calls) == 1
     assert calls[0]["alert_count"] == 1
     assert acks == [("pos-1",)]
-
-
-def test_resolve_deliver_fn_mutual_exclusion(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "spx_spark.application.realtime.composition.outbox_delivery_enabled",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        "spx_spark.application.realtime.composition.direct_alert_delivery_enabled",
-        lambda: True,
-    )
-    assert resolve_deliver_fn() is log_only_deliver
-
-    monkeypatch.setattr(
-        "spx_spark.application.realtime.composition.direct_alert_delivery_enabled",
-        lambda: False,
-    )
-    fn = resolve_deliver_fn()
-    assert fn is not log_only_deliver
 
 
 def test_resolve_shock_notify_independent_of_alert_engine_direct(monkeypatch) -> None:
@@ -261,12 +242,6 @@ def test_build_runtime_evaluator_emits_and_delivers(tmp_path, monkeypatch) -> No
         ],
     )
 
-    delivered: list[str] = []
-
-    def capture(event: DomainEvent) -> bool:
-        delivered.append(event.event_id)
-        return True
-
     from spx_spark.application.realtime import alert_evaluator as ae
 
     def fake_evaluate(self, snapshot, analytics, *, now):  # noqa: ANN001
@@ -274,13 +249,18 @@ def test_build_runtime_evaluator_emits_and_delivers(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(ae.AlertEngineEvaluator, "evaluate", fake_evaluate)
 
+    store = create_engine(Path(storage.data_root))
+    metadata.create_all(store)
     runtime = build_realtime_runtime(
         storage,
-        deliver=capture,
+        outbox_path=Path(storage.data_root) / "spx.sqlite",
         evaluation_enabled=True,
-        delivery_enabled=True,
+        delivery_enabled=False,
     )
     result = runtime.run_cycle(now=NOW)
     assert result.ok is True
-    assert result.consume.delivered == 1
-    assert delivered
+    event = domain_events_from_payload(_payload("quote_health"), now=NOW)[0]
+    assert [(row["channel"], row["status"]) for row in event_rows(store, event.event_id)] == [
+        ("alert_pipeline", "pending")
+    ]
+    store.dispose()

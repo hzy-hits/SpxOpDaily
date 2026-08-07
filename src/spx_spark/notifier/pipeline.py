@@ -28,7 +28,8 @@ from spx_spark.notifier.pipeline_support import (
     telemetry_alert_key as _telemetry_alert_key,
 )
 from spx_spark.notifier.prompts import build_codex_prompt, format_alert_message
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.notifier.format_push import push_lane_for_alerts
 from spx_spark.notifier.review_audit import append_review_audit
 from spx_spark.notifier.sinks import (
@@ -91,7 +92,7 @@ def _dispatch_alerts(
         lane=receipt_lane,
         occurred_at=occurred_at,
     )
-    if settings.delivery_outbox_enabled and settings.delivery_outbox_path:
+    if settings.notification_queue_enabled and settings.notification_database_path:
         enqueued = enqueue_notification(
             settings,
             envelope,

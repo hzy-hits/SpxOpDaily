@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 
 
 QUIET_WINDOW_EXCEPTION_LANES = frozenset(

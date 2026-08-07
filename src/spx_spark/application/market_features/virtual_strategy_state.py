@@ -12,7 +12,7 @@ from spx_spark.notifier.dispatcher import (
     enqueue_linked_notification,
     enqueue_notification,
 )
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 
 _MAX_CONSUMED_SIGNALS = 200

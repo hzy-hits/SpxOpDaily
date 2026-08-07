@@ -1,4 +1,4 @@
-"""24h composition root for RealtimeEngine + outbox + idempotent consumer."""
+"""24h composition root for RealtimeEngine + unified notification queue."""
 
 from __future__ import annotations
 
@@ -7,13 +7,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
-
-from spx_spark.application.notifications.deliver import make_deliver_alert_candidate
-from spx_spark.application.notifications.outbox_consumer import (
-    ConsumeResult,
-    IdempotentOutboxConsumer,
-)
 from spx_spark.application.order_map.level_decision_shadow import (
     run_level_decision_shadow,
 )
@@ -40,18 +33,14 @@ from spx_spark.domain.analytics import (
     AnalyticsResult,
     AnalyticsStatus,
 )
-from spx_spark.domain.events import DomainEvent, EventKind
 from spx_spark.domain.health import EngineMode
 from spx_spark.domain.market import MarketSnapshot
-from spx_spark.infrastructure.ledger.outbox import SqliteEventOutbox
-from spx_spark.infrastructure.ledger.processed_ids import DurableProcessedIdSet
+from spx_spark.infrastructure.notifications import NotificationEventQueue, create_engine
+from spx_spark.notifier.unified_delivery import engine_for_settings
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.settings.alerts import AlertSettings
 from spx_spark.settings.analytics import AnalyticsSettings
 from spx_spark.storage import LatestMarketProjectionStore
-
-
-DeliverFn = Callable[[DomainEvent], bool]
 
 
 def default_runtime_defaults_path() -> Path:
@@ -76,11 +65,9 @@ def load_production_settings(
 
 
 def default_outbox_path(storage: StorageSettings) -> Path:
-    return Path(storage.data_root) / "ledger" / "domain_event_outbox.sqlite"
+    """Deprecated location hint retained for one caller release."""
 
-
-def default_processed_ids_path(storage: StorageSettings) -> Path:
-    return Path(storage.data_root) / "ledger" / "outbox_processed_ids.json"
+    return Path(storage.data_root) / "spx.sqlite"
 
 
 def market_snapshot_from_projection(
@@ -176,13 +163,6 @@ class TickProjectionSink:
         self.ticks.append(tick)
 
 
-def log_only_deliver(event: DomainEvent) -> bool:
-    """Safe sink: acknowledge without external notification IO (shadow / disabled)."""
-
-    _ = event
-    return True
-
-
 def resolve_alert_evaluator(
     store: LatestMarketProjectionStore,
     *,
@@ -201,61 +181,28 @@ def resolve_alert_evaluator(
     return SilentAlertEvaluator()
 
 
-def resolve_deliver_fn(
-    *,
-    delivery_enabled: bool | None = None,
-    notification_settings: NotificationSettings | None = None,
-    deliver: DeliverFn | None = None,
-) -> DeliverFn:
-    """Pick outbox deliver sink.
-
-    Explicit ``deliver`` wins. Otherwise outbox_delivery_enabled selects
-    notify_payload vs log-only. When direct_delivery_enabled is also true,
-    outbox stays log-only so alert_engine owns human notifications (no double-send).
-    """
-
-    if deliver is not None:
-        return deliver
-    if delivery_enabled is None:
-        delivery_enabled = outbox_delivery_enabled()
-    if not delivery_enabled:
-        return log_only_deliver
-    if direct_alert_delivery_enabled():
-        # Dual-path cutover: evaluation may still fill the outbox, but live
-        # notify stays on alert_engine until direct_delivery is flipped off.
-        return log_only_deliver
-    return make_deliver_alert_candidate(notification_settings)
-
-
 @dataclass
 class RealtimeRuntime:
-    """Wired RealtimeEngine + outbox consumer for one service-loop cycle."""
+    """Wired RealtimeEngine with Huey-owned alert candidate delivery."""
 
     engine: RealtimeEngine
-    consumer: IdempotentOutboxConsumer
-    outbox: SqliteEventOutbox
+    outbox: NotificationEventQueue
     projections: TickProjectionSink
-    processed_ids: DurableProcessedIdSet
     storage: StorageSettings
 
     def run_cycle(self, *, now: datetime | None = None, consume_limit: int = 20) -> "CycleResult":
         now = now or datetime.now(tz=timezone.utc)
         tick = self.engine.tick(now=now)
-        consume = self.consumer.consume(
-            limit=consume_limit,
-            kinds=(EventKind.ALERT_CANDIDATE,),
-            now=now,
-        )
+        del consume_limit
         # BLOCKED/DEGRADED/STARTING/WARMING are valid observations, not process
         # failures. The service-loop heartbeat carries readiness separately.
         ok = tick.health.mode is not EngineMode.FAILED
-        return CycleResult(tick=tick, consume=consume, ok=ok)
+        return CycleResult(tick=tick, ok=ok)
 
 
 @dataclass(frozen=True)
 class CycleResult:
     tick: EngineTick
-    consume: ConsumeResult
     ok: bool
 
     def to_dict(self) -> dict[str, object]:
@@ -263,14 +210,7 @@ class CycleResult:
             "ok": self.ok,
             "mode": self.tick.health.mode.value,
             "tick": self.tick.to_dict(),
-            "consume": {
-                "claimed": self.consume.claimed,
-                "delivered": self.consume.delivered,
-                "duplicate_skipped": self.consume.duplicate_skipped,
-                "failed": self.consume.failed,
-                "dead_lettered": self.consume.dead_lettered,
-                "acked_ids": list(self.consume.acked_ids),
-            },
+            "delivery": "huey_async",
             "outbox_writable": self.tick.health.factors.get("outbox_writable"),
         }
 
@@ -278,7 +218,7 @@ class CycleResult:
 def build_realtime_runtime(
     storage: StorageSettings | None = None,
     *,
-    deliver: DeliverFn | None = None,
+    deliver=None,
     consumer_id: str = "notifier-24h",
     critical_tasks_healthy: bool = True,
     front_chain_fresh: bool | None = None,
@@ -292,6 +232,7 @@ def build_realtime_runtime(
     analytics: AnalyticsKernel | None = None,
     warmed_up: bool = True,
 ) -> RealtimeRuntime:
+    del consumer_id, deliver, processed_ids_path
     storage = storage or StorageSettings.from_env()
     analytics_policy = analytics_settings
     if analytics_policy is None and app_settings is not None:
@@ -301,13 +242,23 @@ def build_realtime_runtime(
     alert_policy: AlertSettings | None = app_settings.alerts if app_settings is not None else None
     notification_settings = notification_settings or NotificationSettings.from_env()
     projection = LatestMarketProjectionStore(storage)
-    outbox = SqliteEventOutbox(
-        outbox_path or default_outbox_path(storage),
-        max_attempts=notification_settings.outbox_max_attempts,
-        retry_base_seconds=notification_settings.outbox_retry_base_seconds,
-        retry_max_seconds=notification_settings.outbox_retry_max_seconds,
+    notification_engine = (
+        create_engine((outbox_path or default_outbox_path(storage)).parent)
+        if outbox_path is not None
+        else engine_for_settings(notification_settings)
     )
-    processed = DurableProcessedIdSet(processed_ids_path or default_processed_ids_path(storage))
+    if delivery_enabled is None:
+        delivery_enabled = outbox_delivery_enabled()
+    schedule_enabled = delivery_enabled and not direct_alert_delivery_enabled()
+
+    def schedule(event_id: int) -> None:
+        if not schedule_enabled:
+            return
+        from spx_spark.infrastructure.jobs import deliver_notification_event
+
+        deliver_notification_event(event_id)
+
+    outbox = NotificationEventQueue(notification_engine, schedule=schedule)
     sink = TickProjectionSink()
     engine = RealtimeEngine(
         snapshots=ProjectionSnapshotSource(projection),
@@ -325,23 +276,10 @@ def build_realtime_runtime(
         chain_thresholds=ChainFreshnessThresholds.from_settings(analytics_policy),
         warmed_up=warmed_up,
     )
-    consumer = IdempotentOutboxConsumer(
-        outbox,
-        consumer_id=consumer_id,
-        deliver=resolve_deliver_fn(
-            delivery_enabled=delivery_enabled,
-            notification_settings=notification_settings,
-            deliver=deliver,
-        ),
-        processed_ids=processed,
-        claim_stale_after_seconds=notification_settings.outbox_claim_stale_after_seconds,
-    )
     return RealtimeRuntime(
         engine=engine,
-        consumer=consumer,
         outbox=outbox,
         projections=sink,
-        processed_ids=processed,
         storage=storage,
     )
 

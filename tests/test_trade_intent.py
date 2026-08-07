@@ -4,6 +4,7 @@ import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +49,31 @@ from spx_spark.strategy_contract import policy_version
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 14, 15, 0, tzinfo=UTC)
+
+
+def _notification_database(settings: NotificationSettings) -> Path:
+    return Path(settings.notification_database_path)
+
+
+def _notification_rows(
+    settings: NotificationSettings,
+    event_id: str | None = None,
+) -> list[sqlite3.Row]:
+    query = "SELECT * FROM notification_events"
+    parameters: tuple[str, ...] = ()
+    if event_id is not None:
+        query += " WHERE logical_event_id = ?"
+        parameters = (event_id,)
+    query += " ORDER BY logical_event_id, channel"
+    with sqlite3.connect(_notification_database(settings)) as connection:
+        connection.row_factory = sqlite3.Row
+        return list(connection.execute(query, parameters))
+
+
+def _attempt_rows(settings: NotificationSettings) -> list[sqlite3.Row]:
+    with sqlite3.connect(_notification_database(settings)) as connection:
+        connection.row_factory = sqlite3.Row
+        return list(connection.execute("SELECT * FROM notification_attempts ORDER BY id"))
 
 
 def test_trade_intent_policy_hash_is_stable_and_resets_for_lane_clock_contract() -> None:
@@ -1446,11 +1472,8 @@ def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=True,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     action_times = iter((NOW + timedelta(seconds=1), NOW + timedelta(seconds=122)))
     action_quotes = iter(
@@ -1532,16 +1555,16 @@ def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
     assert "delivered" not in state
     delivery_event_id = _trade_ready_delivery_event_id(intent)
     assert delivery_event_id in state["accepted"]
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute(
-            "SELECT event_id, occurred_at, expires_at, text FROM notification_delivery_events"
-        ).fetchall()
+    rows = _notification_rows(settings, delivery_event_id)
     assert len(rows) == 1
-    assert rows[0][0] == delivery_event_id
-    assert rows[0][1] == NOW.isoformat(timespec="microseconds")
-    assert rows[0][2] == (NOW + timedelta(minutes=5)).isoformat(timespec="microseconds")
-    assert "10.00 / 10.40" in rows[0][3]
-    assert "10.05" not in rows[0][3]
+    payload = json.loads(rows[0]["payload_json"])
+    assert rows[0]["logical_event_id"] == delivery_event_id
+    assert payload["envelope"]["occurred_at"] == NOW.isoformat()
+    assert datetime.fromisoformat(rows[0]["expires_at"]).replace(tzinfo=UTC) == (
+        NOW + timedelta(minutes=5)
+    )
+    assert "10.00 / 10.40" in payload["text"]
+    assert "10.05" not in payload["text"]
 
     deliveries: list[object] = []
     monkeypatch.setattr(
@@ -1554,15 +1577,12 @@ def test_enqueue_ack_crash_replays_immutable_trade_ready_payload(
         notify_dead_letters=False,
     )
 
-    assert consumed["jobs"] == 0
     assert consumed["attempted_targets"] == 0
     assert deliveries == []
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        status = connection.execute(
-            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
-            (delivery_event_id,),
-        ).fetchone()[0]
-    assert status == "dead_letter"
+    assert _notification_rows(settings, delivery_event_id)[0]["status"] == "failed"
+    assert _notification_rows(settings, delivery_event_id)[0]["last_error"] == (
+        "expired_before_transport"
+    )
 
 
 def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
@@ -1602,11 +1622,8 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     monkeypatch.setattr(
         trade_intent_runtime,
@@ -1682,12 +1699,9 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
     assert invalidated["reason"] == "observing"
     assert consumed["jobs"] == 0
     assert consumed["delivered_targets"] == 0
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        old_status = connection.execute(
-            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
-            (delivery_event_id,),
-        ).fetchone()
-    assert old_status == ("dead_letter",)
+    old_rows = _notification_rows(settings, delivery_event_id)
+    assert {row["channel"] for row in old_rows} == {"__cancellation__", "feishu"}
+    assert all(row["status"] == "failed" for row in old_rows)
 
     rearmed_intent = {
         **intent,
@@ -1708,14 +1722,13 @@ def test_enqueue_ack_crash_then_invalidation_cancels_stale_ready(
 
     assert rearmed["accepted"] is True
     assert rearmed_delivery_event_id != delivery_event_id
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        statuses = dict(
-            connection.execute(
-                "SELECT event_id, status FROM notification_delivery_events"
-            ).fetchall()
-        )
+    statuses = {
+        row["logical_event_id"]: row["status"]
+        for row in _notification_rows(settings)
+        if row["channel"] != "__cancellation__"
+    }
     assert statuses == {
-        delivery_event_id: "dead_letter",
+        delivery_event_id: "failed",
         rearmed_delivery_event_id: "pending",
     }
 
@@ -1757,11 +1770,8 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     monkeypatch.setattr(
         trade_intent_runtime,
@@ -1830,9 +1840,11 @@ def test_failed_rth_cancellation_blocks_rearmed_lifecycle(
         NOW + timedelta(seconds=1),
         NOW + timedelta(seconds=1),
     ]
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute("SELECT event_id FROM notification_delivery_events").fetchall()
-    assert rows == [(first_delivery_event_id,)]
+    assert {
+        row["logical_event_id"]
+        for row in _notification_rows(settings)
+        if row["channel"] != "__cancellation__"
+    } == {first_delivery_event_id}
 
 
 def test_legacy_delivered_state_migrates_to_accepted(tmp_path) -> None:
@@ -2108,12 +2120,12 @@ def test_moving_live_quote_enqueues_immutable_trade_ready_card_once(
 
     assert first["accepted"] is True
     assert second["reason"] == "outbox_event_reconciled"
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute("SELECT text FROM notification_delivery_events").fetchall()
+    rows = _notification_rows(settings, _trade_ready_delivery_event_id(intent))
     assert len(rows) == 1
-    assert "NBBO  10.00 / 10.40（决策快照）" in rows[0][0]
-    assert "限价  ≤ 10.40" in rows[0][0]
-    assert "类型  单腿 · 仅人工提交" in rows[0][0]
+    frozen_text = json.loads(rows[0]["payload_json"])["text"]
+    assert "NBBO  10.00 / 10.40（决策快照）" in frozen_text
+    assert "限价  ≤ 10.40" in frozen_text
+    assert "类型  单腿 · 仅人工提交" in frozen_text
     state = json.loads((tmp_path / "latest" / "trade_intent_delivery_state.json").read_text())
     audit = state["last_action_revalidation"]
     assert audit["entry_limit"] == pytest.approx(10.4)
@@ -2230,45 +2242,24 @@ def test_trade_ready_producer_worker_receipt_end_to_end_is_idempotent(
     assert duplicate_tick["reason"] == "outbox_event_reconciled"
     assert deliveries == [frozenset({"feishu"})]
 
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        outbox_event = connection.execute(
-            "SELECT event_id, source, kind, lane, status FROM notification_delivery_events"
-        ).fetchone()
-        outbox_targets = connection.execute(
-            "SELECT event_id, sink, status FROM notification_delivery_targets"
-        ).fetchall()
-    with sqlite3.connect(settings.delivery_receipt_path) as connection:
-        receipts = connection.execute(
-            "SELECT event_id, source, kind, lane, outcome, sinks_json "
-            "FROM notification_delivery_receipts"
-        ).fetchall()
-
-    assert outbox_event == (
-        event_id,
-        "trade_intent",
-        "trade_intent",
-        "trade_ready",
+    outbox_rows = _notification_rows(settings, event_id)
+    assert len(outbox_rows) == 1
+    outbox_event = outbox_rows[0]
+    assert (
+        outbox_event["logical_event_id"],
+        outbox_event["source"],
+        outbox_event["kind"],
+        outbox_event["lane"],
+        outbox_event["channel"],
+        outbox_event["status"],
+    ) == (event_id, "trade_intent", "trade_intent", "trade_ready", "feishu", "delivered")
+    attempts = _attempt_rows(settings)
+    assert len(attempts) == 1
+    assert (attempts[0]["attempted"], attempts[0]["ok"], attempts[0]["outcome"]) == (
+        1,
+        1,
         "delivered",
     )
-    assert outbox_targets == [(event_id, "feishu", "delivered")]
-    assert len(receipts) == 1
-    receipt_event_id, source, kind, lane, outcome, sinks_json = receipts[0]
-    assert receipt_event_id == event_id
-    assert (source, kind, lane, outcome) == (
-        "trade_intent",
-        "trade_intent",
-        "trade_ready",
-        "delivered",
-    )
-    assert json.loads(sinks_json) == [
-        {
-            "sink": "feishu",
-            "attempted": True,
-            "ok": True,
-            "error": None,
-            "verdict": "delivered",
-        }
-    ]
 
 
 def test_producer_outbox_e2e_reconciles_both_state_divergence_directions(
@@ -2312,13 +2303,11 @@ def test_producer_outbox_e2e_reconciles_both_state_divergence_directions(
 
     assert first["accepted"] is True
     assert first["inserted"] is True
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        original_rows = connection.execute(
-            "SELECT event_id, text FROM notification_delivery_events"
-        ).fetchall()
+    original_rows = _notification_rows(settings, delivery_event_id)
     assert len(original_rows) == 1
-    assert original_rows[0][0] == delivery_event_id
-    assert "限价  ≤ 10.40" in original_rows[0][1]
+    assert original_rows[0]["logical_event_id"] == delivery_event_id
+    assert "限价  ≤ 10.40" in json.loads(original_rows[0]["payload_json"])["text"]
+    original_payload = original_rows[0]["payload_json"]
 
     # Outbox durable, local acknowledgement missing: restore local acceptance
     # without creating a second outbox row.
@@ -2345,13 +2334,9 @@ def test_producer_outbox_e2e_reconciles_both_state_divergence_directions(
 
     # Local acknowledgement durable, outbox row missing: clear the stale
     # projection and re-enqueue the exact immutable event before expiry.
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+    with sqlite3.connect(_notification_database(settings)) as connection:
         connection.execute(
-            "DELETE FROM notification_delivery_targets WHERE event_id = ?",
-            (delivery_event_id,),
-        )
-        connection.execute(
-            "DELETE FROM notification_delivery_events WHERE event_id = ?",
+            "DELETE FROM notification_events WHERE logical_event_id = ?",
             (delivery_event_id,),
         )
     retried = process_trade_intent(
@@ -2370,11 +2355,10 @@ def test_producer_outbox_e2e_reconciles_both_state_divergence_directions(
     assert (
         retried_state["last_delivery_reconciliation"]["status"] == "local_accepted_outbox_missing"
     )
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        retried_rows = connection.execute(
-            "SELECT event_id, text FROM notification_delivery_events"
-        ).fetchall()
-    assert retried_rows == original_rows
+    retried_rows = _notification_rows(settings, delivery_event_id)
+    assert len(retried_rows) == 1
+    assert retried_rows[0]["logical_event_id"] == delivery_event_id
+    assert retried_rows[0]["payload_json"] == original_payload
 
 
 @pytest.mark.parametrize(
@@ -2426,34 +2410,41 @@ def test_trade_ready_reconciliation_rejects_mutated_outbox_contract(
     )
     assert first["accepted"] is True
 
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
+    with sqlite3.connect(_notification_database(settings)) as connection:
         if mutation == "payload":
             connection.execute(
-                "UPDATE notification_delivery_events SET text = ? WHERE event_id = ?",
-                ("mutated ticket", event_id),
+                "UPDATE notification_events SET payload_sha256 = ? "
+                "WHERE logical_event_id = ? AND channel != '__cancellation__'",
+                ("mutated", event_id),
             )
         elif mutation == "targets":
             connection.execute(
-                "UPDATE notification_delivery_targets SET sink = ? WHERE event_id = ?",
+                "UPDATE notification_events SET channel = ? WHERE logical_event_id = ?",
                 ("bark", event_id),
             )
         elif mutation == "dead_letter":
             connection.execute(
-                "UPDATE notification_delivery_targets SET status = ? WHERE event_id = ?",
-                ("dead_letter", event_id),
-            )
-            connection.execute(
-                "UPDATE notification_delivery_events SET status = ? WHERE event_id = ?",
-                ("dead_letter", event_id),
+                "UPDATE notification_events SET status = ? WHERE logical_event_id = ?",
+                ("failed", event_id),
             )
         else:
             connection.execute(
                 """
-                INSERT INTO notification_delivery_cancellations (
-                    event_id, reason, cancelled_at
-                ) VALUES (?, ?, ?)
+                INSERT INTO notification_events (
+                    idempotency_key, logical_event_id, source, kind, lane, channel,
+                    payload_json, payload_sha256, status, cancelled_at, cancel_reason,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'test', 'cancellation', 'internal', '__cancellation__',
+                          '{}', ?, 'failed', ?, 'source_invalidated', ?, ?)
                 """,
-                (event_id, "source_invalidated", NOW.isoformat()),
+                (
+                    f"cancel:{event_id}",
+                    event_id,
+                    "cancel-sha",
+                    NOW.replace(tzinfo=None).isoformat(),
+                    NOW.replace(tzinfo=None).isoformat(),
+                    NOW.replace(tzinfo=None).isoformat(),
+                ),
             )
 
     replay = process_trade_intent(
@@ -2697,12 +2688,9 @@ def test_cancellation_or_terminal_after_enqueue_never_promotes_trade_ready(
     assert all(
         json.loads(row)["status"] != "trade_ready" for row in audit_path.read_text().splitlines()
     )
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        outbox_status = connection.execute(
-            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
-            (event_id,),
-        ).fetchone()
-    assert outbox_status == ("dead_letter",)
+    rows = _notification_rows(settings, event_id)
+    assert {row["channel"] for row in rows} == {"__cancellation__", "feishu"}
+    assert all(row["status"] == "failed" for row in rows)
 
 
 def test_stale_pending_projection_cannot_overwrite_durable_acceptance(tmp_path) -> None:
@@ -2880,11 +2868,7 @@ def test_enqueue_exception_releases_lease_and_next_tick_retries(
     assert retried["accepted"] is True
     assert retried["inserted"] is True
     assert enqueue_calls == 2
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        row_count = connection.execute(
-            "SELECT COUNT(*) FROM notification_delivery_events"
-        ).fetchone()[0]
-    assert row_count == 1
+    assert len(_notification_rows(settings)) == 1
 
 
 def test_orphaned_inflight_lease_expires_before_signal_ttl(
@@ -3357,6 +3341,10 @@ def test_explicit_reentry_generation_rearms_after_invalidation(tmp_path, monkeyp
         "spx_spark.application.market_features.trade_intent_runtime.enqueue_notification",
         fake_enqueue,
     )
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.trade_intent_runtime.cancel_pending_notification",
+        lambda *_args, **_kwargs: 1,
+    )
     storage = SimpleNamespace(data_root=str(tmp_path))
     settings = _notification_settings(tmp_path)
 
@@ -3490,29 +3478,25 @@ def test_expiry_cancels_occurrence_without_rearming_same_opportunity(
     assert state["pending_delivery_cancellation_reasons"] == {}
     assert state["delivery_lifecycle_events"] == []
 
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        statuses = dict(
-            connection.execute(
-                "SELECT event_id, status FROM notification_delivery_events"
-            ).fetchall()
-        )
-        cancellations = connection.execute(
-            "SELECT event_id, reason FROM notification_delivery_cancellations"
-        ).fetchall()
+    rows = _notification_rows(settings)
+    statuses = {
+        row["logical_event_id"]: row["status"]
+        for row in rows
+        if row["channel"] != "__cancellation__"
+    }
+    cancellations = [
+        (row["logical_event_id"], row["cancel_reason"])
+        for row in rows
+        if row["channel"] == "__cancellation__"
+    ]
     assert statuses == {
-        first_delivery_id: "dead_letter",
+        first_delivery_id: "failed",
     }
     assert cancellations == [
         (first_delivery_id, "trade_intent_lifecycle_expired"),
     ]
 
-    with sqlite3.connect(settings.delivery_receipt_path) as connection:
-        terminal_receipts = connection.execute(
-            "SELECT event_id, outcome FROM notification_delivery_receipts"
-        ).fetchall()
-    assert terminal_receipts == [
-        (first_delivery_id, "cancelled_before_delivery"),
-    ]
+    assert _attempt_rows(settings) == []
 
 
 def test_rearmed_semantic_intent_uses_distinct_durable_delivery_event(
@@ -3553,11 +3537,8 @@ def test_rearmed_semantic_intent_uses_distinct_durable_delivery_event(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     monkeypatch.setattr(
         "spx_spark.application.market_features.trade_intent_runtime._action_revalidation",
@@ -3607,15 +3588,17 @@ def test_rearmed_semantic_intent_uses_distinct_durable_delivery_event(
     assert first["accepted"] is True
     assert rearmed["accepted"] is True
     assert first_delivery_id != second_delivery_id
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute(
-            "SELECT event_id, status, text FROM notification_delivery_events ORDER BY event_id"
-        ).fetchall()
-    assert {row[0] for row in rows} == {first_delivery_id, second_delivery_id}
-    statuses = {row[0]: row[1] for row in rows}
-    assert statuses[first_delivery_id] == "dead_letter"
+    rows = [
+        row for row in _notification_rows(settings) if row["channel"] != "__cancellation__"
+    ]
+    assert {row["logical_event_id"] for row in rows} == {
+        first_delivery_id,
+        second_delivery_id,
+    }
+    statuses = {row["logical_event_id"]: row["status"] for row in rows}
+    assert statuses[first_delivery_id] == "failed"
     assert statuses[second_delivery_id] == "pending"
-    assert len({row[2] for row in rows}) == 2
+    assert len({row["payload_json"] for row in rows}) == 2
 
 
 def _ready_inputs():
@@ -3921,7 +3904,6 @@ def _notification_settings(tmp_path):
         feishu_enabled=True,
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
     )
 
 
@@ -3933,9 +3915,6 @@ def _outbox_notification_settings(tmp_path) -> NotificationSettings:
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )

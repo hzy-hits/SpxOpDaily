@@ -6,6 +6,7 @@ import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,31 @@ from spx_spark.strategy_contract import policy_version
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 15, 3, 0, tzinfo=UTC)
+
+
+def _notification_database(settings: NotificationSettings) -> Path:
+    return Path(settings.notification_database_path)
+
+
+def _notification_rows(
+    settings: NotificationSettings,
+    event_id: str | None = None,
+) -> list[sqlite3.Row]:
+    query = "SELECT * FROM notification_events"
+    parameters: tuple[str, ...] = ()
+    if event_id is not None:
+        query += " WHERE logical_event_id = ?"
+        parameters = (event_id,)
+    query += " ORDER BY created_at, id"
+    with sqlite3.connect(_notification_database(settings)) as connection:
+        connection.row_factory = sqlite3.Row
+        return list(connection.execute(query, parameters))
+
+
+def _attempt_rows(settings: NotificationSettings) -> list[sqlite3.Row]:
+    with sqlite3.connect(_notification_database(settings)) as connection:
+        connection.row_factory = sqlite3.Row
+        return list(connection.execute("SELECT * FROM notification_attempts ORDER BY id"))
 
 
 def test_runtime_only_consumes_unified_gth_manual_candidate() -> None:
@@ -938,11 +964,8 @@ def test_delivered_level_ready_emits_one_external_terminal_lifecycle(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
         rust_trader_notification_owner=False,
     )
     deliveries: list[frozenset[str]] = []
@@ -1030,43 +1053,27 @@ def test_delivered_level_ready_emits_one_external_terminal_lifecycle(
     assert repeated["terminal_notification_attempted"] is False
     assert duplicate_consumer["jobs"] == 0
     assert deliveries == [frozenset({"feishu"}), frozenset({"feishu"})]
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute(
-            "SELECT event_id, kind, lane, status, title, text, operator_opportunity_id "
-            "FROM notification_delivery_events ORDER BY created_at"
-        ).fetchall()
-        cancellation = connection.execute(
-            "SELECT reason FROM notification_delivery_cancellations WHERE event_id = ?",
-            (ready_event_id,),
-        ).fetchone()
-    with sqlite3.connect(settings.delivery_receipt_path) as connection:
-        receipts = connection.execute(
-            "SELECT event_id, kind, lane, outcome FROM notification_delivery_receipts "
-            "ORDER BY attempted_at"
-        ).fetchall()
-    assert [row[0] for row in rows] == [ready_event_id, terminal_event_id]
-    assert rows[1][1:4] == ("virtual_strategy_exit", "strategy_lifecycle", "delivered")
-    assert visible_label in rows[1][4]
-    assert visible_label in rows[1][5]
-    assert f"原卡  {ready_event_id}" in rows[1][5]
-    assert "系统不知道你的成交状态" in rows[1][5]
-    assert "不代表订单已撤销、仓位已平仓" in rows[1][5]
-    assert rows[1][6] == ready["source_signal_id"]
-    assert receipts == [
-        (
-            ready_event_id,
-            "gth_spxw_level_manual_spread_candidate",
-            "gth_level_manual_candidate",
-            "delivered",
-        ),
-        (
-            terminal_event_id,
-            "virtual_strategy_exit",
-            "strategy_lifecycle",
-            "delivered",
-        ),
+    all_rows = _notification_rows(settings)
+    rows = [row for row in all_rows if row["channel"] != "__cancellation__"]
+    cancellation = next(row for row in all_rows if row["channel"] == "__cancellation__")
+    assert [row["logical_event_id"] for row in rows] == [ready_event_id, terminal_event_id]
+    assert (rows[1]["kind"], rows[1]["lane"], rows[1]["status"]) == (
+        "virtual_strategy_exit",
+        "strategy_lifecycle",
+        "delivered",
+    )
+    terminal_payload = json.loads(rows[1]["payload_json"])
+    assert visible_label in terminal_payload["title"]
+    assert visible_label in terminal_payload["text"]
+    assert f"原卡  {ready_event_id}" in terminal_payload["text"]
+    assert "系统不知道你的成交状态" in terminal_payload["text"]
+    assert "不代表订单已撤销、仓位已平仓" in terminal_payload["text"]
+    assert terminal_payload["envelope"]["operator_opportunity_id"] == ready["source_signal_id"]
+    assert [row["outcome"] for row in _attempt_rows(settings)] == [
+        "delivered",
+        "delivered",
     ]
-    assert cancellation == ("source_candidate_no_longer_manual_ready",)
+    assert cancellation["cancel_reason"] == "source_candidate_no_longer_manual_ready"
     state = level_candidate_module.read_json_object(
         tmp_path / "latest" / "gth_level_manual_candidate_state.json"
     )
@@ -1086,11 +1093,8 @@ def test_delayed_ready_receipt_emits_cancel_then_planned_exit_once(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
         rust_trader_notification_owner=False,
     )
     deliveries: list[frozenset[str]] = []
@@ -1230,19 +1234,19 @@ def test_delayed_ready_receipt_emits_cancel_then_planned_exit_once(
         frozenset({"feishu"}),
         frozenset({"feishu"}),
     ]
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        events = connection.execute(
-            "SELECT event_id, status, text FROM notification_delivery_events ORDER BY created_at"
-        ).fetchall()
-    assert [row[0] for row in events] == [
+    events = [
+        row for row in _notification_rows(settings) if row["channel"] != "__cancellation__"
+    ]
+    assert [row["logical_event_id"] for row in events] == [
         ready_event_id,
         cancel_event_id,
         exit_event_id,
     ]
-    assert [row[1] for row in events] == ["delivered", "delivered", "delivered"]
-    assert "READY CANCELLED" in events[1][2]
-    assert "EXIT REVIEW" in events[2][2]
-    assert "系统不知道你的成交状态" in events[2][2]
+    assert [row["status"] for row in events] == ["delivered", "delivered", "delivered"]
+    event_texts = [json.loads(row["payload_json"])["text"] for row in events]
+    assert "READY CANCELLED" in event_texts[1]
+    assert "EXIT REVIEW" in event_texts[2]
+    assert "系统不知道你的成交状态" in event_texts[2]
     final_state = level_candidate_module.read_json_object(
         tmp_path / "latest" / "gth_level_manual_candidate_state.json"
     )
@@ -1261,11 +1265,8 @@ def test_receipt_recovered_after_exit_emits_exit_without_stale_cancel_once(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
         rust_trader_notification_owner=False,
     )
     deliveries: list[frozenset[str]] = []
@@ -1400,19 +1401,24 @@ def test_receipt_recovered_after_exit_emits_exit_without_stale_cancel_once(
     assert consumed["delivered_targets"] == 1
     assert repeated["terminal_notification_attempted"] is False
     assert deliveries == [frozenset({"feishu"}), frozenset({"feishu"})]
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        terminal_events = connection.execute(
-            "SELECT event_id, status, occurred_at, expires_at "
-            "FROM notification_delivery_events "
-            "WHERE event_id != ? ORDER BY created_at",
-            (ready_event_id,),
-        ).fetchall()
+    terminal_events = [
+        row
+        for row in _notification_rows(settings)
+        if row["logical_event_id"] != ready_event_id
+        and row["channel"] != "__cancellation__"
+    ]
     assert len(terminal_events) == 1
-    terminal_id, terminal_status, occurred_at, expires_at = terminal_events[0]
+    terminal = terminal_events[0]
+    terminal_id = terminal["logical_event_id"]
+    terminal_status = terminal["status"]
+    occurred_at = json.loads(terminal["payload_json"])["envelope"]["occurred_at"]
+    expires_at = terminal["expires_at"]
     assert (terminal_id, terminal_status) == (terminal_event_id, "delivered")
     assert not terminal_id.endswith(":cancel")
     assert datetime.fromisoformat(str(occurred_at)) == NOW + timedelta(seconds=1)
-    assert datetime.fromisoformat(str(expires_at)) == NOW + timedelta(minutes=35)
+    assert datetime.fromisoformat(str(expires_at)).replace(tzinfo=UTC) == (
+        NOW + timedelta(minutes=35)
+    )
     final_state = level_candidate_module.read_json_object(
         tmp_path / "latest" / "gth_level_manual_candidate_state.json"
     )
@@ -1431,11 +1437,8 @@ def test_undelivered_level_ready_is_only_cancelled_internally(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
         rust_trader_notification_owner=False,
     )
     storage = SimpleNamespace(data_root=str(tmp_path))
@@ -1471,15 +1474,9 @@ def test_undelivered_level_ready_is_only_cancelled_internally(
     )
 
     assert ended["terminal_notification_attempted"] is False
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        events = connection.execute(
-            "SELECT event_id, status FROM notification_delivery_events"
-        ).fetchall()
-        targets = connection.execute(
-            "SELECT event_id, sink, status FROM notification_delivery_targets"
-        ).fetchall()
-    assert events == [(ready_event_id, "dead_letter")]
-    assert targets == [(ready_event_id, "feishu", "dead_letter")]
+    events = _notification_rows(settings, ready_event_id)
+    assert {row["channel"] for row in events} == {"__cancellation__", "feishu"}
+    assert all(row["status"] == "failed" for row in events)
     state = level_candidate_module.read_json_object(
         tmp_path / "latest" / "gth_level_manual_candidate_state.json"
     )
@@ -2699,11 +2696,8 @@ def test_manual_ready_outbox_consumer_receipt_end_to_end_is_idempotent(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     deliveries: list[frozenset[str]] = []
 
@@ -2790,45 +2784,31 @@ def test_manual_ready_outbox_consumer_receipt_end_to_end_is_idempotent(
     assert duplicate_after_delivery["notification_attempted"] is False
     assert deliveries == [frozenset({"feishu"})]
 
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        outbox_event = connection.execute(
-            "SELECT event_id, source, kind, lane, status FROM notification_delivery_events"
-        ).fetchone()
-        outbox_targets = connection.execute(
-            "SELECT event_id, sink, status FROM notification_delivery_targets"
-        ).fetchall()
-    with sqlite3.connect(settings.delivery_receipt_path) as connection:
-        receipts = connection.execute(
-            "SELECT event_id, source, kind, lane, outcome, sinks_json "
-            "FROM notification_delivery_receipts"
-        ).fetchall()
-
-    assert outbox_event == (
+    rows = _notification_rows(settings, event_id)
+    assert len(rows) == 1
+    outbox_event = rows[0]
+    assert (
+        outbox_event["logical_event_id"],
+        outbox_event["source"],
+        outbox_event["kind"],
+        outbox_event["lane"],
+        outbox_event["channel"],
+        outbox_event["status"],
+    ) == (
         event_id,
         "gth_manual_candidate",
         "gth_spxw_manual_spread_candidate",
         "gth_manual_candidate",
+        "feishu",
         "delivered",
     )
-    assert outbox_targets == [(event_id, "feishu", "delivered")]
-    assert len(receipts) == 1
-    receipt_event_id, source, kind, lane, outcome, sinks_json = receipts[0]
-    assert {event_id, outbox_event[0], receipt_event_id} == {event_id}
-    assert (source, kind, lane, outcome) == (
-        "gth_manual_candidate",
-        "gth_spxw_manual_spread_candidate",
-        "gth_manual_candidate",
+    attempts = _attempt_rows(settings)
+    assert len(attempts) == 1
+    assert (attempts[0]["attempted"], attempts[0]["ok"], attempts[0]["outcome"]) == (
+        1,
+        1,
         "delivered",
     )
-    assert json.loads(sinks_json) == [
-        {
-            "sink": "feishu",
-            "attempted": True,
-            "ok": True,
-            "error": None,
-            "verdict": "delivered",
-        }
-    ]
 
 
 def test_declared_spread_width_cannot_expand_risk_budget(
@@ -3144,6 +3124,11 @@ def test_blocked_recheck_cancels_unenqueued_candidate_intent(
             "outcome": "enqueue_error",
         },
     )
+    monkeypatch.setattr(
+        candidate_module,
+        "cancel_pending_notification",
+        lambda *_args, **_kwargs: 0,
+    )
     storage = SimpleNamespace(data_root=str(tmp_path))
     common = {
         "now": NOW,
@@ -3186,11 +3171,8 @@ def test_outbox_ack_crash_then_source_loss_then_ready_cannot_collide(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     durable_enqueues = 0
 
@@ -3253,12 +3235,9 @@ def test_outbox_ack_crash_then_source_loss_then_ready_cannot_collide(
     event_id = f"{first['candidate_id']}:ready"
     assert state["pending_notifications"] == []
     assert event_id in state["settled_notification_event_ids"]
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        row = connection.execute(
-            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
-            (event_id,),
-        ).fetchone()
-    assert row == ("dead_letter",)
+    rows = _notification_rows(settings, event_id)
+    assert {row["channel"] for row in rows} == {"__cancellation__", "feishu"}
+    assert all(row["status"] == "failed" for row in rows)
 
 
 def test_accepted_ready_is_cancelled_before_blocked_card_can_deliver(
@@ -3273,11 +3252,8 @@ def test_accepted_ready_is_cancelled_before_blocked_card_can_deliver(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     storage = SimpleNamespace(data_root=str(tmp_path))
     common = {
@@ -3324,12 +3300,9 @@ def test_accepted_ready_is_cancelled_before_blocked_card_can_deliver(
     assert event_id not in final_state["accepted_notification_event_ids"]
     assert event_id in final_state["settled_notification_event_ids"]
     assert final_state["notification_lifecycle_events"] == []
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        row = connection.execute(
-            "SELECT status FROM notification_delivery_events WHERE event_id = ?",
-            (event_id,),
-        ).fetchone()
-    assert row == ("dead_letter",)
+    rows = _notification_rows(settings, event_id)
+    assert {row["channel"] for row in rows} == {"__cancellation__", "feishu"}
+    assert all(row["status"] == "failed" for row in rows)
 
 
 def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
@@ -3344,11 +3317,8 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
         feishu_webhook_url="https://open.feishu.cn/test",
         bark_enabled=False,
         bark_friend_enabled=False,
-        missed_queue_path=str(tmp_path / "missed.jsonl"),
-        delivery_receipt_path=str(tmp_path / "receipts.sqlite"),
-        delivery_outbox_enabled=True,
-        delivery_outbox_path=str(tmp_path / "delivery-outbox.sqlite"),
-        delivery_outbox_legacy_shadow_enabled=False,
+        notification_queue_enabled=True,
+        notification_database_path=str(tmp_path / "delivery-outbox.sqlite"),
     )
     storage = SimpleNamespace(data_root=str(tmp_path))
     common = {
@@ -3412,9 +3382,11 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
         NOW + timedelta(milliseconds=500),
         NOW + timedelta(milliseconds=500),
     ]
-    with sqlite3.connect(settings.delivery_outbox_path) as connection:
-        rows = connection.execute("SELECT event_id FROM notification_delivery_events").fetchall()
-    assert rows == [(f"{first['candidate_id']}:ready",)]
+    assert {
+        row["logical_event_id"]
+        for row in _notification_rows(settings)
+        if row["channel"] != "__cancellation__"
+    } == {f"{first['candidate_id']}:ready"}
 
 
 def _trend_transition_state(

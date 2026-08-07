@@ -1,15 +1,14 @@
-"""Composition root: RealtimeEngine + durable processed_ids + outbox consumer."""
+"""Realtime composition using the unified notification queue."""
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from spx_spark.application.realtime.composition import (
     PassthroughAnalytics,
     build_realtime_runtime,
     default_outbox_path,
-    default_processed_ids_path,
     resolve_analytics_kernel,
 )
 from spx_spark.application.realtime.options_kernel import OptionsAnalyticsKernel
@@ -17,7 +16,7 @@ from spx_spark.config import StorageSettings
 from spx_spark.domain.analytics import AnalyticsStatus
 from spx_spark.domain.events import DomainEvent, EventKind
 from spx_spark.domain.health import EngineMode
-from spx_spark.infrastructure.ledger.processed_ids import DurableProcessedIdSet
+from spx_spark.infrastructure.notifications import create_engine, event_rows, metadata
 from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
@@ -46,21 +45,28 @@ def _storage(tmp_path) -> StorageSettings:
     )
 
 
+def _store(storage: StorageSettings):
+    engine = create_engine(Path(storage.data_root))
+    metadata.create_all(engine)
+    return engine
+
+
 def _seed_spx(storage: StorageSettings, *, now: datetime) -> None:
-    quote = Quote(
-        instrument=InstrumentId.index("SPX"),
-        provider=Provider.SCHWAB,
-        provider_symbol="schwab:SPX",
-        received_at=now,
-        quality=MarketDataQuality.LIVE,
-        bid=5000.0,
-        ask=5001.0,
-        last=5000.5,
-        mark=5000.5,
-        quote_time=now,
-    )
     LatestMarketProjectionStore(storage).update(
-        [quote],
+        [
+            Quote(
+                instrument=InstrumentId.index("SPX"),
+                provider=Provider.SCHWAB,
+                provider_symbol="schwab:SPX",
+                received_at=now,
+                quality=MarketDataQuality.LIVE,
+                bid=5000.0,
+                ask=5001.0,
+                last=5000.5,
+                mark=5000.5,
+                quote_time=now,
+            )
+        ],
         now=now,
         provider_states=[
             ProviderState(
@@ -73,36 +79,28 @@ def _seed_spx(storage: StorageSettings, *, now: datetime) -> None:
 
 
 def test_production_composition_uses_options_analytics_kernel() -> None:
-    kernel = resolve_analytics_kernel(AnalyticsSettings())
-    assert isinstance(kernel, OptionsAnalyticsKernel)
-    shadow = resolve_analytics_kernel(AnalyticsSettings(passthrough_shadow_mode=True))
-    assert isinstance(shadow, PassthroughAnalytics)
+    assert isinstance(resolve_analytics_kernel(AnalyticsSettings()), OptionsAnalyticsKernel)
+    assert isinstance(
+        resolve_analytics_kernel(AnalyticsSettings(passthrough_shadow_mode=True)),
+        PassthroughAnalytics,
+    )
 
 
-def test_build_realtime_runtime_tick_and_persist_processed_ids(
-    tmp_path, monkeypatch
-) -> None:
+def test_realtime_event_is_durably_queued_once(tmp_path, monkeypatch) -> None:
     storage = _storage(tmp_path)
+    store = _store(storage)
     now = datetime.now(tz=timezone.utc)
     monkeypatch.setattr(
         "spx_spark.application.realtime.engine.DEFAULT_MARKET_CALENDAR.is_rth_open",
         lambda _now: True,
     )
     _seed_spx(storage, now=now)
-    sent: list[str] = []
-
-    def deliver(event: DomainEvent) -> bool:
-        sent.append(event.event_id)
-        return True
-
     runtime = build_realtime_runtime(
         storage,
-        deliver=deliver,
         outbox_path=default_outbox_path(storage),
-        processed_ids_path=default_processed_ids_path(storage),
         evaluation_enabled=False,
+        delivery_enabled=False,
         front_chain_fresh=True,
-        # Explicit passthrough for outbox wiring test; production default is real kernel.
         analytics=PassthroughAnalytics(),
     )
     event = DomainEvent(
@@ -113,99 +111,41 @@ def test_build_realtime_runtime_tick_and_persist_processed_ids(
         available_at=now,
         aggregate_id="spx",
         sequence=1,
-        payload={"k": 1},
+        payload={"alerts": []},
     )
-    runtime.outbox.append([event])
+
+    first = runtime.outbox.append([event])
+    duplicate = runtime.outbox.append([event])
     result = runtime.run_cycle(now=now)
+
     assert result.ok is True
     assert result.tick.health.mode is EngineMode.READY
     assert result.tick.analytics is not None
     assert result.tick.analytics.status is AnalyticsStatus.SUCCESS
-    assert result.consume.delivered == 1
-    assert sent == ["wired-1"]
-    assert "wired-1" in runtime.processed_ids
-    reloaded = DurableProcessedIdSet(default_processed_ids_path(storage))
-    assert "wired-1" in reloaded
+    assert first.accepted == 1 and duplicate.duplicate == 1
+    assert [(row["channel"], row["status"]) for row in event_rows(store, "wired-1")] == [
+        ("alert_pipeline", "pending")
+    ]
+    store.dispose()
 
 
-def test_real_kernel_marks_analytics_ok_false_without_front_month(tmp_path) -> None:
+def test_real_kernel_marks_analytics_blocked_without_front_month(tmp_path) -> None:
     storage = _storage(tmp_path)
+    store = _store(storage)
     _seed_spx(storage, now=NOW)
     runtime = build_realtime_runtime(
         storage,
         outbox_path=default_outbox_path(storage),
-        processed_ids_path=default_processed_ids_path(storage),
         evaluation_enabled=False,
+        delivery_enabled=False,
         front_chain_fresh=True,
     )
-    assert isinstance(runtime.engine.analytics, OptionsAnalyticsKernel)
+
     result = runtime.run_cycle(now=NOW)
+
     assert result.ok is True
     assert result.tick.analytics is not None
     assert result.tick.analytics.status is not AnalyticsStatus.SUCCESS
     assert result.tick.health.factors["analytics_ok"] is False
     assert result.tick.health.mode is EngineMode.BLOCKED
-
-
-def test_durable_processed_ids_survives_restart(tmp_path) -> None:
-    path = tmp_path / "ids.json"
-    store = DurableProcessedIdSet(path)
-    store.add("a")
-    store.add("b")
-    again = DurableProcessedIdSet(path)
-    assert "a" in again and "b" in again
-    assert len(again) == 2
-
-
-def test_durable_processed_ids_evicts_by_observation_order_not_lexical_order(
-    tmp_path,
-) -> None:
-    path = tmp_path / "ids.json"
-    store = DurableProcessedIdSet(path, max_ids=2)
-    store.add("z-old")
-    store.add("m-middle")
-    store.add("a-new")
-
-    assert "z-old" not in store
-    assert store.as_set() == {"m-middle", "a-new"}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
-    assert payload["event_ids"] == ["m-middle", "a-new"]
-    assert [item["event_id"] for item in payload["observations"]] == [
-        "m-middle",
-        "a-new",
-    ]
-    assert all(item["observed_at"] for item in payload["observations"])
-
-    reloaded = DurableProcessedIdSet(path, max_ids=2)
-    assert reloaded.as_set() == {"m-middle", "a-new"}
-
-
-def test_durable_processed_ids_migrates_legacy_order(tmp_path) -> None:
-    path = tmp_path / "ids.json"
-    path.write_text(
-        json.dumps({"schema_version": 1, "event_ids": ["z-old", "a-new"]}),
-        encoding="utf-8",
-    )
-
-    store = DurableProcessedIdSet(path, max_ids=2)
-    store.add("b-newest")
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
-    assert payload["event_ids"] == ["a-new", "b-newest"]
-
-
-def test_blocked_readiness_is_a_successful_runtime_observation(tmp_path) -> None:
-    storage = _storage(tmp_path)
-    runtime = build_realtime_runtime(
-        storage,
-        outbox_path=default_outbox_path(storage),
-        processed_ids_path=default_processed_ids_path(storage),
-        evaluation_enabled=False,
-    )
-
-    result = runtime.run_cycle(now=NOW)
-
-    assert result.tick.health.mode is EngineMode.BLOCKED
-    assert result.ok is True
+    store.dispose()

@@ -109,9 +109,9 @@ from spx_spark.intraday_strategy import signed_gex_sign_method
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.notifier.llm_writer import load_previous_push, record_push
-from spx_spark.notifier.model import CommandRunner, default_runner
+from spx_spark.notifier.model import CommandRunner, NotificationEnvelope, default_runner
 from spx_spark.notifier.dispatcher import inspect_notification_event, notification_event_exists
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.options_map import build_options_map
 from spx_spark.ibkr.position_watcher import default_positions_path, load_snapshot
 from spx_spark.storage import LatestState, LatestStateStore

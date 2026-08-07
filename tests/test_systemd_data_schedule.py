@@ -46,8 +46,8 @@ def test_retention_audits_run_after_market_and_weekly_prune_is_threshold_gated()
     assert "prune|critical_stop_raw)" in weekly_script
     assert "spx-spark-maintenance prune --execute" in weekly_script
     assert "spx-spark-maintenance prune\n" in weekly_script
-    # Ledger retention rides the same weekly off-market window.
-    assert "spx-spark-maintenance purge-outbox --vacuum" in weekly_script
+    # Notification retention is now owned by the unified operational database.
+    assert "purge-outbox" not in weekly_script
     assert "spx-spark-maintenance trim-review-audit" in weekly_script
 
 
@@ -267,14 +267,14 @@ def test_intraday_shock_hot_worker_is_a_dedicated_single_owner_service() -> None
     )
 
 
-def test_notification_delivery_has_a_persistent_subsecond_worker() -> None:
-    service = read("systemd/spx-spark-notification-delivery.service")
+def test_notification_delivery_uses_the_single_huey_worker() -> None:
+    service = read("systemd/spx-worker.service")
     installer = read("scripts/install-spx-spark-services.sh")
 
-    assert "spx_spark.notifier.delivery_worker --poll-seconds 0.5" in service
-    assert "Restart=always" in service
-    assert "SuccessExitStatus=143 SIGTERM" in service
-    assert "enable spx-spark-notification-delivery.service" in installer
+    assert "huey_consumer spx_spark.infrastructure.jobs.huey -w 1 -k thread" in service
+    assert "alembic upgrade head" in service
+    assert "Restart=on-failure" in service
+    assert "enable spx-worker.service" in installer
 
 
 def test_surface_dashboard_worker_publishes_to_an_isolated_read_only_feed() -> None:

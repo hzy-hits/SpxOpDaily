@@ -5,13 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from pathlib import Path
 
 from spx_spark.application.realtime.contracts import EngineTick
 from spx_spark.application.realtime.engine import RealtimeEngine
 from spx_spark.domain.analytics import AnalyticsDiagnostics, AnalyticsResult, AnalyticsStatus
 from spx_spark.domain.events import DomainEvent, EventKind
 from spx_spark.domain.market import MarketSnapshot
-from spx_spark.infrastructure.ledger.outbox import SqliteEventOutbox
+from spx_spark.infrastructure.notifications import (
+    NotificationEventQueue,
+    create_engine,
+    event_rows,
+    metadata,
+)
 
 
 NOW = datetime(2026, 7, 11, 17, 0, tzinfo=timezone.utc)
@@ -81,7 +87,9 @@ class Proj:
 
 
 def test_neutral_tick_does_not_grow_outbox(tmp_path) -> None:
-    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite")
+    store = create_engine(Path(tmp_path))
+    metadata.create_all(store)
+    outbox = NotificationEventQueue(store, schedule=lambda _event_id: None)
     engine = RealtimeEngine(
         snapshots=Snap(),
         analytics=Analytics(),
@@ -92,11 +100,13 @@ def test_neutral_tick_does_not_grow_outbox(tmp_path) -> None:
     )
     tick = engine.tick(now=NOW)
     assert tick.events == ()
-    assert outbox.count_by_status() == {}
+    assert event_rows(store, "missing") == ()
 
 
 def test_alert_candidate_tick_appends_outbox(tmp_path) -> None:
-    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite")
+    store = create_engine(Path(tmp_path))
+    metadata.create_all(store)
+    outbox = NotificationEventQueue(store, schedule=lambda _event_id: None)
     event = DomainEvent(
         schema_version=1,
         event_id="cand-1",
@@ -121,4 +131,6 @@ def test_alert_candidate_tick_appends_outbox(tmp_path) -> None:
         front_chain_fresh=True,
     )
     engine.tick(now=NOW)
-    assert outbox.count_by_status()["pending"] == 1
+    assert [(row["channel"], row["status"]) for row in event_rows(store, "cand-1")] == [
+        ("alert_pipeline", "pending")
+    ]

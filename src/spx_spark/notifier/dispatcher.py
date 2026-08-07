@@ -19,6 +19,7 @@ from spx_spark.notifier.unified_delivery import (
     notification_payload,
     notification_payload_fingerprint,
     recover_notification_tasks,
+    settings_use_default_database,
 )
 from spx_spark.config import NotificationSettings
 from spx_spark.infrastructure.notifications import (
@@ -26,10 +27,10 @@ from spx_spark.infrastructure.notifications import (
     due_event_ids,
     status_counts,
 )
-from spx_spark.notifier.delivery_outbox_contract import DeliveryEventInspection
+from spx_spark.notifier.model import DeliveryEventInspection
 from spx_spark.notifier.human_policy import quiet_window_suppresses
 from spx_spark.notifier.model import CommandRunner, SinkResult, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.notifier.rust_ingress import deliver_operator_notification_cancellation
 from spx_spark.notifier.sinks import deliver_trade_push
 
@@ -71,7 +72,12 @@ def _quiet_window_sink() -> SinkResult:
     )
 
 
-def _schedule_event(event_id: int) -> object:
+def _schedule_event(settings: NotificationSettings, event_id: int) -> object | None:
+    # Explicit non-default paths are isolated test/cutover stores. Importing the
+    # process-global Huey app here would enqueue a job against the production
+    # database while the event itself lives in the isolated database.
+    if not settings_use_default_database(settings):
+        return None
     from spx_spark.infrastructure.jobs import deliver_notification_event as task
 
     return task(event_id)
@@ -85,7 +91,7 @@ def _direct_deliver(runner: CommandRunner):
 
 
 def _disabled(settings: NotificationSettings) -> bool:
-    return not settings.delivery_outbox_enabled
+    return not settings.notification_queue_enabled
 
 
 def _store(settings: NotificationSettings):
@@ -231,7 +237,7 @@ def enqueue_notification(
         feishu_text=feishu_text,
         enqueued_at=at,
         engine=_store(settings),
-        schedule=_schedule_event,
+        schedule=lambda event_id: _schedule_event(settings, event_id),
     )
     return _enqueue_result(result)
 
@@ -269,7 +275,7 @@ def enqueue_linked_notification(
         feishu_text=feishu_text,
         enqueued_at=enqueued_at or datetime.now(tz=timezone.utc),
         engine=store,
-        schedule=_schedule_event,
+        schedule=lambda event_id: _schedule_event(settings, event_id),
     )
     return _enqueue_result(result)
 

@@ -6,7 +6,7 @@ import json
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -14,10 +14,7 @@ from spx_spark.application.market_features.trade_intent_runtime_support import (
     _trade_ready_delivery_event_id,
 )
 from spx_spark.market_calendar import MarketSession
-from spx_spark.notifier.receipts import (
-    inspect_delivery_receipt_store,
-    notification_event_id,
-)
+from spx_spark.notifier.unified_delivery import notification_event_id
 
 
 MAX_TRADE_READY_FIRST_DELIVERY_SECONDS = 5.0
@@ -67,123 +64,118 @@ def report_event_id(
     )
 
 
+def _unified_rows(
+    path: str | Path | None,
+    event_ids: Iterable[str],
+) -> tuple[dict[str, list[sqlite3.Row]], str | None]:
+    requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
+    if path is None or not str(path):
+        return {}, "not_configured"
+    database = Path(path)
+    if not database.exists():
+        return {}, "outbox_missing"
+    if not requested:
+        return {}, None
+    placeholders = ",".join("?" for _ in requested)
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT e.id, e.logical_event_id AS event_id, e.channel, e.status,
+                       e.created_at, e.expires_at, e.cancelled_at, e.cancel_reason,
+                       e.last_error,
+                       a.id AS attempt_id, a.finished_at, a.outcome,
+                       a.attempted, a.ok
+                FROM notification_events AS e
+                LEFT JOIN notification_attempts AS a ON a.event_id = e.id
+                WHERE e.logical_event_id IN ("""
+                + placeholders
+                + ") ORDER BY e.logical_event_id, e.channel, a.id",
+                requested,
+            ).fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        return {}, f"outbox_query_failed:{type(exc).__name__}"
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["event_id"]), []).append(row)
+    return grouped, None
+
+
+def _sqlite_utc(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def fully_delivered_event_ids(
     path: str | Path | None,
     event_ids: Iterable[str],
 ) -> frozenset[str]:
     requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
-    if path is None or not str(path) or not requested:
+    grouped, error = _unified_rows(path, requested)
+    if error is not None:
         return frozenset()
-    database = Path(path)
-    if not database.exists():
-        return frozenset()
-    placeholders = ",".join("?" for _ in requested)
-    try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            rows = connection.execute(
-                "SELECT event_id FROM notification_delivery_targets "
-                f"WHERE event_id IN ({placeholders}) "
-                "GROUP BY event_id "
-                "HAVING COUNT(*) > 0 "
-                "AND SUM(CASE WHEN status = 'delivered' THEN 0 ELSE 1 END) = 0",
-                requested,
-            ).fetchall()
-    except (OSError, sqlite3.Error):
-        return frozenset()
-    return frozenset(str(row[0]) for row in rows)
-
-
-def _verified_receipt_mirror_ids(
-    receipt_path: str | Path | None,
-    receipt_ids: Iterable[str],
-) -> tuple[frozenset[str], dict[str, object]]:
-    requested = tuple(dict.fromkeys(str(value) for value in receipt_ids if value))
-    inspection = inspect_delivery_receipt_store(
-        receipt_path or "",
-        required_mirror_ids=requested,
-    )
-    core_healthy = (
-        inspection.exists
-        and inspection.quick_check == "ok"
-        and inspection.journal_mode == "delete"
-        and inspection.synchronous == "full"
-        and inspection.schema_present
-    )
-    verified = set(requested) - set(inspection.missing_mirror_ids) if core_healthy else set()
-    return frozenset(verified), {
-        "path": str(receipt_path or ""),
-        "exists": inspection.exists,
-        "quick_check": inspection.quick_check,
-        "journal_mode": inspection.journal_mode,
-        "synchronous": inspection.synchronous,
-        "schema_present": inspection.schema_present,
-        "required_mirror_ids": len(requested),
-        "verified_mirror_ids": len(verified),
-        "missing_mirror_ids": list(inspection.missing_mirror_ids),
-        "error": inspection.error,
-    }
+    delivered: set[str] = set()
+    for event_id in requested:
+        rows = grouped.get(event_id, [])
+        channels = {str(row["channel"]) for row in rows if row["channel"] != "__cancellation__"}
+        if channels and all(
+            str(row["status"]) == "delivered"
+            for row in rows
+            if row["channel"] != "__cancellation__"
+        ):
+            delivered.add(event_id)
+    return frozenset(delivered)
 
 
 def receipt_store_check(
     outbox_path: str | Path | None,
     receipt_path: str | Path | None,
 ) -> OperationalCheck:
-    """Verify every durable outbox receipt intent in the real receipt DB."""
-
-    receipt_ids: tuple[str, ...] = ()
-    outbox_error: str | None = None
-    if outbox_path is None or not str(outbox_path):
-        outbox_error = "outbox_not_configured"
-    else:
-        database = Path(outbox_path)
-        if not database.exists():
-            outbox_error = "outbox_missing"
-        else:
-            try:
-                with sqlite3.connect(
-                    f"file:{database}?mode=ro",
-                    uri=True,
-                ) as connection:
-                    receipt_ids = tuple(
-                        str(row[0])
-                        for row in connection.execute(
-                            "SELECT receipt_id "
-                            "FROM notification_delivery_terminal_receipts "
-                            "ORDER BY receipt_id"
-                        )
+    del receipt_path
+    database = Path(outbox_path) if outbox_path else None
+    quick_check = "missing"
+    schema_present = False
+    error: str | None = None
+    if database is not None and database.exists():
+        try:
+            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+                quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0]).lower()
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
                     )
-            except (OSError, sqlite3.Error) as exc:
-                outbox_error = f"outbox_query_failed:{type(exc).__name__}"
-    verified, diagnostics = _verified_receipt_mirror_ids(
-        receipt_path,
-        receipt_ids,
-    )
-    passed = (
-        outbox_error is None
-        and diagnostics["exists"] is True
-        and diagnostics["quick_check"] == "ok"
-        and diagnostics["journal_mode"] == "delete"
-        and diagnostics["synchronous"] == "full"
-        and diagnostics["schema_present"] is True
-        and len(verified) == len(receipt_ids)
-    )
+                }
+                schema_present = {
+                    "notification_events",
+                    "notification_attempts",
+                } <= tables
+        except (OSError, sqlite3.Error) as exc:
+            error = f"{type(exc).__name__}:{exc}"
+    passed = quick_check == "ok" and schema_present
     return OperationalCheck(
         name="notification_receipt_integrity",
         measured={
-            **diagnostics,
-            "outbox_error": outbox_error,
-            "outbox_receipt_ids": len(receipt_ids),
+            "path": str(database or ""),
+            "exists": bool(database and database.exists()),
+            "quick_check": quick_check,
+            "schema_present": schema_present,
+            "error": error,
         },
-        threshold=(
-            "receipt DB quick_check=ok, journal_mode=delete, "
-            "synchronous=full, exact schema, and every outbox receipt_id "
-            "joins through its durable mirror to a receipt attempt"
-        ),
+        threshold="spx.sqlite quick_check=ok and notification event/attempt schema present",
         passed=passed,
         reason=(
-            f"receipt store {diagnostics['quick_check']}; mirrored "
-            f"{len(verified)}/{len(receipt_ids)} outbox receipt ids"
-            + (f"; {outbox_error}" if outbox_error else "")
+            "unified notification attempt store healthy"
+            if passed
+            else "unified notification attempt store unavailable or invalid"
         ),
     )
 
@@ -194,136 +186,72 @@ def timely_delivered_event_ids(
     *,
     receipt_path: str | Path | None = None,
 ) -> tuple[frozenset[str], dict[str, object]]:
+    del receipt_path
     requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
-    if path is None or not str(path) or not requested:
-        return frozenset(), {
-            "status": "not_configured" if path is None or not str(path) else "nothing_expected",
-            "events": {},
-        }
-    database = Path(path)
-    if not database.exists():
-        return frozenset(), {"status": "outbox_missing", "events": {}}
-    placeholders = ",".join("?" for _ in requested)
-    try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            connection.row_factory = sqlite3.Row
-            target_rows = connection.execute(
-                """
-                SELECT e.event_id, e.created_at, e.expires_at,
-                       t.sink, t.status, t.delivered_at
-                FROM notification_delivery_events AS e
-                JOIN notification_delivery_targets AS t USING (event_id)
-                WHERE e.event_id IN ("""
-                + placeholders
-                + """)
-                ORDER BY e.event_id, t.sink
-                """,
-                requested,
-            ).fetchall()
-            receipt_rows = connection.execute(
-                """
-                SELECT receipt_id, event_id, sink
-                FROM notification_delivery_terminal_receipts
-                WHERE event_id IN ("""
-                + placeholders
-                + """)
-                  AND outcome = 'delivered'
-                  AND attempted = 1
-                  AND ok = 1
-                  AND recorded_at IS NOT NULL
-                ORDER BY event_id, sink, terminal_at, receipt_id
-                """,
-                requested,
-            ).fetchall()
-    except (OSError, sqlite3.Error) as exc:
-        return frozenset(), {
-            "status": f"outbox_query_failed:{type(exc).__name__}",
-            "events": {},
-        }
-
-    grouped: dict[str, list[sqlite3.Row]] = {}
-    for row in target_rows:
-        grouped.setdefault(str(row["event_id"]), []).append(row)
-    receipt_ids = tuple(str(row["receipt_id"]) for row in receipt_rows)
-    verified_receipt_ids, receipt_diagnostics = _verified_receipt_mirror_ids(
-        receipt_path,
-        receipt_ids,
-    )
-    receipts_by_event_sink: dict[tuple[str, str], list[str]] = {}
-    for row in receipt_rows:
-        receipts_by_event_sink.setdefault(
-            (str(row["event_id"]), str(row["sink"])),
-            [],
-        ).append(str(row["receipt_id"]))
+    grouped, error = _unified_rows(path, requested)
+    if error is not None:
+        return frozenset(), {"status": error, "events": {}}
     accepted: set[str] = set()
     diagnostics: dict[str, object] = {}
     for event_id in requested:
-        rows = grouped.get(event_id, [])
+        all_rows = grouped.get(event_id, [])
+        channels: dict[str, list[sqlite3.Row]] = {}
+        for row in all_rows:
+            if row["channel"] != "__cancellation__":
+                channels.setdefault(str(row["channel"]), []).append(row)
         reasons: list[str] = []
+        receipt_ids: list[str] = []
         first_delivery_seconds: float | None = None
-        if not rows:
+        if not channels:
             reasons.append("missing_event_or_targets")
-        else:
-            created_at = parse_at(rows[0]["created_at"])
-            expires_at = parse_at(rows[0]["expires_at"])
-            delivered_times = [
-                value for row in rows if (value := parse_at(row["delivered_at"])) is not None
+        created_at = _sqlite_utc(all_rows[0]["created_at"]) if all_rows else None
+        expires_at = _sqlite_utc(all_rows[0]["expires_at"]) if all_rows else None
+        delivered_times: list[datetime] = []
+        for channel, rows in channels.items():
+            if str(rows[0]["status"]) != "delivered":
+                reasons.append(f"target_not_delivered:{channel}")
+                continue
+            successful = [
+                row
+                for row in rows
+                if row["ok"] == 1
+                and row["finished_at"] is not None
+                and (
+                    str(row["outcome"]) == "delivered"
+                    or (channel == "rust_ingress" and str(row["outcome"]) == "forwarded_to_rust")
+                )
             ]
-            if any(str(row["status"]) != "delivered" for row in rows):
-                reasons.append("targets_not_fully_delivered")
-            if len(delivered_times) != len(rows):
-                reasons.append("delivered_at_missing")
-            if created_at is None:
-                reasons.append("created_at_invalid")
-            elif delivered_times:
-                first_delivery_seconds = (min(delivered_times) - created_at).total_seconds()
-                if (
-                    first_delivery_seconds < 0
-                    or first_delivery_seconds > MAX_TRADE_READY_FIRST_DELIVERY_SECONDS
-                ):
-                    reasons.append("first_delivery_slo_breached")
-            if expires_at is None:
-                reasons.append("expires_at_invalid")
-            else:
-                if created_at is not None and created_at >= expires_at:
-                    reasons.append("enqueued_at_or_after_expiry")
-                if any(delivered_at > expires_at for delivered_at in delivered_times):
-                    reasons.append("delivered_after_expiry")
-            success_receipt_ids = {
-                receipt_id
-                for row in rows
-                for receipt_id in receipts_by_event_sink.get(
-                    (event_id, str(row["sink"])),
-                    (),
-                )
-                if receipt_id in verified_receipt_ids
-            }
-            if any(
-                not any(
-                    receipt_id in verified_receipt_ids
-                    for receipt_id in receipts_by_event_sink.get(
-                        (event_id, str(row["sink"])),
-                        (),
-                    )
-                )
-                for row in rows
-            ):
-                reasons.append("success_receipt_missing_or_unmirrored")
+            if not successful:
+                reasons.append(f"success_attempt_missing:{channel}")
+                continue
+            receipt = successful[0]
+            receipt_ids.append(str(receipt["attempt_id"]))
+            delivered_at = _sqlite_utc(receipt["finished_at"])
+            if delivered_at is not None:
+                delivered_times.append(delivered_at)
+        if created_at is None:
+            reasons.append("created_at_invalid")
+        elif delivered_times:
+            first_delivery_seconds = (min(delivered_times) - created_at).total_seconds()
+            if not 0 <= first_delivery_seconds <= MAX_TRADE_READY_FIRST_DELIVERY_SECONDS:
+                reasons.append("first_delivery_slo_breached")
+        if expires_at is None:
+            reasons.append("expires_at_invalid")
+        elif created_at is not None and created_at >= expires_at:
+            reasons.append("enqueued_at_or_after_expiry")
+        elif any(delivered_at > expires_at for delivered_at in delivered_times):
+            reasons.append("delivered_after_expiry")
         if not reasons:
             accepted.add(event_id)
         diagnostics[event_id] = {
-            "target_count": len(rows),
-            "success_receipt_ids": sorted(success_receipt_ids if rows else ()),
+            "target_count": len(channels),
+            "success_receipt_ids": receipt_ids,
             "first_delivery_seconds": (
                 round(first_delivery_seconds, 6) if first_delivery_seconds is not None else None
             ),
             "reasons": reasons,
         }
-    return frozenset(accepted), {
-        "status": "ready",
-        "events": diagnostics,
-        "receipt_store": receipt_diagnostics,
-    }
+    return frozenset(accepted), {"status": "ready", "events": diagnostics}
 
 
 def explicitly_terminal_event_ids(
@@ -332,122 +260,39 @@ def explicitly_terminal_event_ids(
     *,
     receipt_path: str | Path | None = None,
 ) -> tuple[frozenset[str], dict[str, object]]:
-    """Return expectations settled by an explicit source-terminal receipt.
-
-    A cancellation tombstone or a dead-letter target is not sufficient. Every
-    target must be dead-lettered and have its own durable, mirrored
-    cancellation/expiry receipt. This keeps terminal source outcomes separate
-    from successful human delivery.
-    """
-
+    del receipt_path
     requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
-    if path is None or not str(path) or not requested:
-        return frozenset(), {
-            "status": ("not_configured" if path is None or not str(path) else "nothing_expected"),
-            "events": {},
-        }
-    database = Path(path)
-    if not database.exists():
-        return frozenset(), {"status": "outbox_missing", "events": {}}
-    placeholders = ",".join("?" for _ in requested)
-    try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            connection.row_factory = sqlite3.Row
-            target_rows = connection.execute(
-                """
-                SELECT e.event_id, e.status AS event_status,
-                       t.sink, t.status AS target_status
-                FROM notification_delivery_events AS e
-                JOIN notification_delivery_targets AS t USING (event_id)
-                WHERE e.event_id IN ("""
-                + placeholders
-                + """)
-                ORDER BY e.event_id, t.sink
-                """,
-                requested,
-            ).fetchall()
-            receipt_rows = connection.execute(
-                """
-                SELECT receipt_id, event_id, sink, outcome, attempted, ok,
-                       recorded_at
-                FROM notification_delivery_terminal_receipts
-                WHERE event_id IN ("""
-                + placeholders
-                + """)
-                  AND outcome IN ('cancelled_before_delivery',
-                                  'expired_before_delivery')
-                ORDER BY event_id, sink, terminal_at, receipt_id
-                """,
-                requested,
-            ).fetchall()
-    except (OSError, sqlite3.Error) as exc:
-        return frozenset(), {
-            "status": f"outbox_query_failed:{type(exc).__name__}",
-            "events": {},
-        }
-
-    targets_by_event: dict[str, list[sqlite3.Row]] = {}
-    for row in target_rows:
-        targets_by_event.setdefault(str(row["event_id"]), []).append(row)
-    receipts_by_event_sink: dict[tuple[str, str], list[sqlite3.Row]] = {}
-    for row in receipt_rows:
-        receipts_by_event_sink.setdefault(
-            (str(row["event_id"]), str(row["sink"])),
-            [],
-        ).append(row)
-    receipt_ids = tuple(str(row["receipt_id"]) for row in receipt_rows)
-    verified_receipt_ids, receipt_diagnostics = _verified_receipt_mirror_ids(
-        receipt_path,
-        receipt_ids,
-    )
-
+    grouped, error = _unified_rows(path, requested)
+    if error is not None:
+        return frozenset(), {"status": error, "events": {}}
     accepted: set[str] = set()
     diagnostics: dict[str, object] = {}
     for event_id in requested:
-        targets = targets_by_event.get(event_id, [])
+        rows = grouped.get(event_id, [])
+        targets = [row for row in rows if row["channel"] != "__cancellation__"]
+        fenced = any(row["channel"] == "__cancellation__" for row in rows)
         reasons: list[str] = []
-        terminal_receipt_ids: list[str] = []
-        terminal_outcomes: set[str] = set()
-        if not targets:
-            reasons.append("missing_event_or_targets")
-        elif str(targets[0]["event_status"]) != "dead_letter" or any(
-            str(row["target_status"]) != "dead_letter" for row in targets
+        if not fenced:
+            reasons.append("cancellation_fence_missing")
+        if targets and any(
+            row["cancelled_at"] is None and row["last_error"] != "expired_before_transport"
+            for row in targets
         ):
             reasons.append("targets_not_source_terminal")
-        for target in targets:
-            sink = str(target["sink"])
-            receipts = [
-                row
-                for row in receipts_by_event_sink.get((event_id, sink), [])
-                if (
-                    str(row["outcome"]) in LEGAL_TRADE_READY_TERMINAL_OUTCOMES
-                    and not bool(row["attempted"])
-                    and not bool(row["ok"])
-                    and row["recorded_at"] is not None
-                    and str(row["receipt_id"]) in verified_receipt_ids
-                )
-            ]
-            if not receipts:
-                reasons.append(f"explicit_terminal_receipt_missing:{sink}")
-                continue
-            receipt = receipts[-1]
-            terminal_receipt_ids.append(str(receipt["receipt_id"]))
-            terminal_outcomes.add(str(receipt["outcome"]))
-        if len(terminal_outcomes) > 1:
-            reasons.append("mixed_terminal_outcomes")
         if not reasons:
             accepted.add(event_id)
         diagnostics[event_id] = {
-            "target_count": len(targets),
-            "terminal_receipt_ids": terminal_receipt_ids,
-            "terminal_outcomes": sorted(terminal_outcomes),
+            "target_count": len({str(row["channel"]) for row in targets}),
+            "terminal_outcomes": sorted(
+                {
+                    str(row["cancel_reason"] or row["last_error"])
+                    for row in targets
+                    if row["cancel_reason"] or row["last_error"]
+                }
+            ),
             "reasons": reasons,
         }
-    return frozenset(accepted), {
-        "status": "ready",
-        "events": diagnostics,
-        "receipt_store": receipt_diagnostics,
-    }
+    return frozenset(accepted), {"status": "ready", "events": diagnostics}
 
 
 def trade_ready_delivery_check(

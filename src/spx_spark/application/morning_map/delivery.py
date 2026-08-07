@@ -13,7 +13,8 @@ from spx_spark.config import NotificationSettings
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import generate_push_text
 from spx_spark.notifier.model import CommandRunner, default_runner
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.unified_delivery import notification_event_id
 
 
 def send_morning_map(

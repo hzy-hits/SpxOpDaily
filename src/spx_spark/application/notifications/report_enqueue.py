@@ -12,7 +12,8 @@ from spx_spark.application.order_map.report_clock import RthReportSlot
 from spx_spark.config import NotificationSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.dispatcher import enqueue_notification
-from spx_spark.notifier.receipts import NotificationEnvelope, notification_event_id
+from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.unified_delivery import notification_event_id
 
 
 _DAILY_REPORT_KINDS = frozenset({"morning_map", "order_map", "post_close_review"})

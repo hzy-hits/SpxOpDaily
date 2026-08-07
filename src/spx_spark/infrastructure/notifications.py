@@ -13,6 +13,8 @@ from typing import Mapping, Sequence
 import sqlalchemy as sa
 from sqlalchemy import Engine
 
+from spx_spark.domain.events import AppendResult, DomainEvent
+
 
 CANCELLATION_CHANNEL = "__cancellation__"
 
@@ -96,11 +98,16 @@ class Recovery:
     uncertain_event_ids: tuple[int, ...]
 
 
-def create_engine(data_root: Path) -> Engine:
+def create_database_engine(database_path: Path) -> Engine:
+    database_path.parent.mkdir(parents=True, exist_ok=True)
     return sa.create_engine(
-        f"sqlite:///{data_root / 'spx.sqlite'}",
+        f"sqlite:///{database_path}",
         connect_args={"timeout": 5.0},
     )
+
+
+def create_engine(data_root: Path) -> Engine:
+    return create_database_engine(data_root / "spx.sqlite")
 
 
 def _now(value: datetime | None = None) -> datetime:
@@ -123,6 +130,65 @@ def _payload(value: Mapping[str, object]) -> tuple[str, str]:
 
 def _key(logical_event_id: str, channel: str) -> str:
     return hashlib.sha256(f"{logical_event_id}\0{channel}".encode()).hexdigest()
+
+
+def _domain_event_payload(event: DomainEvent) -> dict[str, object]:
+    event.validate()
+    return {
+        "schema_version": event.schema_version,
+        "event_id": event.event_id,
+        "kind": event.kind.value,
+        "source_at": event.source_at.isoformat(),
+        "available_at": event.available_at.isoformat(),
+        "aggregate_id": event.aggregate_id,
+        "sequence": event.sequence,
+        "payload": dict(event.payload),
+    }
+
+
+class NotificationEventQueue:
+    """Realtime-engine append port backed by notification_events."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        schedule,
+    ) -> None:
+        self.engine = engine
+        self.schedule = schedule
+
+    def writable(self) -> bool:
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(sa.select(sa.literal(1)))
+            return True
+        except sa.exc.SQLAlchemyError:
+            return False
+
+    def append(self, domain_events: Sequence[DomainEvent]) -> AppendResult:
+        accepted = duplicate = 0
+        scheduled: list[int] = []
+        for event in domain_events:
+            batch = enqueue(
+                self.engine,
+                NotificationDraft(
+                    logical_event_id=event.event_id,
+                    source="alert_pipeline",
+                    kind=event.kind.value,
+                    lane="alert_candidate",
+                    payload={"domain_event": _domain_event_payload(event)},
+                    channels=("alert_pipeline",),
+                    expires_at=None,
+                ),
+                now=event.available_at,
+            )
+            accepted += batch.inserted
+            duplicate += batch.duplicate
+            scheduled.extend(batch.event_ids)
+        for event_id in scheduled:
+            self.schedule(event_id)
+        return AppendResult(accepted=accepted, duplicate=duplicate, writable=True)
 
 
 def enqueue(

@@ -20,7 +20,7 @@ from spx_spark.infrastructure.notifications import (
     event_rows,
 )
 from spx_spark.notifier.model import SinkResult
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)

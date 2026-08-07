@@ -14,7 +14,7 @@ from spx_spark.application.order_map.level_decision_machine import (
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.dispatcher import enqueue_notification
 from spx_spark.notifier.operator_cards import render_operator_card
-from spx_spark.notifier.receipts import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 
 

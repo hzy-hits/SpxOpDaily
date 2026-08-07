@@ -33,7 +33,6 @@ def _stub_feishu(monkeypatch):
 def make_settings(
     state_path: str,
     *,
-    missed_queue_path: str = "",
     agent_enabled: bool = False,
     bark_enabled: bool = False,
     feishu_enabled: bool = True,
@@ -78,7 +77,6 @@ def make_settings(
         else "",
         feishu_secret="",
         feishu_timeout_seconds=10.0,
-        missed_queue_path=missed_queue_path,
     )
 
 
@@ -201,7 +199,7 @@ def test_send_morning_map_falls_back_to_template_when_agent_fails(
     assert result["im_ok"] is True
 
 
-def test_send_morning_map_queues_on_feishu_failure(
+def test_send_morning_map_surfaces_feishu_failure_without_legacy_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SPX_PUSH_LLM_ENABLED", "false")
@@ -212,16 +210,13 @@ def test_send_morning_map_queues_on_feishu_failure(
     payload = sample_payload()
     template = render_template(payload)
     missed_path = str(tmp_path / "missed.jsonl")
-    settings = make_settings(str(tmp_path / "notify-state.json"), missed_queue_path=missed_path)
+    settings = make_settings(str(tmp_path / "notify-state.json"))
 
     result = send_morning_map(payload, settings)
     assert result["im_ok"] is False
+    assert result["delivered_ok"] is False
     assert result["text"] == template
-    lines = Path(missed_path).read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["kind"] == "morning_map"
-    assert entry["message"] == template
+    assert not Path(missed_path).exists()
 
 
 def test_rust_report_owner_suppresses_morning_push_before_llm_and_outbox(
