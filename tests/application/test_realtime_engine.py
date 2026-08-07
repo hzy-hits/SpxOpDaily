@@ -378,6 +378,54 @@ def test_front_chain_freshness_ignores_stale_provider_rows_when_live_fallback_ex
     assert snapshot_has_fresh_spxw_chain(_snapshot(quotes=quotes), now=NOW) is True
 
 
+def test_front_chain_freshness_uses_current_rest_observation_clock() -> None:
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=NOW,
+        last_update_at=NOW,
+        quality=MarketDataQuality.LIVE,
+        bid=7499.0,
+        ask=7501.0,
+        quote_time=NOW,
+    )
+    options: list[Quote] = []
+    for strike in range(7440, 7565, 5):
+        for right in ("C", "P"):
+            options.append(
+                Quote(
+                    instrument=InstrumentId.option(
+                        "SPX",
+                        expiry="20260713",
+                        strike=strike,
+                        right=right,
+                        trading_class="SPXW",
+                    ),
+                    provider=Provider.SCHWAB,
+                    received_at=NOW,
+                    last_update_at=NOW,
+                    quality=MarketDataQuality.STALE,
+                    bid=1.0,
+                    ask=1.2,
+                    quote_time=NOW - timedelta(minutes=5),
+                    raw={
+                        "pricing_observed_at": NOW.isoformat(),
+                        "pricing_provider": "schwab",
+                        "pricing_live_entitlement": True,
+                        "pricing_live_entitlement_source": "schwab_rest_response",
+                    },
+                )
+            )
+
+    assert (
+        snapshot_has_fresh_spxw_chain(
+            _snapshot(quotes=[underlier, *options]),
+            now=NOW,
+        )
+        is True
+    )
+
+
 def test_front_chain_freshness_requires_option_transport_and_underlier_clocks() -> None:
     underlier = Quote(
         instrument=InstrumentId.index("SPX"),

@@ -24,7 +24,10 @@ from spx_spark.analytics.options.models import (
     UnderlierReference,
 )
 from spx_spark.analytics.options.pricing import option_mid
-from spx_spark.analytics.options.quote_policy import gth_analytical_quote
+from spx_spark.analytics.options.quote_policy import (
+    analytical_option_quote,
+    option_analytical_pricing_allowed,
+)
 from spx_spark.analytics.options.service import build_expiry_map
 from spx_spark.domain.analytics import (
     AnalyticsDiagnostics,
@@ -303,21 +306,20 @@ def evaluate_front_chain_fresh(
             or quote.quote_time is None
         ):
             continue
-        analytical_quote = gth_analytical_quote(
+        analytical_quote = analytical_option_quote(
             quote,
             as_of=now,
-            max_age_seconds=max_age_seconds,
+            core_max_age_seconds=max_age_seconds,
+            rotation_max_age_seconds=max_age_seconds,
         )
-        if analytical_quote.quality in BAD_QUALITIES:
-            continue
-        source_age = (as_utc(now) - as_utc(quote.quote_time)).total_seconds()
         transport_at = quote.last_update_at or quote.received_at
         transport_age = (as_utc(now) - as_utc(transport_at)).total_seconds()
-        if (
-            source_age > max_age_seconds
-            or transport_age > max_age_seconds
-            or source_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
-            or transport_age < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+        if not option_analytical_pricing_allowed(analytical_quote):
+            continue
+        if not (
+            -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+            <= transport_age
+            <= max_age_seconds
         ):
             continue
         fresh_quotes.append(analytical_quote)
