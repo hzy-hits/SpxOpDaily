@@ -21,6 +21,7 @@ from spx_spark.options_map import (
     build_rn_density,
     build_wall_ladder,
     gex_weight,
+    group_spxw_option_quotes,
     interpolated_atm_iv,
     pair_by_strike,
     select_underlier,
@@ -1317,3 +1318,37 @@ def test_zero_gamma_spot_scan_finds_root_in_chain() -> None:
     assert 5900 <= zero <= 6100
     assert flip_zone is not None
     assert flip_zone[0] <= zero <= flip_zone[1]
+
+
+def test_options_map_accepts_one_precomputed_quote_grouping() -> None:
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc)
+    state = make_state(
+        Quote(
+            instrument=InstrumentId.index("SPX"),
+            provider=Provider.IBKR,
+            received_at=now,
+            quote_time=now,
+            quality=MarketDataQuality.LIVE,
+            last=7500.0,
+        ),
+        make_option(
+            expiry="20260713",
+            strike=7500.0,
+            right="C",
+            mark=10.0,
+            iv=0.2,
+            gamma=0.003,
+            open_interest=1000.0,
+            now=now,
+        ),
+        now=now,
+    )
+    grouped = group_spxw_option_quotes(state)
+
+    expected = build_options_map(state)
+    actual = build_options_map(state, grouped_quotes=grouped)
+
+    assert actual.underlier == expected.underlier
+    assert actual.expiries == expected.expiries
+    assert actual.warnings == expected.warnings
+    assert actual.spy_confluence == expected.spy_confluence

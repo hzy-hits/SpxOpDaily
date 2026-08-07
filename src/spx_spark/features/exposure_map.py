@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -875,11 +876,19 @@ def _build_expiry_exposure(
     )
 
 
-def build_exposure_map(state: LatestState) -> ExposureMap:
+def build_exposure_map(
+    state: LatestState,
+    *,
+    grouped_quotes: Mapping[str, Sequence[Quote]] | None = None,
+) -> ExposureMap:
     from spx_spark.options_map import group_spxw_option_quotes, select_underlier
 
     underlier = select_underlier(state)
-    all_grouped = group_spxw_option_quotes(state)
+    all_grouped = (
+        grouped_quotes
+        if grouped_quotes is not None
+        else group_spxw_option_quotes(state)
+    )
     active_expiries = {
         expiry.strftime("%Y%m%d")
         for expiry in DEFAULT_MARKET_CALENDAR.research_expiries(state.as_of)

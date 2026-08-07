@@ -27,7 +27,7 @@ from spx_spark.marketdata import (
     Provider,
     Quote,
 )
-from spx_spark.options_map import build_options_map
+from spx_spark.options_map import build_options_map, group_spxw_option_quotes
 from spx_spark.storage import LatestState
 
 AS_OF = datetime(2026, 7, 13, 14, 0, tzinfo=timezone.utc)
@@ -713,3 +713,15 @@ def test_early_session_volume_warning() -> None:
     exposure = build_exposure_map(make_golden_state(as_of=as_of))
     assert "early_session_low_volume" in exposure.expiries[0].warnings
     assert exposure.expiries[0].volume_weighted.dagex_proxy is not None
+
+
+def test_exposure_map_accepts_one_precomputed_quote_grouping() -> None:
+    state = make_golden_state()
+    grouped = group_spxw_option_quotes(state)
+
+    expected = build_exposure_map(state)
+    actual = build_exposure_map(state, grouped_quotes=grouped)
+
+    assert actual.underlier == expected.underlier
+    assert actual.expiries == expected.expiries
+    assert actual.warnings == expected.warnings

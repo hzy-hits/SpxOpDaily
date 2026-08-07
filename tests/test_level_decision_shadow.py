@@ -132,11 +132,10 @@ def test_rth_observation_releases_es_latch_when_official_spx_recovers(
 
     class Store:
         def __init__(self, _storage) -> None:
-            pass
+            raise AssertionError("preloaded state must bypass LatestStateStore")
 
         def load(self, *, now):
-            assert now == NOW
-            return state
+            raise AssertionError("preloaded state must bypass LatestStateStore")
 
     monkeypatch.setattr(shadow_service, "LatestStateStore", Store)
     monkeypatch.setattr(
@@ -145,7 +144,11 @@ def test_rth_observation_releases_es_latch_when_official_spx_recovers(
         lambda *_args, **_kwargs: 7420.0,
     )
     monkeypatch.setattr(shadow_service, "_qualified_es_basis", lambda *_args, **_kwargs: 40.0)
-    monkeypatch.setattr(shadow_service, "build_options_map", lambda _state: None)
+    monkeypatch.setattr(
+        shadow_service,
+        "build_options_map",
+        lambda _state: pytest.fail("prebuilt options map must be reused"),
+    )
     monkeypatch.setattr(
         shadow_service,
         "resolve_trigger_coordinate",
@@ -168,6 +171,8 @@ def test_rth_observation_releases_es_latch_when_official_spx_recovers(
         session_date="2026-07-13",
         session_mode="rth",
         frozen_structure=_stable_structure(NOW, put_wall=7375.0, call_wall=7450.0),
+        latest_state=state,
+        options_map=SimpleNamespace(),
         active_decision={
             "phase": LevelPhase.BREAK_PENDING.value,
             "trigger_coordinate_kind": "es_equivalent",

@@ -16,7 +16,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Protocol
 
-from spx_spark.settings import load_app_settings
+from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.config import StorageSettings
 from spx_spark.state_io import atomic_write_json_secure
 
@@ -102,12 +102,19 @@ def run_market_features_cycle(
     on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
     *,
     emit_json: bool = True,
+    app_settings: AppSettings | None = None,
+    storage_settings: StorageSettings | None = None,
 ) -> int:
     # Import once on the first cycle; subsequent calls reuse the same interpreter
     # and module graph instead of paying subprocess and import cost every five seconds.
     from spx_spark.application.market_features import service
 
-    return service.run(["--json"] if emit_json else [], on_frames=on_frames)
+    kwargs: dict[str, object] = {"on_frames": on_frames}
+    if app_settings is not None:
+        kwargs["app_settings"] = app_settings
+    if storage_settings is not None:
+        kwargs["storage_settings"] = storage_settings
+    return service.run(["--json"] if emit_json else [], **kwargs)
 
 
 def run_locked_market_features_once(
@@ -296,11 +303,13 @@ def run_with_stop(
     )
     storage = StorageSettings.from_env()
     lease_path = Path(storage.data_root) / "latest" / "market_features_hot_worker.lease.json"
-    cycle = (
-        run_market_features_cycle
-        if on_frames is None
-        else lambda: run_market_features_cycle(on_frames, emit_json=emit_json)
-    )
+    def cycle() -> int:
+        return run_market_features_cycle(
+            on_frames,
+            emit_json=emit_json,
+            app_settings=app,
+            storage_settings=storage,
+        )
     try:
         with ProcessLock(lock_path):
             print_event(

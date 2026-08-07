@@ -225,7 +225,7 @@ def test_cli_once_uses_configured_cadence_and_lock(
     monkeypatch.setattr(
         hot_worker,
         "run_market_features_cycle",
-        lambda: calls.append("cycle") or 0,
+        lambda *_args, **_kwargs: calls.append("cycle") or 0,
     )
     monkeypatch.setattr(hot_worker, "install_stop_handlers", lambda stop_event: None)
 

@@ -121,9 +121,9 @@ from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.marketdata import as_utc
-from spx_spark.options_map import build_options_map
+from spx_spark.options_map import build_options_map, group_spxw_option_quotes
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
-from spx_spark.settings import load_app_settings
+from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.storage import LatestStateStore
 
@@ -140,6 +140,8 @@ def run(
     now: datetime | None = None,
     action_clock: Callable[[], datetime] | None = None,
     on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
+    app_settings: AppSettings | None = None,
+    storage_settings: StorageSettings | None = None,
 ) -> int:
     args = parse_args(argv)
     evaluation_now = as_utc(now or datetime.now(tz=timezone.utc))
@@ -148,7 +150,7 @@ def run(
         evaluation_time_injected=now is not None,
         action_clock=action_clock,
     )
-    app = load_app_settings()
+    app = app_settings or load_app_settings()
     policy = app.market_features
     output: dict[str, Any] = {"ok": True, "at": evaluation_now.isoformat()}
     if not policy.enabled:
@@ -157,7 +159,7 @@ def run(
             print(json.dumps(output, sort_keys=True))
         return 0
 
-    storage = StorageSettings.from_env()
+    storage = storage_settings or StorageSettings.from_env()
     failover_settings = ProviderFailoverSettings.from_env()
     provider_entry_control = _provider_entry_control(
         failover_settings,
@@ -172,8 +174,13 @@ def run(
     persisted = load_json(state_path)
     trend = load_trend_state(trend_state_path(storage.data_root))
     latest = LatestStateStore(storage).load(now=evaluation_now)
-    options_map = build_options_map(latest, storage_settings=storage)
-    exposure_map = build_exposure_map(latest)
+    grouped_quotes = group_spxw_option_quotes(latest, storage_settings=storage)
+    options_map = build_options_map(
+        latest,
+        storage_settings=storage,
+        grouped_quotes=grouped_quotes,
+    )
+    exposure_map = build_exposure_map(latest, grouped_quotes=grouped_quotes)
     option_history = _dict_list(persisted.get("option_history"))
     option_frame, contracts = build_option_structure_frame(
         latest,
@@ -324,6 +331,8 @@ def run(
             policy=app.level_decision,
             notifications_enabled=True,
             live_structure=level_decision_live_structure(option_frame),
+            latest_state=latest,
+            options_map=options_map,
         )
     except Exception as exc:  # The last durable decision remains usable on refresh failure.
         level_decision_refresh_error = f"{type(exc).__name__}:{exc}"

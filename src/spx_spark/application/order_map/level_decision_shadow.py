@@ -46,6 +46,8 @@ from spx_spark.storage import LatestStateStore
 
 if TYPE_CHECKING:
     from spx_spark.application.realtime.contracts import EngineTick
+    from spx_spark.analytics.options.models import OptionsMap
+    from spx_spark.storage import LatestState
 
 
 class LevelDecisionShadowError(RuntimeError):
@@ -87,6 +89,8 @@ def run_level_decision_shadow(
     policy: LevelDecisionPolicy | None = None,
     notifications_enabled: bool = False,
     live_structure: Mapping[str, object] | None = None,
+    latest_state: LatestState | None = None,
+    options_map: OptionsMap | None = None,
 ) -> dict[str, object]:
     policy = policy or LevelDecisionPolicy()
     if not policy.enabled:
@@ -140,6 +144,8 @@ def run_level_decision_shadow(
             max_frozen_structure_age_sessions=policy.max_frozen_structure_age_sessions,
             active_decision=previous if isinstance(previous, Mapping) else None,
             structure_pending_blocks_new_arm=structure_pending_blocks_new_arm,
+            latest_state=latest_state,
+            options_map=options_map,
         )
         transition = advance_level_decision(
             previous if isinstance(previous, Mapping) else None,
@@ -357,6 +363,8 @@ def _observation(
     max_frozen_structure_age_sessions: int = 1,
     active_decision: Mapping[str, object] | None = None,
     structure_pending_blocks_new_arm: bool = False,
+    latest_state: LatestState | None = None,
+    options_map: OptionsMap | None = None,
 ) -> LevelObservation:
     structure_age = _structure_session_age(frozen_structure, now=now)
     structure_usable = (
@@ -367,7 +375,7 @@ def _observation(
     quality_reasons: list[str] = []
     if frozen_structure is not None and not structure_usable:
         quality_reasons.append("frozen_structure_session_ttl_expired")
-    state = LatestStateStore(storage).load(now=now)
+    state = latest_state or LatestStateStore(storage).load(now=now)
     es_quote = state.best_quote("future:ES")
     es = actionable_live_price(
         state,
@@ -380,10 +388,11 @@ def _observation(
     elif es is None:
         quality_reasons.append("es_not_live")
     basis = _qualified_es_basis(storage, now=now)
-    try:
-        options_map = build_options_map(state)
-    except (LookupError, TypeError, ValueError):
-        options_map = None
+    if options_map is None:
+        try:
+            options_map = build_options_map(state)
+        except (LookupError, TypeError, ValueError):
+            options_map = None
     coordinate = resolve_trigger_coordinate(
         state,
         options_map,

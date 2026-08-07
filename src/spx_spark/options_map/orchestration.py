@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import median
@@ -511,9 +512,14 @@ def build_options_map(
     state: LatestState,
     *,
     storage_settings: StorageSettings | None = None,
+    grouped_quotes: Mapping[str, Sequence[Quote]] | None = None,
 ) -> OptionsMap:
     underlier = select_underlier(state)
-    all_grouped = group_spxw_option_quotes(state, storage_settings=storage_settings)
+    all_grouped = (
+        grouped_quotes
+        if grouped_quotes is not None
+        else group_spxw_option_quotes(state, storage_settings=storage_settings)
+    )
     active_expiries = {
         expiry.strftime("%Y%m%d")
         for expiry in DEFAULT_MARKET_CALENDAR.research_expiries(state.as_of)
