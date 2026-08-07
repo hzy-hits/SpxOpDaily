@@ -89,7 +89,7 @@ The Oracle overlay replaces the generic frame path with
 sibling `archive` directory. At 18:30 `America/New_York`, after the Python
 session finalizer window, `spx-rust-frame-retention.timer` first runs
 `archive-frames --backlog-days 7` and then applies a seven-completed-day,
-12 GiB raw-frame policy. Backlog processing prioritizes missing artifacts
+8 GiB raw-frame policy. Backlog processing prioritizes missing artifacts
 oldest-first; existing artifacts can fill remaining batch slots only after
 idempotent verification, so a history longer than seven days advances instead
 of repeatedly selecting the same dates. Each day is streamed at zstd level 1 into a staging directory; every raw
@@ -316,7 +316,7 @@ test -S /run/spx-spark-core-shadow/core.sock
 systemctl --user status spx-spark-order-map-status.timer --no-pager
 /opt/spx-spark-core-shadow/current/bin/spx-core prune-frames \
   --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 7 \
-  --max-total-bytes 12884901888 --require-archive-root \
+  --max-total-bytes 8589934592 --require-archive-root \
   /srv/data/spx-spark/rust-core-shadow/archive --dry-run
 sudo systemctl status spx-rust-frame-retention.timer --no-pager
 sudo journalctl -u spx-rust-frame-retention.service -n 20 --no-pager

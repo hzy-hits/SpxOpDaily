@@ -10,7 +10,7 @@ fn production_retention_archives_before_manifest_gated_prune() {
 
     assert!(archive < prune, "archive must run before prune");
     assert!(service.contains("--backlog-days 7"));
-    assert!(service.contains("--max-total-bytes 12884901888"));
+    assert!(service.contains("--max-total-bytes 8589934592"));
     assert!(service.contains("--require-archive-root"));
     assert!(service.contains("TimeoutStartSec=6h"));
     assert!(service.contains("ReadWritePaths=-/srv/data/spx-spark/rust-core-shadow/archive"));
