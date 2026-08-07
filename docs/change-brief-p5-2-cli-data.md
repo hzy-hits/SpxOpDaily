@@ -149,3 +149,24 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
 - Validation: 117 focused configuration, Schwab, notification, post-close and
   data-platform tests passed; Ruff, Import Linter 2/2 and `git diff --check`
   passed.
+
+## Alert-candidate outbox idempotency fault
+
+- User-visible goal: prevent a repeated alert candidate inside one cooldown
+  bucket from latching realtime health in `BLOCKED` and suppressing later
+  strategy evaluation.
+- Existing owner and reuse: `NotificationEventQueue` remains the sole adapter
+  from realtime `DomainEvent` candidates to the Python `notification_events`
+  table. The existing semantic event ID remains the dedupe key; no database,
+  queue, service or notification owner is added.
+- Root cause: the semantic ID intentionally stays stable while live market
+  values inside the candidate payload continue changing. The generic enqueue
+  collision guard rejected that expected payload drift, and the realtime
+  engine correctly latched the resulting append failure.
+- Change: only `NotificationEventQueue` may keep the first durable payload and
+  count later same-ID candidates as semantic duplicates. All normal Bark,
+  Feishu and operator notifications retain strict same-ID/same-payload
+  collision rejection.
+- Acceptance: repeated same-ID candidates with changed observations produce
+  one durable row, report `duplicate=1`, keep `outbox_writable=true`, and do not
+  block engine health; the generic collision test must continue to raise.

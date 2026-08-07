@@ -134,3 +134,90 @@ def test_alert_candidate_tick_appends_outbox(tmp_path) -> None:
     assert [(row["channel"], row["status"]) for row in event_rows(store, "cand-1")] == [
         ("alert_pipeline", "pending")
     ]
+
+
+def test_alert_candidate_payload_drift_is_a_semantic_duplicate(tmp_path) -> None:
+    store = create_engine(Path(tmp_path))
+    metadata.create_all(store)
+    scheduled: list[int] = []
+    outbox = NotificationEventQueue(store, schedule=scheduled.append)
+    first = DomainEvent(
+        schema_version=1,
+        event_id="candidate-bucket-1",
+        kind=EventKind.ALERT_CANDIDATE,
+        source_at=NOW,
+        available_at=NOW,
+        aggregate_id="spx",
+        sequence=0,
+        payload={"alerts": [{"kind": "price_move", "spot": 6500.0}]},
+    )
+    changed = DomainEvent(
+        schema_version=1,
+        event_id=first.event_id,
+        kind=first.kind,
+        source_at=NOW,
+        available_at=NOW,
+        aggregate_id=first.aggregate_id,
+        sequence=first.sequence,
+        payload={"alerts": [{"kind": "price_move", "spot": 6501.0}]},
+    )
+
+    accepted = outbox.append((first,))
+    duplicate = outbox.append((changed,))
+
+    assert accepted.accepted == 1
+    assert duplicate.accepted == 0
+    assert duplicate.duplicate == 1
+    assert duplicate.writable is True
+    assert len(event_rows(store, first.event_id)) == 1
+    assert len(scheduled) == 2
+    assert scheduled[0] == scheduled[1]
+
+
+def test_repeated_alert_candidate_does_not_block_realtime_health(tmp_path) -> None:
+    store = create_engine(Path(tmp_path))
+    metadata.create_all(store)
+    outbox = NotificationEventQueue(store, schedule=lambda _event_id: None)
+    event = DomainEvent(
+        schema_version=1,
+        event_id="candidate-bucket-2",
+        kind=EventKind.ALERT_CANDIDATE,
+        source_at=NOW,
+        available_at=NOW,
+        aggregate_id="spx",
+        sequence=0,
+        payload={"alerts": [{"kind": "price_move", "spot": 6500.0}]},
+    )
+
+    class Alerts:
+        current = event
+
+        def evaluate(self, snapshot, analytics, *, now):  # noqa: ANN001
+            return (self.current,)
+
+    alerts = Alerts()
+    engine = RealtimeEngine(
+        snapshots=Snap(),
+        analytics=Analytics(),
+        alerts=alerts,
+        projections=Proj(),
+        outbox=outbox,
+        front_chain_fresh=True,
+    )
+    first = engine.tick(now=NOW)
+    alerts.current = DomainEvent(
+        schema_version=1,
+        event_id=event.event_id,
+        kind=event.kind,
+        source_at=NOW,
+        available_at=NOW,
+        aggregate_id=event.aggregate_id,
+        sequence=event.sequence,
+        payload={"alerts": [{"kind": "price_move", "spot": 6501.0}]},
+    )
+    repeated = engine.tick(now=NOW)
+
+    assert first.health.factors["outbox_writable"] is True
+    assert repeated.health.factors["outbox_writable"] is True
+    assert "outbox_append_failed" not in repeated.health.reasons
+    assert engine.outbox_append_failure_latched is False

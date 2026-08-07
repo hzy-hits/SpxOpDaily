@@ -13,7 +13,7 @@ from typing import Mapping, Sequence
 import sqlalchemy as sa
 from sqlalchemy import Engine
 
-from spx_spark.domain.events import AppendResult, DomainEvent
+from spx_spark.domain.events import AppendResult, DomainEvent, EventKind
 
 
 CANCELLATION_CHANNEL = "__cancellation__"
@@ -193,6 +193,7 @@ class NotificationEventQueue:
                     expires_at=None,
                 ),
                 now=event.available_at,
+                accept_semantic_duplicate=event.kind is EventKind.ALERT_CANDIDATE,
             )
             accepted += batch.inserted
             duplicate += batch.duplicate
@@ -203,7 +204,11 @@ class NotificationEventQueue:
 
 
 def enqueue(
-    engine: Engine, draft: NotificationDraft, *, now: datetime | None = None
+    engine: Engine,
+    draft: NotificationDraft,
+    *,
+    now: datetime | None = None,
+    accept_semantic_duplicate: bool = False,
 ) -> EnqueueBatch:
     if not draft.logical_event_id.strip() or not draft.channels:
         raise ValueError("logical event id and at least one channel are required")
@@ -230,7 +235,10 @@ def enqueue(
                 )
             ).first()
             if existing is not None:
-                if existing.payload_sha256 != fingerprint:
+                if (
+                    existing.payload_sha256 != fingerprint
+                    and not accept_semantic_duplicate
+                ):
                     raise ValueError("notification idempotency collision")
                 event_ids.append(int(existing.id))
                 duplicate += 1
