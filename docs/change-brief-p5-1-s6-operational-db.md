@@ -26,8 +26,10 @@
 
 - 本增量把 live StrategyDecision owner 从 JSON 切到 `decisions`/`decision_legs`；
   `strategy_decision.json` 仅在 SQL commit 后作为 projection 导出。
-- P5 后续 owner cutover 会把旧 research ledger 的 event/outcome/manifest 写入迁到同一
-  Alembic schema，随后删除其 `schema_migrations`、SQL migration 文件和手写 DDL。
+- 本卡同时把旧 research ledger 的 session/event/decision/outcome/manifest 写入迁到同一
+  Alembic schema；feature snapshot、strategy version 与 delivery 兼容事实归并到 `events`。
+- 删除旧 `schema_migrations` SQL 文件和运行时初始化入口；迁移未执行时明确失败并要求
+  `alembic upgrade head`，不再由业务进程偷偷建表。
 - 不保留 StrategyDecision 的 DB/JSON 双写权限：SQL 失败时 JSON 可诊断但 READY 不投递。
 
 ## Dependency decision
@@ -67,6 +69,8 @@ NO_TRADE 同样落一行 decision，但没有 decision legs，也不会进入 RE
 - DB 失败时 READY 不入队；DB 成功后才导出并入队。
 - Oracle 实际验证 unit/restart、数据新鲜度、decision/legs、notification attempts 和
   Bark/飞书 receipt。
+- 本地 Phase 闸门：2948 tests、Ruff、Import Linter、Alembic 单头链与 `git diff --check`
+  全部通过。
 
 ## Non-goals
 

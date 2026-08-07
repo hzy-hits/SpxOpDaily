@@ -23,21 +23,20 @@ from spx_spark.data_platform.telemetry import (
 
 LEDGER_TABLES = (
     "sessions",
-    "strategy_versions",
     "events",
-    "feature_snapshots",
     "decisions",
     "decision_legs",
-    "alert_deliveries",
     "outcomes",
+    "provider_incidents",
     "compaction_manifests",
+    "notification_events",
+    "notification_attempts",
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SPX Spark local data-platform operations")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("init", help="Initialize or migrate the SQLite ledger")
     subparsers.add_parser("status", help="Show counts and storage sizes without identifiers")
     subparsers.add_parser("replay-spool", help="Replay fallback telemetry into SQLite")
     subparsers.add_parser(
@@ -64,15 +63,6 @@ def run(argv: list[str] | None = None) -> int:
         settings.ledger_path,
         busy_timeout_ms=settings.sqlite_busy_timeout_ms,
     )
-    if args.command == "init":
-        _print_json(
-            {
-                "status": "initialized",
-                "ledger_path": settings.ledger_path,
-                "raw_delete_enabled": settings.raw_delete_enabled,
-            }
-        )
-        return 0
     if args.command == "status":
         _print_json(_status(settings))
         return 0

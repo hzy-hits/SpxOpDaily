@@ -58,6 +58,7 @@ def upgrade() -> None:
         "decisions",
         sa.Column("decision_id", sa.Text(), primary_key=True),
         sa.Column("event_key", sa.Text(), sa.ForeignKey("events.event_key")),
+        sa.Column("feature_snapshot_id", sa.Text(), sa.ForeignKey("events.event_key")),
         sa.Column("session_date", sa.Text()),
         sa.Column("strategy_name", sa.Text(), nullable=False),
         sa.Column("strategy_version", sa.Text(), nullable=False),

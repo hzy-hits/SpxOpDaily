@@ -183,9 +183,11 @@ def test_notifier_consumes_raw_observation_without_delivery_and_marks_cooldown(t
     assert second.skipped_reason == "no_alerts_after_severity_or_cooldown"
 
 
-def test_notifier_shadow_records_context_consumption(tmp_path, monkeypatch) -> None:
+def test_notifier_shadow_records_context_consumption(
+    tmp_path, monkeypatch, migrate_operational_database
+) -> None:
     data_root = tmp_path / "market-data"
-    ledger_path = data_root / "runtime" / "research-ledger.sqlite3"
+    ledger_path = migrate_operational_database(tmp_path)
     monkeypatch.setenv("DATA_PLATFORM_ENABLED", "true")
     monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(data_root))
     monkeypatch.setenv("DATA_PLATFORM_LEDGER_PATH", str(ledger_path))
@@ -202,32 +204,33 @@ def test_notifier_shadow_records_context_consumption(tmp_path, monkeypatch) -> N
     assert result.sent_count == 0
     connection = sqlite3.connect(ledger_path)
     try:
-        assert connection.execute("SELECT count(*) FROM events").fetchone()[0] == 1
-        assert connection.execute("SELECT count(*) FROM decisions").fetchone()[0] == 1
-        assert connection.execute("SELECT count(*) FROM alert_deliveries").fetchone()[0] >= 1
         assert (
             connection.execute(
-                "SELECT count(*) FROM alert_deliveries WHERE status='sent'"
-            ).fetchone()[0]
-            == 0
-        )
-        assert (
-            connection.execute(
-                "SELECT count(*) FROM alert_deliveries WHERE channel='context_policy'"
+                "SELECT count(*) FROM events "
+                "WHERE event_type != 'notification_delivery'"
             ).fetchone()[0]
             == 1
         )
+        assert connection.execute("SELECT count(*) FROM decisions").fetchone()[0] == 1
+        deliveries = [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT attributes_json FROM events "
+                "WHERE event_type='notification_delivery'"
+            ).fetchall()
+        ]
+        assert len(deliveries) >= 1
+        assert not any(row["status"] == "sent" for row in deliveries)
+        assert sum(row["channel"] == "context_policy" for row in deliveries) == 1
         assert connection.execute("SELECT status, action, side FROM decisions").fetchone() == (
             "context",
             "observe",
             "none",
         )
-        assert (
-            connection.execute(
-                "SELECT status FROM alert_deliveries WHERE channel='context_policy'"
-            ).fetchone()[0]
-            == "consumed"
+        context_delivery = next(
+            row for row in deliveries if row["channel"] == "context_policy"
         )
+        assert context_delivery["status"] == "consumed"
     finally:
         connection.close()
 

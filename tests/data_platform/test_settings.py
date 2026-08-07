@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import pytest
 
+from spx_spark.app_settings import get_settings
 from spx_spark.data_platform.settings import DataPlatformSettings
+
+
+@pytest.fixture(autouse=True)
+def reset_simplified_settings() -> None:
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_data_platform_settings_are_safe_by_default(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(tmp_path / "market"))
+    monkeypatch.setenv("SPX_DATA_ROOT", str(tmp_path / "app"))
     monkeypatch.delenv("DATA_PLATFORM_ENABLED", raising=False)
     monkeypatch.delenv("DATA_PLATFORM_RAW_DELETE_ENABLED", raising=False)
 
@@ -15,7 +24,7 @@ def test_data_platform_settings_are_safe_by_default(monkeypatch, tmp_path) -> No
 
     assert settings.enabled is False
     assert settings.raw_delete_enabled is False
-    assert settings.ledger_path.endswith("/runtime/research-ledger.sqlite3")
+    assert settings.ledger_path == str(tmp_path / "app" / "spx.sqlite")
     assert settings.lake_root.endswith("/lake")
     assert settings.replay_raw_delete_grace_hours == 24
     assert settings.replay_finalize_backlog_days == 7
@@ -26,6 +35,7 @@ def test_data_platform_settings_are_safe_by_default(monkeypatch, tmp_path) -> No
 
 def test_blank_optional_path_overrides_use_safe_defaults(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("SPX_DATA_ROOT", str(tmp_path / "app"))
     for name in (
         "DATA_PLATFORM_LEDGER_PATH",
         "DATA_PLATFORM_FALLBACK_SPOOL_PATH",
@@ -38,7 +48,7 @@ def test_blank_optional_path_overrides_use_safe_defaults(monkeypatch, tmp_path) 
 
     settings = DataPlatformSettings.from_env()
 
-    assert settings.ledger_path == str(tmp_path / "runtime/research-ledger.sqlite3")
+    assert settings.ledger_path == str(tmp_path / "app" / "spx.sqlite")
     assert settings.fallback_spool_path == str(
         tmp_path / "runtime/research-ledger-fallback.jsonl"
     )

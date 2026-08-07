@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
@@ -260,8 +261,15 @@ def test_disabled_integration_is_noop(tmp_path) -> None:
     assert result.status == "disabled"
 
 
-def test_actual_sqlite_catalog_links_scoped_veto_delivery_and_call_outcome(tmp_path) -> None:
-    settings = replace(disabled_settings(tmp_path), enabled=True)
+def test_actual_sqlite_catalog_links_scoped_veto_delivery_and_call_outcome(
+    tmp_path,
+    migrate_operational_database: Callable,
+) -> None:
+    settings = replace(
+        disabled_settings(tmp_path),
+        enabled=True,
+        ledger_path=str(migrate_operational_database(tmp_path)),
+    )
     ledger = SQLiteDecisionLedger(settings.ledger_path)
     telemetry = OperationalTelemetry(ledger, FallbackSpool(settings.fallback_spool_path))
     alerts = (

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from spx_spark.app_settings import get_settings
 from spx_spark.config import env_bool, env_int, env_str, load_dotenv
 from spx_spark.settings import settings_value
 
@@ -49,7 +50,7 @@ class DataPlatformSettings:
             data_root=data_root,
             ledger_path=(
                 env_str("DATA_PLATFORM_LEDGER_PATH")
-                or f"{data_root}/runtime/research-ledger.sqlite3"
+                or str(get_settings().data_root / "spx.sqlite")
             ),
             fallback_spool_path=(
                 env_str("DATA_PLATFORM_FALLBACK_SPOOL_PATH")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,27 +13,28 @@ from spx_spark.data_platform.lake.manifest import CompactionManifest, write_mani
 from spx_spark.data_platform.research import ResearchCatalog
 
 
-def configure(monkeypatch, tmp_path) -> None:
+def configure(monkeypatch, tmp_path, migrate: Callable[[Path], Path]) -> Path:
+    ledger = migrate(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(tmp_path / "data"))
-    monkeypatch.setenv(
-        "DATA_PLATFORM_LEDGER_PATH",
-        str(tmp_path / "data/runtime/research-ledger.sqlite3"),
-    )
+    monkeypatch.setenv("DATA_PLATFORM_LEDGER_PATH", str(ledger))
+    return ledger
 
 
-def test_status_initializes_private_ledger_and_reports_counts(
-    tmp_path, monkeypatch, capsys
+def test_status_reports_counts_from_operational_database(
+    tmp_path, monkeypatch, capsys, migrate_operational_database
 ) -> None:
-    configure(monkeypatch, tmp_path)
+    configure(monkeypatch, tmp_path, migrate_operational_database)
     assert run(["status"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ledger"]["counts"]["events"] == 0
     assert payload["lake"]["parquet_files"] == 0
 
 
-def test_sync_manifests_is_idempotent(tmp_path, monkeypatch, capsys) -> None:
-    configure(monkeypatch, tmp_path)
+def test_sync_manifests_is_idempotent(
+    tmp_path, monkeypatch, capsys, migrate_operational_database
+) -> None:
+    configure(monkeypatch, tmp_path, migrate_operational_database)
     path = tmp_path / "data/manifests/compaction/date=2026-07-10/quotes.json"
     now = datetime(2026, 7, 10, 15, tzinfo=timezone.utc).isoformat()
     write_manifest(
@@ -83,8 +85,9 @@ def test_missing_parquet_rebuild_resyncs_and_quality_view_deduplicates_lineage(
     tmp_path: Path,
     monkeypatch,
     capsys,
+    migrate_operational_database,
 ) -> None:
-    configure(monkeypatch, tmp_path)
+    ledger = configure(monkeypatch, tmp_path, migrate_operational_database)
     data_root = tmp_path / "data"
     raw = (
         data_root
@@ -137,7 +140,6 @@ def test_missing_parquet_rebuild_resyncs_and_quality_view_deduplicates_lineage(
     assert run(["sync-manifests"]) == 0
     assert json.loads(capsys.readouterr().out)["skipped"] == 1
 
-    ledger = data_root / "runtime/research-ledger.sqlite3"
     with ResearchCatalog.in_memory(data_root, sqlite_ledger=ledger) as catalog:
         quality = catalog.reader().session_data_quality()
         quotes = catalog.reader().quotes()

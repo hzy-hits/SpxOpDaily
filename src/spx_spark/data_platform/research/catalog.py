@@ -318,6 +318,15 @@ class ResearchCatalog:
     ) -> str:
         normalized = f"_sqlite_{schema.name}_v1"
         table = next((name for name in schema.sqlite_tables if name in sqlite_tables), None)
+        if table is None and "events" in sqlite_tables:
+            raw = self._build_operational_event_view(schema)
+            if raw is not None:
+                self._create_normalized_view(
+                    name=normalized,
+                    raw_relation=_quote_identifier(raw),
+                    schema=schema,
+                )
+                return normalized
         if table is None:
             self._create_empty_view(normalized, schema)
             return normalized
@@ -326,6 +335,57 @@ class ResearchCatalog:
         )
         self._create_normalized_view(name=normalized, raw_relation=relation, schema=schema)
         return normalized
+
+    def _build_operational_event_view(self, schema: DatasetSchema) -> str | None:
+        raw = f"_raw_sqlite_{schema.name}_v1"
+        relation = ".".join(
+            (_quote_identifier("ledger"), _quote_identifier("main"), _quote_identifier("events"))
+        )
+        if schema.name == "feature_snapshots":
+            select = """
+                event_key AS feature_snapshot_id,
+                json_extract_string(attributes_json, '$.parent_event_key') AS event_key,
+                session_date,
+                source_at,
+                received_at,
+                available_at,
+                json_extract_string(attributes_json, '$.gamma_regime') AS gamma_regime,
+                json_extract(attributes_json, '$.payload') AS payload_json
+            """
+            event_type = "feature_snapshot"
+        elif schema.name == "alert_deliveries":
+            select = """
+                event_key AS delivery_id,
+                json_extract_string(attributes_json, '$.decision_id') AS decision_id,
+                session_date,
+                json_extract_string(attributes_json, '$.channel') AS channel,
+                json_extract_string(attributes_json, '$.provider') AS provider,
+                json_extract_string(attributes_json, '$.status') AS status,
+                coalesce(
+                    json_extract_string(attributes_json, '$.veto_reason'),
+                    json_extract_string(attributes_json, '$.error_code')
+                ) AS reason_code,
+                coalesce(
+                    json_extract_string(attributes_json, '$.attempted_at'),
+                    source_at
+                ) AS attempted_at,
+                json_extract_string(attributes_json, '$.sent_at') AS sent_at,
+                available_at AS updated_at,
+                schema_version,
+                attributes_json AS payload_json
+            """
+            event_type = "notification_delivery"
+        else:
+            return None
+        self._connection.execute(
+            f"""
+            CREATE OR REPLACE VIEW {_quote_identifier(raw)} AS
+            SELECT {select}
+            FROM {relation}
+            WHERE event_type = {_quote_literal(event_type)}
+            """
+        )
+        return raw
 
     def _build_dataset_views(
         self,

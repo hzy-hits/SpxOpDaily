@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -87,6 +88,7 @@ def add_schema_v2_copy(v1_path: Path, v2_path: Path) -> None:
 
 def test_schwab_quote_to_sqlite_parquet_and_duckdb_is_offline_and_deduplicated(
     tmp_path: Path,
+    migrate_operational_database: Callable[[Path], Path],
 ) -> None:
     quote = quote_from_schwab_option_contract(
         "SPX",
@@ -127,7 +129,7 @@ def test_schwab_quote_to_sqlite_parquet_and_duckdb_is_offline_and_deduplicated(
     )
     add_schema_v2_copy(v1_path, v2_path)
 
-    ledger_path = tmp_path / "runtime" / "research-ledger.sqlite3"
+    ledger_path = migrate_operational_database(tmp_path)
     ledger = SQLiteDecisionLedger(ledger_path)
     event_at = quote.quote_time or quote.received_at
     decision_at = quote.received_at + timedelta(seconds=1)

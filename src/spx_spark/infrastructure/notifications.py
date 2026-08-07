@@ -98,11 +98,11 @@ class Recovery:
     uncertain_event_ids: tuple[int, ...]
 
 
-def create_database_engine(database_path: Path) -> Engine:
+def create_database_engine(database_path: Path, *, timeout_seconds: float = 5.0) -> Engine:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     engine = sa.create_engine(
         f"sqlite:///{database_path}",
-        connect_args={"timeout": 5.0},
+        connect_args={"timeout": timeout_seconds},
     )
     sa.event.listen(engine, "connect", _configure_sqlite_connection)
     return engine

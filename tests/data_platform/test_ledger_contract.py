@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -29,10 +30,14 @@ NOW = datetime(2026, 7, 10, 14, 30, tzinfo=timezone.utc)
 
 
 @pytest.fixture(params=("memory", "sqlite"))
-def ledger(request: pytest.FixtureRequest, tmp_path: Path) -> DecisionLedger:
+def ledger(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    migrate_operational_database: Callable[[Path], Path],
+) -> DecisionLedger:
     if request.param == "memory":
         return InMemoryDecisionLedger()
-    return SQLiteDecisionLedger(tmp_path / "ledger.sqlite3")
+    return SQLiteDecisionLedger(migrate_operational_database(tmp_path))
 
 
 def _event() -> EventRecord:
