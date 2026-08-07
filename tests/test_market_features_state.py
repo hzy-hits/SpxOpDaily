@@ -20,6 +20,18 @@ def test_save_json_skips_rewrite_when_content_unchanged(tmp_path) -> None:
     assert not (tmp_path / "market_feature_state.json.tmp").exists()
 
 
+def test_save_json_uses_compact_wire_format_without_changing_semantics(tmp_path) -> None:
+    target = tmp_path / "market_feature_state.json"
+    payload = {"schema_version": 1, "samples": [{"at": "2026-07-13", "price": 6300.5}]}
+
+    save_json(target, payload)
+
+    assert target.read_text(encoding="utf-8") == (
+        '{"samples":[{"at":"2026-07-13","price":6300.5}],"schema_version":1}\n'
+    )
+    assert load_json(target) == payload
+
+
 def test_save_json_rewrites_when_content_changes(tmp_path) -> None:
     target = tmp_path / "market_feature_state.json"
 

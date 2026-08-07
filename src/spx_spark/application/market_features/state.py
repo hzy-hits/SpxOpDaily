@@ -39,7 +39,7 @@ def load_json(path: str | Path) -> dict[str, Any]:
 def save_json(path: str | Path, payload: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    rendered = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    rendered = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
     try:
         # Skip the write entirely when content is unchanged: the 5s service
         # loop would otherwise rewrite multi-MB state files all day.
