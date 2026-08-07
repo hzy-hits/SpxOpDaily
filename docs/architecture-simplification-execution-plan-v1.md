@@ -1,10 +1,30 @@
 # SPX Spark 架构简化执行方案 v1（面向执行 Agent 的施工图与硬约束）
 
-状态：**执行基线。所有简化重构 PR 必须引用本文档中的 Phase 与任务卡编号。**
+状态：**生产收口基线；自 2026-08-08 起不再作为必须逐项清零的施工队列。**
 上位文档：`docs/architecture-simplification-blueprint-v1.md`（下称 blueprint）
 事实核实基线：commit `2b96a2c2`（master），2026-08-07 由核实 Agent 在生产仓库逐项验证
 执行者：GPT-5.6 Sol / Codex 等代码 Agent
 设计者与仲裁者：项目维护者（用户）
+
+## 0. 2026-08-08 维护者收口决定
+
+架构简化在生产提交 `5fb4f31` 收口。该基线已经完成主要收益项：单一
+`spx` CLI、TOML/typed settings 主入口、四层 Import Linter、FastAPI、
+Core/Worker 收敛、Huey 通知队列、单一 operational DB，以及 Bark/飞书真实
+receipt 验收。继续清理剩余 helper 的边际收益已经低于变更风险和时间成本。
+
+- P5-2 剩余的 `config.py` env helper 与兼容 settings factory 记为接受的技术债，
+  不再阻塞策略、行情或消息工作；仅在实际修改对应 owner 时就地迁移，禁止再发起
+  全仓清零项目。
+- P6 延期：现有 Rust system units 保持运行和冻结，不做退出迁移；只允许生产故障
+  修复。没有验证过的 Python 等价链路和独立维护窗口时不得删除 Rust owner。
+- P7 全面重写延期：保留现有 session finalizer、manifest-gated compaction、空间
+  reserve 和定时清理；只处理真实磁盘告警，不重构数据平台状态机。
+- 当前主线转为交易结果：数据新鲜度、自然 `READY`、机会生命周期、执行价格与
+  replay/净收益证据。不得再用大规模架构测试替代真实行情和消息验收。
+
+这是一项明确的范围终止决定，不把 P5-2/P6/P7 的未实施项伪报为已完成；下文保留
+为历史设计和未来按需参考。
 
 本文档做四件事：
 
@@ -657,3 +677,4 @@ def maintenance_daily() -> None:
 | 2026-08-08 | production safety: front-chain analytical readiness | +0 / -0 | production +14 / -18（net -4） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | RTH readiness 复用既有 analytical observation/entitlement 合同，删除“交易所价格 15 秒内必须变化”及 analytical wing 的 execution-only 正 bid 重复门；真实 transport、entitlement、quote validity、链结构与 exact-leg execution 门不变；71 tests、Ruff、Import Linter、diff-check PASS；Oracle `6554704` 自然周期 `mode=ready`、analytics/front-chain/anchor/outbox 全 true、reasons 空、Core NRestarts=0 |
 | 2026-08-08 | P5-2 provider-failover typed settings cutover | +0 / -0 | production +270 / -94（net +176） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 14 个既有 failover policy/threshold/env override 统一进入 typed AppSettings；Core、Realtime、alert、market-features 与 IBKR production composition 复用进程级解析，删除 controller/session gate 的旧 helper 读取（直接 helper consumer -2）；274 tests、Ruff、Import Linter、diff-check PASS；Oracle `916728c` 阈值/路径与部署前基线一致，stream-control 环境覆盖保持 true，Core/IBKR active、NRestarts=0，ES live；周五收盘后 SPX/SPXW 正确 stale；Bark/飞书测试事件均一次 delivered |
 | 2026-08-08 | P5-2 alert/context typed settings cutover | +0 / -0 | production +365 / -220（net +145） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | alert、position、sector breadth、Hyperliquid basis/carry 与 Micopedia tags 统一由 typed AppSettings 注入；六个生产文件退出旧 env/helper 读取；170 tests、Ruff、Import Linter、diff-check PASS；Oracle `161144a` 五个 Python unit active/running、NRestarts=0，resolved policy 与部署前基线一致；测试事件 Bark/飞书均第一次 delivered；周末 SPX 正确 stale、IBKR available，未伪造自然 READY |
+| 2026-08-08 | architecture program scope close | +0 / -0 | production +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 维护者决定在生产 `5fb4f31` 收口：P5-2 剩余 helper 清理接受为按需技术债，P6 Rust 退出与 P7 全面重写延期；保持现有 Rust、compaction、reserve 和清理机制，主线切回自然 READY、数据与执行/replay 证据 |
