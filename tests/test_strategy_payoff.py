@@ -234,6 +234,30 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert "direction_valid_but_entry_too_late" in rejected["why_not"]["reasons"]
 
 
+def test_rth_confirmed_trigger_reuses_fresh_exact_snapshot_for_pricing_only() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    snapshot = _gth_candidate(now, "lower_rejection_call")
+    snapshot.update(
+        status="blocked",
+        manual_action_eligible=False,
+        execution_eligible=False,
+        block_reasons=["spx_gth_session_required"],
+    )
+    payload["gth_level_manual_candidate"] = snapshot
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["candidate"]["source"] == (
+        "rth_confirmed_trigger_exact_spread_snapshot"
+    )
+    assert decision["candidate"]["long"]["contract_id"].endswith(":7710:C")
+    assert decision["candidate"]["short"]["contract_id"].endswith(":7720:C")
+    assert decision["execution"]["limit"] == pytest.approx(3.0)
+
+
 def test_sparse_physical_sample_shrinks_to_q_and_utility_can_still_compete() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)

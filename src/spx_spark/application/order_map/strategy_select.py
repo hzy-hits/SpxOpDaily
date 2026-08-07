@@ -206,6 +206,9 @@ def _rth_evidence(
         spread = _intent_spread(payload.get("trade_intent"), latest)
         source = "legacy_trade_intent_trigger_only"
     if not spread:
+        spread = _confirmed_trigger_spread(facts, direction)
+        source = "rth_confirmed_trigger_exact_spread_snapshot"
+    if not spread:
         return None, ["vertical_exact_spread_unavailable"]
     target, stop = _structural_geometry(facts, direction, _number(trigger.get("level")))
     if target is None or stop is None:
@@ -233,6 +236,27 @@ def _intent_spread(value: object, latest: LatestState) -> Mapping[str, Any]:
     short_strike = strike + 10.0 if right == "C" else strike - 10.0
     long, short = _option_leg(latest, expiry, strike, right), _option_leg(latest, expiry, short_strike, right)
     return {"long": long, "short": short} if long and short else {}
+
+
+def _confirmed_trigger_spread(
+    facts: Mapping[str, Any], direction: str
+) -> Mapping[str, Any]:
+    """Reuse a fresh exact quote as pricing evidence, never as RTH authority."""
+
+    evidence = _map(facts.get("gth_evidence"))
+    if _direction(evidence.get("direction")) != direction:
+        return {}
+    snapshot = _map(evidence.get("exact_spread_snapshot"))
+    long = _gth_leg(snapshot.get("long"), evidence.get("long_contract_id"))
+    short = _gth_leg(snapshot.get("short"), evidence.get("short_contract_id"))
+    expected_right = "C" if direction == "UP" else "P"
+    if any(
+        not str(leg.get("contract_id") or "").startswith("option:SPX:SPXW:")
+        or leg.get("right") != expected_right
+        for leg in (long, short)
+    ):
+        return {}
+    return {"long": long, "short": short}
 
 
 def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
