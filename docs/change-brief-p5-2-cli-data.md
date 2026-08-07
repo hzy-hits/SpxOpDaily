@@ -189,3 +189,23 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
 - Acceptance: all existing notification, retry and receipt behavior tests pass;
   an Oracle notify test must produce Bark and Feishu delivered receipts after
   the worker cutover.
+
+## Retired operational-ledger path cleanup
+
+- User-visible goal: make the Oracle active data tree tell the truth: only
+  `spx.sqlite` and Huey's `huey.sqlite` are mutable operational databases.
+- Read-only preflight: verify no process holds the four legacy databases open,
+  record size/mtime and SQLite `quick_check`, and confirm their mtimes predate
+  the Python owner cutover.
+- Move, do not delete: relocate `data/ledger/domain_event_outbox.sqlite`,
+  `data/ledger/notification_delivery.sqlite`,
+  `data/ledger/notification_delivery_outbox.sqlite`, and
+  `data/runtime/research-ledger.sqlite3` with any sidecars into one dated
+  `/srv/data/spx-spark/deploy-backups/` directory. Historical diagnostic docs
+  remain historical; no production source references these default paths.
+- Rollback: stop affected Python owners only if a missing-path regression is
+  observed, move the files back to their exact original paths, then restart the
+  affected owner. No database contents or tables are rewritten in this card.
+- Acceptance: active-process FD audit names only `spx.sqlite`/`huey.sqlite`;
+  all five Python units remain active with zero restarts; the operational DB
+  and notification receipt checks still pass.
