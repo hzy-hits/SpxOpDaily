@@ -1,0 +1,22 @@
+[Unit]
+Description=SPX Spark scheduled jobs and notification worker
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/data/spx-spark
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/spx-spark
+EnvironmentFile=-/home/ubuntu/spx-spark/.env
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TZ=UTC
+ExecStartPre=/home/ubuntu/spx-spark/.venv/bin/alembic upgrade head
+ExecStart=/home/ubuntu/spx-spark/.venv/bin/huey_consumer spx_spark.infrastructure.jobs.huey -w 1 -k thread
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

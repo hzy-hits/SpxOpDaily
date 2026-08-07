@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "Near-real-time SPX/SPXW data verifier and alert research system"
 requires-python = ">=3.12"
 dependencies = [
+  "alembic>=1.16,<2",
   "duckdb>=1.4,<2",
   "fastapi[standard-no-fastapi-cloud-cli]>=0.116,<1",
+  "huey>=2.6,<3",
   "ib-async>=2.0.0",
   "numpy>=2.0,<3",
   "openai>=2,<3",
@@ -15,6 +17,7 @@ dependencies = [
   "schwab-py==1.5.1",
   "scikit-learn>=1.7,<2",
   "scipy>=1.15,<2",
+  "sqlalchemy>=2.0,<3",
   "structlog>=26.1.0",
   "typer>=0.27.1",
 ]
@@ -111,5 +114,11 @@ layers = [
   "spx_spark.application",
   "spx_spark.infrastructure",
   "spx_spark.analytics | spx_spark.domain",
+]
+ignore_imports = [
+  # TODO P5-2: remove after legacy top-level session finalization moves into application.
+  "spx_spark.infrastructure.jobs -> spx_spark.session_finalize",
+  # TODO P4-2: replace this direct legacy notifier entry during notification cutover.
+  "spx_spark.infrastructure.jobs -> spx_spark.application.schwab_reauth_reminder",
 ]
 exhaustive = false
