@@ -95,12 +95,13 @@ git remote -v
 uv sync --frozen
 ```
 
-先读与任务直接相关的权威文档和测试，再做最小范围修改。新增或移动模块前必须遵守 `module-architecture.md`，不得靠扩大白名单绕过架构测试。
+先读与任务直接相关的权威文档和测试，再做最小范围修改。新增或移动模块前必须遵守 `module-architecture.md` 的分层方向和 Import Linter contracts，不得靠扩大豁免绕过架构检查。
 
 本地验证按风险递进：
 
 ```bash
 uv run pytest -q path/to/relevant_tests.py
+uv run lint-imports
 uv run ruff check src tests scripts
 uv run pytest -q
 (cd rust && cargo fmt --all --check)

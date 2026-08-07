@@ -1,4 +1,5 @@
-"""Compatibility facade for the 24h service loop.
+"""FROZEN (2026-08): production-fault fixes only; see docs/architecture-simplification-execution-plan-v1.md.
+Compatibility facade for the 24h service loop.
 
 Implementation lives under ``spx_spark.application.runtime``
 (settings / registry / runner / scheduler / health / tasks).

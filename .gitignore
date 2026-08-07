@@ -4,6 +4,7 @@
 .firecrawl/
 .env
 config/runtime.local.yaml
+config/production.toml
 logs/
 /runtime/
 data/raw/

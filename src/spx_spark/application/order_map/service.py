@@ -89,6 +89,7 @@ from spx_spark.application.order_map.spot import (
 from spx_spark.application.order_map.spring_gamma_projection import (
     attach_spring_gamma_v3_shadow,
 )
+from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.application.order_map.state import (
     REFRESH_COOLDOWN_SECONDS_DEFAULT,
     already_sent,
@@ -499,6 +500,9 @@ def build_order_payload_with_retry(
         now=evaluation_now,
     )
     attach_convexity_idea_radar(payload, now=evaluation_now)
+    if state is None:
+        raise RuntimeError("order map did not load a latest state")
+    payload["strategy_decision"] = build_strategy_decision(payload, state, evaluation_now)
     return payload
 
 

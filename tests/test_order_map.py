@@ -988,6 +988,41 @@ def test_order_payload_retry_rebuilds_after_stale_candidate_refresh(
     }
     assert not any("bad_quality_for_7550P" in item for item in payload["warnings"])
     assert payload["vol_context"]["vix"] == 16.0
+    assert list(payload).count("strategy_decision") == 1
+    decision = payload["strategy_decision"]
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["candidate"] is None
+    assert decision["automatic_ordering"] is False
+    assert decision["execution"]["action"] == "WAIT"
+    assert decision["why_not"]["reasons"]
+
+
+def test_strategy_decision_rejects_future_fact_frames() -> None:
+    from spx_spark.application.order_map.strategy_select import build_strategy_decision
+
+    now = datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc)
+    future = (now + timedelta(minutes=1)).isoformat()
+    payload = {
+        "trading_date": "2026-08-07",
+        "pricing_allowed": True,
+        "underlier": {"price": 7710.0, "source": "index:SPX"},
+        "minute_market_frame": {"as_of": future, "quality": "ready"},
+        "option_structure_frame": {
+            "as_of": future,
+            "quality": "ready",
+            "l1": {"quality": "ready"},
+        },
+        "macro_event": {"mode": "normal", "entry_allowed": True},
+        "candidates": [],
+    }
+
+    decision = build_strategy_decision(payload, make_state(now=now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["market_facts"]["quality"]["status"] == "degraded"
+    assert "minute_market_frame_from_future" in decision["why_not"]["reasons"]
+    assert "option_structure_frame_from_future" in decision["why_not"]["reasons"]
+    assert decision["available_at"] <= decision["decision_at"]
 
 
 def test_order_payload_retry_is_bounded_when_candidate_stays_stale(

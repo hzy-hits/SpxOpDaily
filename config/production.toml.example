@@ -1,0 +1,3 @@
+# Copy to config/production.toml on the deployment host to override defaults.
+data_root = "/srv/data/spx-spark"
+log_level = "WARNING"

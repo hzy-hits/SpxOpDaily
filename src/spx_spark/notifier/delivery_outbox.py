@@ -1,4 +1,5 @@
-"""Durable, per-sink outbox for every human-facing notification."""
+"""FROZEN (2026-08): production-fault fixes only; see docs/architecture-simplification-execution-plan-v1.md.
+Durable, per-sink outbox for every human-facing notification."""
 
 from __future__ import annotations
 

@@ -1,0 +1,2 @@
+data_root = "/srv/data/spx-spark"
+log_level = "INFO"

@@ -201,8 +201,10 @@ def _valid_strategy_distribution_forecast() -> dict[str, object]:
 def test_projection_is_versioned_complete_and_never_truncates_changes(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     long_change = "结构变化" * 3000
+    payload = _payload()
+    payload["strategy_decision"] = {"schema_version": "strategy_decision.v1"}
     wire = build_desk_map_wire(
-        _payload(),
+        payload,
         [long_change],
         now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
         trading_date="2026-08-04",
@@ -213,6 +215,7 @@ def test_projection_is_versioned_complete_and_never_truncates_changes(tmp_path: 
     assert wire["session"] == "rth"
     assert wire["action_authority"] == "none"
     assert wire["automatic_ordering"] is False
+    assert "strategy_decision" not in wire
     assert wire["research_context"] is None
     assert long_change in wire["message"]["structure"]
     assert set(wire["message"]) == {

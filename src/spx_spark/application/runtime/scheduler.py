@@ -1,4 +1,5 @@
-"""Concurrent service-loop scheduler and one-shot runner."""
+"""FROZEN (2026-08): production-fault fixes only; see docs/architecture-simplification-execution-plan-v1.md.
+Concurrent service-loop scheduler and one-shot runner."""
 
 from __future__ import annotations
 

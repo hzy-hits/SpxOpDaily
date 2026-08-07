@@ -606,4 +606,10 @@ def maintenance_daily() -> None:
 
 | 日期 | 任务卡 | files +/- | LOC +/- | deps +/- | units +/- | scripts +/- | DB tables +/- | 备注 |
 |---|---|---|---|---|---|---|---|---|
-| （待首张卡完成后登记） | | | | | | | | |
+| 2026-08-07 | P0-2 | +0 / -0 | production +3 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 三个冻结模块各只增加一行标记；39 个相关测试通过 |
+| 2026-08-07 | P0-3 | +1 / -0 | production +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 120 行 owner 实体清单；已与 Oracle 只读事实交叉核对 |
+| 2026-08-07 | P1-1 | +4 / -0 | production +45 / -0 | +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | AppSettings + defaults/production TOML + 优先级测试 |
+| 2026-08-07 | P1-2 | +1 / -0 | production +22 / -0 | +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | structlog 单入口；实际 JSON 事件验证通过 |
+| 2026-08-07 | P1-3 | +1 / -0 | production +21 / -0 | +1 / -0 | +0 / -0 | +1 / -0 | +0 / -0 | `spx status` 复用旧读取和渲染，scripts 43→44 |
+| 2026-08-07 | P1-4 | +0 / -2 | production +0 / -0 | dev +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 两个 contracts kept；删除 309 行自研 registry/兼容测试 |
+| 2026-08-07 | S1 | +3 / -0 | production +453 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 唯一 StrategyDecision/NO_TRADE；未来 frame 拒绝；Rust wire 未污染 |

@@ -7,12 +7,16 @@ dependencies = [
   "duckdb>=1.4,<2",
   "ib-async>=2.0.0",
   "numpy>=2.0,<3",
+  "pydantic-settings>=2.14.2",
   "pytz>=2025.2",
   "pyyaml>=6.0,<7",
   "schwab-py==1.5.1",
+  "structlog>=26.1.0",
+  "typer>=0.27.1",
 ]
 
 [project.scripts]
+spx = "spx_spark.cli:app"
 spx-spark-alert-profile = "spx_spark.alert_profile:main"
 spx-spark-alert-engine = "spx_spark.alert_engine:main"
 spx-spark-provider-failover = "spx_spark.provider_failover_controller:main"
@@ -59,6 +63,7 @@ spx-spark-surface-live-service = "spx_spark.surface_live_session_http:main"
 
 [dependency-groups]
 dev = [
+  "import-linter>=2.13",
   "ipykernel>=6,<8",
   "nbclient>=0.10,<1",
   "nbformat>=5.10,<6",
@@ -77,3 +82,31 @@ target-version = "py312"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
+
+[tool.importlinter]
+root_package = "spx_spark"
+
+[[tool.importlinter.contracts]]
+name = "domain and analytics stay pure"
+type = "forbidden"
+source_modules = ["spx_spark.domain", "spx_spark.analytics"]
+forbidden_modules = [
+  # TODO P2-1: add spx_spark.web after the real FastAPI package exists.
+  "spx_spark.notifier",
+  "spx_spark.infrastructure",
+  "spx_spark.ibkr",
+  "spx_spark.schwab",
+  "spx_spark.application",
+]
+
+[[tool.importlinter.contracts]]
+name = "layers for packaged code"
+type = "layers"
+layers = [
+  # TODO P2-1: add spx_spark.web alongside spx_spark.cli once it exists.
+  "spx_spark.cli",
+  "spx_spark.application",
+  "spx_spark.infrastructure",
+  "spx_spark.analytics | spx_spark.domain",
+]
+exhaustive = false
