@@ -6,21 +6,28 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Mapping
+import hashlib
+import json
+from typing import Callable, Mapping, Sequence
 
 from sqlalchemy import Engine
 
 from spx_spark.app_settings import get_settings
 from spx_spark.config import NotificationSettings
 from spx_spark.infrastructure.notifications import (
+    CANCELLATION_CHANNEL,
     NotificationDraft,
     NotificationStatus,
     begin_attempt,
+    cancel,
     create_engine,
     enqueue,
+    event_rows,
     mark_transport_started,
+    recover_incomplete_attempts,
     settle,
 )
+from spx_spark.notifier.delivery_outbox_contract import DeliveryEventInspection
 from spx_spark.notifier.human_policy import quiet_window_suppresses
 from spx_spark.notifier.model import SinkResult
 from spx_spark.notifier.receipts import NotificationEnvelope
@@ -68,6 +75,15 @@ def default_engine() -> Engine:
     return _engine(str(root))
 
 
+def engine_for_settings(settings: NotificationSettings) -> Engine:
+    """Keep explicitly isolated legacy settings isolated during cutover."""
+
+    legacy_path = Path(settings.delivery_outbox_path) if settings.delivery_outbox_path else None
+    if legacy_path is not None and legacy_path.parent.name != "ledger":
+        return _engine(str(legacy_path.parent))
+    return default_engine()
+
+
 def transport_lane(envelope: NotificationEnvelope) -> str:
     return "ops" if envelope.lane == "ops_transition" else "trade"
 
@@ -111,6 +127,34 @@ def freeze_route(
     )
 
 
+def notification_payload(
+    envelope: NotificationEnvelope,
+    *,
+    title: str,
+    text: str,
+    friend: bool,
+    feishu_text: str | None,
+) -> dict[str, object]:
+    return {
+        "envelope": _envelope_to_dict(envelope),
+        "title": title,
+        "text": text,
+        "friend": friend,
+        "feishu_text": feishu_text,
+    }
+
+
+def notification_payload_fingerprint(payload: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def enqueue_final_notification(
     settings: NotificationSettings,
     envelope: NotificationEnvelope,
@@ -128,13 +172,13 @@ def enqueue_final_notification(
     routed, targets = freeze_route(settings, envelope, friend=friend)
     if not targets:
         return UnifiedEnqueueResult(routed, (), (), "no_sink", 0, 0, False)
-    payload = {
-        "envelope": _envelope_to_dict(routed),
-        "title": title,
-        "text": text,
-        "friend": friend,
-        "feishu_text": feishu_text,
-    }
+    payload = notification_payload(
+        routed,
+        title=title,
+        text=text,
+        friend=friend,
+        feishu_text=feishu_text,
+    )
     batch = enqueue(
         engine or default_engine(),
         NotificationDraft(
@@ -165,6 +209,187 @@ def enqueue_final_notification(
         batch.duplicate,
         True,
     )
+
+
+def enqueue_frozen_notification(
+    envelope: NotificationEnvelope,
+    targets: Sequence[str],
+    *,
+    title: str,
+    text: str,
+    friend: bool,
+    feishu_text: str | None,
+    enqueued_at: datetime,
+    engine: Engine,
+    schedule: Callable[[int], object],
+) -> UnifiedEnqueueResult:
+    envelope.validate()
+    normalized = tuple(sorted(dict.fromkeys(str(target) for target in targets)))
+    if not normalized:
+        return UnifiedEnqueueResult(envelope, (), (), "no_sink", 0, 0, False)
+    batch = enqueue(
+        engine,
+        NotificationDraft(
+            logical_event_id=envelope.event_id,
+            source=envelope.source,
+            kind=envelope.kind,
+            lane=envelope.lane,
+            payload=notification_payload(
+                envelope,
+                title=title,
+                text=text,
+                friend=friend,
+                feishu_text=feishu_text,
+            ),
+            channels=normalized,
+            expires_at=envelope.expires_at,
+        ),
+        now=enqueued_at,
+    )
+    if batch.cancelled:
+        return UnifiedEnqueueResult(
+            envelope, normalized, (), "cancelled_before_enqueue", 0, 0, False
+        )
+    for event_id in batch.event_ids:
+        schedule(event_id)
+    return UnifiedEnqueueResult(
+        envelope,
+        normalized,
+        batch.event_ids,
+        "pending",
+        batch.inserted,
+        batch.duplicate,
+        True,
+    )
+
+
+def inspect_final_notification(
+    engine: Engine,
+    envelope: NotificationEnvelope,
+    *,
+    title: str,
+    text: str,
+    friend: bool,
+    feishu_text: str | None,
+    targets: Sequence[str],
+    expected_payload_fingerprint: str | None = None,
+) -> DeliveryEventInspection:
+    expected_targets = tuple(sorted(dict.fromkeys(str(target) for target in targets)))
+    rows = tuple(event_rows(engine, envelope.event_id))
+    cancellation = next(
+        (row for row in rows if row["channel"] == CANCELLATION_CHANNEL),
+        None,
+    )
+    delivery_rows = tuple(row for row in rows if row["channel"] != CANCELLATION_CHANNEL)
+    target_statuses = tuple(
+        (str(row["channel"]), str(row["status"])) for row in delivery_rows
+    )
+    if not delivery_rows:
+        return DeliveryEventInspection(
+            event_id=envelope.event_id,
+            exists=False,
+            cancelled=cancellation is not None,
+            payload_matches=False,
+            targets_match=not expected_targets,
+            event_status=None,
+            target_statuses=(),
+            reason="cancelled" if cancellation is not None else "missing",
+        )
+    expected_payload = notification_payload(
+        envelope,
+        title=title,
+        text=text,
+        friend=friend,
+        feishu_text=feishu_text,
+    )
+    expected_fingerprint = expected_payload_fingerprint or notification_payload_fingerprint(
+        expected_payload
+    )
+    payload_matches = all(
+        str(row["payload_sha256"]) == expected_fingerprint for row in delivery_rows
+    )
+    targets_match = tuple(channel for channel, _status in target_statuses) == expected_targets
+    statuses = tuple(status for _channel, status in target_statuses)
+    event_status = _aggregate_status(statuses)
+    if cancellation is not None:
+        reason = "cancelled"
+    elif not payload_matches:
+        reason = "payload_mismatch"
+    elif not targets_match:
+        reason = "target_mismatch"
+    elif any(
+        status in {NotificationStatus.FAILED.value, NotificationStatus.UNCERTAIN.value}
+        for status in statuses
+    ):
+        reason = "terminal_or_invalid_status"
+    else:
+        reason = "accepted"
+    return DeliveryEventInspection(
+        event_id=envelope.event_id,
+        exists=True,
+        cancelled=cancellation is not None,
+        payload_matches=payload_matches,
+        targets_match=targets_match,
+        event_status=event_status,
+        target_statuses=target_statuses,
+        reason=reason,
+    )
+
+
+def notification_exists(engine: Engine, event_id: str) -> bool:
+    return bool(event_rows(engine, event_id))
+
+
+def cancel_final_notification(
+    engine: Engine,
+    event_id: str,
+    *,
+    reason: str,
+    now: datetime,
+) -> int:
+    return cancel(engine, event_id, reason=reason, now=now)
+
+
+def frozen_route_for_event(
+    engine: Engine,
+    event_id: str,
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    rows = tuple(
+        row for row in event_rows(engine, event_id) if row["channel"] != CANCELLATION_CHANNEL
+    )
+    if not rows:
+        return (), ()
+    channels = tuple(sorted(str(row["channel"]) for row in rows))
+    payload = json.loads(str(rows[0]["payload_json"]))
+    envelope = _envelope_from_dict(_mapping(payload.get("envelope")))
+    return channels, envelope.operator_targets
+
+
+def recover_notification_tasks(
+    engine: Engine,
+    *,
+    schedule: Callable[[int], object],
+    now: datetime,
+) -> tuple[int, int]:
+    recovery = recover_incomplete_attempts(engine, now=now)
+    for event_id in recovery.retry_event_ids:
+        schedule(event_id)
+    return len(recovery.retry_event_ids), len(recovery.uncertain_event_ids)
+
+
+def _aggregate_status(statuses: Sequence[str]) -> str | None:
+    if not statuses:
+        return None
+    for status in (
+        NotificationStatus.UNCERTAIN.value,
+        NotificationStatus.FAILED.value,
+        NotificationStatus.PROCESSING.value,
+        NotificationStatus.PENDING.value,
+        NotificationStatus.DELIVERED.value,
+    ):
+        if status in statuses:
+            return status
+    return "invalid"
 
 
 def deliver_notification_event(

@@ -406,3 +406,49 @@ def event_rows(engine: Engine, logical_event_id: str) -> Sequence[Mapping[str, o
                 .order_by(events.c.channel)
             ).mappings()
         )
+
+
+def due_event_ids(engine: Engine, *, limit: int = 1) -> tuple[int, ...]:
+    if limit < 1:
+        return ()
+    latest_attempt = (
+        sa.select(
+            attempts.c.event_id,
+            sa.func.max(attempts.c.id).label("attempt_id"),
+            sa.func.count(attempts.c.id).label("attempt_count"),
+        )
+        .group_by(attempts.c.event_id)
+        .subquery()
+    )
+    with engine.connect() as connection:
+        rows = connection.execute(
+            sa.select(events.c.id)
+            .outerjoin(latest_attempt, latest_attempt.c.event_id == events.c.id)
+            .outerjoin(attempts, attempts.c.id == latest_attempt.c.attempt_id)
+            .where(
+                events.c.cancelled_at.is_(None),
+                sa.or_(
+                    events.c.status == NotificationStatus.PENDING.value,
+                    sa.and_(
+                        events.c.status == NotificationStatus.FAILED.value,
+                        attempts.c.outcome.in_(
+                            ("retryable_failure", "interrupted_before_transport")
+                        ),
+                        latest_attempt.c.attempt_count < 3,
+                    ),
+                ),
+            )
+            .order_by(events.c.created_at, events.c.id)
+            .limit(limit)
+        ).scalars()
+        return tuple(int(event_id) for event_id in rows)
+
+
+def status_counts(engine: Engine) -> dict[str, int]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            sa.select(events.c.status, sa.func.count(events.c.id)).where(
+                events.c.channel != CANCELLATION_CHANNEL
+            ).group_by(events.c.status)
+        )
+        return {str(status): int(count) for status, count in rows}

@@ -15,7 +15,7 @@ huey = SqliteHuey(
 
 @huey.task(retries=2, retry_delay=5)
 def deliver_notification_event(event_id: int) -> None:
-    from spx_spark.application.notifications.unified_delivery import (
+    from spx_spark.notifier.unified_delivery import (
         deliver_notification_event as deliver,
     )
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from spx_spark.application.notifications.unified_delivery import (
+from spx_spark.notifier.unified_delivery import (
     RetryableDeliveryError,
     deliver_notification_event,
     enqueue_final_notification,
