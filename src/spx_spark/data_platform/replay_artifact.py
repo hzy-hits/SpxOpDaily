@@ -400,11 +400,16 @@ def latest_verified_replay_artifact(
     data_root: str | Path,
     *,
     trading_date: date,
+    verify_source_files: bool = True,
 ) -> ReplayArtifactManifest:
     root = Path(data_root)
     grouped = _artifact_manifests_by_date(root)
     paths = grouped.get(trading_date.isoformat(), ())
-    return _latest_verified_manifest(root, paths)
+    return _latest_verified_manifest(
+        root,
+        paths,
+        verify_source_files=verify_source_files,
+    )
 
 
 def measure_storage_pressure(
@@ -609,6 +614,8 @@ def session_finalizer_lock(
 def _latest_verified_manifest(
     data_root: Path,
     paths: Sequence[Path],
+    *,
+    verify_source_files: bool = True,
 ) -> ReplayArtifactManifest:
     loaded: list[tuple[datetime, Path, ReplayArtifactManifest]] = []
     for path in paths:
@@ -620,7 +627,11 @@ def _latest_verified_manifest(
         loaded,
         key=lambda item: (item[0], len(item[2].sources), str(item[1])),
     )
-    return verify_replay_artifact(path, data_root=data_root)
+    return verify_replay_artifact(
+        path,
+        data_root=data_root,
+        verify_source_files=verify_source_files,
+    )
 
 
 def _artifact_manifests_by_date(data_root: Path) -> dict[str, tuple[Path, ...]]:

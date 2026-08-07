@@ -442,7 +442,11 @@ def _unchanged_existing_artifact(
     """Return the verified artifact when all still-present raw sources match by stat."""
 
     try:
-        existing = latest_verified_replay_artifact(data_root, trading_date=selected_date)
+        existing = latest_verified_replay_artifact(
+            data_root,
+            trading_date=selected_date,
+            verify_source_files=False,
+        )
     except ReplayArtifactError:
         return None
     if not partitions:
