@@ -82,7 +82,7 @@ from spx_spark.notifier import notify_payload
 from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.options_map import build_options_map
-from spx_spark.settings import DEFAULT_ALERT_SETTINGS, load_app_settings
+from spx_spark.settings import AppSettings, DEFAULT_ALERT_SETTINGS, current_app_settings
 from spx_spark.state_io import (
     atomic_write_json_secure,
     exclusive_state_lock,
@@ -108,11 +108,14 @@ def run(
     *,
     latest_state: LatestState | None = None,
     options_map: OptionsMap | None = None,
+    app_settings: AppSettings | None = None,
+    storage_settings: StorageSettings | None = None,
 ) -> int:
     args = parse_args(argv)
-    settings = IntradayShockSettings.from_env()
-    level_policy = load_app_settings().level_decision
-    storage_settings = StorageSettings.from_env()
+    app = app_settings or current_app_settings()
+    settings = IntradayShockSettings.from_env(app_settings=app)
+    level_policy = app.level_decision
+    storage_settings = storage_settings or StorageSettings.from_env()
     data_platform_settings: DataPlatformSettings | None = None
     data_platform_config_error: str | None = None
     try:
@@ -210,7 +213,7 @@ def run(
             if alerts and DEFAULT_ALERT_SETTINGS.steven_alert_context_enabled:
                 try:
                     steven_state = load_steven_state_for_alerts(
-                        StorageSettings.from_env().data_root
+                        storage_settings.data_root
                     )
                     alerts = annotate_alerts_with_steven_context(
                         alerts,

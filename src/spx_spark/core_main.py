@@ -110,11 +110,13 @@ async def main() -> None:
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, request_shutdown)
     storage = StorageSettings.from_env()
+    app_settings = current_app_settings()
     feature_runner = partial(
         market_features_hot_worker.run_with_stop,
         on_frames=_regime_publisher(),
         on_analytical_snapshot=partial(
             intraday_shock_hot_worker.run_embedded_intraday_shock_cycle,
+            app_settings=app_settings,
             storage_settings=storage,
             emit_json=False,
         ),

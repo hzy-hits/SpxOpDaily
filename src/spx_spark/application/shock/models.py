@@ -10,7 +10,7 @@ from pathlib import Path
 
 from spx_spark.config import env_bool, env_csv_preserve, env_float, env_int
 from spx_spark.marketdata import Provider, as_utc
-from spx_spark.settings import AppSettings, ShockSettings, load_app_settings
+from spx_spark.settings import AppSettings, ShockSettings, current_app_settings
 from spx_spark.settings.shock import DEFAULT_SHOCK_SETTINGS, validate_gth_spread_policy
 
 
@@ -219,9 +219,13 @@ class IntradayShockSettings:
         return cls.from_policy(app.shock)
 
     @classmethod
-    def from_env(cls) -> "IntradayShockSettings":
+    def from_env(
+        cls,
+        *,
+        app_settings: AppSettings | None = None,
+    ) -> "IntradayShockSettings":
         try:
-            return cls.from_app_settings(load_app_settings())
+            return cls.from_app_settings(app_settings or current_app_settings())
         except (FileNotFoundError, KeyError, ValueError, TypeError):
             # Tests / minimal environments without full runtime.yaml still work.
             return cls.from_policy(DEFAULT_SHOCK_SETTINGS)

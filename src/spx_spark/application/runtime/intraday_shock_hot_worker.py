@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import partial
 from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,7 +26,7 @@ from spx_spark.application.runtime.market_features_hot_worker import (
 )
 from spx_spark.application.runtime.settings import ServiceLoopSettings
 from spx_spark.config import StorageSettings
-from spx_spark.settings import load_app_settings
+from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.state_io import atomic_write_json_secure
 
 if TYPE_CHECKING:
@@ -46,6 +47,8 @@ def run_intraday_shock_cycle(
     emit_json: bool = True,
     latest_state: LatestState | None = None,
     options_map: OptionsMap | None = None,
+    app_settings: AppSettings | None = None,
+    storage_settings: StorageSettings | None = None,
 ) -> int:
     # The first cycle pays import cost once. Later cycles reuse the interpreter
     # and module graph instead of spawning and importing every few seconds.
@@ -56,6 +59,10 @@ def run_intraday_shock_cycle(
         kwargs["latest_state"] = latest_state
     if options_map is not None:
         kwargs["options_map"] = options_map
+    if app_settings is not None:
+        kwargs["app_settings"] = app_settings
+    if storage_settings is not None:
+        kwargs["storage_settings"] = storage_settings
     return service.run(["--json"] if emit_json else [], **kwargs)
 
 
@@ -63,6 +70,7 @@ def run_embedded_intraday_shock_cycle(
     latest_state: LatestState,
     options_map: OptionsMap,
     *,
+    app_settings: AppSettings,
     storage_settings: StorageSettings,
     interval_seconds: float = 5.0,
     emit_json: bool = False,
@@ -80,6 +88,8 @@ def run_embedded_intraday_shock_cycle(
             emit_json=emit_json,
             latest_state=latest_state,
             options_map=options_map,
+            app_settings=app_settings,
+            storage_settings=storage_settings,
         )
     except Exception as exc:  # noqa: BLE001 - preserve failure in the lease
         raised = exc
@@ -147,7 +157,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    loop_settings = ServiceLoopSettings.from_app_settings(load_app_settings())
+    app_settings = load_app_settings()
+    loop_settings = ServiceLoopSettings.from_app_settings(app_settings)
     interval_seconds = (
         float(args.interval_seconds)
         if args.interval_seconds is not None
@@ -162,6 +173,7 @@ def run(argv: list[str] | None = None) -> int:
         interval_seconds=interval_seconds,
         max_consecutive_failures=args.max_consecutive_failures,
         max_cycles=1 if args.once else None,
+        app_settings=app_settings,
     )
     print_event(
         {
@@ -182,8 +194,10 @@ def run_with_stop(
     max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     max_cycles: int | None = None,
     emit_json: bool = True,
+    app_settings: AppSettings | None = None,
 ) -> int:
-    loop_settings = ServiceLoopSettings.from_app_settings(load_app_settings())
+    app = app_settings or load_app_settings()
+    loop_settings = ServiceLoopSettings.from_app_settings(app)
     cadence = float(
         interval_seconds
         if interval_seconds is not None
@@ -191,10 +205,11 @@ def run_with_stop(
     )
     storage = StorageSettings.from_env()
     lease_path = Path(storage.data_root) / "latest" / "intraday_shock_hot_worker.lease.json"
-    cycle = (
-        run_intraday_shock_cycle
-        if emit_json
-        else lambda: run_intraday_shock_cycle(emit_json=False)
+    cycle = partial(
+        run_intraday_shock_cycle,
+        emit_json=emit_json,
+        app_settings=app,
+        storage_settings=storage,
     )
     try:
         with ProcessLock(lock_path):

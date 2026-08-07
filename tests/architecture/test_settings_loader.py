@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from spx_spark.application.shock import models as shock_models
 from spx_spark.application.shock.models import IntradayShockSettings
 from spx_spark.settings import (
     AppSettings,
@@ -18,6 +19,21 @@ from spx_spark.settings.shock import ShockSettings
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "runtime.defaults.yaml"
+
+
+def test_intraday_shock_reuses_explicit_app_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = load_settings(defaults_path=FIXTURE, environ={})
+
+    def unexpected_reload() -> AppSettings:
+        raise AssertionError("shock tick must not reload runtime YAML")
+
+    monkeypatch.setattr(shock_models, "current_app_settings", unexpected_reload)
+
+    settings = IntradayShockSettings.from_env(app_settings=app)
+
+    assert settings.gth_exit_clock_et == app.shock.gth_exit_clock_et
 
 
 def test_load_settings_from_fixture_is_stable(

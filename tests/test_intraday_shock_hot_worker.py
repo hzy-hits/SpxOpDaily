@@ -97,6 +97,8 @@ def test_embedded_cycle_reuses_snapshot_and_keeps_a_separate_lease(
 ) -> None:
     latest = object()
     options = object()
+    app = object()
+    storage = SimpleNamespace(data_root=str(tmp_path))
     calls: list[dict[str, object]] = []
     monotonic = iter((100.0, 100.25))
 
@@ -110,12 +112,19 @@ def test_embedded_cycle_reuses_snapshot_and_keeps_a_separate_lease(
     hot_worker.run_embedded_intraday_shock_cycle(
         latest,
         options,
-        storage_settings=SimpleNamespace(data_root=str(tmp_path)),
+        app_settings=app,
+        storage_settings=storage,
         emit_json=False,
     )
 
     assert calls == [
-        {"emit_json": False, "latest_state": latest, "options_map": options}
+        {
+            "emit_json": False,
+            "latest_state": latest,
+            "options_map": options,
+            "app_settings": app,
+            "storage_settings": storage,
+        }
     ]
     lease = json.loads(
         (tmp_path / "latest" / "intraday_shock_hot_worker.lease.json").read_text(
@@ -149,7 +158,7 @@ def test_cli_once_uses_the_service_loop_shock_cadence_and_one_lock(
     monkeypatch.setattr(
         hot_worker,
         "run_intraday_shock_cycle",
-        lambda: calls.append("cycle") or 0,
+        lambda **kwargs: calls.append("cycle") or 0,
     )
     monkeypatch.setattr(hot_worker, "install_stop_handlers", lambda stop_event: None)
 
