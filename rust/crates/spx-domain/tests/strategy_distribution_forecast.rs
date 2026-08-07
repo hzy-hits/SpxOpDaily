@@ -27,7 +27,7 @@ fn python_to_dict_fixture_is_strict_valid_and_canonical() {
     assert_eq!(canonical, FIXTURE);
     assert_eq!(
         canonical_json_hash(&forecast).expect("fixture must hash"),
-        "32d153a79b946250337d8ab960b15868fea33a69d289e5cdd22c293008856bae"
+        "cb86214c38c0233a4fcb260134cee609b14a83911c46b44cb1dc023a948144a1"
     );
 
     assert_eq!(forecast.action_authority, DistributionActionAuthority::None);
@@ -39,6 +39,12 @@ fn python_to_dict_fixture_is_strict_valid_and_canonical() {
     assert!(forecast.q_event.sample_count.is_none());
     assert_eq!(forecast.p_event.sample_count, Some(40));
     assert_eq!(forecast.p_event.session_count, Some(8));
+    assert_eq!(forecast.p_event.n_raw, Some(40));
+    assert_eq!(
+        forecast.p_event.n_effective.map(|value| value.get()),
+        Some(8.0)
+    );
+    assert_eq!(forecast.p_event.historical_sessions.len(), 8);
 
     let candidate = &forecast.strategy_candidates[0];
     assert!(candidate.execution.actual_fill_probability.is_none());
@@ -130,6 +136,9 @@ fn unavailable_q_and_p_can_formally_represent_a_null_event_no_trade() {
     value["p_event"]["interval_low"] = Value::Null;
     value["p_event"]["interval_high"] = Value::Null;
     value["p_event"]["trained_through_date"] = Value::Null;
+    value["p_event"]["n_raw"] = json!(0);
+    value["p_event"]["n_effective"] = Value::Null;
+    value["p_event"]["historical_sessions"] = json!([]);
     value["strategy_candidates"] = json!([]);
     value["shadow_decision"]["reason_codes"] = json!(["direction_unavailable"]);
     value["quality"] = json!("unavailable");
@@ -157,6 +166,14 @@ fn required_nullable_and_unknown_fields_fail_typed_decode() {
         .remove("sample_count");
     serde_json::from_value::<StrategyDistributionForecastV1>(missing_sample_count)
         .expect_err("required nullable physical sample_count must be explicit");
+
+    let mut missing_n_effective = fixture_value();
+    missing_n_effective["p_event"]
+        .as_object_mut()
+        .expect("p_event is an object")
+        .remove("n_effective");
+    serde_json::from_value::<StrategyDistributionForecastV1>(missing_n_effective)
+        .expect_err("required nullable physical n_effective must be explicit");
 
     let mut unknown_nested = fixture_value();
     unknown_nested["p_event"]["confidence"] = json!("high");

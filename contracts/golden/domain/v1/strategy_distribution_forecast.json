@@ -31,7 +31,10 @@
     "session_count": null,
     "interval_low": null,
     "interval_high": null,
-    "trained_through_date": null
+    "trained_through_date": null,
+    "n_raw": null,
+    "n_effective": null,
+    "historical_sessions": []
   },
   "p_event": {
     "measure": "physical",
@@ -51,7 +54,19 @@
     "session_count": 8,
     "interval_low": 0.3,
     "interval_high": 0.5,
-    "trained_through_date": "2026-08-04"
+    "trained_through_date": "2026-08-04",
+    "n_raw": 40,
+    "n_effective": 8.0,
+    "historical_sessions": [
+      "2026-07-24",
+      "2026-07-27",
+      "2026-07-28",
+      "2026-07-29",
+      "2026-07-30",
+      "2026-07-31",
+      "2026-08-03",
+      "2026-08-04"
+    ]
   },
   "strategy_candidates": [
     {

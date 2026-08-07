@@ -181,6 +181,11 @@ pub struct ProbabilityEstimateV1 {
     pub interval_high: Option<ProbabilityF64>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub trained_through_date: Option<NaiveDate>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub n_raw: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub n_effective: Option<NonNegativeF64>,
+    pub historical_sessions: Vec<NaiveDate>,
 }
 
 impl Validate for ProbabilityEstimateV1 {
@@ -245,6 +250,22 @@ impl Validate for ProbabilityEstimateV1 {
 
 impl ProbabilityEstimateV1 {
     fn validate_evidence_metadata(&self) -> Result<(), DomainError> {
+        if self.n_raw != self.sample_count {
+            return Err(DomainError::Invalid {
+                field: "probability n_raw",
+                reason: "must equal sample_count",
+            });
+        }
+        if !self
+            .historical_sessions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        {
+            return Err(DomainError::Invalid {
+                field: "probability historical_sessions",
+                reason: "must be unique and sorted",
+            });
+        }
         if self.interval_low.is_none() != self.interval_high.is_none() {
             return Err(DomainError::Invalid {
                 field: "probability interval bounds",
@@ -280,6 +301,9 @@ impl ProbabilityEstimateV1 {
             || self.interval_low.is_some()
             || self.interval_high.is_some()
             || self.trained_through_date.is_some()
+            || self.n_raw.is_some()
+            || self.n_effective.is_some()
+            || !self.historical_sessions.is_empty()
         {
             return Err(DomainError::Invalid {
                 field: "risk-neutral probability",
@@ -332,6 +356,12 @@ impl ProbabilityEstimateV1 {
                     return Err(DomainError::Invalid {
                         field: "available physical probability",
                         reason: "requires trained_through_date",
+                    });
+                }
+                if self.n_effective.is_none() {
+                    return Err(DomainError::Invalid {
+                        field: "available physical probability",
+                        reason: "requires n_effective",
                     });
                 }
             }
