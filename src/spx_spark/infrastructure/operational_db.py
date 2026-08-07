@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 import json
 from pathlib import Path
@@ -188,6 +188,138 @@ def read_strategy_decisions(
     return tuple(json.loads(value) for value in rows)
 
 
+def read_due_strategy_observations(
+    *,
+    now: datetime,
+    horizon_minutes: int = 5,
+    maximum_lag_seconds: float = 90.0,
+    limit: int = 100,
+    database_path: str | Path | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Load recent decisions with frozen legs that need one causal exit mark."""
+
+    if horizon_minutes <= 0 or maximum_lag_seconds <= 0 or limit <= 0:
+        raise ValueError("strategy observation window must be positive")
+    observed_at = now.astimezone(timezone.utc)
+    target_cutoff = observed_at - timedelta(minutes=horizon_minutes)
+    earliest = target_cutoff - timedelta(seconds=maximum_lag_seconds)
+    path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
+    has_legs = sa.exists(
+        sa.select(decision_legs.c.decision_id).where(
+            decision_legs.c.decision_id == decisions.c.decision_id
+        )
+    )
+    already_observed = sa.exists(
+        sa.select(outcomes.c.outcome_id).where(
+            outcomes.c.decision_id == decisions.c.decision_id,
+            outcomes.c.horizon_minutes == horizon_minutes,
+        )
+    )
+    statement = (
+        sa.select(decisions.c.decision_id, decisions.c.decision_at, decisions.c.attributes_json)
+        .where(
+            decisions.c.strategy_name == "strategy_signal_engine_v2",
+            decisions.c.decision_at <= _utc_text(target_cutoff),
+            decisions.c.decision_at >= _utc_text(earliest),
+            has_legs,
+            ~already_observed,
+        )
+        .order_by(decisions.c.decision_at)
+        .limit(limit)
+    )
+    result = []
+    with _engine(str(path)).begin() as connection:
+        for row in connection.execute(statement).mappings():
+            legs = connection.execute(
+                sa.select(decision_legs)
+                .where(decision_legs.c.decision_id == row["decision_id"])
+                .order_by(decision_legs.c.leg_index)
+            ).mappings().all()
+            result.append(
+                {
+                    "decision": json.loads(row["attributes_json"]),
+                    "decision_at": row["decision_at"],
+                    "target_at": (
+                        _time(row["decision_at"], "decision_at")
+                        + timedelta(minutes=horizon_minutes)
+                    ).isoformat(),
+                    "horizon_minutes": horizon_minutes,
+                    "legs": [dict(leg) for leg in legs],
+                }
+            )
+    return tuple(result)
+
+
+def persist_strategy_outcome(
+    value: Mapping[str, object],
+    *,
+    database_path: str | Path | None = None,
+) -> str:
+    """Atomically persist an immutable strategy mark and its audit event."""
+
+    decision_id = _required_text(value, "decision_id")
+    horizon_minutes = int(value.get("horizon_minutes") or 0)
+    if horizon_minutes <= 0:
+        raise ValueError("strategy outcome horizon must be positive")
+    target_at = _time(value.get("target_at"), "target_at")
+    sampled_at = _time(value.get("sampled_at"), "sampled_at")
+    if sampled_at < target_at:
+        raise ValueError("strategy outcome cannot be sampled before target")
+    outcome_id = f"strategy-outcome:{decision_id}:{horizon_minutes}m"
+    event_key = f"strategy-observation:{decision_id}:{horizon_minutes}m"
+    path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
+    now_text = _utc_text(datetime.now(tz=timezone.utc))
+    attributes = _mapping(value.get("attributes"))
+    with _engine(str(path)).begin() as connection:
+        decision = connection.execute(
+            sa.select(decisions).where(decisions.c.decision_id == decision_id)
+        ).mappings().one()
+        event_row = {
+            "event_key": event_key,
+            "event_type": "strategy_outcome_observation",
+            "session_date": str(decision["session_date"] or ""),
+            "source_at": _utc_text(target_at),
+            "available_at": _utc_text(sampled_at),
+            "received_at": _utc_text(sampled_at),
+            "phase": str(value.get("status") or "unavailable"),
+            "direction": str(value.get("hypothesis_direction") or "none"),
+            "data_quality": "ready" if value.get("status") == "observed" else "degraded",
+            "schema_version": 1,
+            "attributes_json": _json(
+                {"decision_id": decision_id, "horizon_minutes": horizon_minutes}
+            ),
+            "created_at": now_text,
+        }
+        connection.execute(sqlite_insert(events).values(event_row).on_conflict_do_nothing())
+        stored_event = connection.execute(
+            sa.select(events).where(events.c.event_key == event_key)
+        ).mappings().one()
+        _assert_same("strategy outcome event", stored_event, event_row)
+        outcome_row = {
+            "outcome_id": outcome_id,
+            "event_key": event_key,
+            "decision_id": decision_id,
+            "horizon_minutes": horizon_minutes,
+            "status": str(value.get("status") or "unavailable"),
+            "target_at": _utc_text(target_at),
+            "sampled_at": _utc_text(sampled_at),
+            "hypothesis_direction": str(value.get("hypothesis_direction") or "none"),
+            "spx_return_bps": _number(value.get("spx_return_bps")),
+            "spx_mfe_bps": None,
+            "spx_mae_bps": None,
+            "option_return_bps": _number(value.get("option_return_bps")),
+            "option_pnl": None,
+            "attributes_json": _json(attributes),
+            "created_at": now_text,
+        }
+        connection.execute(sqlite_insert(outcomes).values(outcome_row).on_conflict_do_nothing())
+        stored = connection.execute(
+            sa.select(outcomes).where(outcomes.c.outcome_id == outcome_id)
+        ).mappings().one()
+        _assert_same("strategy outcome", stored, outcome_row)
+    return outcome_id
+
+
 def _decision_rows(
     value: Mapping[str, object],
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
@@ -200,6 +332,7 @@ def _decision_rows(
     execution = _mapping(value.get("execution"))
     regime = _mapping(value.get("regime"))
     why_not = _mapping(value.get("why_not"))
+    nearest_candidate = _mapping(why_not.get("nearest_candidate"))
     reasons = why_not.get("reasons")
     reason = next((str(item) for item in reasons if item), None) if isinstance(reasons, list) else None
     now_text = _utc_text(datetime.now(tz=timezone.utc))
@@ -219,7 +352,7 @@ def _decision_rows(
         "attributes_json": _json(value),
         "created_at": now_text,
     }
-    return row, _leg_rows(candidate, decision_id, available_at, now_text)
+    return row, _leg_rows(candidate or nearest_candidate, decision_id, available_at, now_text)
 
 
 def _leg_rows(

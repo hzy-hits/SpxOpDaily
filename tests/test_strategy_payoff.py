@@ -315,6 +315,12 @@ def test_candidate_fails_closed_when_utility_and_lower_bound_are_not_positive() 
     decision = build_strategy_decision(payload, _state(now), now)
     assert decision["decision_type"] == "NO_TRADE"
     assert "candidate_utility_not_positive" in decision["why_not"]["reasons"]
+    shadow = decision["why_not"]["nearest_candidate"]
+    assert shadow["shadow_only"] is True
+    assert shadow["strategy_type"] == "CALL_DEBIT_VERTICAL"
+    assert shadow["utility"]["utility"] <= 0
+    assert decision["candidate"] is None
+    assert decision["action_authority"] == "none"
 
 
 def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cannot() -> None:

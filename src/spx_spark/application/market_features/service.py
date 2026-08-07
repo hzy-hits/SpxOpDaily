@@ -113,6 +113,9 @@ from spx_spark.application.order_map.decision_consistency import coherent_level_
 from spx_spark.application.order_map.delivery import enqueue_strategy_decision
 from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
+from spx_spark.application.order_map.strategy_outcomes import (
+    observe_due_strategy_outcomes,
+)
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
@@ -501,6 +504,16 @@ def run(
     # lifecycle episode from the evaluation clock or the earlier quote snapshot.
     action_now = as_utc(resolved_action_clock())
     action_latest = LatestStateStore(storage).load(now=action_now)
+    try:
+        strategy_outcome_observation = observe_due_strategy_outcomes(
+            action_latest,
+            now=action_now,
+        )
+    except Exception as exc:
+        strategy_outcome_observation = {
+            "observed": 0,
+            "error": f"{type(exc).__name__}:{exc}",
+        }
     action_macro_event = macro_event_state(action_now)
     action_provider_entry_control = _provider_entry_control(
         failover_settings,
@@ -709,6 +722,7 @@ def run(
             "strategy_decision": strategy_decision,
             "strategy_decision_persistence": strategy_persistence,
             "strategy_decision_delivery": strategy_delivery,
+            "strategy_outcome_observation": strategy_outcome_observation,
         }
     )
     if args.json:

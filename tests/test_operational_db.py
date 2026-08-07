@@ -177,6 +177,43 @@ def test_candidate_and_legs_commit_atomically_and_conflicts_fail(tmp_path: Path)
         )
 
 
+def test_rejected_shadow_candidate_persists_legs_without_trade_authority(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    candidate = _candidate()["candidate"]
+    decision = {
+        **_no_trade(),
+        "decision_id": "strategy:shadow-call-vertical",
+        "why_not": {
+            "reasons": ["candidate_utility_not_positive"],
+            "nearest_candidate": {
+                **candidate,
+                "shadow_only": True,
+                "rejection_reasons": ["candidate_utility_not_positive"],
+            },
+        },
+    }
+
+    persist_strategy_decision(decision, database_path=database)
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT status, action, side FROM decisions WHERE decision_id=?",
+            ("strategy:shadow-call-vertical",),
+        ).fetchone()
+        legs = connection.execute(
+            "SELECT instrument_id, quantity FROM decision_legs "
+            "WHERE decision_id=? ORDER BY leg_index",
+            ("strategy:shadow-call-vertical",),
+        ).fetchall()
+    assert row == ("no_trade", "wait", "none")
+    assert legs == [
+        ("option:SPX:SPXW:20260807:7730:C", 1.0),
+        ("option:SPX:SPXW:20260807:7740:C", -1.0),
+    ]
+
+
 def test_future_available_fact_is_rejected_before_write(tmp_path: Path) -> None:
     database = _migrate(tmp_path)
     decision = {

@@ -50,7 +50,7 @@ def build_strategy_decision(
                 policy=DEFAULT_STRATEGY_POLICY
             )
     if candidate:
-        candidate, utility_reasons = _utility_gate(
+        candidate, utility_reasons, nearest_candidate = _utility_gate(
             candidate,
             facts,
             regime,
@@ -61,9 +61,11 @@ def build_strategy_decision(
         if candidate:
             return _candidate_decision(facts, {**regime, "entry_state": "GOOD_LOCATION"}, candidate)
         reasons.extend(utility_reasons)
+    else:
+        nearest_candidate = None
     if "direction_valid_but_entry_too_late" in reasons:
         regime = {**regime, "entry_state": "LATE_CHASE"}
-    return _no_trade_decision(facts, regime, reasons)
+    return _no_trade_decision(facts, regime, reasons, nearest_candidate=nearest_candidate)
 
 
 def _select_butterfly(
@@ -340,7 +342,7 @@ def _utility_gate(
     data_root: str | Path | None,
     probability_settings: StrategyDistributionSettings | None,
     now: datetime,
-) -> tuple[dict[str, Any] | None, list[str]]:
+) -> tuple[dict[str, Any] | None, list[str], dict[str, Any]]:
     expected_kind = {
         "UP": "terminal_above", "DOWN": "terminal_below", "NEUTRAL": "terminal_between"
     }.get(str(candidate.get("direction")))
@@ -353,18 +355,18 @@ def _utility_gate(
         now=now,
     )
     if evidence_reasons:
-        return None, evidence_reasons
+        return None, evidence_reasons, dict(candidate)
     if event.get("kind") != expected_kind:
-        return None, ["candidate_probability_event_mismatch"]
+        return None, ["candidate_probability_event_mismatch"], dict(candidate)
     q, p, low = (_number(evidence.get(key)) for key in ("q", "p_empirical", "p_interval_low"))
     if q is None or p is None or low is None:
-        return None, ["candidate_probability_unavailable"]
+        return None, ["candidate_probability_unavailable"], dict(candidate)
     weight = float(evidence["shrinkage_weight"])
     probability, conservative = (weight * value + (1.0 - weight) * q for value in (p, low))
     economics, quote = _map(candidate.get("economics")), _map(candidate.get("quote"))
     gain, loss = (_number(economics.get(key)) for key in ("max_gain_points", "max_loss_points"))
     if gain is None or loss is None or gain <= 0.0 or loss <= 0.0:
-        return None, ["candidate_payoff_unavailable"]
+        return None, ["candidate_payoff_unavailable"], dict(candidate)
     expected = probability * gain - (1.0 - probability) * loss
     lower_bound = conservative * gain - (1.0 - conservative) * loss
     friction = min(abs(float(quote.get("ask", 0.0)) - float(quote.get("bid", 0.0))) / loss, 1.0)
@@ -380,9 +382,10 @@ def _utility_gate(
         "liquidity_penalty": round(friction, 6), "model_uncertainty": round(uncertainty, 6),
         "method": "binary_payoff_bootstrap_bound.v1",
     }
+    scored = {**candidate, "probability_evidence": evidence, "utility": scoring}
     if utility <= 0.0 or lower_bound <= 0.0:
-        return None, ["candidate_utility_not_positive"]
-    return {**candidate, "probability_evidence": evidence, "utility": scoring}, []
+        return None, ["candidate_utility_not_positive"], scored
+    return scored, [], scored
 
 
 def _candidate_probability_evidence(
@@ -529,17 +532,40 @@ def _candidate_decision(
 
 
 def _no_trade_decision(
-    facts: Mapping[str, Any], regime: Mapping[str, Any], reasons: list[str]
+    facts: Mapping[str, Any], regime: Mapping[str, Any], reasons: list[str], *,
+    nearest_candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons = list(dict.fromkeys(reasons or ["no_supported_strategy_candidate"]))
-    result = _base_decision(facts, regime, (facts["decision_at"], facts["available_at"], regime, reasons))
+    shadow = dict(nearest_candidate or {})
+    if shadow:
+        shadow.update({"shadow_only": True, "rejection_reasons": reasons})
+    legs = (
+        shadow.get("legs") or (shadow.get("long"), shadow.get("short"))
+        if shadow
+        else ()
+    )
+    available_times = [
+        timestamp
+        for timestamp in (
+            _time(facts["available_at"]),
+            *(_time(_map(leg).get("source_at")) for leg in legs),
+        )
+        if timestamp is not None
+    ]
+    available = max(available_times).isoformat()
+    result = _base_decision(
+        facts,
+        regime,
+        (facts["decision_at"], available, regime, reasons, shadow.get("opportunity_id")),
+    )
     refresh = "刷新 SPXW 两腿双边报价后重新计算" if "quote_refresh_required" in reasons else "等待价格触发、结构赔率和执行价格同时通过"
     result.update({
+        "available_at": available,
         "decision_type": "NO_TRADE",
         "candidate": None,
         "desk_view": {"state": regime["path_state"], "direction": regime.get("path_direction"),
                       "conclusion": "NO TRADE", "reason": reasons[0]},
-        "why_not": {"nearest_candidate": None, "reasons": reasons,
+        "why_not": {"nearest_candidate": shadow or None, "reasons": reasons,
                     "reauthorize_on": refresh},
         "execution": {"action": "WAIT", "order_type": None, "limit": None,
                       "automatic_ordering": False, "manual_action_only": True},
