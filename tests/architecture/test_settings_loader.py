@@ -81,13 +81,22 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
             "SPX_STEVEN_ENABLED": "true",
             "MARKET_DATA_PROVIDER_PRIORITY": "ibkr,schwab",
             "SPX_STANDARDIZED_MINUTE_MAX_AGE_SECONDS": "120",
+            "ALERT_INTRADAY_ANCHOR_PROVIDER_PRIORITY": "ibkr,schwab",
+            "ALERT_INTRADAY_REQUIRE_SCHWAB_STREAMING_ANCHORS": "false",
+            "ALERT_INTRADAY_PROVIDER_SWITCH_RESET_SECONDS": "45",
+            "ALERT_INTRADAY_SHOCK_SPX_MAX_AGE_SECONDS": "21.5",
         },
     )
     assert settings.alerts.steven_enabled is True
     assert settings.market_data.provider_priority == ("ibkr", "schwab")
     assert settings.market_data.standardized_minute_max_age_seconds == 120.0
+    assert settings.shock.anchor_provider_priority == ("ibkr", "schwab")
+    assert settings.shock.require_schwab_streaming_anchors is False
+    assert settings.shock.provider_switch_reset_seconds == 45
+    assert settings.shock.max_spx_age_seconds == 21.5
     assert settings.sources["steven.enabled"].origin == "environment"
     assert settings.sources["market_data.provider_priority"].origin == "environment"
+    assert settings.sources["intraday_shock.max_spx_age_seconds"].origin == "environment"
 
 
 def test_deployment_overlay_beats_defaults(tmp_path: Path) -> None:

@@ -209,3 +209,19 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
 - Acceptance: active-process FD audit names only `spx.sqlite`/`huey.sqlite`;
   all five Python units remain active with zero restarts; the operational DB
   and notification receipt checks still pass.
+
+## Intraday-shock typed environment cutover
+
+- User-visible behavior: all existing `ALERT_INTRADAY_*` overrides retain the
+  same values, but precedence is resolved once by the typed AppSettings loader
+  instead of being re-read inside every `IntradayShockSettings.from_policy`
+  construction.
+- Existing owner and reuse: extend the loader's documented environment map for
+  the already tracked `intraday_shock.*` keys. `ShockSettings` remains the typed
+  policy object injected into the runtime; add no setting, file or model.
+- Delete: remove 22 `env_bool`/`env_int`/`env_float`/`env_csv_preserve` calls and
+  their `config.py` imports from the shock runtime model. Explicit
+  `from_policy(policy)` becomes deterministic and independent of ambient env.
+- Acceptance: injected policy tests, environment-precedence tests, replay shock
+  freshness/skew cases and the full shock state-machine suite pass; resolved
+  Oracle values before/after deploy compare equal without printing secrets.

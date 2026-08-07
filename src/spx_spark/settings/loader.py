@@ -191,9 +191,58 @@ def _env_override(dotted_path: str, environ: Mapping[str, str]) -> Any | None:
         "provider_failover.control_ibkr_stream_enabled": (
             "PROVIDER_FAILOVER_CONTROL_IBKR_STREAM_ENABLED"
         ),
+        "intraday_shock.anchor_provider_priority": (
+            "ALERT_INTRADAY_ANCHOR_PROVIDER_PRIORITY"
+        ),
         "intraday_shock.require_schwab_streaming_anchors": (
             "ALERT_INTRADAY_REQUIRE_SCHWAB_STREAMING_ANCHORS"
         ),
+        "intraday_shock.provider_switch_reset_seconds": (
+            "ALERT_INTRADAY_PROVIDER_SWITCH_RESET_SECONDS"
+        ),
+        "intraday_shock.one_minute_seconds": "ALERT_INTRADAY_SHOCK_1M_SECONDS",
+        "intraday_shock.three_minute_seconds": "ALERT_INTRADAY_SHOCK_3M_SECONDS",
+        "intraday_shock.one_minute_threshold_bps": "ALERT_INTRADAY_SHOCK_1M_BPS",
+        "intraday_shock.three_minute_threshold_bps": "ALERT_INTRADAY_SHOCK_3M_BPS",
+        "intraday_shock.es_confirm_ratio": "ALERT_INTRADAY_SHOCK_ES_CONFIRM_RATIO",
+        "intraday_shock.max_spx_age_seconds": (
+            "ALERT_INTRADAY_SHOCK_SPX_MAX_AGE_SECONDS"
+        ),
+        "intraday_shock.max_es_age_seconds": (
+            "ALERT_INTRADAY_SHOCK_ES_MAX_AGE_SECONDS"
+        ),
+        "intraday_shock.max_anchor_skew_seconds": (
+            "ALERT_INTRADAY_SHOCK_MAX_ANCHOR_SKEW_SECONDS"
+        ),
+        "intraday_shock.reclaim_window_seconds": (
+            "ALERT_INTRADAY_RECLAIM_WINDOW_SECONDS"
+        ),
+        "intraday_shock.event_expiry_seconds": (
+            "ALERT_INTRADAY_EVENT_EXPIRY_SECONDS"
+        ),
+        "intraday_shock.reclaim_fraction": "ALERT_INTRADAY_RECLAIM_FRACTION",
+        "intraday_shock.es_reclaim_fraction": (
+            "ALERT_INTRADAY_RECLAIM_ES_FRACTION"
+        ),
+        "intraday_shock.reclaim_hold_fraction": (
+            "ALERT_INTRADAY_RECLAIM_HOLD_FRACTION"
+        ),
+        "intraday_shock.es_reclaim_hold_fraction": (
+            "ALERT_INTRADAY_RECLAIM_ES_HOLD_FRACTION"
+        ),
+        "intraday_shock.reclaim_confirm_samples": (
+            "ALERT_INTRADAY_RECLAIM_CONFIRM_SAMPLES"
+        ),
+        "intraday_shock.completion_hold_seconds": (
+            "ALERT_INTRADAY_COMPLETION_HOLD_SECONDS"
+        ),
+        "intraday_shock.rearm_recovery_fraction": (
+            "ALERT_INTRADAY_REARM_RECOVERY_FRACTION"
+        ),
+        "intraday_shock.rearm_neutral_seconds": (
+            "ALERT_INTRADAY_REARM_NEUTRAL_SECONDS"
+        ),
+        "intraday_shock.retry_seconds": "ALERT_INTRADAY_DELIVERY_RETRY_SECONDS",
         "ibkr_stream.max_option_lines": "IBKR_STREAM_MAX_OPTION_LINES",
         "schwab.streaming.mode": "SCHWAB_STREAMING_MODE",
         "level_decision_shadow.gth_phase_timeout_seconds": (

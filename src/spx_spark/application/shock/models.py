@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from spx_spark.config import env_bool, env_csv_preserve, env_float, env_int
 from spx_spark.marketdata import Provider, as_utc
 from spx_spark.settings import AppSettings, ShockSettings, current_app_settings
 from spx_spark.settings.shock import DEFAULT_SHOCK_SETTINGS, validate_gth_spread_policy
@@ -101,97 +100,28 @@ class IntradayShockSettings:
             state_path=state_path
             or os.getenv("ALERT_INTRADAY_SHOCK_STATE_PATH")
             or f"{data_root.rstrip('/')}/latest/intraday_shock_state.json",
-            anchor_provider_priority=tuple(
-                provider.lower()
-                for provider in env_csv_preserve(
-                    "ALERT_INTRADAY_ANCHOR_PROVIDER_PRIORITY",
-                    ",".join(policy.anchor_provider_priority),
-                )
-            ),
-            require_schwab_streaming_anchors=env_bool(
-                "ALERT_INTRADAY_REQUIRE_SCHWAB_STREAMING_ANCHORS",
-                policy.require_schwab_streaming_anchors,
-            ),
-            provider_switch_reset_seconds=env_int(
-                "ALERT_INTRADAY_PROVIDER_SWITCH_RESET_SECONDS",
-                policy.provider_switch_reset_seconds,
-            ),
-            one_minute_seconds=env_int(
-                "ALERT_INTRADAY_SHOCK_1M_SECONDS",
-                policy.one_minute_seconds,
-            ),
-            three_minute_seconds=env_int(
-                "ALERT_INTRADAY_SHOCK_3M_SECONDS",
-                policy.three_minute_seconds,
-            ),
-            one_minute_threshold_bps=env_float(
-                "ALERT_INTRADAY_SHOCK_1M_BPS",
-                policy.one_minute_threshold_bps,
-            ),
-            three_minute_threshold_bps=env_float(
-                "ALERT_INTRADAY_SHOCK_3M_BPS",
-                policy.three_minute_threshold_bps,
-            ),
-            es_confirm_ratio=env_float(
-                "ALERT_INTRADAY_SHOCK_ES_CONFIRM_RATIO",
-                policy.es_confirm_ratio,
-            ),
-            max_spx_age_seconds=env_float(
-                "ALERT_INTRADAY_SHOCK_SPX_MAX_AGE_SECONDS",
-                policy.max_spx_age_seconds,
-            ),
-            max_es_age_seconds=env_float(
-                "ALERT_INTRADAY_SHOCK_ES_MAX_AGE_SECONDS",
-                policy.max_es_age_seconds,
-            ),
-            max_anchor_skew_seconds=env_float(
-                "ALERT_INTRADAY_SHOCK_MAX_ANCHOR_SKEW_SECONDS",
-                policy.max_anchor_skew_seconds,
-            ),
-            reclaim_window_seconds=env_int(
-                "ALERT_INTRADAY_RECLAIM_WINDOW_SECONDS",
-                policy.reclaim_window_seconds,
-            ),
-            event_expiry_seconds=env_int(
-                "ALERT_INTRADAY_EVENT_EXPIRY_SECONDS",
-                policy.event_expiry_seconds,
-            ),
-            reclaim_fraction=env_float(
-                "ALERT_INTRADAY_RECLAIM_FRACTION",
-                policy.reclaim_fraction,
-            ),
-            es_reclaim_fraction=env_float(
-                "ALERT_INTRADAY_RECLAIM_ES_FRACTION",
-                policy.es_reclaim_fraction,
-            ),
-            reclaim_hold_fraction=env_float(
-                "ALERT_INTRADAY_RECLAIM_HOLD_FRACTION",
-                policy.reclaim_hold_fraction,
-            ),
-            es_reclaim_hold_fraction=env_float(
-                "ALERT_INTRADAY_RECLAIM_ES_HOLD_FRACTION",
-                policy.es_reclaim_hold_fraction,
-            ),
-            reclaim_confirm_samples=env_int(
-                "ALERT_INTRADAY_RECLAIM_CONFIRM_SAMPLES",
-                policy.reclaim_confirm_samples,
-            ),
-            completion_hold_seconds=env_int(
-                "ALERT_INTRADAY_COMPLETION_HOLD_SECONDS",
-                policy.completion_hold_seconds,
-            ),
-            rearm_recovery_fraction=env_float(
-                "ALERT_INTRADAY_REARM_RECOVERY_FRACTION",
-                policy.rearm_recovery_fraction,
-            ),
-            rearm_neutral_seconds=env_int(
-                "ALERT_INTRADAY_REARM_NEUTRAL_SECONDS",
-                policy.rearm_neutral_seconds,
-            ),
-            retry_seconds=env_int(
-                "ALERT_INTRADAY_DELIVERY_RETRY_SECONDS",
-                policy.retry_seconds,
-            ),
+            anchor_provider_priority=policy.anchor_provider_priority,
+            require_schwab_streaming_anchors=policy.require_schwab_streaming_anchors,
+            provider_switch_reset_seconds=policy.provider_switch_reset_seconds,
+            one_minute_seconds=policy.one_minute_seconds,
+            three_minute_seconds=policy.three_minute_seconds,
+            one_minute_threshold_bps=policy.one_minute_threshold_bps,
+            three_minute_threshold_bps=policy.three_minute_threshold_bps,
+            es_confirm_ratio=policy.es_confirm_ratio,
+            max_spx_age_seconds=policy.max_spx_age_seconds,
+            max_es_age_seconds=policy.max_es_age_seconds,
+            max_anchor_skew_seconds=policy.max_anchor_skew_seconds,
+            reclaim_window_seconds=policy.reclaim_window_seconds,
+            event_expiry_seconds=policy.event_expiry_seconds,
+            reclaim_fraction=policy.reclaim_fraction,
+            es_reclaim_fraction=policy.es_reclaim_fraction,
+            reclaim_hold_fraction=policy.reclaim_hold_fraction,
+            es_reclaim_hold_fraction=policy.es_reclaim_hold_fraction,
+            reclaim_confirm_samples=policy.reclaim_confirm_samples,
+            completion_hold_seconds=policy.completion_hold_seconds,
+            rearm_recovery_fraction=policy.rearm_recovery_fraction,
+            rearm_neutral_seconds=policy.rearm_neutral_seconds,
+            retry_seconds=policy.retry_seconds,
             gth_dip_reclaim_enabled=policy.gth_dip_reclaim_enabled,
             gth_short_horizon_seconds=policy.gth_short_horizon_seconds,
             gth_long_horizon_seconds=policy.gth_long_horizon_seconds,
