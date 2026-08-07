@@ -962,5 +962,6 @@ def test_raw_delete_blocked_is_summary_failure(tmp_path: Path, capsys, monkeypat
     assert code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["failed"] is True
+    assert payload["raw_delete_enabled"] is False
     assert len(payload["failures"]) == 1
     assert payload["failures"][0]["status"] == "raw_delete_blocked"

@@ -1,10 +1,9 @@
 [Unit]
-Description=Run SPX Spark Rust raw-frame retention hourly
+Description=Run SPX Spark Rust raw-frame archive and retention daily at 18:30 ET
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* 18:30:00 America/New_York
 Persistent=true
-RandomizedDelaySec=5m
 AccuracySec=1m
 Unit=spx-rust-frame-retention.service
 

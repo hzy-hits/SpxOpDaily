@@ -1440,6 +1440,21 @@ data_platform:
   raw_delete_grace_hours:
     value: 72
     description: Rollback grace period in hours after verified compaction before raw deletion.
+  replay_raw_delete_grace_hours:
+    value: 24
+    description: Minimum age before a replay artifact may authorize exact raw deletion.
+  replay_finalize_backlog_days:
+    value: 7
+    description: Maximum published trading dates scanned per pressure pass.
+  storage_pressure_action_free_bytes:
+    value: 30064771072
+    description: Artifact-authorized cleanup action threshold.
+  storage_pressure_warning_free_bytes:
+    value: 25769803776
+    description: Storage pressure warning threshold.
+  storage_pressure_critical_free_bytes:
+    value: 21474836480
+    description: Storage pressure critical threshold.
   writer_version:
     value: spx-spark-v1
     description: Writer version stamped onto research-platform records.

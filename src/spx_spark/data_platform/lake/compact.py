@@ -43,6 +43,7 @@ from spx_spark.data_platform.lake.normalize import (
 from spx_spark.data_platform.lake.raw_delete_machine import (
     RawDeleteEvidence,
     RawDeletePhase,
+    delete_raw_if_manifest_matches as delete_exact_raw,
     evidence_mismatch_reason,
     quarantined_evidence_matches,
     raw_delete_gate,
@@ -184,6 +185,22 @@ class QuoteLakeCompactor:
         lock = nullcontext() if dry_run else self._exclusive_lock()
         with lock:
             return self._compact_one_unlocked(partition, now=now, dry_run=dry_run)
+
+    def delete_raw_if_manifest_matches(
+        self,
+        partition: RawQuotePartition,
+        *,
+        expected_manifest: CompactionManifest,
+        now: datetime,
+        dry_run: bool = False,
+    ) -> CompactionResult:
+        return delete_exact_raw(
+            self,
+            partition,
+            expected_manifest=expected_manifest,
+            now=now,
+            dry_run=dry_run,
+        )
 
     def _compact_one_unlocked(
         self,
@@ -944,7 +961,6 @@ class QuoteLakeCompactor:
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:

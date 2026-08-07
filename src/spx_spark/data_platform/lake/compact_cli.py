@@ -47,7 +47,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             else platform_settings.compaction_min_age_seconds
         ),
         compression_level=args.compression_level,
-        raw_delete_enabled=platform_settings.raw_delete_enabled,
+        # The generic compactor is permanently copy-only. Exact raw deletion
+        # belongs to the replay finalizer, which supplies artifact lineage.
+        raw_delete_enabled=False,
         raw_delete_grace_hours=platform_settings.raw_delete_grace_hours,
     )
     summary = compactor.run(
@@ -75,7 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status_counts": summary.status_counts,
             "failed": summary.failed,
             "failures": failures,
-            "raw_delete_enabled": platform_settings.raw_delete_enabled,
+            "raw_delete_enabled": False,
             "deletions": deletions,
         }
         if args.as_json:

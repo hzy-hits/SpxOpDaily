@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,8 @@ use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 use serde::Serialize;
 use spx_domain::{DomainError, canonical_json_hash};
 use thiserror::Error;
+
+use crate::frame_archive::{load_archive_barrier_manifest, verify_source_path};
 
 #[derive(Debug, Error)]
 pub enum RawLogError {
@@ -61,6 +64,8 @@ pub enum RawLogError {
 }
 
 const DIRECTORY_LOCK_FILE: &str = ".spx-raw-log.lock";
+const DATE_LOCK_PREFIX: &str = ".spx-raw-log-date-";
+const DATE_LOCK_SUFFIX: &str = ".lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppendDurability {
@@ -86,16 +91,38 @@ pub struct RawLogPruneReport {
     pub keep_completed_days: u32,
     pub max_total_bytes: u64,
     pub dry_run: bool,
+    pub archive_root: Option<PathBuf>,
     pub matched_files: usize,
     pub ignored_entries: usize,
     pub protected_current_or_future_files: usize,
     pub total_bytes_before: u64,
+    pub policy_candidate_files: usize,
+    pub policy_candidate_bytes: u64,
+    pub archive_authorized_files: usize,
+    pub archive_unauthorized_files: usize,
+    pub archive_denials: Vec<RawLogArchiveDenial>,
+    pub archive_barrier_status: RawLogArchiveBarrierStatus,
     pub planned_files: usize,
     pub planned_bytes: u64,
     pub removed_files: usize,
     pub removed_bytes: u64,
     pub projected_bytes_after: u64,
     pub limit_satisfied_after_plan: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawLogArchiveBarrierStatus {
+    NotRequired,
+    Satisfied,
+    Withheld,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RawLogArchiveDenial {
+    pub segment: PathBuf,
+    pub utc_date: NaiveDate,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +133,7 @@ struct SegmentFile {
     bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PruneSelection {
     selected: Vec<bool>,
     projected_bytes_after: u64,
@@ -191,9 +218,13 @@ impl RawLog {
             });
         }
         let _directory_lock = DirectoryLock::acquire(&self.directory, DirectoryLockMode::Shared)?;
+        let date_prefix = observed_at.format("%Y-%m-%d").to_string();
+        let _date_lock = DirectoryLock::acquire_path(
+            &date_lock_path(&self.directory, &date_prefix),
+            DirectoryLockMode::Shared,
+        )?;
         self.ensure_free_space(record_bytes)?;
 
-        let date_prefix = observed_at.format("%Y-%m-%d").to_string();
         let mut active = self
             .active_segment
             .lock()
@@ -291,16 +322,19 @@ impl RawLog {
 
 impl DirectoryLock {
     fn acquire(directory: &Path, mode: DirectoryLockMode) -> Result<Self, RawLogError> {
-        let path = directory.join(DIRECTORY_LOCK_FILE);
+        Self::acquire_path(&directory.join(DIRECTORY_LOCK_FILE), mode)
+    }
+
+    fn acquire_path(path: &Path, mode: DirectoryLockMode) -> Result<Self, RawLogError> {
         let descriptor = open(
-            &path,
+            path,
             OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
             Mode::from_raw_mode(0o600),
         )
-        .map_err(|error| unsafe_open_error(error, &path, RawLogError::UnsafeLockPath))?;
+        .map_err(|error| unsafe_open_error(error, path, RawLogError::UnsafeLockPath))?;
         let file = File::from(descriptor);
         if !file.metadata()?.file_type().is_file() {
-            return Err(RawLogError::UnsafeLockPath(path));
+            return Err(RawLogError::UnsafeLockPath(path.to_path_buf()));
         }
         #[cfg(unix)]
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
@@ -326,6 +360,55 @@ pub fn prune_raw_log(
     max_total_bytes: u64,
     dry_run: bool,
 ) -> Result<RawLogPruneReport, RawLogError> {
+    prune_raw_log_inner(
+        directory,
+        current_utc_date,
+        keep_completed_days,
+        max_total_bytes,
+        dry_run,
+        None,
+    )
+}
+
+/// Selects and optionally removes completed raw-log segments, but only after
+/// every deletion candidate is covered by a verified day archive whose source
+/// size and SHA-256 still match.
+///
+/// If any candidate is unauthorized, the entire mutation is withheld. The
+/// returned report names every denied segment so dry runs and production jobs
+/// remain diagnosable without risking a partial unarchived deletion.
+///
+/// # Errors
+///
+/// Returns an error for an invalid policy, unsafe raw-log directory,
+/// unreadable directory, arithmetic overflow, or a candidate that changes
+/// before removal. Missing or inconsistent archives are reported as denials.
+pub fn prune_raw_log_with_archive(
+    directory: impl AsRef<Path>,
+    current_utc_date: NaiveDate,
+    keep_completed_days: u32,
+    max_total_bytes: u64,
+    dry_run: bool,
+    archive_root: impl AsRef<Path>,
+) -> Result<RawLogPruneReport, RawLogError> {
+    prune_raw_log_inner(
+        directory,
+        current_utc_date,
+        keep_completed_days,
+        max_total_bytes,
+        dry_run,
+        Some(archive_root.as_ref()),
+    )
+}
+
+fn prune_raw_log_inner(
+    directory: impl AsRef<Path>,
+    current_utc_date: NaiveDate,
+    keep_completed_days: u32,
+    max_total_bytes: u64,
+    dry_run: bool,
+    archive_root: Option<&Path>,
+) -> Result<RawLogPruneReport, RawLogError> {
     if !(1..=365).contains(&keep_completed_days) {
         return Err(RawLogError::InvalidRetentionPolicy(
             "keep_completed_days must be within 1..=365",
@@ -350,15 +433,30 @@ pub fn prune_raw_log(
         .iter()
         .filter(|segment| segment.date >= current_utc_date)
         .count();
-    let selection = select_segments(
+    let policy_selection = select_segments(
         &segments,
         current_utc_date,
         keep_cutoff,
         max_total_bytes,
         total_bytes_before,
     )?;
+    let (selection, archive_authorized_files, archive_denials) = match archive_root {
+        Some(root) => {
+            authorize_archive_selection(&segments, &policy_selection, root, total_bytes_before)
+        }
+        None => (
+            policy_selection.clone(),
+            policy_selection.planned_files,
+            Vec::new(),
+        ),
+    };
     let (removed_files, removed_bytes) =
         apply_selection(&directory, &segments, &selection.selected, dry_run)?;
+    let archive_barrier_status = match (archive_root.is_some(), archive_denials.is_empty()) {
+        (false, _) => RawLogArchiveBarrierStatus::NotRequired,
+        (true, true) => RawLogArchiveBarrierStatus::Satisfied,
+        (true, false) => RawLogArchiveBarrierStatus::Withheld,
+    };
 
     Ok(RawLogPruneReport {
         raw_log_dir: directory,
@@ -366,10 +464,17 @@ pub fn prune_raw_log(
         keep_completed_days,
         max_total_bytes,
         dry_run,
+        archive_root: archive_root.map(Path::to_path_buf),
         matched_files: segments.len(),
         ignored_entries,
         protected_current_or_future_files,
         total_bytes_before,
+        policy_candidate_files: policy_selection.planned_files,
+        policy_candidate_bytes: policy_selection.planned_bytes,
+        archive_authorized_files,
+        archive_unauthorized_files: archive_denials.len(),
+        archive_denials,
+        archive_barrier_status,
         planned_files: selection.planned_files,
         planned_bytes: selection.planned_bytes,
         removed_files,
@@ -379,13 +484,74 @@ pub fn prune_raw_log(
     })
 }
 
+fn authorize_archive_selection(
+    segments: &[SegmentFile],
+    policy_selection: &PruneSelection,
+    archive_root: &Path,
+    total_bytes_before: u64,
+) -> (PruneSelection, usize, Vec<RawLogArchiveDenial>) {
+    let mut positions_by_date: BTreeMap<NaiveDate, Vec<usize>> = BTreeMap::new();
+    for (position, (segment, selected)) in
+        segments.iter().zip(&policy_selection.selected).enumerate()
+    {
+        if *selected {
+            positions_by_date
+                .entry(segment.date)
+                .or_default()
+                .push(position);
+        }
+    }
+
+    let mut authorized_files = 0_usize;
+    let mut denials = Vec::new();
+    for (date, positions) in positions_by_date {
+        match load_archive_barrier_manifest(archive_root, date) {
+            Ok(manifest) => {
+                for position in positions {
+                    let segment = &segments[position];
+                    match verify_source_path(&segment.path, segment.bytes, &manifest) {
+                        Ok(()) => authorized_files = authorized_files.saturating_add(1),
+                        Err(error) => denials.push(RawLogArchiveDenial {
+                            segment: segment.path.clone(),
+                            utc_date: date,
+                            reason: error.to_string(),
+                        }),
+                    }
+                }
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                denials.extend(positions.into_iter().map(|position| RawLogArchiveDenial {
+                    segment: segments[position].path.clone(),
+                    utc_date: date,
+                    reason: reason.clone(),
+                }));
+            }
+        }
+    }
+
+    if denials.is_empty() {
+        return (policy_selection.clone(), authorized_files, denials);
+    }
+    (
+        PruneSelection {
+            selected: vec![false; segments.len()],
+            projected_bytes_after: total_bytes_before,
+            planned_files: 0,
+            planned_bytes: 0,
+        },
+        authorized_files,
+        denials,
+    )
+}
+
 fn scan_segment_files(directory: &Path) -> Result<(Vec<SegmentFile>, usize), RawLogError> {
     let mut segments = Vec::new();
     let mut ignored_entries = 0_usize;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let file_name = entry.file_name();
-        if file_name == DIRECTORY_LOCK_FILE {
+        if file_name == DIRECTORY_LOCK_FILE || file_name.to_str().is_some_and(is_date_lock_name) {
             continue;
         }
         let parsed = file_name.to_str().and_then(parse_segment_name);
@@ -604,7 +770,7 @@ fn is_segment_name(name: &str) -> bool {
     parse_segment_name(name).is_some()
 }
 
-fn parse_segment_name(name: &str) -> Option<(NaiveDate, u32)> {
+pub(crate) fn parse_segment_name(name: &str) -> Option<(NaiveDate, u32)> {
     let (date, suffix) = name.split_once('.')?;
     if date.len() != 10
         || !date
@@ -623,6 +789,16 @@ fn parse_segment_name(name: &str) -> Option<(NaiveDate, u32)> {
         return None;
     }
     Some((date, index.parse().ok()?))
+}
+
+pub(crate) fn date_lock_path(directory: &Path, date_prefix: &str) -> PathBuf {
+    directory.join(format!("{DATE_LOCK_PREFIX}{date_prefix}{DATE_LOCK_SUFFIX}"))
+}
+
+fn is_date_lock_name(name: &str) -> bool {
+    name.strip_prefix(DATE_LOCK_PREFIX)
+        .and_then(|value| value.strip_suffix(DATE_LOCK_SUFFIX))
+        .is_some_and(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok())
 }
 
 fn segment_index(name: &str, date_prefix: &str) -> Option<u32> {
@@ -670,7 +846,10 @@ fn unsafe_open_error(
 mod tests {
     use super::*;
     use serde::Serialize;
+    use spx_domain::{IngressEnvelopeV1, Validate};
     use tempfile::TempDir;
+
+    use crate::archive_completed_utc_day;
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -1090,6 +1269,53 @@ mod tests {
     }
 
     #[test]
+    fn completed_date_lock_blocks_only_same_date_appends() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let temp = TempDir::new().expect("temporary directory");
+        let log = Arc::new(RawLog::new(temp.path(), 4096).expect("raw log"));
+        let directory = fs::canonicalize(temp.path()).expect("canonical raw directory");
+        let exclusive = DirectoryLock::acquire_path(
+            &date_lock_path(&directory, "2026-07-29"),
+            DirectoryLockMode::Exclusive,
+        )
+        .expect("archive-side date lock");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let same_date_log = Arc::clone(&log);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal append start");
+            let result = same_date_log.append(
+                &Payload { value: "late" },
+                at("2026-07-29T23:59:59Z"),
+                AppendDurability::Durable,
+            );
+            done_tx.send(result).expect("send append result");
+        });
+        started_rx.recv().expect("receive append start");
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        log.append(
+            &Payload { value: "current" },
+            at("2026-08-01T00:00:01Z"),
+            AppendDurability::Durable,
+        )
+        .expect("different UTC date remains writable");
+        drop(exclusive);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("same-date append unblocked")
+            .expect("same-date append succeeded");
+        worker.join().expect("join append worker");
+        assert!(directory.join("2026-07-29.0000.ndjson").exists());
+        assert!(directory.join("2026-08-01.0000.ndjson").exists());
+    }
+
+    #[test]
     fn partial_prune_failure_reports_removed_files_after_directory_sync() {
         let temp = TempDir::new().expect("temporary directory");
         write_segment(temp.path(), "2026-07-28.0000.ndjson", b"first");
@@ -1123,6 +1349,156 @@ mod tests {
         ));
         assert!(!temp.path().join("2026-07-28.0000.ndjson").exists());
         assert!(temp.path().join("2026-07-29.0000.ndjson").exists());
+    }
+
+    #[test]
+    fn archive_barrier_reports_and_withholds_unarchived_candidates() {
+        let temp = TempDir::new().expect("temporary directory");
+        let frames = temp.path().join("frames");
+        let archive = temp.path().join("archive");
+        fs::create_dir(&frames).expect("create frames");
+        fs::create_dir(&archive).expect("create archive");
+        let frames = fs::canonicalize(frames).expect("canonical frames");
+        let archive = fs::canonicalize(archive).expect("canonical archive");
+        write_valid_ingress_segment(
+            &frames,
+            "2026-07-29.0000.ndjson",
+            at("2026-07-29T14:30:00Z"),
+        );
+
+        let dry_run = prune_raw_log_with_archive(
+            &frames,
+            NaiveDate::from_ymd_opt(2026, 8, 1).expect("current date"),
+            1,
+            u64::MAX,
+            true,
+            &archive,
+        )
+        .expect("barrier dry run");
+        assert_eq!(dry_run.policy_candidate_files, 1);
+        assert_eq!(dry_run.archive_unauthorized_files, 1);
+        assert_eq!(dry_run.planned_files, 0);
+        assert_eq!(
+            dry_run.archive_barrier_status,
+            RawLogArchiveBarrierStatus::Withheld
+        );
+
+        let applied = prune_raw_log_with_archive(
+            &frames,
+            NaiveDate::from_ymd_opt(2026, 8, 1).expect("current date"),
+            1,
+            u64::MAX,
+            false,
+            &archive,
+        )
+        .expect("barrier applied report");
+        assert_eq!(applied.removed_files, 0);
+        assert!(frames.join("2026-07-29.0000.ndjson").exists());
+    }
+
+    #[test]
+    fn archive_barrier_allows_only_matching_verified_source_deletion() {
+        let temp = TempDir::new().expect("temporary directory");
+        let frames = temp.path().join("frames");
+        let archive = temp.path().join("archive");
+        fs::create_dir(&frames).expect("create frames");
+        fs::create_dir(&archive).expect("create archive");
+        let frames = fs::canonicalize(frames).expect("canonical frames");
+        let archive = fs::canonicalize(archive).expect("canonical archive");
+        let observed_at = at("2026-07-29T14:30:00Z");
+        write_valid_ingress_segment(&frames, "2026-07-29.0000.ndjson", observed_at);
+        archive_completed_utc_day(
+            &frames,
+            &archive,
+            observed_at.date_naive(),
+            at("2026-08-01T12:00:00Z"),
+        )
+        .expect("archive completed date");
+
+        let report = prune_raw_log_with_archive(
+            &frames,
+            NaiveDate::from_ymd_opt(2026, 8, 1).expect("current date"),
+            1,
+            u64::MAX,
+            false,
+            &archive,
+        )
+        .expect("authorized prune");
+        assert_eq!(
+            report.archive_barrier_status,
+            RawLogArchiveBarrierStatus::Satisfied
+        );
+        assert_eq!(report.archive_authorized_files, 1);
+        assert_eq!(report.removed_files, 1);
+        assert!(!frames.join("2026-07-29.0000.ndjson").exists());
+    }
+
+    #[test]
+    fn archive_barrier_detects_source_change_and_deletes_nothing() {
+        let temp = TempDir::new().expect("temporary directory");
+        let frames = temp.path().join("frames");
+        let archive = temp.path().join("archive");
+        fs::create_dir(&frames).expect("create frames");
+        fs::create_dir(&archive).expect("create archive");
+        let frames = fs::canonicalize(frames).expect("canonical frames");
+        let archive = fs::canonicalize(archive).expect("canonical archive");
+        let observed_at = at("2026-07-29T14:30:00Z");
+        let source = frames.join("2026-07-29.0000.ndjson");
+        write_valid_ingress_segment(&frames, "2026-07-29.0000.ndjson", observed_at);
+        archive_completed_utc_day(
+            &frames,
+            &archive,
+            observed_at.date_naive(),
+            at("2026-08-01T12:00:00Z"),
+        )
+        .expect("archive completed date");
+        let mut tampered = fs::read(&source).expect("read source");
+        tampered[0] ^= 1;
+        fs::write(&source, tampered).expect("tamper source without changing size");
+
+        let report = prune_raw_log_with_archive(
+            &frames,
+            NaiveDate::from_ymd_opt(2026, 8, 1).expect("current date"),
+            1,
+            u64::MAX,
+            false,
+            &archive,
+        )
+        .expect("denied prune report");
+        assert_eq!(
+            report.archive_barrier_status,
+            RawLogArchiveBarrierStatus::Withheld
+        );
+        assert_eq!(report.archive_unauthorized_files, 1);
+        assert_eq!(report.removed_files, 0);
+        assert!(source.exists());
+    }
+
+    fn write_valid_ingress_segment(directory: &Path, name: &str, observed_at: DateTime<Utc>) {
+        let batch: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v1/quote_batch_schwab_rth.json"
+        ))
+        .expect("valid quote batch fixture");
+        let envelope: IngressEnvelopeV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "spx_ingress.v1",
+            "message_id": "message:raw-log-archive-barrier-test",
+            "emitted_at": "2026-07-31T14:30:00Z",
+            "message": {
+                "kind": "quote_batch",
+                "payload": batch
+            }
+        }))
+        .expect("valid envelope");
+        envelope.validate().expect("valid envelope contract");
+        let payload_sha256 = canonical_json_hash(&envelope).expect("payload hash");
+        let mut encoded = serde_json::to_vec(&serde_json::json!({
+            "observed_at": observed_at,
+            "payload_sha256": payload_sha256,
+            "payload": envelope,
+        }))
+        .expect("encode raw record");
+        encoded.push(b'\n');
+        write_segment(directory, name, &encoded);
     }
 
     fn write_segment(directory: &Path, name: &str, contents: &[u8]) {

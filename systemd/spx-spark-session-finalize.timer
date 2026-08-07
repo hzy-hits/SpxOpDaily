@@ -1,0 +1,11 @@
+[Unit]
+Description=Finalize the latest completed SPX trading session at 18:00 New York time
+
+[Timer]
+OnCalendar=*-*-* 18:00:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=spx-spark-session-finalize.service
+
+[Install]
+WantedBy=timers.target
