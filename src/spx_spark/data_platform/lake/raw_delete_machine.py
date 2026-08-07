@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import fcntl
+import os
 import stat
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterator
 
 from spx_spark.data_platform.lake.compact_support import SourceSnapshot
-from spx_spark.data_platform.lake.manifest import CompactionManifest
 from spx_spark.data_platform.lake.layout import RawQuotePartition, parse_raw_quote_partition
+from spx_spark.data_platform.lake.manifest import CompactionManifest, load_manifest
+
+if TYPE_CHECKING:
+    from spx_spark.data_platform.lake.compact import CompactionResult, QuoteLakeCompactor
 
 
 class RawDeletePhase(StrEnum):
@@ -34,6 +41,59 @@ class RawDeleteEvidence:
     output: SourceSnapshot
     source_rows: int
     parquet_rows: int
+
+
+def delete_raw_if_manifest_matches(
+    compactor: QuoteLakeCompactor,
+    partition: RawQuotePartition,
+    *,
+    expected_manifest: CompactionManifest,
+    now: datetime,
+    dry_run: bool = False,
+) -> CompactionResult:
+    """Delete only the exact source lineage already authorized by a caller."""
+    from spx_spark.data_platform.lake.compact import CompactionResult, _as_utc
+
+    lock = nullcontext() if dry_run else compactor._exclusive_lock()
+    with lock:
+        with _exclusive_raw_path_lock(partition.source_path):
+            current = load_manifest(partition.manifest_path)
+            if current != expected_manifest:
+                return CompactionResult(
+                    partition.source_relative_path,
+                    expected_manifest.output_path,
+                    "raw_delete_blocked",
+                    row_count=expected_manifest.row_count,
+                    source_sha256=expected_manifest.source_sha256,
+                    detail="compaction manifest changed after replay authorization",
+                )
+            status = "empty_up_to_date" if current.status == "empty" else "up_to_date"
+            result = CompactionResult(
+                partition.source_relative_path,
+                current.output_path,
+                status,
+                row_count=current.row_count,
+                source_sha256=current.source_sha256,
+            )
+            return compactor._maybe_delete_raw(
+                partition,
+                result,
+                manifest=current,
+                now=_as_utc(now),
+                dry_run=dry_run,
+            )
+
+
+@contextmanager
+def _exclusive_raw_path_lock(source_path: Path) -> Iterator[None]:
+    lock_path = source_path.with_name(f".{source_path.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def raw_delete_gate(
