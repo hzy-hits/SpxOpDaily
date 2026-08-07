@@ -151,6 +151,11 @@ def build_rn_density(
         p25=round1(percentile(0.25)),
         p75=round1(percentile(0.75)),
         p90=round1(percentile(0.9)),
+        mode=round1(max(raw, key=lambda item: item[1])[0]),
+        local_mass_5pt={
+            f"{center:g}": round(cdf(center + 2.5) - cdf(center - 2.5), 4)
+            for center in range(round(underlier / 5) * 5 - 30, round(underlier / 5) * 5 + 31, 5)
+        },
         prob_below_put_wall=round(cdf(put_wall), 3) if put_wall is not None else None,
         prob_above_call_wall=round(1.0 - cdf(call_wall), 3) if call_wall is not None else None,
         clipped_mass_fraction=round(clipped_fraction, 3),

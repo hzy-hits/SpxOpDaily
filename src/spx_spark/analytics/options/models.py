@@ -117,6 +117,8 @@ class RnDensity:
     p25: float | None = None
     p75: float | None = None
     p90: float | None = None
+    mode: float | None = None
+    local_mass_5pt: dict[str, float] | None = None
     prob_below_put_wall: float | None = None
     prob_above_call_wall: float | None = None
     clipped_mass_fraction: float | None = None

@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
+    butterfly_economics,
+    conservative_butterfly_bbo,
     conservative_vertical_bbo,
     vertical_economics,
     vertical_entry_quality,
@@ -20,6 +22,8 @@ from spx_spark.application.order_map.strategy_regime import (
     assess_regime,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.marketdata import InstrumentId
+from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.storage import LatestState
 
 
@@ -31,14 +35,64 @@ def build_strategy_decision(
     reasons = _gate_reasons(facts, regime)
     candidate = None
     if not reasons:
-        candidate, reasons = _select_vertical(
-            payload, facts, regime, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
-        )
+        if regime.get("terminal_state") == "PIN_STABLE":
+            candidate, reasons = _select_butterfly(payload, facts, regime, latest, _utc(now))
+        else:
+            candidate, reasons = _select_vertical(
+                payload, facts, regime, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
+            )
     if candidate:
         return _candidate_decision(facts, {**regime, "entry_state": "GOOD_LOCATION"}, candidate)
     if "direction_valid_but_entry_too_late" in reasons:
         regime = {**regime, "entry_state": "LATE_CHASE"}
     return _no_trade_decision(facts, regime, reasons)
+
+
+def _select_butterfly(
+    payload: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any],
+    latest: LatestState, now: datetime,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    frame, pin = _map(payload.get("option_structure_frame")), _map(regime.get("pin"))
+    expiry, rows = str(frame.get("front_expiry") or ""), []
+    if not expiry:
+        return None, ["butterfly_expiry_unavailable"]
+    for ranked in pin.get("top_centers") or ():
+        center = _number(_map(ranked).get("center"))
+        if center is None:
+            continue
+        for width in (5.0, 10.0, 15.0, 20.0):
+            for right in ("C", "P"):
+                legs = [_option_leg(latest, expiry, strike, right) for strike in (center - width, center, center + width)]
+                if any(not leg for leg in legs):
+                    continue
+                quote = conservative_butterfly_bbo(*legs, now=now)
+                if quote.get("status") != "ready":
+                    continue
+                try:
+                    economics = butterfly_economics(center=center, width=width, net_debit=float(quote["ask"]))
+                except ValueError:
+                    continue
+                score = float(_map(ranked).get("score") or 0) + 0.05 * min(
+                    float(economics["max_gain_points"]) / float(economics["max_loss_points"]), 3
+                ) - 0.01 * width / 5
+                rows.append((score, center, width, right, legs, quote, economics))
+    if not rows:
+        return None, ["butterfly_three_leg_bbo_unavailable"]
+    score, center, width, right, legs, quote, economics = max(rows, key=lambda row: row[0])
+    source_times = [_time(value) for value in quote.get("source_times") or ()]
+    quote_valid = min(value for value in source_times if value) + timedelta(seconds=DEFAULT_STRATEGY_POLICY.quote_max_age_seconds)
+    identity = (facts.get("session_date"), center, width, right, *(leg["contract_id"] for leg in legs))
+    return {
+        "strategy_type": f"{right == 'C' and 'CALL' or 'PUT'}_BUTTERFLY",
+        "setup_kind": "STABLE_PIN", "direction": "NEUTRAL",
+        "opportunity_id": f"strategy-opportunity:{_hash(identity)[:24]}",
+        "target_spx": center, "invalidation_spx": [center - width, center + width],
+        "center": center, "width": width, "right": right, "legs": legs,
+        "quote": quote, "economics": economics, "selection_score": round(score, 4),
+        "pin": pin, "quote_valid_until": quote_valid.isoformat(),
+        "opportunity_valid_until": (now + timedelta(seconds=DEFAULT_STRATEGY_POLICY.opportunity_ttl_seconds)).isoformat(),
+        "source": "stable_pin_butterfly", "automatic_ordering": False, "manual_action_only": True,
+    }, []
 
 
 def _gate_reasons(facts: Mapping[str, Any], regime: Mapping[str, Any]) -> list[str]:
@@ -259,10 +313,8 @@ def _base_decision(facts: Mapping[str, Any], regime: Mapping[str, Any], identity
 def _candidate_decision(
     facts: Mapping[str, Any], regime: Mapping[str, Any], candidate: Mapping[str, Any]
 ) -> dict[str, Any]:
-    available = max(
-        str(facts["available_at"]),
-        *(str(_map(candidate.get(side)).get("source_at") or "") for side in ("long", "short")),
-    )
+    legs = candidate.get("legs") or (candidate.get("long"), candidate.get("short"))
+    available = max(str(facts["available_at"]), *(str(_map(leg).get("source_at") or "") for leg in legs))
     economics = _map(candidate.get("economics"))
     result = _base_decision(facts, regime, (facts["decision_at"], available, candidate["opportunity_id"], candidate["quote"]))
     result.update({
@@ -325,6 +377,16 @@ def _gth_leg(value: object, contract_id: object) -> dict[str, Any]:
         leg["right"] = parts[-1].upper()
     leg["contract_id"] = contract_id
     return leg
+
+
+def _option_leg(latest: LatestState, expiry: str, strike: float, right: str) -> dict[str, Any]:
+    contract_id = InstrumentId.option("SPX", expiry=expiry, strike=strike, right=right, trading_class="SPXW").canonical_id
+    quote = latest.best_quote(contract_id)
+    if quote is None:
+        return {}
+    return {"contract_id": contract_id, "strike": strike, "right": right,
+            "provider": quote.provider.value, "bid": quote.bid, "ask": quote.ask,
+            "source_at": quote_source_at(quote).isoformat()}
 
 
 def _flip_values(value: object) -> list[float | None]:

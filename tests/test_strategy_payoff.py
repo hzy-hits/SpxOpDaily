@@ -6,15 +6,20 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from spx_spark.analytics.options.strategy_payoff import (
+    butterfly_economics,
+    butterfly_payoff,
+    conservative_butterfly_bbo,
     conservative_vertical_bbo,
     vertical_economics,
     vertical_payoff,
 )
+from spx_spark.application.order_map.strategy_regime import assess_regime
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.data_platform.research.strategy_decision_replay import (
     build_vertical_replay_report,
     classify_gth_vertical_record,
 )
+from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.storage import LatestState
 
 
@@ -112,6 +117,59 @@ def test_conservative_vertical_bbo_accepts_zero_bid_without_using_mid() -> None:
     }
 
     assert conservative_vertical_bbo(long_leg, short_leg, now=now)["ask"] == 0.2
+
+
+@given(
+    center=st.floats(min_value=100, max_value=10_000, allow_nan=False, allow_infinity=False),
+    width=st.floats(min_value=1, max_value=100, allow_nan=False, allow_infinity=False),
+    fraction=st.floats(min_value=0.01, max_value=0.99, allow_nan=False, allow_infinity=False),
+)
+def test_butterfly_payoff_is_bounded_with_two_breakevens(
+    center: float, width: float, fraction: float
+) -> None:
+    debit = width * fraction
+    economics = butterfly_economics(center=center, width=width, net_debit=debit)
+    assert economics["max_loss_points"] + economics["max_gain_points"] == pytest.approx(width)
+    assert butterfly_payoff(center, center=center, width=width, net_debit=debit) == pytest.approx(width - debit)
+    for breakeven in (economics["breakeven_low"], economics["breakeven_high"]):
+        assert butterfly_payoff(
+            breakeven, center=center, width=width, net_debit=debit
+        ) == pytest.approx(0, abs=1e-8)
+
+
+def test_conservative_butterfly_bbo_uses_three_leg_nbbo_and_rejects_mid_only() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    legs = [
+        {"bid": 15.1, "ask": 15.3, "mid": 15.2},
+        {"bid": 7.3, "ask": 7.5, "mid": 7.4},
+        {"bid": 2.5, "ask": 2.6, "mid": 2.55},
+    ]
+    for leg in legs:
+        leg.update(provider="schwab", source_at=(now - timedelta(seconds=1)).isoformat())
+    assert conservative_butterfly_bbo(*legs, now=now)["bid"] == pytest.approx(2.6)
+    assert conservative_butterfly_bbo(*legs, now=now)["ask"] == pytest.approx(3.3)
+    assert conservative_butterfly_bbo(
+        *({"mid": leg["mid"], "provider": "schwab", "source_at": leg["source_at"]} for leg in legs),
+        now=now,
+    )["status"] == "unavailable"
+
+
+def test_frozen_pin_cases_migrate_on_aug5_and_rank_7710_on_aug6() -> None:
+    aug5 = assess_regime(_frozen_pin_facts("2026-08-05"))
+    aug6 = assess_regime(_frozen_pin_facts("2026-08-06"))
+    assert aug5["terminal_state"] == "PIN_MIGRATING"
+    assert aug6["terminal_state"] == "PIN_STABLE"
+    assert [row["center"] for row in aug6["pin"]["top_centers"]][:1] == [7710.0]
+
+
+def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    decision = build_strategy_decision(_pin_payload(now), _pin_state(now), now)
+    assert decision["decision_type"] == "CALL_BUTTERFLY"
+    assert decision["candidate"]["center"] == 7710.0
+    assert decision["candidate"]["width"] == 10.0
+    assert decision["execution"]["limit"] == pytest.approx(3.3)
+    assert decision["automatic_ordering"] is False
 
 
 def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
@@ -342,6 +400,87 @@ def _gth_candidate(now: datetime, path_kind: str) -> dict[str, object]:
             },
         },
     }
+
+
+def _frozen_pin_facts(day: str) -> dict[str, object]:
+    aug6 = day == "2026-08-06"
+    return {
+        "quality": {"status": "ready"},
+        "event": {"state": "normal"},
+        "minutes_to_close": 60,
+        "path": {
+            "direction_score": 0.0, "efficiency_ratio_30m": 0.1429 if aug6 else 0.2432,
+            "vwap_crosses_30m": 3.0, "breadth_above_vwap": 0.5, "vwap_slope": 0.0,
+            "price_vs_vwap": "above",
+            "pin_path_spx": (
+                [7710.75, 7709.62, 7712.71, 7718.41, 7715.24, 7709.41, 7712.85,
+                 7712.70, 7712.85, 7713.11, 7712.75]
+                if aug6 else [7741.36, 7742.71, 7741.63, 7739.13, 7738.26, 7738.47, 7738.94, 7732.72]
+            ),
+        },
+        "value_center": (
+            {"spx_15m": 7712.56, "spx_30m": 7712.69, "spx_60m": 7714.18}
+            if aug6 else {"spx_15m": 7736.65, "spx_30m": 7737.36, "spx_60m": 7738.68}
+        ),
+        "volatility": {"vix_return_15m_pct": -0.005 if aug6 else 0.004,
+                       "atm_straddle_decay_15m": 0.0448 if aug6 else -0.0123},
+        "structure": {
+            "q_mode": 7710.0 if aug6 else 7730.0,
+            "q_local_mass_5pt": (
+                {"7700": 0.0766, "7705": 0.1100, "7710": 0.3033, "7715": 0.05,
+                 "7720": 0.1483, "7725": 0.1053}
+                if aug6 else {"7725": 0.05, "7730": 0.521, "7735": 0.224, "7740": 0.17}
+            ),
+            "zero_gamma": 7709.0 if aug6 else 7740.0,
+            "flip_zone": [7705.0, 7710.0] if aug6 else [7735.0, 7740.0],
+            "put_wall": 7700.0 if aug6 else 7720.0,
+            "call_wall": 7720.0 if aug6 else 7760.0,
+        },
+    }
+
+
+def _pin_payload(now: datetime) -> dict[str, object]:
+    observed = (now - timedelta(seconds=1)).isoformat()
+    facts = _frozen_pin_facts("2026-08-06")
+    return {
+        "trading_date": "2026-08-06", "pricing_allowed": True,
+        "underlier": {"price": 7712.94, "source": "index:SPX"},
+        "minute_market_frame": {
+            "as_of": observed, "quality": "ready", "es": {
+                "price": 7739.5, "vwap": 7739.25, "trend_efficiency_30m": 0.1429,
+                "vwap_slope_15m_points": 0.0,
+                "pin_path_1m": [value + 26.56 for value in facts["path"]["pin_path_spx"]],
+            },
+            "volume": {"value_centers_es": {"15m": 7739.12, "30m": 7739.25, "60m": 7740.74}},
+            "volatility": {"vix_return_15m_pct": -0.005},
+            "diagnostics": {"rth_market_state": {"D": 0.0, "input_lineage": {
+                "values": {"efficiency_ratio": 0.1429, "vwap_cross_count": 3,
+                           "price_vs_vwap": "above", "breadth_above_vwap": 0.5},
+                "diagnostics": {"moving_averages": {"atr_5m": 4.6}},
+            }}},
+        },
+        "option_structure_frame": {
+            "as_of": observed, "quality": "ready", "front_expiry": "20260806",
+            "l1": {"quality": "ready"}, "structure": facts["structure"],
+            "density": {"mode": 7710.0, "local_mass_5pt": facts["structure"]["q_local_mass_5pt"]},
+            "volatility": {"atm_straddle_decay_15m": 0.0448},
+        },
+        "macro_event": {"mode": "normal", "entry_allowed": True}, "candidates": [],
+    }
+
+
+def _pin_state(now: datetime) -> LatestState:
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.option("SPX", expiry="20260806", strike=strike,
+                                           right="C", trading_class="SPXW"),
+            provider=Provider.SCHWAB, received_at=now - timedelta(seconds=1),
+            quote_time=now - timedelta(seconds=1), quality=MarketDataQuality.LIVE,
+            bid=bid, ask=ask,
+        )
+        for strike, bid, ask in ((7700, 15.1, 15.3), (7710, 7.3, 7.5), (7720, 2.5, 2.6))
+    )
+    return LatestState(created_at=now, as_of=now - timedelta(seconds=1), quotes=quotes, best_quotes=quotes)
 
 
 def _opportunity(opportunity_id: str, pnl: tuple[float, float, float, float]) -> dict:

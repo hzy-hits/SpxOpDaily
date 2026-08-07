@@ -370,6 +370,8 @@ def option_volatility_features(
     if front is None:
         return {
             "atm_iv_0dte": None,
+            "atm_straddle_mid": None,
+            "atm_straddle_decay_15m": None,
             "atm_iv_1dte": None,
             "put_skew_25d_0dte": None,
             "call_skew_25d_0dte": None,
@@ -383,8 +385,10 @@ def option_volatility_features(
             "term_gap": None,
         }
     current_iv = front.atm_iv
+    current_straddle = getattr(front, "atm_straddle_mid", None)
     result = {
         "atm_iv_0dte": current_iv,
+        "atm_straddle_mid": current_straddle,
         "atm_iv_1dte": next_expiry.atm_iv if next_expiry else None,
         "put_skew_25d_0dte": front.put_skew_25d,
         "call_skew_25d_0dte": front.call_skew_25d,
@@ -396,6 +400,14 @@ def option_volatility_features(
         ),
         "term_gap": _difference(current_iv, next_expiry.atm_iv if next_expiry else None),
     }
+    prior_straddle = _history_value(
+        history, now=now, minutes=15, section="volatility", key="atm_straddle_mid"
+    )
+    result["atm_straddle_decay_15m"] = (
+        (prior_straddle - current_straddle) / prior_straddle
+        if prior_straddle and current_straddle is not None
+        else None
+    )
     for minutes in (5, 15, 60):
         prior = _history_value(
             history,

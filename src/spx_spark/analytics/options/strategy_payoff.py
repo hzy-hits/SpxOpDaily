@@ -11,41 +11,51 @@ def conservative_vertical_bbo(
     long_leg: Mapping[str, Any], short_leg: Mapping[str, Any], *, now: datetime,
     max_quote_age_seconds: float = 15.0, max_source_skew_seconds: float = 2.0,
 ) -> dict[str, Any]:
-    long_bid, long_ask = _nonnegative(long_leg.get("bid")), _positive(long_leg.get("ask"))
-    short_bid, short_ask = _nonnegative(short_leg.get("bid")), _positive(short_leg.get("ask"))
-    long_at, short_at = _time(long_leg.get("source_at")), _time(short_leg.get("source_at"))
-    provider, reasons = str(long_leg.get("provider") or ""), []
-    if not provider or provider != str(short_leg.get("provider") or ""):
-        reasons.append("spread_leg_provider_mismatch")
-    if None in (long_bid, long_ask, short_bid, short_ask):
-        reasons.append("spread_leg_nbbo_invalid")
-    if long_at is None or short_at is None:
-        reasons.append("spread_leg_source_time_missing")
+    return _combo_bbo((long_leg, short_leg), (1, -1), now, max_quote_age_seconds,
+                      max_source_skew_seconds, "spread_leg", "vertical")
+
+
+def conservative_butterfly_bbo(
+    lower: Mapping[str, Any], body: Mapping[str, Any], upper: Mapping[str, Any], *, now: datetime,
+    max_quote_age_seconds: float = 15.0, max_source_skew_seconds: float = 2.0,
+) -> dict[str, Any]:
+    return _combo_bbo((lower, body, upper), (1, -2, 1), now, max_quote_age_seconds,
+                      max_source_skew_seconds, "butterfly_leg", "butterfly")
+
+
+def _combo_bbo(
+    legs: tuple[Mapping[str, Any], ...], quantities: tuple[int, ...], now: datetime,
+    max_age: float, max_skew: float, prefix: str, name: str,
+) -> dict[str, Any]:
+    bids, asks = [_nonnegative(leg.get("bid")) for leg in legs], [_positive(leg.get("ask")) for leg in legs]
+    times, providers, reasons = [_time(leg.get("source_at")) for leg in legs], {str(leg.get("provider") or "") for leg in legs}, []
+    if len(providers) != 1 or "" in providers:
+        reasons.append(f"{prefix}_provider_mismatch")
+    if any(value is None for value in (*bids, *asks)):
+        reasons.append(f"{prefix}_nbbo_invalid")
+    if any(value is None for value in times):
+        reasons.append(f"{prefix}_source_time_missing")
     else:
-        now_utc = _utc(now)
-        ages = ((now_utc - long_at).total_seconds(), (now_utc - short_at).total_seconds())
+        observed = [value for value in times if value]
+        ages = [(_utc(now) - value).total_seconds() for value in observed]
         if any(age < 0 for age in ages):
-            reasons.append("spread_leg_quote_from_future")
-        if any(age > max_quote_age_seconds for age in ages):
-            reasons.append("spread_leg_quote_stale")
-        if abs((long_at - short_at).total_seconds()) > max_source_skew_seconds:
-            reasons.append("spread_leg_time_skew_exceeded")
+            reasons.append(f"{prefix}_quote_from_future")
+        if any(age > max_age for age in ages):
+            reasons.append(f"{prefix}_quote_stale")
+        if (max(observed) - min(observed)).total_seconds() > max_skew:
+            reasons.append(f"{prefix}_time_skew_exceeded")
     if reasons:
-        return {"status": "unavailable", "reasons": list(dict.fromkeys(reasons))}
-    assert None not in (long_bid, long_ask, short_bid, short_ask, long_at, short_at)
-    net_ask, net_bid = float(long_ask) - float(short_bid), max(float(long_bid) - float(short_ask), 0.0)
+        return {"status": "unavailable", "reasons": reasons}
+    net_ask = sum(q * float(ask if q > 0 else bid) for q, bid, ask in zip(quantities, bids, asks))
+    net_bid = max(sum(q * float(bid if q > 0 else ask) for q, bid, ask in zip(quantities, bids, asks)), 0.0)
     if net_ask <= 0 or net_bid > net_ask:
-        return {"status": "unavailable", "reasons": ["synthetic_vertical_bbo_invalid"]}
-    assert long_at is not None and short_at is not None
-    return {
-        "status": "ready", "bid": round(net_bid, 4), "ask": round(net_ask, 4),
-        "provider": provider, "long_source_at": long_at.isoformat(),
-        "short_source_at": short_at.isoformat(),
-        "source_skew_seconds": round(abs((long_at - short_at).total_seconds()), 3),
-        "max_quote_age_seconds": round(max((_utc(now) - long_at).total_seconds(),
-                                           (_utc(now) - short_at).total_seconds()), 3),
-        "reasons": [],
-    }
+        return {"status": "unavailable", "reasons": [f"synthetic_{name}_bbo_invalid"]}
+    observed = [value for value in times if value]
+    return {"status": "ready", "bid": round(net_bid, 4), "ask": round(net_ask, 4),
+            "provider": next(iter(providers)), "source_times": [value.isoformat() for value in observed],
+            "source_skew_seconds": round((max(observed) - min(observed)).total_seconds(), 3),
+            "max_quote_age_seconds": round(max((_utc(now) - value).total_seconds() for value in observed), 3),
+            "reasons": []}
 
 
 def vertical_economics(
@@ -75,6 +85,19 @@ def vertical_payoff(
     else:
         raise ValueError("right must be C or P")
     return intrinsic - net_debit
+
+
+def butterfly_economics(*, center: float, width: float, net_debit: float) -> dict[str, float]:
+    if width <= 0 or not 0 < net_debit < width:
+        raise ValueError("butterfly debit must be positive and below wing width")
+    return {"width_points": width, "max_loss_points": net_debit,
+            "max_gain_points": width - net_debit, "breakeven_low": center - width + net_debit,
+            "breakeven_high": center + width - net_debit,
+            "debit_fraction_of_width": net_debit / width}
+
+
+def butterfly_payoff(settlement: float, *, center: float, width: float, net_debit: float) -> float:
+    return max(width - abs(settlement - center), 0.0) - net_debit
 
 
 def vertical_entry_quality(

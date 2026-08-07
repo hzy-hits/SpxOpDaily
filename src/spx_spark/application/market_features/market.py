@@ -291,6 +291,11 @@ def build_minute_market_frame(
         baselines=volume_baselines or {},
         required_sessions=policy.volume_baseline_sessions,
     )
+    pin_buckets = {
+        int(point[0].timestamp() // 60): round(point[1], 2)
+        for point in es_points
+        if point[0] >= now - timedelta(minutes=60)
+    }
     ranges = {
         "overnight": _range_payload(overnight_points, price),
         "asia": _segment_range(session_samples, "asia", price),
@@ -323,7 +328,9 @@ def build_minute_market_frame(
         else None,
         "distance_from_low_points": price - low if price is not None and low is not None else None,
         "trend_efficiency_60m": trend_efficiency(es_points, now=now, minutes=60),
+        "trend_efficiency_30m": trend_efficiency(es_points, now=now, minutes=30),
         "trend_efficiency_180m": trend_efficiency(es_points, now=now, minutes=180),
+        "pin_path_1m": list(pin_buckets.values()),
         **swing_structure(es_points, now=now),
         "overnight_range_points": overnight_range,
         "overnight_expected_move_used": expected_move_used,
@@ -477,6 +484,10 @@ def volume_features(
         "pace_baseline_sample_count": len(history_values),
         "pace_baseline_ready": len(history_values) >= required_sessions,
         "session_vwap": vwap,
+        "value_centers_es": {
+            f"{minutes}m": _volume_weighted_price(_window_points(points, now=now, minutes=minutes))
+            for minutes in (15, 30, 60)
+        },
         "overnight_vwap": overnight_vwap,
         "vwap_slope_15m_points": (
             recent_vwap - earlier_vwap

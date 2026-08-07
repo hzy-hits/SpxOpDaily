@@ -23,6 +23,7 @@ def build_market_fact_pack(
     opening, averages = _map(diagnostics.get("opening_range")), _map(diagnostics.get("moving_averages"))
     structure, density = _map(option.get("structure")), _map(option.get("density"))
     volatility, cross = _map(option.get("volatility")), _map(market.get("cross_asset"))
+    market_volatility, volume = _map(market.get("volatility")), _map(market.get("volume"))
     macro = _map(payload.get("macro_event"))
     trigger, gth = _map(payload.get("level_decision")), _map(payload.get("gth_level_manual_candidate"))
     trading_date = str(payload.get("trading_date") or "")
@@ -58,7 +59,7 @@ def build_market_fact_pack(
         "path": {
             "market_state": rth.get("market_state") or rth.get("state"),
             "direction_score": _number(rth.get("D")),
-            "efficiency_ratio_30m": _first(values.get("efficiency_ratio"), es.get("trend_efficiency_60m")),
+            "efficiency_ratio_30m": _first(values.get("efficiency_ratio"), es.get("trend_efficiency_30m")),
             "vwap_crosses_30m": _number(values.get("vwap_cross_count")),
             "price_vs_vwap": values.get("price_vs_vwap"),
             "vwap_slope": _first(values.get("vwap_slope"), es.get("vwap_slope_15m_points")),
@@ -70,9 +71,17 @@ def build_market_fact_pack(
             "impulse_15m_points": _number(es.get("return_15m_points")),
             "return_60m_points": _number(es.get("return_60m_points")),
             "atr_5m": _number(averages.get("atr_5m")),
+            "pin_path_spx": [
+                float(value) - basis for value in es.get("pin_path_1m") or ()
+                if isinstance(value, int | float) and basis is not None
+            ],
         },
-        "value_center": {"es_vwap": es_vwap,
-                         "spx_equivalent": es_vwap - basis if es_vwap is not None and basis is not None else None},
+        "value_center": {
+            "es_vwap": es_vwap, "spx_equivalent": es_vwap - basis if es_vwap is not None and basis is not None else None,
+            **{f"spx_{window}": float(value) - basis
+               for window, value in _map(volume.get("value_centers_es")).items()
+               if isinstance(value, int | float) and basis is not None},
+        },
         "cross_section": {
             "returns": dict(_map(cross.get("returns"))),
             "es_spy_confirmation": cross.get("es_spy_direction_confirmation_15m"),
@@ -85,6 +94,8 @@ def build_market_fact_pack(
             "atm_iv_change_15m": _number(volatility.get("atm_iv_change_15m")),
             "expected_move_points": _first(volatility.get("expected_move_points_0dte"),
                                             payload.get("expected_move_points")),
+            "vix_return_15m_pct": _number(market_volatility.get("vix_return_15m_pct")),
+            "atm_straddle_decay_15m": _number(volatility.get("atm_straddle_decay_15m")),
         },
         "structure": {
             "zero_gamma": _first(structure.get("zero_gamma"), payload.get("zero_gamma")),
@@ -92,8 +103,11 @@ def build_market_fact_pack(
             "put_wall": _number(structure.get("put_wall")),
             "call_wall": _number(structure.get("call_wall")),
             "q_median": _number(density.get("median")),
+            "q_mode": _number(density.get("mode")),
+            "q_local_mass_5pt": dict(_map(density.get("local_mass_5pt"))),
             "q_clipped_mass_fraction": _number(density.get("clipped_mass_fraction")),
             "gex_quality": structure.get("gex_quality"),
+            "zero_gamma_migration_points": _number(structure.get("zero_gamma_migration_points")),
         },
         "event": {"state": macro.get("mode") or "unavailable",
                   "entry_allowed": macro.get("entry_allowed") is True,

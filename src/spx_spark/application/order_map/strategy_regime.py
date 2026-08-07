@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -27,6 +28,7 @@ class StrategyPolicy:
     max_stop_atr: float = 1.0
     late_chase_distance_atr: float = 1.0
     late_chase_impulse_atr: float = 1.0
+    pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
 
     def entry_quality_kwargs(self) -> dict[str, float]:
         names = (
@@ -82,13 +84,72 @@ def assess_regime(
         "pre_event": "SCHEDULED_EVENT_RISK", "post_event": "POST_EVENT_DISCOVERY",
         "normal": "NORMAL",
     }.get(str(event.get("state") or "unavailable"), "UNCERTAIN")
+    pin = _pin_assessment(facts, policy)
     return {
         "schema_version": "regime_assessment.v1", "policy_version": policy.policy_version,
-        "path_state": state, "path_direction": direction, "terminal_state": "UNCERTAIN",
+        "path_state": state, "path_direction": direction, "terminal_state": pin["terminal_state"],
         "event_state": event_state, "entry_state": "INSUFFICIENT_DATA",
         "confidence": round(sum(value is not None for value in inputs) / 5, 2),
-        "reasons": reasons, "contradictions": contradictions,
+        "reasons": reasons, "contradictions": contradictions, "pin": pin,
     }
+
+
+def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[str, Any]:
+    path, vc, structure = _map(facts.get("path")), _map(facts.get("value_center")), _map(facts.get("structure"))
+    vol, mass = _map(facts.get("volatility")), _map(structure.get("q_local_mass_5pt"))
+    er, vc15, vc30, vc60 = (_number(path.get("efficiency_ratio_30m")), *(_number(vc.get(f"spx_{w}")) for w in ("15m", "30m", "60m")))
+    q_mode, decay = _number(structure.get("q_mode")), _number(vol.get("atm_straddle_decay_15m"))
+    closes = [float(value) for value in path.get("pin_path_spx") or () if isinstance(value, int | float)]
+    required = (er, vc15, vc30, vc60, q_mode, decay)
+    if None in required or len(closes) < 4 or not mass:
+        return {"terminal_state": "UNCERTAIN", "reason": "pin_inputs_unavailable", "top_centers": []}
+    centers = [float(key) for key in mass if str(key).replace(".", "", 1).isdigit()]
+    returns = {center: _excursion_returns(closes, center) for center in centers}
+    drift30, drift60 = float(vc15) - float(vc30), float(vc15) - float(vc60)
+    extreme = abs(closes[-1] - closes[-4]) >= 5 and closes[-1] in {min(closes[-4:]), max(closes[-4:])}
+    breadth = _number(path.get("breadth_above_vwap"))
+    vix = _number(vol.get("vix_return_15m_pct")) or 0.0
+    depin = min(1.0, 0.25 * max(abs(drift30) / 5, abs(drift60) / 8)
+                + 0.20 * min(float(er) / 0.4, 1) + 0.20 * (abs(float(breadth) - 0.5) * 2 if breadth is not None else 0)
+                + 0.15 * min(max(vix, 0) / 0.01, 1) + 0.10 * extreme
+                + 0.10 * min(max(-float(decay), 0) / 0.05, 1))
+    refs = [_number(structure.get(key)) for key in ("zero_gamma", "put_wall", "call_wall")]
+    flip = structure.get("flip_zone")
+    if isinstance(flip, (list, tuple)) and len(flip) >= 2:
+        refs.append(sum(map(float, flip[:2])) / 2)
+    gamma = min((value for value in refs if value is not None), key=lambda value: abs(value - float(q_mode)), default=None)
+    max_mass = max(float(value) for value in mass.values()) or 1.0
+    ranked = sorted(({
+        "center": center,
+        "score": round(0.25 * math.exp(-min((abs(center - value) for value in refs if value is not None), default=30) / 5)
+                       + 0.25 * (0.5 * math.exp(-abs(center - float(vc30)) / 5) + 0.5 * math.exp(-abs(center - float(vc60)) / 7.5))
+                       + 0.20 * float(mass[f"{center:g}"]) / max_mass
+                       + 0.15 * (0, 0.4, 0.7, 1)[min(returns[center], 3)] + 0.10 * (float(decay) > 0)
+                       - 0.25 * min(max(abs(drift30) / 5, abs(drift60) / 8), 1) - 0.20 * depin, 4),
+        "excursion_returns": returns[center],
+    } for center in centers), key=lambda row: row["score"], reverse=True)
+    er_max, drift30_max, drift60_max, migrate30, migrate60, stable_risk, block_risk = policy.pin_thresholds
+    migrating = abs(drift30) > migrate30 or abs(drift60) > migrate60 or float(er) > 0.40 or extreme
+    aligned = gamma is not None and max(float(q_mode), float(vc30), gamma) - min(float(q_mode), float(vc30), gamma) <= 5
+    stable = (facts.get("minutes_to_close") is not None and int(facts["minutes_to_close"]) <= 210
+              and float(er) < er_max and abs(drift30) <= drift30_max and abs(drift60) <= drift60_max
+              and max(returns.values(), default=0) >= 2 and vix <= 0.01 and not extreme and aligned
+              and float(decay) > 0 and depin < stable_risk)
+    terminal = "PIN_MIGRATING" if migrating or depin >= block_risk else "PIN_STABLE" if stable else "NONE"
+    return {"terminal_state": terminal, "depin_risk": round(depin, 4), "drift_30m": round(drift30, 2),
+            "drift_60m": round(drift60, 2), "recent_extreme_acceptance": extreme,
+            "top_centers": ranked[:3]}
+
+
+def _excursion_returns(values: list[float], center: float) -> int:
+    away, count = False, 0
+    for value in values:
+        if abs(value - center) >= 5:
+            away = True
+        elif away and abs(value - center) <= 2.5:
+            count += 1
+            away = False
+    return count
 
 
 def _map(value: object) -> Mapping[str, Any]:
