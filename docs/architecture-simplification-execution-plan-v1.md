@@ -615,3 +615,4 @@ def maintenance_daily() -> None:
 | 2026-08-07 | S1 | +3 / -0 | production +453 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | 唯一 StrategyDecision/NO_TRADE；未来 frame 拒绝；Rust wire 未污染 |
 | 2026-08-07 | S2 | +2 / -0 | production +794 / -268（S-track 当前 979） | dev +1 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Vertical BBO/payoff/Anti-Chase/replay；18 sessions、12 可比机会；gate collecting，未切 owner |
 | 2026-08-07 | S3 | +0 / -0 | production +233 / -43（S-track 当前 1139） | +0 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Stable Pin/De-pin、Q mode/local mass、三腿 BBO；8/5 与 8/6 frozen cases PASS；未切 owner |
+| 2026-08-07 | S4 | +0 / -0 | production +188 / -133（S-track 当前 1194） | +2 / -0 | +0 / -0 | +0 / -0 | +0 / -0 | Nearest-neighbor P、SciPy 区间、向 Q 收缩、Utility/保守下界；158 tests + import contracts PASS；仍无 fill/完整 path 标签 |

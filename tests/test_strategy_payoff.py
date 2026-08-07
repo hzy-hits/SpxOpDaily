@@ -180,6 +180,12 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
 
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
+    assert decision["probability_evidence"] == {
+        "q": 0.85, "p_empirical": 0.9, "p_interval_low": 0.8,
+        "n_raw": 40, "n_effective": 40.0, "shrinkage_weight": 0.666667,
+        "historical_sessions": ["2026-08-04", "2026-08-05"],
+    }
+    assert decision["candidate"]["utility"]["conservative_lower_bound"] > 0
     assert decision["execution"]["action"] == "MANUAL_LIMIT"
     assert decision["execution"]["limit"] == pytest.approx(3.0)
     assert decision["automatic_ordering"] is False
@@ -195,6 +201,28 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert rejected["decision_type"] == "NO_TRADE"
     assert rejected["regime"]["entry_state"] == "LATE_CHASE"
     assert "direction_valid_but_entry_too_late" in rejected["why_not"]["reasons"]
+
+
+def test_sparse_physical_sample_shrinks_to_q_and_utility_can_still_compete() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    forecast = payload["strategy_distribution_forecast"]
+    forecast["p_event"].update(probability=0.1, interval_low=0.05, n_raw=2, n_effective=0.0)
+    decision = build_strategy_decision(payload, _state(now), now)
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["probability_evidence"]["shrinkage_weight"] == 0.0
+    assert decision["candidate"]["utility"]["event_probability"] == 0.85
+
+
+def test_candidate_fails_closed_when_utility_and_lower_bound_are_not_positive() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    forecast = payload["strategy_distribution_forecast"]
+    forecast["q_event"]["probability"] = 0.2
+    forecast["p_event"].update(probability=0.2, interval_low=0.1)
+    decision = build_strategy_decision(payload, _state(now), now)
+    assert decision["decision_type"] == "NO_TRADE"
+    assert "candidate_utility_not_positive" in decision["why_not"]["reasons"]
 
 
 def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cannot() -> None:
@@ -363,6 +391,7 @@ def _decision_payload(now: datetime) -> dict[str, object]:
             "status": "candidate",
             "candidate": {"long": long_leg, "short": short_leg},
         },
+        "strategy_distribution_forecast": _probability_forecast(now, "terminal_above"),
         "candidates": [],
     }
 
@@ -465,7 +494,20 @@ def _pin_payload(now: datetime) -> dict[str, object]:
             "density": {"mode": 7710.0, "local_mass_5pt": facts["structure"]["q_local_mass_5pt"]},
             "volatility": {"atm_straddle_decay_15m": 0.0448},
         },
-        "macro_event": {"mode": "normal", "entry_allowed": True}, "candidates": [],
+        "macro_event": {"mode": "normal", "entry_allowed": True},
+        "strategy_distribution_forecast": _probability_forecast(now, "terminal_between"),
+        "candidates": [],
+    }
+
+
+def _probability_forecast(now: datetime, kind: str) -> dict[str, object]:
+    event = {"kind": kind, "target_at": (now + timedelta(minutes=5)).isoformat()}
+    return {
+        "quality": "degraded", "valid_until": (now + timedelta(minutes=5)).isoformat(),
+        "q_event": {"event": event, "probability": 0.85},
+        "p_event": {"event": event, "probability": 0.9, "interval_low": 0.8,
+                    "n_raw": 40, "n_effective": 40.0,
+                    "historical_sessions": ["2026-08-04", "2026-08-05"]},
     }
 
 

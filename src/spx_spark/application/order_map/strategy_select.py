@@ -42,7 +42,10 @@ def build_strategy_decision(
                 payload, facts, regime, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
             )
     if candidate:
-        return _candidate_decision(facts, {**regime, "entry_state": "GOOD_LOCATION"}, candidate)
+        candidate, utility_reasons = _utility_gate(candidate, facts, regime)
+        if candidate:
+            return _candidate_decision(facts, {**regime, "entry_state": "GOOD_LOCATION"}, candidate)
+        reasons.extend(utility_reasons)
     if "direction_valid_but_entry_too_late" in reasons:
         regime = {**regime, "entry_state": "LATE_CHASE"}
     return _no_trade_decision(facts, regime, reasons)
@@ -106,12 +109,8 @@ def _gate_reasons(facts: Mapping[str, Any], regime: Mapping[str, Any]) -> list[s
 
 
 def _select_vertical(
-    payload: Mapping[str, Any],
-    facts: Mapping[str, Any],
-    regime: Mapping[str, Any],
-    *,
-    now: datetime,
-    policy: StrategyPolicy,
+    payload: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any], *,
+    now: datetime, policy: StrategyPolicy,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         evidence, reasons = _rth_evidence(payload, facts, regime)
@@ -123,13 +122,9 @@ def _select_vertical(
         return None, reasons
 
     long, short = _map(evidence.get("long")), _map(evidence.get("short"))
-    bbo = conservative_vertical_bbo(
-        long,
-        short,
-        now=now,
+    bbo = conservative_vertical_bbo(long, short, now=now,
         max_quote_age_seconds=policy.quote_max_age_seconds,
-        max_source_skew_seconds=policy.quote_max_skew_seconds,
-    )
+        max_source_skew_seconds=policy.quote_max_skew_seconds)
     if bbo.get("status") != "ready":
         reasons = list(map(str, bbo.get("reasons") or ()))
         if "spread_leg_quote_stale" in reasons:
@@ -141,32 +136,20 @@ def _select_vertical(
     if None in strikes or right not in {"C", "P"}:
         return None, ["vertical_contract_geometry_unavailable"]
     try:
-        economics = vertical_economics(
-            long_strike=float(strikes[0]),
-            short_strike=float(strikes[1]),
-            net_debit=float(bbo["ask"]),
-            right=right,
-        )
+        economics = vertical_economics(long_strike=float(strikes[0]),
+            short_strike=float(strikes[1]), net_debit=float(bbo["ask"]), right=right)
     except ValueError:
         return None, ["vertical_contract_geometry_invalid"]
 
     path, spot = _map(facts.get("path")), _number(_map(facts.get("spot")).get("spx"))
-    geometry = (
-        spot,
-        _number(path.get("atr_5m")),
-        _number(evidence.get("target_spx")),
-        _number(evidence.get("invalidation_spx")),
-    )
+    geometry = (spot, _number(path.get("atr_5m")), _number(evidence.get("target_spx")),
+                _number(evidence.get("invalidation_spx")))
     if None in geometry:
         return None, ["entry_quality_atr_or_geometry_unavailable"]
     entry_quality, reasons = vertical_entry_quality(
-        spot=float(geometry[0]),
-        atr=float(geometry[1]),
-        target=float(geometry[2]),
-        stop=float(geometry[3]),
-        trigger=_number(evidence.get("trigger_level")),
-        direction=str(evidence["direction"]),
-        setup_kind=str(evidence["setup_kind"]),
+        spot=float(geometry[0]), atr=float(geometry[1]), target=float(geometry[2]),
+        stop=float(geometry[3]), trigger=_number(evidence.get("trigger_level")),
+        direction=str(evidence["direction"]), setup_kind=str(evidence["setup_kind"]),
         distance_to_vwap_points=_number(path.get("distance_to_vwap_points")),
         impulse_15m_points=_number(path.get("impulse_15m_points")),
         debit_fraction=float(economics["debit_fraction_of_width"]),
@@ -178,39 +161,26 @@ def _select_vertical(
     quote_times = [_time(leg.get("source_at")) for leg in (long, short)]
     if any(item is None for item in quote_times):
         return None, ["spread_leg_source_time_missing"]
-    quote_valid = min(item for item in quote_times if item) + timedelta(
-        seconds=policy.quote_max_age_seconds
-    )
+    quote_valid = min(item for item in quote_times if item) + timedelta(seconds=policy.quote_max_age_seconds)
     opportunity_valid = now + timedelta(seconds=policy.opportunity_ttl_seconds)
     if source_valid := _time(evidence.get("valid_until")):
         opportunity_valid = min(opportunity_valid, source_valid)
     if opportunity_valid <= now:
         return None, ["source_opportunity_expired"]
 
-    identity = {
-        "session_date": facts.get("session_date"),
-        "setup_kind": evidence["setup_kind"],
-        "direction": evidence["direction"],
-        "trigger_level": evidence.get("trigger_level"),
-        "long_contract_id": long.get("contract_id"),
-        "short_contract_id": short.get("contract_id"),
-    }
+    identity = {"session_date": facts.get("session_date"), "setup_kind": evidence["setup_kind"],
+                "direction": evidence["direction"], "trigger_level": evidence.get("trigger_level"),
+                "long_contract_id": long.get("contract_id"), "short_contract_id": short.get("contract_id")}
     return {
         "strategy_type": f"{'CALL' if right == 'C' else 'PUT'}_DEBIT_VERTICAL",
         **{key: evidence.get(key) for key in (
             "setup_kind", "direction", "trigger_level", "target_spx",
             "invalidation_spx", "source",
         )},
-        "right": right,
-        "opportunity_id": f"strategy-opportunity:{_hash(identity)[:24]}",
-        "long": dict(long),
-        "short": dict(short),
-        "quote": bbo,
-        "economics": economics,
-        "entry_quality": entry_quality,
-        "quote_valid_until": quote_valid.isoformat(),
-        "opportunity_valid_until": opportunity_valid.isoformat(),
-        "automatic_ordering": False,
+        "right": right, "opportunity_id": f"strategy-opportunity:{_hash(identity)[:24]}",
+        "long": dict(long), "short": dict(short), "quote": bbo, "economics": economics,
+        "entry_quality": entry_quality, "quote_valid_until": quote_valid.isoformat(),
+        "opportunity_valid_until": opportunity_valid.isoformat(), "automatic_ordering": False,
         "manual_action_only": True,
     }, []
 
@@ -236,14 +206,10 @@ def _rth_evidence(
     if target is None or stop is None:
         return None, ["vertical_target_or_invalidation_unavailable"]
     return {
-        "setup_kind": setup,
-        "direction": direction,
-        "trigger_level": _number(trigger.get("level")),
-        "target_spx": target,
-        "invalidation_spx": stop,
-        "long": _map(spread.get("long")),
-        "short": _map(spread.get("short")),
-        "source": source,
+        "setup_kind": setup, "direction": direction,
+        "trigger_level": _number(trigger.get("level")), "target_spx": target,
+        "invalidation_spx": stop, "long": _map(spread.get("long")),
+        "short": _map(spread.get("short")), "source": source,
     }, []
 
 
@@ -265,10 +231,8 @@ def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
         token in path_kind for token in ("rejection", "reclaim", "dip")
     ) else "TREND_PULLBACK"
     return {
-        "setup_kind": setup,
-        "direction": direction,
-        "trigger_level": _number(evidence.get("trigger_level")),
-        "target_spx": target,
+        "setup_kind": setup, "direction": direction,
+        "trigger_level": _number(evidence.get("trigger_level")), "target_spx": target,
         "invalidation_spx": stop,
         "long": _gth_leg(snapshot.get("long"), evidence.get("long_contract_id")),
         "short": _gth_leg(snapshot.get("short"), evidence.get("short_contract_id")),
@@ -305,8 +269,59 @@ def _base_decision(facts: Mapping[str, Any], regime: Mapping[str, Any], identity
         "session_date": facts.get("session_date"),
         "market_facts": facts,
         "regime": regime,
-        "legacy_reference": _legacy(facts),
+        "probability_evidence": _probability_evidence(facts),
         "automatic_ordering": False,
+    }
+
+
+def _utility_gate(
+    candidate: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any]
+) -> tuple[dict[str, Any] | None, list[str]]:
+    evidence = _probability_evidence(facts)
+    event = _map(_map(facts.get("probability")).get("event"))
+    expected_kind = {
+        "UP": "terminal_above", "DOWN": "terminal_below", "NEUTRAL": "terminal_between"
+    }.get(str(candidate.get("direction")))
+    if event.get("kind") != expected_kind:
+        return None, ["candidate_probability_event_mismatch"]
+    q, p, low = (_number(evidence.get(key)) for key in ("q", "p_empirical", "p_interval_low"))
+    if q is None or p is None or low is None:
+        return None, ["candidate_probability_unavailable"]
+    weight = float(evidence["shrinkage_weight"])
+    probability, conservative = (weight * value + (1.0 - weight) * q for value in (p, low))
+    economics, quote = _map(candidate.get("economics")), _map(candidate.get("quote"))
+    gain, loss = (_number(economics.get(key)) for key in ("max_gain_points", "max_loss_points"))
+    if gain is None or loss is None or gain <= 0.0 or loss <= 0.0:
+        return None, ["candidate_payoff_unavailable"]
+    expected = probability * gain - (1.0 - probability) * loss
+    lower_bound = conservative * gain - (1.0 - conservative) * loss
+    friction = min(abs(float(quote.get("ask", 0.0)) - float(quote.get("bid", 0.0))) / loss, 1.0)
+    uncertainty, migration = 1.0 - weight, float(_map(regime.get("pin")).get("depin_risk") or 0.0)
+    utility = expected / loss - 0.75 - 0.25 * friction - 0.25 * uncertainty - 0.5 * migration
+    scoring = {
+        "event_probability": round(probability, 6), "conservative_probability": round(conservative, 6),
+        "expected_net_pnl": round(expected * 100.0, 2), "conservative_lower_bound": round(lower_bound * 100.0, 2),
+        "p10_net_pnl": round(-loss * 100.0, 2),
+        "p50_net_pnl": round((gain if probability >= 0.5 else -loss) * 100.0, 2),
+        "p90_net_pnl": round((gain if probability >= 0.1 else -loss) * 100.0, 2),
+        "expected_shortfall_10": round(loss * 100.0, 2), "utility": round(utility, 6),
+        "liquidity_penalty": round(friction, 6), "model_uncertainty": round(uncertainty, 6),
+        "method": "binary_payoff_bootstrap_bound.v1",
+    }
+    if utility <= 0.0 or lower_bound <= 0.0:
+        return None, ["candidate_utility_not_positive"]
+    return {**candidate, "probability_evidence": evidence, "utility": scoring}, []
+
+
+def _probability_evidence(facts: Mapping[str, Any]) -> dict[str, Any]:
+    probability = _map(facts.get("probability"))
+    effective = max(_number(probability.get("n_effective")) or 0.0, 0.0)
+    return {
+        "q": _number(probability.get("q")), "p_empirical": _number(probability.get("p_empirical")),
+        "p_interval_low": _number(probability.get("p_interval_low")),
+        "n_raw": int(_number(probability.get("n_raw")) or 0), "n_effective": round(effective, 6),
+        "shrinkage_weight": round(effective / (effective + 20.0), 6),
+        "historical_sessions": list(probability.get("historical_sessions") or ()),
     }
 
 
@@ -343,14 +358,13 @@ def _no_trade_decision(
 ) -> dict[str, Any]:
     reasons = list(dict.fromkeys(reasons or ["no_supported_strategy_candidate"]))
     result = _base_decision(facts, regime, (facts["decision_at"], facts["available_at"], regime, reasons))
-    legacy = result["legacy_reference"]
     refresh = "刷新 SPXW 两腿双边报价后重新计算" if "quote_refresh_required" in reasons else "等待价格触发、结构赔率和执行价格同时通过"
     result.update({
         "decision_type": "NO_TRADE",
         "candidate": None,
         "desk_view": {"state": regime["path_state"], "direction": regime.get("path_direction"),
                       "conclusion": "NO TRADE", "reason": reasons[0]},
-        "why_not": {"nearest_candidate": legacy["nearest_candidate"], "reasons": reasons,
+        "why_not": {"nearest_candidate": None, "reasons": reasons,
                     "reauthorize_on": refresh},
         "execution": {"action": "WAIT", "order_type": None, "limit": None,
                       "automatic_ordering": False, "manual_action_only": True},
@@ -360,11 +374,6 @@ def _no_trade_decision(
         "action_authority": "none",
     })
     return result
-
-
-def _legacy(facts: Mapping[str, Any]) -> dict[str, Any]:
-    rows = [row for row in facts.get("legacy_candidates") or () if isinstance(row, Mapping)]
-    return {"candidate_count": len(rows), "nearest_candidate": str(rows[0].get("play") or "") if rows else None}
 
 
 def _gth_leg(value: object, contract_id: object) -> dict[str, Any]:

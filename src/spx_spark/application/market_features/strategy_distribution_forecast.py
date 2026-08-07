@@ -1,10 +1,4 @@
-"""Production writer for the advisory strategy-distribution forecast artifact.
-
-This first lane is intentionally conservative.  It compares one directional
-terminal event under a short-horizon ATM N(d2) risk-neutral proxy and a causal
-prior-day Beta physical baseline.  It has no actual-fill, net-PnL, candidate,
-or order authority and therefore always emits a formal ``NO_TRADE`` decision.
-"""
+"""Causal Q/P advisory artifact; candidate authority remains in the selector."""
 
 from __future__ import annotations
 
@@ -60,8 +54,8 @@ from spx_spark.state_io import (
 from spx_spark.storage import LatestState
 
 
-MODEL_VERSION = "strategy_distribution_atm_nd2_beta_baseline.v1"
-FEATURE_SET_VERSION = "action_spx_option_frame_level_direction.v1"
+MODEL_VERSION = "strategy_distribution_q_nearest_neighbor.v2"
+FEATURE_SET_VERSION = "action_spx_option_frame_level_neighbours.v2"
 POLICY_VERSION = "formal_no_trade_proxy_only.v1"
 Q_METHOD_VERSION = "risk_neutral_atm_nd2_short_horizon_proxy.v1"
 LATEST_FILENAME = "strategy_distribution_forecast.json"
@@ -218,6 +212,7 @@ def build_strategy_distribution_forecast(
             trading_date=trading_date,
             direction=direction,
             thesis=_thesis(raw_level_decision),
+            level_kind=str(raw_level_decision.get("level_kind") or "unknown"),
             settings=settings,
             estimator=physical_estimator,
         )
@@ -479,6 +474,7 @@ def _physical_estimate(
     trading_date: date,
     direction: str,
     thesis: str | None,
+    level_kind: str,
     settings: StrategyDistributionSettings,
     estimator: PhysicalEstimator,
 ) -> PhysicalFollowThroughEstimate:
@@ -487,6 +483,7 @@ def _physical_estimate(
         trading_date,
         direction,
         thesis,
+        level_kind,
         settings.horizon_seconds,
         settings.window_days,
         settings.minimum_physical_samples,
@@ -512,6 +509,7 @@ def _physical_estimate(
         prior_beta=settings.beta_prior_beta,
         direction=direction,
         thesis=thesis,
+        level_kind=level_kind,
     )
     if type(estimate) is not PhysicalFollowThroughEstimate:
         raise ValueError("physical estimator must return PhysicalFollowThroughEstimate")
@@ -560,6 +558,8 @@ def _physical_probability(
                 max(estimate.sample_count, 0),
                 max(estimate.session_count, 0),
             ),
+            effective_sample_count=max(estimate.effective_sample_count, 0.0),
+            historical_sessions=estimate.historical_sessions,
         )
     assert probability is not None
     assert interval_low is not None and interval_high is not None
@@ -577,6 +577,8 @@ def _physical_probability(
         interval_low=interval_low,
         interval_high=interval_high,
         trained_through_date=estimate.trained_through_date,
+        effective_sample_count=estimate.effective_sample_count,
+        historical_sessions=estimate.historical_sessions,
     )
 
 
@@ -587,6 +589,8 @@ def _unavailable_probability(
     reasons: tuple[str, ...],
     method_version: str | None = None,
     physical_counts: tuple[int, int] | None = None,
+    effective_sample_count: float | None = None,
+    historical_sessions: tuple[str, ...] = (),
 ) -> ProbabilityEstimate:
     sample_count: int | None = None
     session_count: int | None = None
@@ -602,6 +606,8 @@ def _unavailable_probability(
         reason_codes=tuple(sorted(set(reasons))),
         sample_count=sample_count,
         session_count=session_count,
+        effective_sample_count=(effective_sample_count if measure is ProbabilityMeasure.PHYSICAL else None),
+        historical_sessions=(historical_sessions if measure is ProbabilityMeasure.PHYSICAL else ()),
     )
 
 

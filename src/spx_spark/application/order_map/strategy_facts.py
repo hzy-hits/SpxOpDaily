@@ -22,10 +22,12 @@ def build_market_fact_pack(
     values, diagnostics = _map(rth_lineage.get("values")), _map(rth_lineage.get("diagnostics"))
     opening, averages = _map(diagnostics.get("opening_range")), _map(diagnostics.get("moving_averages"))
     structure, density = _map(option.get("structure")), _map(option.get("density"))
-    volatility, cross = _map(option.get("volatility")), _map(market.get("cross_asset"))
+    volatility = _map(option.get("volatility"))
     market_volatility, volume = _map(market.get("volatility")), _map(market.get("volume"))
     macro = _map(payload.get("macro_event"))
     trigger, gth = _map(payload.get("level_decision")), _map(payload.get("gth_level_manual_candidate"))
+    forecast = _map(payload.get("strategy_distribution_forecast"))
+    q_event, p_event = _map(forecast.get("q_event")), _map(forecast.get("p_event"))
     trading_date = str(payload.get("trading_date") or "")
     spx, es_price = _number(underlier.get("price")), _first(es.get("price"), payload.get("es_last"))
     basis = es_price - spx if es_price is not None and spx is not None else None
@@ -52,7 +54,6 @@ def build_market_fact_pack(
         "decision_at": decision_at.isoformat(),
         "available_at": max(source_times, default=decision_at).isoformat(),
         "session_date": trading_date or None,
-        "session_phase": payload.get("session_phase"),
         "minutes_to_close": _minutes_to_close(trading_date, decision_at),
         "spot": {"spx": spx, "es": es_price, "es_spx_basis": basis,
                  "pricing_source": underlier.get("source")},
@@ -81,11 +82,6 @@ def build_market_fact_pack(
             **{f"spx_{window}": float(value) - basis
                for window, value in _map(volume.get("value_centers_es")).items()
                if isinstance(value, int | float) and basis is not None},
-        },
-        "cross_section": {
-            "returns": dict(_map(cross.get("returns"))),
-            "es_spy_confirmation": cross.get("es_spy_direction_confirmation_15m"),
-            "cancellation_score": None,
         },
         "volatility": {
             "vix": _number(volatility.get("vix")), "vix1d": _number(volatility.get("vix1d")),
@@ -130,14 +126,19 @@ def build_market_fact_pack(
             "valid_until": gth.get("valid_until"), "exit_at": gth.get("exit_at"),
             "exact_spread_snapshot": gth.get("exact_spread_snapshot"),
         },
+        "probability": {
+            "q": q_event.get("probability"), "p_empirical": p_event.get("probability"),
+            "p_interval_low": p_event.get("interval_low"),
+            "n_raw": p_event.get("n_raw") or p_event.get("sample_count") or 0,
+            "n_effective": p_event.get("n_effective") or 0.0,
+            "historical_sessions": list(p_event.get("historical_sessions") or ()),
+            "event": q_event.get("event"), "valid_until": forecast.get("valid_until"),
+            "quality": forecast.get("quality") or "unavailable",
+        },
         "quality": {"status": "ready" if not quality else "degraded", "reasons": quality,
                     "market": market.get("quality") or "unavailable",
                     "options": option.get("quality") or "unavailable",
                     "l1": l1.get("quality") or "unavailable"},
-        "legacy_candidates": [
-            {key: row.get(key) for key in ("play", "level", "contract_id")}
-            for row in payload.get("candidates") or () if isinstance(row, Mapping)
-        ],
     }
 
 

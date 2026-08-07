@@ -199,6 +199,8 @@ class ProbabilityEstimate:
     interval_low: float | None = None
     interval_high: float | None = None
     trained_through_date: date | None = None
+    effective_sample_count: float | None = None
+    historical_sessions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require(type(self.measure) is ProbabilityMeasure, "probability measure must be typed")
@@ -267,6 +269,13 @@ class ProbabilityEstimate:
                 )
         if self.trained_through_date is not None:
             _date(self.trained_through_date, "probability trained_through_date")
+        if self.effective_sample_count is not None:
+            _finite(self.effective_sample_count, "probability effective_sample_count")
+            _require(
+                self.effective_sample_count >= 0.0,
+                "probability effective_sample_count must be non-negative",
+            )
+        _reason_codes(self.historical_sessions, "probability historical_sessions")
 
         if self.measure is ProbabilityMeasure.RISK_NEUTRAL:
             _require(
@@ -276,6 +285,10 @@ class ProbabilityEstimate:
                 and self.interval_high is None
                 and self.trained_through_date is None,
                 "risk-neutral probability cannot claim physical sample evidence",
+            )
+            _require(
+                self.effective_sample_count is None and not self.historical_sessions,
+                "risk-neutral probability cannot claim physical neighbour evidence",
             )
             return
 
@@ -325,6 +338,9 @@ class ProbabilityEstimate:
             "trained_through_date": (
                 self.trained_through_date.isoformat() if self.trained_through_date else None
             ),
+            "n_raw": self.sample_count,
+            "n_effective": self.effective_sample_count,
+            "historical_sessions": list(self.historical_sessions),
         }
 
 

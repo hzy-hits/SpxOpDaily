@@ -79,3 +79,20 @@
 | 2026-08-06 frozen case | PASS（PIN_STABLE；7710 Top 1；三腿 BBO） |
 
 结论：`bootstrap_gate=pass`（工程 bootstrap，不是 edge 证明）。代码可进入 S4；旧 Vertical/GTH green-card 的生产 owner 仍须等合并、周末 cutover 和真实消息验收后才能删除或降级。
+
+## S4 P/Q 与 Utility
+
+- P 使用 `StandardScaler + NearestNeighbors`，只读取当前交易日前已完成的 5 分钟 level outcomes；加权 Beta 区间使用 SciPy。
+- 现有历史标签只包含方向、thesis、level kind 和事件时间，尚不包含完整 path/breadth/IV 场景，也没有 order-at-risk fill；因此模型仍标为 uncalibrated。
+- `w=n_eff/(n_eff+20)`；样本稀疏时输出向 Q 收缩后的概率，不因样本少而伪装成“模型不可用”。
+- 当前 Utility 是保守二元 payoff bound，不是已校准净 PnL 分布；真实 first-touch、结算与双腿退出标签补齐前不得宣称 edge。
+- Candidate 只有在 `Utility > 0` 且 conservative lower bound `> 0` 时保留；否则统一输出 `NO_TRADE`。
+
+自检原始输出：
+
+```text
+sparse {'decision_type': 'CALL_DEBIT_VERTICAL', 'n_raw': 2, 'n_effective': 0.0, 'shrinkage_weight': 0.0, 'historical_sessions': ['2026-08-04', '2026-08-05'], 'event_probability': 0.85}
+negative {'decision_type': 'NO_TRADE', 'n_raw': 40, 'n_effective': 40.0, 'shrinkage_weight': 0.666667, 'why_not': ['candidate_utility_not_positive']}
+158 passed in 3.83s
+Contracts: 2 kept, 0 broken.
+```
