@@ -230,7 +230,7 @@ Development flow:
 cd /home/ubuntu/spx-spark
 cp .env.example .env
 uv sync
-scripts/run-ibkr-verifier.sh
+uv run spx verify ibkr
 ```
 
 The verifier writes JSON snapshots to `logs/`.
@@ -238,8 +238,8 @@ The verifier writes JSON snapshots to `logs/`.
 For a trading-hours entitlement report in the normal Oracle Paper deployment:
 
 ```bash
-IBKR_PORT=4002 scripts/run-ibkr-trading-hours-report.sh --skip-options
-IBKR_PORT=4002 IBKR_MAX_OPTION_LINES=40 scripts/run-ibkr-trading-hours-report.sh --strict
+IBKR_PORT=4002 uv run spx report ibkr-hours --skip-options
+IBKR_PORT=4002 IBKR_MAX_OPTION_LINES=40 uv run spx report ibkr-hours --strict
 ```
 
 The report uses the same market-data-only connection path as the verifier:
@@ -385,7 +385,7 @@ The installer disables the legacy independent
 only for explicit manual compatibility:
 
 ```bash
-scripts/run-post-close-review.sh --date 2026-08-06
+uv run spx job post-close-review --date 2026-08-06
 ```
 
 An hourly `spx-spark-storage-pressure.timer` runs at `:20` and calls the same finalizer with

@@ -204,13 +204,13 @@ are recomputed. Source quote age remains available separately through
 Useful commands:
 
 ```bash
-scripts/run-mock-collector.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
-scripts/run-ibkr-collector.sh --dry-run
-scripts/run-ibkr-collector.sh --force --skip-options
+uv run spx ops mock-collector --underlier 7500 --expiry 20260706 --next-expiry 20260707
+uv run spx ibkr collect --dry-run
+uv run spx ibkr collect --force --skip-options
 scripts/run-hyperliquid-collector.sh --coin 'S&P500-USDC' --json
 scripts/run-hyperliquid-collector.sh --dex xyz --coin xyz:SP500 --json
-scripts/show-latest-state.sh --instrument index:SPX
-scripts/show-latest-state.sh --all-providers
+uv run spx status --instrument index:SPX
+uv run spx status --all-providers
 ```
 
 IBKR collector notes:

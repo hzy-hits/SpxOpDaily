@@ -130,7 +130,7 @@ def run(argv: list[str] | None = None) -> int:
     token_path.chmod(0o600)
     print()
     print(f"Wrote {token_path}")
-    print("Now run: scripts/run-schwab-verifier.sh --skip-chains")
+    print("Now run: uv run spx verify schwab --skip-chains")
     return 0
 
 

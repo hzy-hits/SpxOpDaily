@@ -8,7 +8,7 @@ Type=oneshot
 WorkingDirectory=/home/ubuntu/spx-spark
 EnvironmentFile=-/home/ubuntu/spx-spark/.env
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/ubuntu/spx-spark/scripts/run-ibkr-verifier.sh
+ExecStart=/home/ubuntu/spx-spark/.venv/bin/spx verify ibkr
 
 [Install]
 WantedBy=default.target

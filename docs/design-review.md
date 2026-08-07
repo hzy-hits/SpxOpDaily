@@ -107,7 +107,7 @@ collector 已经能识别 10197。检测到抢占时自动写一个如 30 分钟
 | --- | --- | --- |
 | 流式采集 | `ibkr/stream_collector.py`（新） | 常驻订阅采集器：热区+轮换分组、2s flush、退避重连、冲突探测、runtime mode 复查 |
 | 流式采集 | `config.py` | 新增 `IbkrStreamSettings`（`IBKR_STREAM_*`） |
-| 流式采集 | `pyproject.toml`、`scripts/run-ibkr-stream.sh`、`systemd/spx-spark-ibkr-stream.service` | CLI 入口、运行脚本、systemd 单元 |
+| 流式采集 | `pyproject.toml`、`spx ibkr stream`、`systemd/spx-spark-ibkr-stream.service` | CLI 入口、systemd 单元 |
 | 并发调度 | `service_loop.py` | `run_loop` 线程池化；`submit_due_tasks`/`drain_finished_tasks`；worker 线程跳过 SIGALRM |
 | 文件锁 | `storage.py` | `LatestStateStore.exclusive_lock()`，update 全程持锁 |
 | 测试 | `tests/test_stream_collector.py`（新）、`tests/test_service_loop.py`、`tests/test_storage.py` | 订阅预算/轮换/重规划/退避、并发调度、并发写不丢数据 |
@@ -168,7 +168,7 @@ collector 已经能识别 10197。检测到抢占时自动写一个如 30 分钟
 ## 六、建议的后续优先级
 
 1. ~~策略层 5.1 组修复~~（已完成，见 5.1）。
-2. 流式采集器实盘验收：交易时段跑 `scripts/run-ibkr-stream.sh --force --duration-seconds 300`，确认 flush 事件、期权轮换和 latest state 新鲜度。
+2. 流式采集器实盘验收：交易时段跑 `uv run spx ibkr stream --force --duration-seconds 300`，确认 flush 事件、期权轮换和 latest state 新鲜度。
 3. 24h loop 切换：`SPX_SERVICE_ENABLE_IBKR` 保持 false，改用 `spx-spark-ibkr-stream.service`（避免两条 IBKR 写入路径并存）。
 4. 策略层 5.2–5.4 组（命名勘误、severity 解耦、死配置接线或删除）。
 5. verifier 拆分（contracts/session 与 CLI 解耦）+ 去重样板。

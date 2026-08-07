@@ -24,9 +24,13 @@ def _init() -> None:
 
 
 @app.command()
-def status(all_providers: bool = False) -> None:
+def status(all_providers: bool = False, instrument: str | None = None) -> None:
     """Inspect the normalized latest market-data state."""
-    argv = ["--all-providers"] if all_providers else []
+    argv: list[str] = []
+    if all_providers:
+        argv.append("--all-providers")
+    if instrument:
+        argv.extend(("--instrument", instrument))
     raise typer.Exit(latest_state.run(argv))
 
 

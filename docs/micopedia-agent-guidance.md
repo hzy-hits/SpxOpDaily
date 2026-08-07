@@ -71,7 +71,7 @@ Core fields:
 Build a manual signal:
 
 ```bash
-scripts/run-micopedia-guidance.sh \
+uv run spx report micopedia \
   --underlier 7502 \
   --vix1d 12.5 \
   --gamma-state pin \
@@ -84,7 +84,7 @@ scripts/run-micopedia-guidance.sh \
 Read missing prices from latest state:
 
 ```bash
-scripts/run-micopedia-guidance.sh --from-latest-state --time-phase open --event cpi --json
+uv run spx report micopedia --from-latest-state --time-phase open --event cpi --json
 ```
 
 ## Integration Rules

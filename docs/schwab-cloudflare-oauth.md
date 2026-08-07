@@ -152,7 +152,7 @@ Local checks:
 curl --fail http://127.0.0.1:8183/healthz
 curl --fail http://127.0.0.1:8184/livez
 curl --silent --show-error http://127.0.0.1:8184/healthz
-scripts/run-schwab-oauth.sh status
+uv run spx schwab oauth status
 ```
 
 The callback health endpoint deliberately reveals no token state. The local
@@ -186,7 +186,7 @@ Generate the login URL over SSH:
 
 ```bash
 cd /home/ubuntu/spx-spark
-scripts/run-schwab-oauth.sh authorize
+uv run spx schwab oauth authorize
 ```
 
 Open the printed URL in the local browser and approve access. Schwab redirects
@@ -205,10 +205,10 @@ Sunday.
 Verify without exposing the token:
 
 ```bash
-scripts/run-schwab-oauth.sh status
+uv run spx schwab oauth status
 curl --fail http://127.0.0.1:8184/healthz
-scripts/run-schwab-verifier.sh --skip-chains
-scripts/run-schwab-verifier.sh
+uv run spx verify schwab --skip-chains
+uv run spx verify schwab
 ```
 
 ## Offline acceptance while the app is pending

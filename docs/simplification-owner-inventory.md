@@ -4,7 +4,7 @@
 | `systemd/ibc-watchdog.service` | unit | `scripts/ibc-watchdog.sh` | `ibc-watchdog.timer` | 外部 `ibc-gateway` | 保留 |
 | `systemd/ibc-watchdog.timer` | unit | user systemd timer | `ibc-watchdog.service` | 外部 `ibc-gateway` | 保留 |
 | `systemd/ibgateway-xvfb.service` | unit | IB Gateway binary | user systemd | 外部 `ibc-gateway` | 保留 |
-| `systemd/spx-ibkr-verifier.service` | unit | `scripts/run-ibkr-verifier.sh` | `spx-ibkr-verifier.timer` | `spx-worker` periodic task | P4 |
+| `systemd/spx-ibkr-verifier.service` | unit | direct `spx verify ibkr` | `spx-ibkr-verifier.timer` | `spx-worker` periodic task | P4 |
 | `systemd/spx-ibkr-verifier.timer` | unit | user systemd timer | `spx-ibkr-verifier.service` | `spx-worker` periodic task | P4 |
 | `systemd/spx-spark-24h.service` | unit | `scripts/run-24h-service.sh` / `service_loop.py` | user systemd | 热任务 `spx-core`、慢任务 `spx-worker` | P3-3 |
 | `systemd/spx-spark-backtest-weekly.service` | unit | `scripts/backtest-0dte-levels.py` | `spx-spark-backtest-weekly.timer` | `spx-worker` periodic task | P4 |
@@ -25,7 +25,7 @@
 | `systemd/spx-spark-morning-map.service` | unit | `morning_map` | `spx-spark-morning-map.timer` | `spx-worker` periodic task | P4 |
 | `systemd/spx-spark-morning-map.timer` | unit | user systemd timer | `spx-spark-morning-map.service` | `spx-worker` periodic task | P4 |
 | `systemd/spx-spark-notification-delivery.service` | unit | `notifier.delivery_worker` | user systemd | `spx-worker` Huey consumer | P4-2 |
-| `systemd/spx-spark-order-map-status.service` | unit | `scripts/run-order-map.sh --status` | `spx-spark-order-map-status.timer` | `spx-worker` periodic task | P4 |
+| `systemd/spx-spark-order-map-status.service` | unit | direct `spx job order-map --status` | `spx-spark-order-map-status.timer` | `spx-worker` periodic task | P4 |
 | `systemd/spx-spark-order-map-status.timer` | unit | user systemd timer | `spx-spark-order-map-status.service` | `spx-worker` periodic task | P4 |
 | `systemd/spx-spark-order-map.service` | unit | `order_map` | `spx-spark-order-map.timer` | `spx-worker` periodic task | P4 |
 | `systemd/spx-spark-order-map.timer` | unit | user systemd timer | `spx-spark-order-map.service` | `spx-worker` periodic task | P4 |
@@ -56,7 +56,7 @@
 | `rust/systemd/spx-rust-frame-retention.timer` | unit | host systemd timer | `spx-rust-frame-retention.service` | `spx-worker` retention task | P6 |
 | `rust/systemd/spx-rust-normalized-bridge.service` | unit | `spx-bridge` | host systemd | direct Python ownership | P6 |
 | `rust/systemd/spx-rust-report.service` | unit | `spx-report` | host systemd | `spx-worker` | P6 |
-| `spx-spark-alert-profile` | script | `alert_profile:main` | `scripts/run-alert-profile.sh` | `spx` operator command | P5 |
+| `spx-spark-alert-profile` | retired script | `alert_profile:main` | direct `spx ops alert-profile` | `spx` operator command | P5 |
 | `spx-spark-alert-engine` | script | `alert_engine:main` | service-loop registry | direct `spx-core` call | P3-3 |
 | `spx-spark-provider-failover` | script | `provider_failover_controller:main` | service-loop registry | direct `spx-core` call | P3-3 |
 | `spx-spark-data-platform` | script | `data_platform.cli:main` | human/operator tooling | `spx data` command | P5 |
@@ -65,7 +65,7 @@
 | `spx-spark-greek-shadow` | script | `greek_shadow:main` | service-loop registry | direct `spx-core` call | P3-3 |
 | `spx-spark-ibkr-verifier` | script | `ibkr.verifier:main` | verifier wrapper/unit | `spx-worker` job / `spx status` | P5 |
 | `spx-spark-ibkr-collector` | script | `ibkr.collector:main` | collector wrapper/service-loop | `spx-ibkr` direct call | P3 |
-| `spx-spark-ibkr-stream` | script | `ibkr.stream_collector:main` | `run-ibkr-stream.sh` | `spx-ibkr` service | P5 |
+| `spx-spark-ibkr-stream` | retired script | `ibkr.stream_collector:main` | direct `spx ibkr stream` | `spx-ibkr` service | P5 |
 | `spx-spark-ibkr-farm-probe` | script | `ibkr.farm_health:main` | `ibc-watchdog.sh` | external gateway watchdog | P5 |
 | `spx-spark-ibkr-positions` | script | `ibkr.position_watcher:main` | position wrapper/service-loop | direct `spx-ibkr` call | P3 |
 | `spx-spark-ibkr-trading-hours-report` | script | `ibkr.trading_hours_report:main` | operator wrapper | `spx report` command | P5 |

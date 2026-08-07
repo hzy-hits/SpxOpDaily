@@ -56,6 +56,24 @@ def test_core_runtime_paths_are_typed_and_cli_is_registered(
     assert "run" in result.stdout
 
 
+def test_status_forwards_provider_and_instrument_filters(
+    settings_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        "spx_spark.latest_state.run",
+        lambda argv: captured.append(list(argv)) or 0,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["status", "--all-providers", "--instrument", "index:SPX"],
+    )
+
+    assert result.exit_code == 0
+    assert captured == [["--all-providers", "--instrument", "index:SPX"]]
+
+
 def test_notify_test_queues_one_real_verification_event(
     settings_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

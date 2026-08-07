@@ -50,13 +50,11 @@ def test_installer_enables_weekend_bulk_timer() -> None:
 def test_rth_daily_acceptance_runs_on_new_york_session_clock() -> None:
     service = read("systemd/spx-spark-rth-daily-acceptance.service")
     timer = read("systemd/spx-spark-rth-daily-acceptance.timer")
-    runner = read("scripts/run-rth-daily-acceptance.sh")
     installer = read("scripts/install-spx-spark-services.sh")
 
-    assert "--date auto --strict" in service
+    assert ".venv/bin/spx job rth-daily-acceptance --date auto --strict" in service
     assert "OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York" in timer
     assert "Persistent=true" in timer
-    assert "spx job rth-daily-acceptance" in runner
     assert "disable --now spx-spark-post-close-review.timer" in installer
     assert "enable --now spx-spark-post-close-review.timer" not in installer
     assert "spx-spark-rth-daily-acceptance.timer" in installer
@@ -228,17 +226,15 @@ def test_compaction_runner_has_a_non_blocking_whole_run_lock() -> None:
 
 def test_schwab_oauth_service_is_loopback_only_and_private_by_default() -> None:
     service = read("systemd/spx-spark-schwab-oauth.service")
-    runner = read("scripts/run-schwab-oauth.sh")
     installer = read("scripts/install-schwab-oauth-service.sh")
     env_writer = read("scripts/set-schwab-env.sh")
 
-    assert "scripts/run-schwab-oauth.sh serve" in service
+    assert ".venv/bin/spx schwab oauth serve" in service
     assert "UMask=0077" in service
     assert "NoNewPrivileges=true" in service
     assert "TasksMax=32" in service
     assert "MemoryMax=512M" in service
     assert "LimitCORE=0" in service
-    assert "uv run --frozen" in runner
     assert "spx schwab oauth status" in installer
     assert "enable --now spx-spark-schwab-oauth.service" in installer
     assert "Unsupported Schwab environment key" in env_writer

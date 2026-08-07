@@ -63,10 +63,27 @@ the approved weekend cutover window and preserves a rollback copy outside the
 checkout.
 
 This is explicitly an intermediate P5-2 slice. `settings/loader.py`,
-`runtime_config.py`, `config.py` env helpers and shell wrapper scripts still
+`runtime_config.py`, `config.py` env helpers and three coordination scripts still
 exist; P5-2 is not complete until their surviving consumers move individually
 to the minimal pydantic-settings `AppSettings` and those legacy mechanisms are
 deleted. No new setting may be added to `runtime.toml` in the meantime.
+
+## Thin-wrapper deletion follow-up
+
+Nineteen scripts whose only behavior was `cd` plus one Python/console dispatch
+are deleted. The surviving IBKR, Schwab and scheduled-job systemd units call the
+absolute `/home/ubuntu/spx-spark/.venv/bin/spx` entry directly, so unit startup
+does not depend on an interactive PATH. Operator docs use `uv run spx ...`.
+
+Scripts that still own real coordination are deliberately retained: compaction
+and session finalization hold non-blocking `flock` locks, while weekly
+maintenance applies the threshold/deletion sequence. Those owners leave only
+when their P7/Huey replacement carries the same behavior.
+
+This follow-up deletes 19 files and changes +116/-225 tracked lines
+(production +16/-157). It changes no service/timer count, database, config key,
+dependency or notification owner. Full validation: 2,973 tests passed; Import
+Linter kept 2/2 contracts; Ruff and `git diff --check` passed.
 
 ## Complexity and validation
 

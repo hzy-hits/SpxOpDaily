@@ -51,7 +51,7 @@ one commit and the root CI validates both workspaces. See
 cd /home/ubuntu/spx-spark
 cp .env.example .env
 uv sync
-scripts/run-ibkr-verifier.sh
+uv run spx verify ibkr
 ```
 
 Validate the Rust workspace from the same checkout:
@@ -96,10 +96,10 @@ The runtime mode file is local state under `runtime/`. It lets an agent temporar
 ## IBKR Collector
 
 ```bash
-scripts/run-ibkr-collector.sh --dry-run
-scripts/run-ibkr-collector.sh --skip-options
-scripts/run-ibkr-collector.sh --force --skip-options
-scripts/run-ibkr-collector.sh --force
+uv run spx ibkr collect --dry-run
+uv run spx ibkr collect --skip-options
+uv run spx ibkr collect --force --skip-options
+uv run spx ibkr collect --force
 ```
 
 The collector writes normalized IBKR quotes into the same raw/latest-state path as the mock
@@ -113,16 +113,16 @@ Suggested real-data acceptance sequence:
 scripts/start-ibgateway-xvfb.sh
 scripts/start-ibgateway-vnc.sh
 uv run spx ops runtime-mode ibkr-on --ttl-minutes 120 --reason "manual IBKR data test"
-scripts/run-ibkr-collector.sh --force --skip-options --json
-scripts/show-latest-state.sh --all-providers
-scripts/run-ibkr-collector.sh --force --json
+uv run spx ibkr collect --force --skip-options --json
+uv run spx status --all-providers
+uv run spx ibkr collect --force --json
 ```
 
 Trading-hours entitlement report:
 
 ```bash
-IBKR_PORT=4001 scripts/run-ibkr-trading-hours-report.sh --skip-options
-IBKR_PORT=4001 IBKR_MAX_OPTION_LINES=40 scripts/run-ibkr-trading-hours-report.sh
+IBKR_PORT=4001 uv run spx report ibkr-hours --skip-options
+IBKR_PORT=4001 IBKR_MAX_OPTION_LINES=40 uv run spx report ibkr-hours
 ```
 
 The report writes `logs/ibkr-trading-hours-report-*.json` and classifies each
@@ -156,9 +156,9 @@ reconnects with exponential backoff, backs off politely on a competing session
 MES, and cross-index context remains on Schwab rather than consuming IBKR lines.
 
 ```bash
-scripts/run-ibkr-stream.sh --print-config
-scripts/run-ibkr-stream.sh --force --skip-options --duration-seconds 60
-scripts/run-ibkr-stream.sh --force
+uv run spx ibkr stream --print-config
+uv run spx ibkr stream --force --skip-options --duration-seconds 60
+uv run spx ibkr stream --force
 ```
 
 Run it as a service (keep `SPX_SERVICE_ENABLE_IBKR=false` in the 24h loop so
@@ -199,7 +199,7 @@ correction, for example:
 
 ```bash
 IBKR_VERIFY_INDEXES='SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX@NASDAQ,RUT@RUSSELL,DJX@CBOE,DJU@CBOE' \
-  scripts/run-ibkr-collector.sh --force --skip-options --json
+  uv run spx ibkr collect --force --skip-options --json
 ```
 
 For NDX/RUT/Dow/utilities context, ETF proxies `QQQ/IWM/DIA/XLU` are often
@@ -210,11 +210,11 @@ that layer instead of being silently replaced.
 ## Schwab Verifier
 
 ```bash
-scripts/run-schwab-oauth.sh status
-scripts/run-schwab-oauth.sh authorize
-scripts/run-schwab-verifier.sh --offline
-scripts/run-schwab-verifier.sh --print-config
-scripts/run-schwab-verifier.sh
+uv run spx schwab oauth status
+uv run spx schwab oauth authorize
+uv run spx verify schwab --offline
+uv run spx verify schwab --print-config
+uv run spx verify schwab
 ```
 
 The verifier checks candidate index quotes, ETF/futures quotes, and option chains without
@@ -253,8 +253,8 @@ The dry run scans disk usage and cleanup candidates only. It does not delete fil
 ## Sampling Plan
 
 ```bash
-scripts/run-sampling-plan.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
-scripts/run-sampling-plan.sh --underlier 7500 --mode degraded --summary-json
+uv run spx ops sampling-plan --underlier 7500 --expiry 20260706 --next-expiry 20260707
+uv run spx ops sampling-plan --underlier 7500 --mode degraded --summary-json
 ```
 
 The planner produces the SPXW hot lane and rolling quote groups for collectors. It does not request market data.
@@ -262,11 +262,11 @@ The planner produces the SPXW hot lane and rolling quote groups for collectors. 
 ## Alert Profile
 
 ```bash
-scripts/run-alert-profile.sh
-scripts/run-alert-profile.sh --schedule
-scripts/run-alert-profile.sh --at 2026-07-06T14:30:00
+uv run spx ops alert-profile
+uv run spx ops alert-profile --schedule
+uv run spx ops alert-profile --at 2026-07-06T14:30:00
 scripts/run-alert-engine.sh --at 2026-07-07T03:15:00
-scripts/run-options-map.sh
+uv run spx report options-map
 scripts/run-iv-surface.sh
 scripts/run-24h-service.sh --print-config
 scripts/send-openclaw-test-alert.sh
@@ -324,7 +324,7 @@ scripts/send-openclaw-test-alert.sh
 ALERT_NOTIFY_OPENCLAW_DRY_RUN=false scripts/send-openclaw-test-alert.sh
 ```
 
-`run-options-map.sh` is the current options-intelligence feature layer. It reads
+`spx report options-map` is the current options-intelligence feature layer. It reads
 SPXW option quotes from latest state and computes ATM strike, ATM straddle,
 expected move, IV/skew ratios, Greek coverage, and an open-interest-based GEX
 prototype for zero gamma, put wall, and call wall when OI is available. Without
@@ -389,13 +389,12 @@ DATA_PLATFORM_RAW_DELETE_ENABLED=false
 Operational commands:
 
 ```bash
-scripts/run-data-platform.sh init
-scripts/run-data-platform.sh status
-scripts/run-data-platform.sh replay-spool
+uv run spx data status
+uv run spx data replay-spool
 scripts/run-data-compact.sh --dry-run --limit 1 --json
 scripts/run-data-compact.sh --limit 1 --json
-scripts/run-data-platform.sh query strategy --start 2026-07-10 --limit 100
-scripts/run-data-platform.sh query bias --start 2026-07-10
+uv run spx data query strategy --start 2026-07-10 --limit 100
+uv run spx data query bias --start 2026-07-10
 ```
 
 `replay-spool` only retains transient storage failures and references that may
@@ -414,8 +413,8 @@ failure boundaries, schema evolution, and the production rollout rule.
 Post-close SPX/SPXW review:
 
 ```bash
-scripts/run-post-close-review.sh --date auto
-scripts/run-post-close-review.sh --date 2026-07-06 --json
+uv run spx job post-close-review --date auto
+uv run spx job post-close-review --date 2026-07-06 --json
 ```
 
 The review is designed to run after the US close delay and to be appended by the
@@ -446,9 +445,9 @@ journalctl --user -u spx-spark-24h.service -f
 ## Mock Data Loop
 
 ```bash
-scripts/run-mock-collector.sh --underlier 7500 --expiry 20260706 --next-expiry 20260707
-scripts/show-latest-state.sh --instrument index:SPX
-scripts/show-latest-state.sh --all-providers
+uv run spx ops mock-collector --underlier 7500 --expiry 20260706 --next-expiry 20260707
+uv run spx status --instrument index:SPX
+uv run spx status --all-providers
 ```
 
 The mock collector generates normalized `Quote` rows, writes raw JSONL files under
@@ -462,7 +461,7 @@ scripts/run-hyperliquid-collector.sh --print-config
 scripts/run-hyperliquid-collector.sh --list-coins
 scripts/run-hyperliquid-collector.sh --coin 'S&P500-USDC' --json
 scripts/run-hyperliquid-collector.sh --dex xyz --coin xyz:SP500 --json
-scripts/show-latest-state.sh --all-providers --instrument crypto_perp:xyz:SP500
+uv run spx status --all-providers --instrument crypto_perp:xyz:SP500
 ```
 
 The Hyperliquid collector uses public `POST /info` endpoints and does not need an API key.
@@ -476,8 +475,8 @@ different Hyperliquid crypto/perp asset and must not be mixed with `index:SPX`.
 ## MrMicopedia Guidance
 
 ```bash
-scripts/run-micopedia-guidance.sh --underlier 7502 --vix1d 12.5 --gamma-state pin --event opex,jpm_collar
-scripts/run-micopedia-guidance.sh --from-latest-state --time-phase open --event cpi --json
+uv run spx report micopedia --underlier 7502 --vix1d 12.5 --gamma-state pin --event opex,jpm_collar
+uv run spx report micopedia --from-latest-state --time-phase open --event cpi --json
 ```
 
 This produces an observational `MicopediaSignal`: regime, map focus, trigger
