@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from spx_spark.config import env_bool, env_csv_preserve, env_float, env_int, env_str, load_dotenv
+from spx_spark.config import env_bool, env_csv_preserve, env_float, env_int, env_str
 from spx_spark.settings import settings_csv, settings_value
 
 
@@ -21,7 +21,6 @@ class HyperliquidSettings:
 
     @classmethod
     def from_env(cls) -> "HyperliquidSettings":
-        load_dotenv()
         return cls(
             api_base_url=env_str(
                 "HYPERLIQUID_API_BASE_URL", str(settings_value("hyperliquid.api_base_url"))
@@ -66,7 +65,6 @@ class PolymarketSettings:
 
     @classmethod
     def from_env(cls) -> "PolymarketSettings":
-        load_dotenv()
         return cls(
             gamma_api_base_url=env_str(
                 "POLYMARKET_GAMMA_API_BASE_URL",
@@ -137,7 +135,6 @@ class MaintenanceSettings:
 
     @classmethod
     def from_env(cls) -> "MaintenanceSettings":
-        load_dotenv()
         return cls(
             data_root=env_str(
                 "MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))

@@ -16,7 +16,7 @@ from typing import Any
 
 from openai import OpenAI, OpenAIError
 
-from spx_spark.config import NotificationSettings, env_bool, load_dotenv
+from spx_spark.config import NotificationSettings, env_bool
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.prompts import DESK_STYLE_GUARDRAILS
 from spx_spark.notifier.sinks import run_openclaw_agent
@@ -118,7 +118,6 @@ class LlmWriterSettings:
 
     @classmethod
     def from_env(cls) -> "LlmWriterSettings":
-        load_dotenv()
         return cls(
             enabled=env_bool("SPX_PUSH_LLM_ENABLED", bool(settings_value("push_llm.enabled"))),
             model=os.getenv("SPX_PUSH_LLM_MODEL", str(settings_value("push_llm.model"))).strip(),

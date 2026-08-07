@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from spx_spark.config import NotificationSettings, StorageSettings, load_dotenv
+from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.features.bar_builder import SpxBar
 from spx_spark.greek_reference import (
     load_zero_dte_greeks_snapshots,
@@ -81,7 +81,6 @@ class ReviewCompletenessPolicy:
 
     @classmethod
     def from_env(cls) -> "ReviewCompletenessPolicy":
-        load_dotenv()
         return cls(
             min_index_bucket_ratio=float(
                 os.getenv(

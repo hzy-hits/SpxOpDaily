@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from spx_spark.config import NY_TZ, load_dotenv
+from spx_spark.config import NY_TZ
 from spx_spark.intraday_shock import (
     IntradayShockSettings,
     PriceSample,
@@ -149,7 +149,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    load_dotenv()
     settings = replace(IntradayShockSettings.from_env(), state_path="<replay>")
     samples = paired_samples(iter_lines(args.paths), settings)
     start = parse_at(args.start)

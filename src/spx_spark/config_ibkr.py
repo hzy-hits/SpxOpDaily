@@ -15,7 +15,6 @@ from spx_spark.config import (
     env_int,
     env_str,
     is_time_in_window,
-    load_dotenv,
     next_equity_futures_month,
     parse_hhmm,
 )
@@ -53,7 +52,6 @@ class IbkrSettings:
 
     @classmethod
     def from_env(cls) -> "IbkrSettings":
-        load_dotenv()
         auto_futures_expiry = next_equity_futures_month()
         return cls(
             host=env_str("IBKR_HOST", str(settings_value("ibkr.host"))),
@@ -144,7 +142,6 @@ class IbkrStreamSettings:
 
     @classmethod
     def from_env(cls) -> "IbkrStreamSettings":
-        load_dotenv()
         return cls(
             # Distinct from the snapshot collector's client id so an accidental
             # overlap does not kick the other API session.
@@ -268,7 +265,6 @@ class IbkrPositionSettings:
 
     @classmethod
     def from_env(cls) -> "IbkrPositionSettings":
-        load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
             env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
@@ -322,7 +318,6 @@ class IbkrBrokerSettings:
 
     @classmethod
     def from_env(cls) -> "IbkrBrokerSettings":
-        load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
             env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
@@ -349,7 +344,6 @@ class IbkrBrokerSettings:
 
 
 def ibkr_account_read_enabled() -> bool:
-    load_dotenv()
     return env_bool(
         "IBKR_BROKER_ACCOUNT_READ_ENABLED",
         env_bool(
@@ -360,7 +354,6 @@ def ibkr_account_read_enabled() -> bool:
 
 
 def ibkr_legacy_position_poller_enabled() -> bool:
-    load_dotenv()
     return env_bool(
         "IBKR_LEGACY_POSITION_POLLER_ENABLED",
         env_bool(
@@ -399,7 +392,6 @@ class RuntimePolicySettings:
 
     @classmethod
     def from_env(cls) -> "RuntimePolicySettings":
-        load_dotenv()
         return cls(
             ibkr_schedule_enabled=env_bool(
                 "IBKR_SCHEDULE_ENABLED",

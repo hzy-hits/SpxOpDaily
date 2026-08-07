@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from spx_spark.app_settings import get_settings
-from spx_spark.config import env_bool, env_int, env_str, load_dotenv
+from spx_spark.config import env_bool, env_int, env_str
 from spx_spark.settings import settings_value
 
 
@@ -37,7 +37,6 @@ class DataPlatformSettings:
 
     @classmethod
     def from_env(cls) -> "DataPlatformSettings":
-        load_dotenv()
         data_root = (
             env_str("MARKET_DATA_DATA_ROOT")
             or env_str("MAINTENANCE_DATA_ROOT")

@@ -5,7 +5,7 @@ import os
 from getpass import getpass
 from pathlib import Path
 
-from spx_spark.config import SchwabSettings, load_dotenv
+from spx_spark.config import SchwabSettings
 from spx_spark.schwab.auth_storage import (
     AtomicJsonFile,
     ExclusiveFileLock,
@@ -71,7 +71,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    load_dotenv()
     settings = SchwabSettings.from_env()
     token_path = Path(args.token_path or settings.token_file).expanduser()
     default_callback = (

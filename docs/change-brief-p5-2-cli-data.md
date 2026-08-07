@@ -132,3 +132,20 @@ Ruff, Import Linter 2/2 and `git diff --check` passed.
 - The obsolete per-file `runtime_value()` call-budget test is deleted after
   the helper itself reaches zero call sites; Import Linter remains the active
   architecture boundary.
+
+## Hand-written dotenv loader removal
+
+- User-visible behavior is unchanged on Oracle: systemd remains the sole
+  deployment-environment injector through each unit's existing
+  `EnvironmentFile`; tracked TOML remains the non-secret default owner.
+- Delete `config.load_dotenv` and all calls instead of moving the parser to a
+  second module or adding `python-dotenv`. Direct process-environment overrides
+  already consumed by the surviving settings factories are unchanged.
+- No dependency, config key, service, timer, database, table, queue,
+  persistence owner or notification owner changes.
+- Complexity: production +8/-50 lines (net -42, including the offline replay
+  script); tests +1/-14. The dedicated pytest dotenv-isolation test is removed
+  with the implementation it tested.
+- Validation: 117 focused configuration, Schwab, notification, post-close and
+  data-platform tests passed; Ruff, Import Linter 2/2 and `git diff --check`
+  passed.

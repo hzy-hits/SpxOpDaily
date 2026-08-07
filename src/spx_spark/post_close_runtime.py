@@ -16,7 +16,7 @@ from typing import Any
 from spx_spark.application.order_map.desk_projection_export import (
     rust_report_owner_enabled,
 )
-from spx_spark.config import NotificationSettings, StorageSettings, env_bool, load_dotenv
+from spx_spark.config import NotificationSettings, StorageSettings, env_bool
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.llm_writer import DEFAULT_SYSTEM_PROMPT, generate_push_text
 from spx_spark.notifier.model import CommandRunner, default_runner
@@ -87,7 +87,6 @@ class ReviewLlmSettings:
 
     @classmethod
     def from_env(cls) -> "ReviewLlmSettings":
-        load_dotenv()
         provider = os.getenv(
             "SPX_REVIEW_LLM_PROVIDER", str(settings_value("review.llm_provider"))
         ).strip()

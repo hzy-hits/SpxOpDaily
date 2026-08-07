@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from spx_spark.config import IbkrBrokerSettings, load_dotenv
+from spx_spark.config import IbkrBrokerSettings
 from spx_spark.settings import current_app_settings, load_settings, settings_value
 
 
@@ -13,19 +13,6 @@ def test_app_settings_points_at_test_fixture() -> None:
     path = current_app_settings().defaults_path
     assert path.name == "runtime.defaults.toml"
     assert "tests/fixtures" in str(path).replace("\\", "/")
-
-
-def test_load_dotenv_is_disabled_under_pytest() -> None:
-    assert os.environ.get("SPX_SPARK_DISABLE_DOTENV", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-    }
-    before = dict(os.environ)
-    load_dotenv()  # would otherwise setdefault from workspace .env
-    assert os.environ == before
 
 
 def test_runtime_local_overrides_are_disabled_under_pytest() -> None:

@@ -61,24 +61,6 @@ def env_csv_preserve(name: str, default: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def load_dotenv(path: str = ".env") -> None:
-    """Load a small .env file without requiring python-dotenv."""
-    # Unit tests pin SPX_SPARK_DISABLE_DOTENV so workspace deployment .env
-    # values cannot change Settings.from_env() behavior.
-    disabled = os.getenv("SPX_SPARK_DISABLE_DOTENV", "").strip().lower()
-    if disabled in {"1", "true", "yes", "y", "on"}:
-        return
-    if not os.path.exists(path):
-        return
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, value = stripped.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
 def next_equity_futures_month(today: date | None = None) -> str:
     """Return the next quarterly CME equity futures contract month as YYYYMM."""
     if today is None:
@@ -149,7 +131,6 @@ class SchwabSettings:
 
     @classmethod
     def from_env(cls) -> "SchwabSettings":
-        load_dotenv()
         return cls(
             api_base_url=env_str("SCHWAB_API_BASE_URL", str(settings_value("schwab.api_base_url"))),
             access_token=env_str("SCHWAB_ACCESS_TOKEN"),
@@ -260,7 +241,6 @@ class SchwabStreamSettings:
 
     @classmethod
     def from_env(cls, *, data_root: str | None = None) -> "SchwabStreamSettings":
-        load_dotenv()
         root = data_root or env_str(
             "MARKET_DATA_DATA_ROOT",
             env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
@@ -373,7 +353,6 @@ class StorageSettings:
 
     @classmethod
     def from_env(cls) -> "StorageSettings":
-        load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
             env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
@@ -449,7 +428,6 @@ class IvSurfaceSettings:
 
     @classmethod
     def from_env(cls) -> "IvSurfaceSettings":
-        load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
             env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
@@ -606,7 +584,6 @@ class NotificationSettings:
 
     @classmethod
     def from_env(cls) -> "NotificationSettings":
-        load_dotenv()
         data_root = env_str(
             "MARKET_DATA_DATA_ROOT",
             env_str("MAINTENANCE_DATA_ROOT", str(settings_value("maintenance.data_root"))),
@@ -847,7 +824,6 @@ class SamplingSettings:
 
     @classmethod
     def from_env(cls) -> "SamplingSettings":
-        load_dotenv()
         return cls(
             strike_step=env_int(
                 "SAMPLING_STRIKE_STEP", int(settings_value("sampling.strike_step"))
