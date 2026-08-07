@@ -8,6 +8,7 @@ import pytest
 
 from spx_spark.application.market_features.physical_followthrough import (
     estimate_physical_followthrough,
+    estimate_physical_terminal_range,
 )
 
 
@@ -127,3 +128,44 @@ def test_missing_history_is_an_explicit_unavailable_result(tmp_path: Path) -> No
     assert estimate.status == "unavailable"
     assert estimate.probability is None
     assert estimate.reason_codes == ("physical_outcomes_unavailable",)
+
+
+def test_terminal_range_bootstrap_is_prior_day_and_session_weighted(tmp_path: Path) -> None:
+    for day, terminal in (("2026-08-03", 101.0), ("2026-08-04", 110.0)):
+        path = tmp_path / "spx_standardized_samples" / f"date={day}" / "events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "status": "selected",
+                "minute": f"{day}T14:00:00+00:00",
+                "selected": {"price": 100.0},
+            },
+            {
+                "status": "selected",
+                "minute": f"{day}T14:05:00+00:00",
+                "selected": {"price": terminal},
+            },
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    estimate = estimate_physical_terminal_range(
+        tmp_path,
+        now=NOW,
+        trading_date=date(2026, 8, 5),
+        horizon_seconds=300,
+        window_days=35,
+        minimum_samples=30,
+        prior_alpha=1.0,
+        prior_beta=1.0,
+        current_spot=100.0,
+        lower_level=99.0,
+        upper_level=105.0,
+    )
+
+    assert estimate.status == "insufficient_sample"
+    assert estimate.sample_count == 2
+    assert estimate.success_count == 1
+    assert estimate.session_count == 2
+    assert estimate.effective_sample_count == 2.0
+    assert estimate.probability == pytest.approx(0.5)
+    assert estimate.historical_sessions == ("2026-08-03", "2026-08-04")

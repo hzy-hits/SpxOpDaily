@@ -499,7 +499,13 @@ def build_order_payload_with_retry(
     attach_convexity_idea_radar(payload, now=evaluation_now)
     if state is None:
         raise RuntimeError("order map did not load a latest state")
-    payload["strategy_decision"] = build_strategy_decision(payload, state, evaluation_now)
+    payload["strategy_decision"] = build_strategy_decision(
+        payload,
+        state,
+        evaluation_now,
+        data_root=storage_settings.data_root,
+        probability_settings=app.strategy_distribution,
+    )
     return payload
 
 

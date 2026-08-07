@@ -6,6 +6,7 @@ import json
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
@@ -20,6 +21,7 @@ MODEL_VERSION = "physical_followthrough_nearest_neighbor.v2"
 FEATURE_SET_VERSION = "direction_thesis_level_time_bucket.v2"
 CALIBRATION_VERSION = "uncalibrated_weighted_beta_interval.v2"
 NEW_YORK = ZoneInfo("America/New_York")
+PIN_CLOCK_WINDOW_MINUTES = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +173,153 @@ def estimate_physical_followthrough(
         effective_sample_count=round(effective, 6),
         historical_sessions=sessions,
     )
+
+
+def estimate_physical_terminal_range(
+    features_root: Path,
+    *,
+    now: datetime,
+    trading_date: date,
+    horizon_seconds: int,
+    window_days: int,
+    minimum_samples: int,
+    prior_alpha: float,
+    prior_beta: float,
+    current_spot: float,
+    lower_level: float,
+    upper_level: float,
+) -> PhysicalFollowThroughEstimate:
+    """Estimate a causal same-clock terminal-range probability for a pin candidate.
+
+    Each completed prior session contributes total weight one, so dense intraminute
+    snapshots cannot masquerade as independent market days.
+    """
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("physical terminal-range now must be timezone-aware")
+    if horizon_seconds <= 0 or horizon_seconds % 60:
+        raise ValueError("physical terminal-range horizon must be whole positive minutes")
+    if window_days <= 0 or minimum_samples <= 0:
+        raise ValueError("physical terminal-range settings must be positive")
+    if prior_alpha <= 0 or prior_beta <= 0:
+        raise ValueError("physical terminal-range Beta prior must be positive")
+    if not all(math.isfinite(value) and value > 0 for value in (current_spot, lower_level, upper_level)):
+        raise ValueError("physical terminal-range levels must be finite and positive")
+    if lower_level >= upper_level:
+        raise ValueError("physical terminal-range levels must be ordered")
+
+    local_now = now.astimezone(NEW_YORK)
+    query_minute = local_now.hour * 60 + local_now.minute
+    horizon_minutes = horizon_seconds // 60
+    earliest = trading_date - timedelta(days=window_days)
+    session_rates: list[float] = []
+    raw_samples = raw_successes = 0
+    sessions: list[str] = []
+    root = Path(features_root) / "spx_standardized_samples"
+    for path in sorted(root.glob("date=*/events.jsonl")):
+        partition = _partition_date(path)
+        if partition is None or partition < earliest or partition >= trading_date:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        prices = dict(_load_standardized_session(str(path), stat.st_mtime_ns, stat.st_size))
+        outcomes = []
+        for minute, start in prices.items():
+            if abs(minute - query_minute) > PIN_CLOCK_WINDOW_MINUTES:
+                continue
+            terminal = prices.get(minute + horizon_minutes)
+            if terminal is None:
+                continue
+            projected = current_spot + terminal - start
+            outcomes.append(lower_level < projected < upper_level)
+        if not outcomes:
+            continue
+        raw_samples += len(outcomes)
+        successes = sum(outcomes)
+        raw_successes += successes
+        session_rates.append(successes / len(outcomes))
+        sessions.append(partition.isoformat())
+
+    if not session_rates:
+        return PhysicalFollowThroughEstimate(
+            status="unavailable",
+            probability=None,
+            interval_low=None,
+            interval_high=None,
+            sample_count=0,
+            success_count=0,
+            session_count=0,
+            horizon_seconds=horizon_seconds,
+            trained_through_date=None,
+            cohort="same_clock_terminal_range",
+            reason_codes=("physical_terminal_range_samples_unavailable",),
+        )
+
+    weighted_successes = sum(session_rates)
+    effective = float(len(session_rates))
+    alpha = prior_alpha + weighted_successes
+    beta = prior_beta + effective - weighted_successes
+    probability = alpha / (alpha + beta)
+    interval_low, interval_high = beta_distribution.ppf((0.025, 0.975), alpha, beta)
+    status = "estimated_uncalibrated" if effective >= minimum_samples else "insufficient_sample"
+    reasons = [
+        "not_fill_probability",
+        "physical_terminal_range_same_clock_bootstrap",
+        "research_unvalidated",
+        "session_cluster_weighted",
+    ]
+    if status == "insufficient_sample":
+        reasons.append("physical_sample_below_minimum")
+    return PhysicalFollowThroughEstimate(
+        status=status,
+        probability=round(probability, 6),
+        interval_low=round(float(interval_low), 6),
+        interval_high=round(float(interval_high), 6),
+        sample_count=raw_samples,
+        success_count=raw_successes,
+        session_count=len(sessions),
+        horizon_seconds=horizon_seconds,
+        trained_through_date=max(date.fromisoformat(value) for value in sessions),
+        cohort="same_clock_terminal_range",
+        reason_codes=tuple(sorted(reasons)),
+        effective_sample_count=effective,
+        historical_sessions=tuple(sessions),
+        model_version="physical_terminal_range_bootstrap.v1",
+        feature_set_version="rth_same_clock_return_window.v1",
+        calibration_version="uncalibrated_session_weighted_beta.v1",
+    )
+
+
+@lru_cache(maxsize=64)
+def _load_standardized_session(
+    path_text: str, _mtime_ns: int, _size: int
+) -> tuple[tuple[int, float], ...]:
+    """Return the last eligible SPX observation for each New York minute."""
+
+    prices: dict[int, float] = {}
+    try:
+        lines = Path(path_text).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, Mapping) or row.get("status") != "selected":
+            continue
+        selected = row.get("selected")
+        if not isinstance(selected, Mapping):
+            continue
+        price = _finite(selected.get("price"))
+        minute = _timestamp(row.get("minute"))
+        if price is None or minute is None:
+            continue
+        local = minute.astimezone(NEW_YORK)
+        prices[local.hour * 60 + local.minute] = price
+    return tuple(sorted(prices.items()))
 
 
 def _features(direction: str, thesis: str, level_kind: str, observed_at: datetime) -> list[float]:

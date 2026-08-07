@@ -1,5 +1,7 @@
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from hypothesis import given
@@ -20,6 +22,7 @@ from spx_spark.data_platform.research.strategy_decision_replay import (
     classify_gth_vertical_record,
 )
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
+from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 from spx_spark.storage import LatestState
 
 
@@ -196,11 +199,45 @@ def test_frozen_pin_cases_migrate_on_aug5_and_rank_7710_on_aug6() -> None:
 def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     decision = build_strategy_decision(_pin_payload(now), _pin_state(now), now)
-    assert decision["decision_type"] == "CALL_BUTTERFLY"
+    assert decision["decision_type"] == "CALL_BUTTERFLY", decision["why_not"]
     assert decision["candidate"]["center"] == 7710.0
     assert decision["candidate"]["width"] == 10.0
     assert decision["execution"]["limit"] == pytest.approx(3.3)
     assert decision["automatic_ordering"] is False
+
+
+def test_stable_pin_builds_candidate_specific_terminal_range_probability(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    for offset in range(1, 31):
+        day = (now.date() - timedelta(days=offset)).isoformat()
+        path = tmp_path / "features" / "spx_standardized_samples" / f"date={day}" / "events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {"status": "selected", "minute": f"{day}T19:00:00+00:00", "selected": {"price": 7712.0}},
+            {"status": "selected", "minute": f"{day}T19:05:00+00:00", "selected": {"price": 7712.0}},
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    payload = _pin_payload(now)
+    payload["strategy_distribution_forecast"] = {
+        "quality": "unavailable",
+        "q_event": {"event": None, "probability": None},
+        "p_event": {"event": None, "probability": None},
+    }
+
+    decision = build_strategy_decision(
+        payload,
+        _pin_state(now),
+        now,
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+    )
+
+    assert decision["decision_type"] == "CALL_BUTTERFLY", decision["why_not"]
+    assert decision["probability_evidence"]["method"] == "physical_terminal_range_bootstrap.v1"
+    assert decision["probability_evidence"]["n_effective"] == 30.0
+    assert decision["candidate"]["utility"]["conservative_lower_bound"] > 0
 
 
 def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:

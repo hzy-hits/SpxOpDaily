@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
@@ -21,14 +22,20 @@ from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
     assess_regime,
 )
+from spx_spark.application.market_features.physical_followthrough import (
+    estimate_physical_terminal_range,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import InstrumentId
 from spx_spark.application.market_features.market import quote_source_at
+from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 from spx_spark.storage import LatestState
 
 
 def build_strategy_decision(
-    payload: Mapping[str, Any], latest: LatestState, now: datetime
+    payload: Mapping[str, Any], latest: LatestState, now: datetime, *,
+    data_root: str | Path | None = None,
+    probability_settings: StrategyDistributionSettings | None = None,
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
     regime = assess_regime(facts)
@@ -43,7 +50,14 @@ def build_strategy_decision(
                 policy=DEFAULT_STRATEGY_POLICY
             )
     if candidate:
-        candidate, utility_reasons = _utility_gate(candidate, facts, regime)
+        candidate, utility_reasons = _utility_gate(
+            candidate,
+            facts,
+            regime,
+            data_root=data_root,
+            probability_settings=probability_settings,
+            now=_utc(now),
+        )
         if candidate:
             return _candidate_decision(facts, {**regime, "entry_state": "GOOD_LOCATION"}, candidate)
         reasons.extend(utility_reasons)
@@ -322,13 +336,24 @@ def _base_decision(facts: Mapping[str, Any], regime: Mapping[str, Any], identity
 
 
 def _utility_gate(
-    candidate: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any]
+    candidate: Mapping[str, Any], facts: Mapping[str, Any], regime: Mapping[str, Any], *,
+    data_root: str | Path | None,
+    probability_settings: StrategyDistributionSettings | None,
+    now: datetime,
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    evidence = _probability_evidence(facts)
-    event = _map(_map(facts.get("probability")).get("event"))
     expected_kind = {
         "UP": "terminal_above", "DOWN": "terminal_below", "NEUTRAL": "terminal_between"
     }.get(str(candidate.get("direction")))
+    evidence, event, evidence_reasons = _candidate_probability_evidence(
+        candidate,
+        facts,
+        expected_kind=expected_kind,
+        data_root=data_root,
+        settings=probability_settings,
+        now=now,
+    )
+    if evidence_reasons:
+        return None, evidence_reasons
     if event.get("kind") != expected_kind:
         return None, ["candidate_probability_event_mismatch"]
     q, p, low = (_number(evidence.get(key)) for key in ("q", "p_empirical", "p_interval_low"))
@@ -360,6 +385,108 @@ def _utility_gate(
     return {**candidate, "probability_evidence": evidence, "utility": scoring}, []
 
 
+def _candidate_probability_evidence(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    expected_kind: str | None,
+    data_root: str | Path | None,
+    settings: StrategyDistributionSettings | None,
+    now: datetime,
+) -> tuple[dict[str, Any], Mapping[str, Any], list[str]]:
+    probability = _map(facts.get("probability"))
+    event = _map(probability.get("event"))
+    if event.get("kind") == expected_kind:
+        return _probability_evidence(facts), event, []
+    if expected_kind != "terminal_between":
+        if not event:
+            return {}, {}, ["candidate_probability_unavailable"]
+        return {}, event, ["candidate_probability_event_mismatch"]
+    if data_root is None or settings is None:
+        return {}, {}, ["pin_probability_model_unavailable"]
+
+    economics = _map(candidate.get("economics"))
+    lower = _number(economics.get("breakeven_low"))
+    upper = _number(economics.get("breakeven_high"))
+    spot = _number(_map(facts.get("spot")).get("spx"))
+    q_mass = _terminal_range_q_mass(
+        _map(_map(facts.get("structure")).get("q_local_mass_5pt")),
+        lower,
+        upper,
+    )
+    session_date = _session_date(facts.get("session_date"))
+    if None in (lower, upper, spot, q_mass) or session_date is None:
+        return {}, {}, ["pin_probability_inputs_unavailable"]
+    estimate = estimate_physical_terminal_range(
+        Path(data_root).expanduser() / "features",
+        now=now,
+        trading_date=session_date,
+        horizon_seconds=settings.horizon_seconds,
+        window_days=settings.window_days,
+        minimum_samples=settings.minimum_physical_samples,
+        prior_alpha=settings.beta_prior_alpha,
+        prior_beta=settings.beta_prior_beta,
+        current_spot=float(spot),
+        lower_level=float(lower),
+        upper_level=float(upper),
+    )
+    if estimate.probability is None or estimate.interval_low is None:
+        return {}, {}, ["pin_physical_probability_unavailable"]
+    target_at = now + timedelta(seconds=settings.horizon_seconds)
+    event = {
+        "event_id": f"pin-range:{_hash((session_date.isoformat(), candidate.get('opportunity_id'), round(float(lower), 4), round(float(upper), 4), target_at.isoformat()))[:24]}",
+        "kind": "terminal_between",
+        "target_at": target_at.isoformat(),
+        "lower_level": round(float(lower), 4),
+        "upper_level": round(float(upper), 4),
+    }
+    effective = max(estimate.effective_sample_count, 0.0)
+    return {
+        "q": round(float(q_mass), 6),
+        "p_empirical": estimate.probability,
+        "p_interval_low": estimate.interval_low,
+        "n_raw": estimate.sample_count,
+        "n_effective": round(effective, 6),
+        "shrinkage_weight": round(effective / (effective + 20.0), 6),
+        "historical_sessions": list(estimate.historical_sessions),
+        "method": estimate.model_version,
+    }, event, []
+
+
+def _terminal_range_q_mass(
+    values: Mapping[str, Any], lower: float | None, upper: float | None
+) -> float | None:
+    if lower is None or upper is None or lower >= upper:
+        return None
+    cells = []
+    for key, value in values.items():
+        center, mass = _strike_number(key), _number(value)
+        if center is not None and mass is not None and mass >= 0.0:
+            cells.append((center - 2.5, center + 2.5, mass))
+    if not cells or lower < min(cell[0] for cell in cells) or upper > max(cell[1] for cell in cells):
+        return None
+    probability = sum(
+        mass * max(0.0, min(upper, high) - max(lower, low)) / (high - low)
+        for low, high, mass in cells
+    )
+    return min(max(probability, 0.0), 1.0)
+
+
+def _strike_number(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0.0 else None
+
+
+def _session_date(value: object) -> date | None:
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
 def _probability_evidence(facts: Mapping[str, Any]) -> dict[str, Any]:
     probability = _map(facts.get("probability"))
     effective = max(_number(probability.get("n_effective")) or 0.0, 0.0)
@@ -381,6 +508,7 @@ def _candidate_decision(
     result = _base_decision(facts, regime, (facts["decision_at"], available, candidate["opportunity_id"], candidate["quote"]))
     result.update({
         "available_at": available,
+        "probability_evidence": dict(_map(candidate.get("probability_evidence"))),
         "decision_type": candidate["strategy_type"],
         "candidate": dict(candidate),
         "desk_view": {"state": regime["path_state"], "direction": candidate["direction"],

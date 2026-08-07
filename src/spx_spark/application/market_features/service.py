@@ -580,7 +580,13 @@ def run(
         "strategy_distribution_forecast": strategy_distribution_forecast,
         "candidates": [],
     }
-    strategy_decision = build_strategy_decision(strategy_payload, action_latest, action_now)
+    strategy_decision = build_strategy_decision(
+        strategy_payload,
+        action_latest,
+        action_now,
+        data_root=storage.data_root,
+        probability_settings=app.strategy_distribution,
+    )
     try:
         persisted_decision_id = persist_strategy_decision(
             strategy_decision,
