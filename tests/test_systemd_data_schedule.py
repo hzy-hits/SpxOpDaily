@@ -22,12 +22,10 @@ def test_weekend_bulk_compaction_is_bounded_low_priority_and_persistent() -> Non
     assert "Persistent=true" in timer
 
 
-def test_retention_audits_run_after_market_and_weekly_prune_is_threshold_gated() -> None:
-    daily = read("systemd/spx-spark-maintenance-daily.timer")
+def test_weekly_prune_is_threshold_gated() -> None:
     weekly = read("systemd/spx-spark-maintenance-weekly.timer")
     weekly_script = read("scripts/run-maintenance-weekly.sh")
 
-    assert "OnCalendar=*-*-* 07:30:00 Asia/Shanghai" in daily
     assert "OnCalendar=Sun *-*-* 13:00:00 Asia/Shanghai" in weekly
     # Deletion only fires when the dry-run report crosses the prune watermark;
     # below it the weekly pass stays audit-only.
@@ -69,8 +67,6 @@ def test_rth_daily_acceptance_runs_on_new_york_session_clock() -> None:
 def test_session_finalizer_owns_daily_review_order_on_new_york_clock() -> None:
     service = read("systemd/spx-spark-session-finalize.service")
     timer = read("systemd/spx-spark-session-finalize.timer")
-    pressure_service = read("systemd/spx-spark-storage-pressure.service")
-    pressure_timer = read("systemd/spx-spark-storage-pressure.timer")
     runner = read("scripts/run-session-finalize.sh")
     installer = read("scripts/install-spx-spark-services.sh")
 
@@ -98,36 +94,24 @@ def test_session_finalizer_owns_daily_review_order_on_new_york_clock() -> None:
     assert "python -m spx_spark.session_finalize" in runner
     assert "run-post-close-review.sh" not in runner
 
-    assert "--date auto --json --pressure-check" in pressure_service
-    assert "MemoryMax=" not in pressure_service
-    assert "/srv/data/spx-spark/rust-core-shadow/frames" not in pressure_service
-    assert "OnCalendar=*-*-* *:20:00" in pressure_timer
-    assert "Persistent=true" in pressure_timer
-    assert "AccuracySec=1min" in pressure_timer
-    assert "spx-spark-storage-pressure.service" in pressure_timer
-
     for unit in (
         "spx-spark-session-finalize.service",
         "spx-spark-session-finalize.timer",
-        "spx-spark-storage-pressure.service",
-        "spx-spark-storage-pressure.timer",
     ):
         assert unit in installer
     assert "enable --now spx-spark-session-finalize.timer" in installer
-    assert "enable --now spx-spark-storage-pressure.timer" in installer
     assert "disable --now spx-spark-post-close-review.timer" in installer
 
 
 def test_session_finalize_watermarks_stay_in_typed_config_not_systemd() -> None:
     service = read("systemd/spx-spark-session-finalize.service")
-    pressure_service = read("systemd/spx-spark-storage-pressure.service")
     runner = read("scripts/run-session-finalize.sh")
-    wiring = service + pressure_service + runner
+    wiring = service + runner
 
     assert "30064771072" not in wiring  # 28 GiB action watermark
     assert "25769803776" not in wiring  # 24 GiB warning watermark
     assert "21474836480" not in wiring  # 20 GiB critical/reserve watermark
-    assert "--pressure-check" in pressure_service
+    assert "--pressure-check" not in wiring
 
 
 def test_compactors_cannot_bypass_replay_artifact_deletion_gate() -> None:
@@ -146,6 +130,9 @@ def test_main_installer_refuses_non_master_dirty_or_unpushed_deployments() -> No
     assert "status --porcelain=v1" in installer
     assert '[[ "$DEPLOY_HEAD" != "$DEPLOY_ORIGIN_MASTER" ]]' in installer
     assert "uv sync --frozen" in installer
+    assert installer.index("systemd unit drift") < installer.index(
+        'disable --now "${retired_units[@]}"'
+    )
 
 
 def test_main_installer_owns_the_persistent_order_map_timer() -> None:
@@ -205,6 +192,19 @@ def test_notification_delivery_uses_the_single_huey_worker() -> None:
     assert "alembic upgrade head" in service
     assert "Restart=on-failure" in service
     assert "enable spx-worker.service" in installer
+    for unit in (
+        "spx-spark-notification-delivery.service",
+        "spx-spark-maintenance-daily.service",
+        "spx-spark-maintenance-daily.timer",
+        "spx-spark-storage-pressure.service",
+        "spx-spark-storage-pressure.timer",
+        "spx-spark-schwab-reauth-reminder.service",
+        "spx-spark-schwab-reauth-reminder.timer",
+    ):
+        assert unit in installer
+        assert not (ROOT / "systemd" / unit).exists()
+    assert not (ROOT / "scripts/run-maintenance-daily.sh").exists()
+    assert not (ROOT / "scripts/run-schwab-reauth-reminder.sh").exists()
 
 
 def test_core_publishes_the_surface_projection_for_its_live_api() -> None:
@@ -256,15 +256,10 @@ def test_core_service_is_installed_disabled_until_staging_cutover() -> None:
     assert "restart spx-core.service" not in installer
 
 
-def test_schwab_reauth_reminder_runs_each_sunday_in_beijing() -> None:
-    service = read("systemd/spx-spark-schwab-reauth-reminder.service")
-    timer = read("systemd/spx-spark-schwab-reauth-reminder.timer")
-    runner = read("scripts/run-schwab-reauth-reminder.sh")
+def test_schwab_reauth_reminder_is_owned_only_by_huey() -> None:
     installer = read("scripts/install-schwab-oauth-service.sh")
 
-    assert "scripts/run-schwab-reauth-reminder.sh" in service
-    assert "UMask=0077" in service
-    assert "OnCalendar=Sun *-*-* 20:00:00 Asia/Shanghai" in timer
-    assert "Persistent=true" in timer
-    assert "spx_spark.application.schwab_reauth_reminder" in runner
-    assert "enable --now spx-spark-schwab-reauth-reminder.timer" in installer
+    assert not (ROOT / "systemd/spx-spark-schwab-reauth-reminder.service").exists()
+    assert not (ROOT / "systemd/spx-spark-schwab-reauth-reminder.timer").exists()
+    assert not (ROOT / "scripts/run-schwab-reauth-reminder.sh").exists()
+    assert "spx-spark-schwab-reauth-reminder" not in installer
