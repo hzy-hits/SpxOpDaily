@@ -55,6 +55,7 @@ def test_jobs_use_one_sqlite_queue_and_delegate_to_existing_entries(
 
     assert jobs.huey.storage.filename == str(tmp_path / "huey.sqlite")
     assert calls == [
+        ("maintenance", ["cache-prune", "--execute"]),
         ("maintenance", ["dry-run"]),
         ("storage", ["--date", "auto", "--json", "--pressure-check"]),
         ("reauth", None),
@@ -99,7 +100,6 @@ def test_slow_context_jobs_reuse_existing_entries_and_runtime_flags(
     calls: list[str] = []
     runtime = SimpleNamespace(
         hyperliquid_enabled=True,
-        polymarket_enabled=False,
         greek_shadow_enabled=True,
         iv_surface_enabled=True,
     )
@@ -112,10 +112,6 @@ def test_slow_context_jobs_reuse_existing_entries_and_runtime_flags(
         lambda _argv: calls.append("hyperliquid") or 0,
     )
     monkeypatch.setattr(
-        "spx_spark.polymarket.collector.run",
-        lambda _argv: calls.append("polymarket") or 0,
-    )
-    monkeypatch.setattr(
         "spx_spark.greek_shadow.run",
         lambda _argv: calls.append("greek_shadow") or 0,
     )
@@ -125,7 +121,6 @@ def test_slow_context_jobs_reuse_existing_entries_and_runtime_flags(
     )
 
     jobs.hyperliquid_context.call_local()
-    jobs.polymarket_context.call_local()
     jobs.greek_shadow_context.call_local()
     jobs.iv_surface_context.call_local()
 
@@ -139,7 +134,7 @@ def test_nonzero_existing_entry_fails_the_huey_task(
     jobs = load_jobs(tmp_path, monkeypatch)
     monkeypatch.setattr("spx_spark.maintenance.run", lambda argv: 1)
 
-    with pytest.raises(RuntimeError, match="maintenance daily failed"):
+    with pytest.raises(RuntimeError, match="surface cache maintenance failed"):
         jobs.maintenance_daily.call_local()
 
 

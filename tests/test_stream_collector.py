@@ -1966,7 +1966,7 @@ def test_first_flush_after_reconnect_excludes_pre_disconnect_option_rows(monkeyp
     }
     snapshots: list[object] = []
 
-    def capture_snapshot(snapshot, _storage):
+    def capture_snapshot(snapshot, _storage, **_kwargs):
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
@@ -1993,7 +1993,7 @@ def test_flush_skips_quote_persistence_when_socket_disconnected(monkeypatch) -> 
     def capture_state(state, _storage):
         state_calls.append(state)
 
-    def capture_snapshot(snapshot, _storage):
+    def capture_snapshot(snapshot, _storage, **_kwargs):
         snapshot_calls.append(snapshot)
         return SimpleNamespace(best_quote_count=0)
 
@@ -2007,6 +2007,55 @@ def test_flush_skips_quote_persistence_when_socket_disconnected(monkeypatch) -> 
     assert state_calls[0].status.value == "unavailable"
     assert "disconnected" in (state_calls[0].reason or "").lower()
     assert snapshot_calls == []
+
+
+def test_ibkr_raw_persistence_is_change_only_with_periodic_checkpoint() -> None:
+    from dataclasses import replace
+
+    from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
+    from spx_spark.provider_adapter import ProviderSnapshot
+
+    collector = _flush_test_collector()
+    now = datetime(2026, 7, 11, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        provider_symbol="SPX",
+        mark=6900.0,
+        quote_time=now,
+        source_session="ibkr-stream:1",
+    )
+
+    first = collector._raw_quotes_for_persistence(
+        ProviderSnapshot(provider=Provider.IBKR, received_at=now, quotes=(quote,)),
+        received_at=now,
+    )
+    unchanged = replace(quote, received_at=now.replace(second=2))
+    second = collector._raw_quotes_for_persistence(
+        ProviderSnapshot(provider=Provider.IBKR, received_at=unchanged.received_at, quotes=(unchanged,)),
+        received_at=unchanged.received_at,
+    )
+    changed = replace(unchanged, mark=6901.0, received_at=now.replace(second=4))
+    third = collector._raw_quotes_for_persistence(
+        ProviderSnapshot(provider=Provider.IBKR, received_at=changed.received_at, quotes=(changed,)),
+        received_at=changed.received_at,
+    )
+    checkpoint = replace(changed, received_at=now.replace(minute=1, second=1))
+    fourth = collector._raw_quotes_for_persistence(
+        ProviderSnapshot(
+            provider=Provider.IBKR,
+            received_at=checkpoint.received_at,
+            quotes=(checkpoint,),
+        ),
+        received_at=checkpoint.received_at,
+    )
+
+    assert first == (quote,)
+    assert second == ()
+    assert third == (changed,)
+    assert fourth == (checkpoint,)
 
 
 def test_flush_marks_all_rows_stale_during_tws_connectivity_loss(monkeypatch) -> None:
@@ -2038,7 +2087,7 @@ def test_flush_marks_all_rows_stale_during_tws_connectivity_loss(monkeypatch) ->
     }
     snapshots: list[object] = []
 
-    def capture_snapshot(snapshot, _storage):
+    def capture_snapshot(snapshot, _storage, **_kwargs):
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
@@ -2166,7 +2215,7 @@ def test_flush_stamps_connection_generation_on_quotes(monkeypatch) -> None:
     }
     snapshots: list[object] = []
 
-    def capture_snapshot(snapshot, _storage):
+    def capture_snapshot(snapshot, _storage, **_kwargs):
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
@@ -2346,7 +2395,7 @@ def test_flush_reports_outage_while_farm_not_ready(monkeypatch) -> None:
     }
     snapshots: list[object] = []
 
-    def capture_snapshot(snapshot, _storage):
+    def capture_snapshot(snapshot, _storage, **_kwargs):
         snapshots.append(snapshot)
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
@@ -2399,7 +2448,7 @@ def test_flush_reports_healthy_data_plane_with_fresh_quote_despite_partial_error
         )
     }
 
-    def capture_snapshot(snapshot, _storage):
+    def capture_snapshot(snapshot, _storage, **_kwargs):
         return SimpleNamespace(best_quote_count=len(snapshot.quotes))
 
     patch_stream(monkeypatch, "persist_provider_snapshot", capture_snapshot)

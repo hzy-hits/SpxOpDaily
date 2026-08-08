@@ -105,12 +105,15 @@ class SchwabStreamQuoteAssembler:
                 ):
                     continue
                 key = (service, symbol)
-                merged = dict(self._rows.get(key, {}))
+                previous = self._rows.get(key)
+                merged = dict(previous or {})
                 for field_name, value in item.items():
                     if field_name == "key" or value is None:
                         continue
                     merged[str(field_name)] = value
                 merged["SYMBOL"] = symbol
+                if previous == merged:
+                    continue
                 self._rows[key] = merged
                 self._received_at[key] = observed_at
                 self._dirty.add(key)

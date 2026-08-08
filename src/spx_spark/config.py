@@ -891,5 +891,4 @@ RuntimePolicySettings = _config_ibkr.RuntimePolicySettings
 from spx_spark import config_providers as _config_providers  # noqa: E402
 
 HyperliquidSettings = _config_providers.HyperliquidSettings
-PolymarketSettings = _config_providers.PolymarketSettings
 MaintenanceSettings = _config_providers.MaintenanceSettings

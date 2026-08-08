@@ -35,7 +35,7 @@ L3 analytics       analytics/*（options / greeks）, options_map/*, features,
                    greek_reference, iv_surface, market_context, human_focus,
                    strategy/*, intraday_strategy, steven_validation
 L2 providers       ibkr/*（含 ibkr/stream/*）, schwab/*, hyperliquid/*,
-                   polymarket/*, mock_collector,
+                   mock_collector,
                    provider_failover_controller（temporary）
 L1 infrastructure  config, storage, state_io, sampling, runtime_mode,
                    provider_adapter, provider_failover, position_events
@@ -73,7 +73,7 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 - `ibkr/` — collector / gateway / adapter；流式实现在 `ibkr/stream/*`
   （models / runtime_machine / replan_machine / subscriptions / cache /
   flush / session / supervisor / cli）
-- `schwab/`、`hyperliquid/`、`polymarket/`、`mock_collector`
+- `schwab/`、`hyperliquid/`、`mock_collector`
 - `provider_failover_controller.py` — temporary control-document consumer
 
 ### L3 analytics

@@ -168,6 +168,41 @@ def test_persist_provider_snapshot_writes_raw_and_latest(tmp_path):
     assert state.best_quote("index:SPX").provider == Provider.HYPERLIQUID
 
 
+def test_persist_provider_snapshot_can_write_changed_raw_subset_and_full_latest(tmp_path):
+    settings = make_storage_settings(tmp_path)
+    now = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
+    spx = make_quote(
+        provider=Provider.IBKR,
+        quality=MarketDataQuality.LIVE,
+        mark=7493.5,
+        received_at=now,
+    )
+    es = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.IBKR,
+        received_at=now,
+        quality=MarketDataQuality.LIVE,
+        provider_symbol="ES",
+        mark=7501.0,
+        quote_time=now,
+    )
+    snapshot = ProviderSnapshot(
+        provider=Provider.IBKR,
+        received_at=now,
+        quotes=(spx, es),
+        metadata={"replace_provider_quotes": True},
+    )
+
+    result = persist_provider_snapshot(snapshot, settings, raw_quotes=(spx,))
+    state = LatestStateStore(settings).load(now=now)
+
+    assert sum(result.raw_paths.values()) == 1
+    assert {quote.instrument.canonical_id for quote in state.quotes} == {
+        "index:SPX",
+        "future:ES",
+    }
+
+
 def test_persist_provider_snapshot_can_replace_ibkr_quotes(tmp_path):
     settings = make_storage_settings(tmp_path)
     store = LatestStateStore(settings)

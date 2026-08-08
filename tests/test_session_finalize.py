@@ -391,7 +391,7 @@ def test_pressure_check_never_builds_review_or_notifies(tmp_path: Path, monkeypa
     )
 
     assert result.status == "pressure_checked"
-    assert result.cleanup.status == "pressure_normal"
+    assert result.cleanup.status == "no_verified_sources"
     assert result.artifact is None
     assert result.human_review is None
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from spx_spark.config import env_bool, env_csv_preserve, env_float, env_int, env_str
-from spx_spark.settings import settings_csv, settings_value
+from spx_spark.config import env_bool, env_float, env_int, env_str
+from spx_spark.settings import settings_value
 
 
 @dataclass(frozen=True)
@@ -49,70 +49,6 @@ class HyperliquidSettings:
 
 
 @dataclass(frozen=True)
-class PolymarketSettings:
-    gamma_api_base_url: str
-    request_timeout_seconds: float
-    search_terms: list[str]
-    event_slugs: list[str]
-    market_slugs: list[str]
-    max_results_per_query: int
-    max_markets_per_run: int
-    min_liquidity: float
-    min_volume_24h: float
-    min_relevance_score: float
-    include_closed: bool
-    user_agent: str
-
-    @classmethod
-    def from_env(cls) -> "PolymarketSettings":
-        return cls(
-            gamma_api_base_url=env_str(
-                "POLYMARKET_GAMMA_API_BASE_URL",
-                str(settings_value("polymarket.gamma_api_base_url")),
-            ),
-            request_timeout_seconds=env_float(
-                "POLYMARKET_REQUEST_TIMEOUT_SECONDS",
-                float(settings_value("polymarket.request_timeout_seconds")),
-            ),
-            search_terms=env_csv_preserve(
-                "POLYMARKET_SEARCH_TERMS",
-                settings_csv("polymarket.search_terms"),
-            ),
-            event_slugs=env_csv_preserve(
-                "POLYMARKET_EVENT_SLUGS", settings_csv("polymarket.event_slugs")
-            ),
-            market_slugs=env_csv_preserve(
-                "POLYMARKET_MARKET_SLUGS", settings_csv("polymarket.market_slugs")
-            ),
-            max_results_per_query=env_int(
-                "POLYMARKET_MAX_RESULTS_PER_QUERY",
-                int(settings_value("polymarket.max_results_per_query")),
-            ),
-            max_markets_per_run=env_int(
-                "POLYMARKET_MAX_MARKETS_PER_RUN",
-                int(settings_value("polymarket.max_markets_per_run")),
-            ),
-            min_liquidity=env_float(
-                "POLYMARKET_MIN_LIQUIDITY", float(settings_value("polymarket.min_liquidity"))
-            ),
-            min_volume_24h=env_float(
-                "POLYMARKET_MIN_VOLUME_24H", float(settings_value("polymarket.min_volume_24h"))
-            ),
-            min_relevance_score=env_float(
-                "POLYMARKET_MIN_RELEVANCE_SCORE",
-                float(settings_value("polymarket.min_relevance_score")),
-            ),
-            include_closed=env_bool(
-                "POLYMARKET_INCLUDE_CLOSED", bool(settings_value("polymarket.include_closed"))
-            ),
-            user_agent=env_str(
-                "POLYMARKET_USER_AGENT",
-                str(settings_value("polymarket.user_agent")),
-            ),
-        )
-
-
-@dataclass(frozen=True)
 class MaintenanceSettings:
     data_root: str
     logs_root: str
@@ -132,6 +68,7 @@ class MaintenanceSettings:
     degraded_pct: float
     prune_pct: float
     critical_pct: float
+    surface_cache_retention_days: int = 2
 
     @classmethod
     def from_env(cls) -> "MaintenanceSettings":
@@ -198,5 +135,9 @@ class MaintenanceSettings:
             ),
             critical_pct=env_float(
                 "MAINTENANCE_CRITICAL_PCT", float(settings_value("maintenance.critical_pct"))
+            ),
+            surface_cache_retention_days=env_int(
+                "MAINTENANCE_SURFACE_CACHE_RETENTION_DAYS",
+                int(settings_value("maintenance.surface_cache_retention_days")),
             ),
         )

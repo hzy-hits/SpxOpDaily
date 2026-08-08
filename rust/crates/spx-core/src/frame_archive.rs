@@ -9,8 +9,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use chrono::{DateTime, NaiveDate, Utc};
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
-use spx_domain::{IngressEnvelopeV1, Validate, canonical_json_hash};
+use spx_domain::{IngressEnvelopeV1, Validate};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -141,7 +142,7 @@ struct ValidatedRecords {
 struct RawRecord {
     observed_at: DateTime<Utc>,
     payload_sha256: String,
-    payload: IngressEnvelopeV1,
+    payload: Box<RawValue>,
 }
 
 /// Archives every strict segment from one completed UTC day into one verified,
@@ -676,20 +677,7 @@ fn validate_records<R: Read>(
                 ),
             ));
         }
-        record.payload.validate().map_err(|error| {
-            invalid_record(
-                source_name,
-                record_count,
-                format!("invalid ingress payload: {error}"),
-            )
-        })?;
-        let payload_sha256 = canonical_json_hash(&record.payload).map_err(|error| {
-            invalid_record(
-                source_name,
-                record_count,
-                format!("payload hash failed: {error}"),
-            )
-        })?;
+        let payload_sha256 = hex::encode(Sha256::digest(record.payload.get().as_bytes()));
         if payload_sha256 != record.payload_sha256 {
             return Err(invalid_record(
                 source_name,
@@ -697,6 +685,21 @@ fn validate_records<R: Read>(
                 "payload canonical SHA-256 mismatch",
             ));
         }
+        let payload: IngressEnvelopeV1 =
+            serde_json::from_str(record.payload.get()).map_err(|error| {
+                invalid_record(
+                    source_name,
+                    record_count,
+                    format!("invalid ingress payload JSON: {error}"),
+                )
+            })?;
+        payload.validate().map_err(|error| {
+            invalid_record(
+                source_name,
+                record_count,
+                format!("invalid ingress payload: {error}"),
+            )
+        })?;
         digest.update(&line);
         if let Some(writer) = sink.as_deref_mut() {
             writer.write_all(&line)?;
@@ -1056,15 +1059,32 @@ mod tests {
 
     fn record_bytes(observed_at: DateTime<Utc>) -> Vec<u8> {
         let payload = envelope();
-        let payload_sha256 = canonical_json_hash(&payload).expect("payload hash");
-        let mut encoded = serde_json::to_vec(&serde_json::json!({
-            "observed_at": observed_at,
-            "payload_sha256": payload_sha256,
-            "payload": payload,
-        }))
-        .expect("encode raw record");
-        encoded.push(b'\n');
-        encoded
+        let raw_payload = serde_json::to_string(&payload).expect("encode ingress payload");
+        let payload_sha256 = hex::encode(Sha256::digest(raw_payload.as_bytes()));
+        format!(
+            "{{\"observed_at\":{},\"payload_sha256\":{},\"payload\":{raw_payload}}}\n",
+            serde_json::to_string(&observed_at).expect("serialize observed_at"),
+            serde_json::to_string(&payload_sha256).expect("serialize payload hash"),
+        )
+        .into_bytes()
+    }
+
+    fn reordered_record_bytes(observed_at: DateTime<Utc>) -> Vec<u8> {
+        let value = serde_json::to_value(envelope()).expect("serialize ingress envelope");
+        let raw_payload = format!(
+            "{{\"message\":{},\"emitted_at\":{},\"message_id\":{},\"schema_version\":{}}}",
+            serde_json::to_string(&value["message"]).expect("serialize message"),
+            serde_json::to_string(&value["emitted_at"]).expect("serialize emitted_at"),
+            serde_json::to_string(&value["message_id"]).expect("serialize message_id"),
+            serde_json::to_string(&value["schema_version"]).expect("serialize schema_version"),
+        );
+        let payload_sha256 = hex::encode(Sha256::digest(raw_payload.as_bytes()));
+        format!(
+            "{{\"observed_at\":{},\"payload_sha256\":{},\"payload\":{raw_payload}}}\n",
+            serde_json::to_string(&observed_at).expect("serialize observed_at"),
+            serde_json::to_string(&payload_sha256).expect("serialize payload hash"),
+        )
+        .into_bytes()
     }
 
     fn write_segment(raw_log_dir: &Path, utc_date: NaiveDate, index: u32, seconds: u32) -> Vec<u8> {
@@ -1128,6 +1148,30 @@ mod tests {
             subset_verified.status,
             FrameArchiveReportStatus::ExistingVerified
         );
+    }
+
+    #[test]
+    fn archive_hashes_stored_payload_bytes_before_typed_validation() {
+        let temp = TempDir::new().expect("temporary directory");
+        let raw = canonical_subdir(&temp, "frames");
+        let archive = canonical_subdir(&temp, "archive");
+        let date = NaiveDate::from_ymd_opt(2026, 8, 2).expect("date");
+        let observed_at = Utc
+            .with_ymd_and_hms(2026, 8, 2, 1, 2, 3)
+            .single()
+            .expect("valid observation time");
+        let contents = reordered_record_bytes(observed_at);
+        fs::write(raw.join("2026-08-02.0000.ndjson"), &contents)
+            .expect("write reordered raw segment");
+
+        let created = archive_completed_utc_day(&raw, &archive, date, now())
+            .expect("archive historical encoding");
+
+        assert_eq!(created.manifest.total_record_count, 1);
+        let decompressed =
+            zstd::stream::decode_all(File::open(created.archive_path).expect("open archive"))
+                .expect("decompress archive");
+        assert_eq!(decompressed, contents);
     }
 
     #[test]

@@ -11,6 +11,7 @@ from spx_spark.maintenance import (
     execute_prune,
     is_protected_path,
     maybe_send_disk_alert,
+    prune_rebuildable_surface_caches,
     trim_review_audit_file,
 )
 
@@ -115,6 +116,25 @@ def test_prune_execute_deletes_old_logs(tmp_path):
 
     assert result.deleted_files == 1
     assert not old_log.exists()
+
+
+def test_surface_cache_prune_only_deletes_old_rebuildable_json(tmp_path):
+    settings = make_settings(tmp_path)
+    now = datetime(2026, 7, 4, tzinfo=timezone.utc)
+    publish = tmp_path / "data" / "published" / "spxw-surface"
+    old_replay = publish / "replay-cache" / "policy=v3" / "old.json"
+    fresh_session = publish / "session-surface-cache" / "policy=v5" / "fresh.json"
+    old_live = publish / "live" / "policy=live-v2" / "session=2026-07-01" / "old.json"
+    touch_old(old_replay, now=now, days=3)
+    touch_old(fresh_session, now=now, days=1)
+    touch_old(old_live, now=now, days=30)
+
+    result = prune_rebuildable_surface_caches(settings, execute=True, now=now)
+
+    assert result.deleted_files == 1
+    assert old_replay.exists() is False
+    assert fresh_session.exists()
+    assert old_live.exists()
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)

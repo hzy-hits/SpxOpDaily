@@ -260,7 +260,6 @@ direction_confirmation_move_bps = { value = 5, description = "Minimum same-direc
 
 [service_loop]
 hyperliquid_enabled = { value = true, description = "Enables the lightweight overnight SPX proxy context collector." }
-polymarket_enabled = { value = false, description = "Enables event-probability context collection when explicitly requested." }
 ibkr_enabled = { value = false, description = "Enables the snapshot IBKR collector inside the shared loop; the dedicated stream service remains separate." }
 iv_surface_enabled = { value = true, description = "Enables periodic implied-volatility surface snapshots." }
 intraday_shock_enabled = { value = false, description = "Enables the fast intraday shock detector in the shared loop when operationally selected." }
@@ -268,7 +267,6 @@ alerts_enabled = { value = true, description = "Enables the alert engine task in
 realtime_engine_enabled = { value = true, description = "Enables RealtimeEngine tick + SQLite outbox consumer in the 24h loop." }
 realtime_engine_interval_seconds = { value = 15, description = "Cadence for RealtimeEngine tick and outbox drain." }
 hyperliquid_interval_seconds = { value = 30, description = "Cadence for lightweight overnight proxy context collection." }
-polymarket_interval_seconds = { value = 60, description = "Cadence for event-probability context collection." }
 ibkr_interval_seconds = { value = 60, description = "Cadence for the optional IBKR snapshot collector." }
 iv_surface_interval_seconds = { value = 300, description = "Cadence for recalculating and persisting the IV surface." }
 intraday_shock_interval_seconds = { value = 5, description = "Cadence for evaluating fast SPX shock and reclaim conditions." }
@@ -366,20 +364,6 @@ proxy_futures_basis_warn_bps = { value = 80.0, description = "Wider warning thre
 es_carry_annual_rate = { value = 0.035, description = "Annualized futures carry rate (risk-free minus dividend yield) stripped from ES/MES anchors before computing the Hyperliquid proxy basis; the front quarter otherwise books ~75bps of phantom basis." }
 proxy_futures_basis_block_bps = { value = 150.0, description = "Wider block threshold in basis points when the anchor is ES or MES futures." }
 
-[polymarket]
-gamma_api_base_url = { value = "https://gamma-api.polymarket.com", description = "Public Polymarket Gamma API base URL used for research-only context." }
-request_timeout_seconds = { value = 12.0, description = "Network timeout in seconds for Polymarket API requests." }
-search_terms = { value = ["SPY", "Fed decision", "CPI", "FOMC", "Powell", "NFP"], description = "Search terms used to discover macro and SPX-relevant Polymarket markets." }
-event_slugs = { value = [], description = "Explicit Polymarket event slugs to include; empty means discovery only." }
-market_slugs = { value = [], description = "Explicit Polymarket market slugs to include; empty means discovery only." }
-max_results_per_query = { value = 5, description = "Maximum Polymarket search results inspected for each query term." }
-max_markets_per_run = { value = 80, description = "Maximum Polymarket markets retained in one collector run." }
-min_liquidity = { value = 0.0, description = "Minimum market liquidity in USD required for Polymarket context inclusion." }
-min_volume_24h = { value = 0.0, description = "Minimum 24-hour volume in USD required for Polymarket context inclusion." }
-min_relevance_score = { value = 0.35, description = "Minimum heuristic relevance score required for discovered markets." }
-include_closed = { value = false, description = "Includes closed Polymarket markets in research context when enabled." }
-user_agent = { value = "Mozilla/5.0 spx-spark research collector", description = "User-Agent sent to Polymarket public API requests." }
-
 [maintenance]
 data_root = { value = "data", description = "Root directory for market data, latest state, reports, and research artifacts." }
 logs_root = { value = "logs", description = "Root directory for maintenance and service logs." }
@@ -399,6 +383,7 @@ compact_pct = { value = 80.0, description = "Disk budget usage percent where com
 degraded_pct = { value = 85.0, description = "Disk budget usage percent where service state is considered degraded." }
 prune_pct = { value = 90.0, description = "Disk budget usage percent where pruning is allowed by policy." }
 critical_pct = { value = 95.0, description = "Disk budget usage percent where storage pressure is critical." }
+surface_cache_retention_days = { value = 2, description = "Retention for rebuildable SPXW replay and session-surface JSON caches; live causal boundaries are excluded." }
 
 [storage]
 raw_file_name = { value = "quotes.jsonl", description = "File name used for raw normalized quote landing files." }

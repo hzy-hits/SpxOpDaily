@@ -30,7 +30,6 @@ class RuntimeSettingsSlice:
     provider_failover_ibkr_recovery_observations: int = 3
     provider_failover_interval_seconds: int = 15
     hyperliquid_enabled: bool = True
-    polymarket_enabled: bool = False
     ibkr_enabled: bool = False
     iv_surface_enabled: bool = True
     intraday_shock_enabled: bool = False
@@ -38,7 +37,6 @@ class RuntimeSettingsSlice:
     realtime_engine_enabled: bool = True
     realtime_engine_interval_seconds: int = 15
     hyperliquid_interval_seconds: int = 30
-    polymarket_interval_seconds: int = 60
     ibkr_interval_seconds: int = 60
     iv_surface_interval_seconds: int = 300
     intraday_shock_interval_seconds: int = 5

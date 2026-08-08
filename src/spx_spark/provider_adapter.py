@@ -195,8 +195,12 @@ def provider_state_from_quote_health(
 def persist_provider_snapshot(
     snapshot: ProviderSnapshot,
     storage_settings: StorageSettings,
+    *,
+    raw_quotes: Iterable[Quote] | None = None,
 ) -> ProviderSnapshotWriteResult:
-    raw_result = JsonlQuoteWriter(storage_settings).write_quotes(snapshot.quotes)
+    raw_result = JsonlQuoteWriter(storage_settings).write_quotes(
+        snapshot.quotes if raw_quotes is None else raw_quotes
+    )
     replace_providers = (
         (snapshot.provider,) if snapshot.metadata.get("replace_provider_quotes") is True else ()
     )

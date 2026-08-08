@@ -88,6 +88,8 @@ class StreamCollector(
         self.spy_subs: dict[str, tuple[Any, VerifyRow]] = {}
         self.spy_plan_key: tuple[str, int] | None = None
         self.spy_retry_at = 0.0
+        self.raw_quote_fingerprints: dict[str, str] = {}
+        self.last_raw_checkpoint_at = None
         self.option_plan: OptionSubscriptionPlan | None = None
         self.option_replan_controller = OptionReplanController(
             trigger_points=stream_settings.replan_drift_points,

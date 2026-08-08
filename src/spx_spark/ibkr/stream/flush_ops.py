@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 
 from spx_spark.ibkr.farm_health import data_flow_silence_breached
@@ -27,6 +29,15 @@ subscription_outage_reason = stream_deps.subscription_outage_reason
 time = stream_deps.time
 unavailable_state = stream_deps.unavailable_state
 update_option_cache = stream_deps.update_option_cache
+
+RAW_CHECKPOINT_SECONDS = 60.0
+
+
+def _quote_fingerprint(quote: object) -> str:
+    payload = quote.to_dict()
+    payload.pop("received_at", None)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class FlushOps:
@@ -123,7 +134,12 @@ class FlushOps:
             source_session=source_session,
             market_calendar=getattr(self, "market_calendar", DEFAULT_MARKET_CALENDAR),
         )
-        write_result = persist_provider_snapshot(snapshot, self.storage_settings)
+        raw_quotes = self._raw_quotes_for_persistence(snapshot, received_at=received_at)
+        write_result = persist_provider_snapshot(
+            snapshot,
+            self.storage_settings,
+            raw_quotes=raw_quotes,
+        )
         fresh_quote_count = sum(
             1
             for quote in snapshot.quotes
@@ -151,6 +167,7 @@ class FlushOps:
             "task": "ibkr_stream",
             "event": "flush",
             "quotes": snapshot.quote_count,
+            "raw_quotes": len(raw_quotes),
             "best_quotes": write_result.best_quote_count,
             "fresh_quotes": fresh_quote_count,
             "fresh_spxw_quotes": fresh_spxw_quote_count,
@@ -170,6 +187,30 @@ class FlushOps:
             "tws_connectivity_lost": self.tws_connectivity_lost,
             "source_session": source_session,
         }
+
+    def _raw_quotes_for_persistence(self, snapshot, *, received_at: datetime):
+        current = {
+            quote.instrument.canonical_id: _quote_fingerprint(quote)
+            for quote in snapshot.quotes
+        }
+        last_checkpoint = getattr(self, "last_raw_checkpoint_at", None)
+        checkpoint_due = (
+            last_checkpoint is None
+            or (received_at - last_checkpoint).total_seconds() >= RAW_CHECKPOINT_SECONDS
+        )
+        previous = getattr(self, "raw_quote_fingerprints", {})
+        if checkpoint_due:
+            selected = snapshot.quotes
+            self.last_raw_checkpoint_at = received_at
+        else:
+            selected = tuple(
+                quote
+                for quote in snapshot.quotes
+                if previous.get(quote.instrument.canonical_id)
+                != current[quote.instrument.canonical_id]
+            )
+        self.raw_quote_fingerprints = current
+        return selected
 
     def _observe_data_flow(self, now: datetime) -> None:
         """Feed ES liveness into farm health (zombie-session detector).

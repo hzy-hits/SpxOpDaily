@@ -7,7 +7,6 @@ from spx_spark.config import (
     IbkrBrokerSettings,
     IbkrSettings,
     NotificationSettings,
-    PolymarketSettings,
     RuntimePolicySettings,
     StorageSettings,
     SchwabSettings,
@@ -232,22 +231,6 @@ def test_ibkr_default_verifier_uses_minimal_spx_es_universe(monkeypatch, tmp_pat
     assert settings.slow_index_labels == frozenset()
     assert settings.qualify_contracts is True
     assert settings.request_timeout_seconds == 30.0
-
-
-def test_polymarket_settings_defaults_are_research_context(monkeypatch, tmp_path) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("POLYMARKET_SEARCH_TERMS", raising=False)
-    monkeypatch.delenv("POLYMARKET_USER_AGENT", raising=False)
-
-    settings = PolymarketSettings.from_env()
-
-    assert settings.gamma_api_base_url == "https://gamma-api.polymarket.com"
-    assert settings.search_terms == ["SPY", "Fed decision", "CPI", "FOMC", "Powell", "NFP"]
-    assert settings.max_results_per_query == 5
-    assert settings.max_markets_per_run == 80
-    assert settings.min_relevance_score == 0.35
-    assert settings.include_closed is False
-    assert settings.user_agent
 
 
 def test_schwab_cloudflare_gateway_settings(monkeypatch, tmp_path) -> None:

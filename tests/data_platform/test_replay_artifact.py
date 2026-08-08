@@ -216,7 +216,7 @@ def test_same_sources_with_changed_review_bytes_publish_a_new_revision(tmp_path:
     assert (tmp_path / second.manifest_path).is_file()
 
 
-def test_late_source_creates_new_revision_and_old_revision_does_not_authorize_it(
+def test_late_unverified_source_does_not_block_verified_partition_cleanup(
     tmp_path: Path,
 ) -> None:
     write_source(source_path(tmp_path, hour=10), [quote_payload()])
@@ -233,41 +233,37 @@ def test_late_source_creates_new_revision_and_old_revision_does_not_authorize_it
         pressure=low_pressure(),
         grace_hours=24,
     )
-    second_preparation = prepare(tmp_path)
-    second = publish(tmp_path, second_preparation, label="late source included")
     old_manifest = verify_replay_artifact(tmp_path / first.manifest_path, data_root=tmp_path)
-    new_manifest = verify_replay_artifact(tmp_path / second.manifest_path, data_root=tmp_path)
 
     assert blocked.status == "blocked"
-    assert "does not authorize late/current" in blocked.blocked_dates[0][1]
-    assert source_path(tmp_path, hour=10).exists()
-    assert first.revision != second.revision
+    assert "verified compaction manifest is unavailable" in blocked.blocked_dates[0][1]
+    assert source_path(tmp_path, hour=10).exists() is False
+    assert source_path(tmp_path, hour=11).exists()
     assert len(old_manifest.sources) == 1
-    assert len(new_manifest.sources) == 2
 
 
-def test_cleanup_requires_pressure_and_both_24_hour_grace_clocks(tmp_path: Path) -> None:
+def test_cleanup_ignores_pressure_and_requires_24_hour_manifest_age(tmp_path: Path) -> None:
     raw = source_path(tmp_path, hour=10)
     write_source(raw, [quote_payload()])
     preparation = prepare(tmp_path)
     publish(tmp_path, preparation)
 
-    normal = cleanup_authorized_replay_sources(
-        tmp_path,
-        now=NOW + timedelta(hours=30),
-        pressure=normal_pressure(),
-    )
     early = cleanup_authorized_replay_sources(
         tmp_path,
         now=NOW + timedelta(hours=23),
         pressure=low_pressure(),
     )
+    normal = cleanup_authorized_replay_sources(
+        tmp_path,
+        now=NOW + timedelta(hours=30),
+        pressure=normal_pressure(),
+    )
 
-    assert normal.status == "pressure_normal"
-    assert early.status == "blocked"
-    assert "grace_not_elapsed" in early.blocked_dates[0][1]
-    assert raw.exists()
-    assert normal.deleted_files == early.deleted_files == 0
+    assert early.status == "waiting_for_age"
+    assert early.deleted_files == 0
+    assert normal.status == "deleted"
+    assert normal.deleted_files == 1
+    assert raw.exists() is False
 
 
 def test_cleanup_dry_run_then_exact_delete_and_audit_resumes_as_verified(
@@ -303,11 +299,11 @@ def test_cleanup_dry_run_then_exact_delete_and_audit_resumes_as_verified(
     assert deleted.status == "deleted"
     assert deleted.deleted_files == 1
     assert deleted.deleted_bytes == preparation.sources[0].source_size
-    assert after.status == "no_authorized_sources"
+    assert after.status == "no_verified_sources"
     verify_replay_artifact(tmp_path / artifact.manifest_path, data_root=tmp_path)
 
 
-def test_any_artifact_validation_failure_blocks_whole_date_before_unlink(tmp_path: Path) -> None:
+def test_artifact_file_does_not_gate_verified_partition_cleanup(tmp_path: Path) -> None:
     first_raw = source_path(tmp_path, hour=10)
     second_raw = source_path(tmp_path, hour=11)
     write_source(first_raw, [quote_payload()])
@@ -327,10 +323,10 @@ def test_any_artifact_validation_failure_blocks_whole_date_before_unlink(tmp_pat
         pressure=low_pressure(),
     )
 
-    assert cleanup.status == "blocked"
-    assert cleanup.deleted_files == 0
-    assert first_raw.exists()
-    assert second_raw.exists()
+    assert cleanup.status == "deleted"
+    assert cleanup.deleted_files == 2
+    assert first_raw.exists() is False
+    assert second_raw.exists() is False
 
 
 def test_late_append_between_artifact_check_and_delete_is_never_recompacted_or_deleted(
@@ -376,7 +372,7 @@ def test_late_append_between_artifact_check_and_delete_is_never_recompacted_or_d
         pressure=low_pressure(),
     )
 
-    assert cleanup.status == "delete_failed"
+    assert cleanup.status == "blocked"
     assert cleanup.results[0].status == "raw_delete_blocked"
     assert raw.exists()
     assert load_manifest(partition.manifest_path) == original_manifest

@@ -52,6 +52,27 @@ def test_stream_assembler_merges_sparse_equity_deltas() -> None:
     assert assembler.drain_snapshot() is None
 
 
+def test_stream_assembler_ignores_identical_provider_redelivery() -> None:
+    now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
+    assembler = SchwabStreamQuoteAssembler(stale_after_seconds=15.0)
+    message = {
+        "service": "LEVELONE_EQUITIES",
+        "content": [
+            {
+                "key": "$SPX",
+                "BID_PRICE": 7499.5,
+                "ASK_PRICE": 7500.5,
+                "QUOTE_TIME_MILLIS": millis(now),
+            }
+        ],
+    }
+
+    assert assembler.ingest(message, received_at=now) == 1
+    assert assembler.drain_snapshot() is not None
+    assert assembler.ingest(message, received_at=now + timedelta(seconds=1)) == 0
+    assert assembler.drain_snapshot() is None
+
+
 def test_stream_assembler_normalizes_concrete_es_future() -> None:
     now = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
     assembler = SchwabStreamQuoteAssembler(stale_after_seconds=15.0)

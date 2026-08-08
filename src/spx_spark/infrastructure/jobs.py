@@ -42,6 +42,8 @@ def recover_notification_delivery_tasks() -> None:
 def maintenance_daily() -> None:
     from spx_spark.maintenance import run
 
+    if run(["cache-prune", "--execute"]) != 0:
+        raise RuntimeError("surface cache maintenance failed")
     if run(["dry-run"]) != 0:
         raise RuntimeError("maintenance daily failed")
 
@@ -69,15 +71,6 @@ def hyperliquid_context() -> None:
 
     if load_app_settings().runtime.hyperliquid_enabled and collector.run(["--json"]) != 0:
         raise RuntimeError("hyperliquid failed")
-
-
-@huey.periodic_task(crontab(minute="*", strict=True))
-def polymarket_context() -> None:
-    from spx_spark.polymarket import collector
-    from spx_spark.settings import load_app_settings
-
-    if load_app_settings().runtime.polymarket_enabled and collector.run(["--json"]) != 0:
-        raise RuntimeError("polymarket failed")
 
 
 @huey.periodic_task(crontab(minute="*", strict=True))

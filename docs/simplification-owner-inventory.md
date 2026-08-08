@@ -85,7 +85,6 @@
 | `spx-spark-options-map` | script | `options_map:main` | operator wrapper | `spx report` command | P5 |
 | `spx-spark-post-close-review` | script | `post_close_review:main` | review wrapper/unit | `spx-worker` job | P4 |
 | `spx-spark-rth-daily-acceptance` | script | `application.order_map.rth_daily_acceptance:main` | acceptance unit | `spx-worker` job | P4 |
-| `spx-spark-polymarket-collector` | script | `polymarket.collector:main` | service-loop registry | direct `spx-core` call | P3-3 |
 | `spx-spark-runtime-mode` | script | `runtime_mode:main` | operator tooling | `spx ops` command | P5 |
 | `spx-spark-service-loop` | script | `service_loop:main` | `run-24h-service.sh` | direct Core/Worker calls | P3-3 |
 | `spx-spark-es-bar-sampler` | script | `application.runtime.es_bar_sampler:main` | sampler wrapper/unit | `spx-core` TaskGroup | P3-1 |

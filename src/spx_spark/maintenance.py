@@ -352,6 +352,58 @@ def execute_prune(
     )
 
 
+def prune_rebuildable_surface_caches(
+    settings: MaintenanceSettings,
+    *,
+    execute: bool,
+    now: datetime | None = None,
+) -> PruneResult:
+    current = now or datetime.now(tz=timezone.utc)
+    cutoff = current - timedelta(days=settings.surface_cache_retention_days)
+    publish_root = Path(settings.data_root) / "published" / "spxw-surface"
+    roots = [
+        publish_root / "replay-cache",
+        publish_root / "session-surface-cache",
+    ]
+    deleted_paths: list[str] = []
+    deleted_bytes = 0
+    candidates: list[tuple[Path, int]] = []
+    errors: list[str] = []
+    for root in roots:
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for path in root.rglob("*.json"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+                continue
+            modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            if modified_at < cutoff:
+                candidates.append((path, stat.st_size))
+    if execute:
+        for path, size in candidates:
+            try:
+                path.unlink()
+                deleted_paths.append(str(path))
+                deleted_bytes += size
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+    removed_empty_dirs = remove_empty_directories(roots) if execute else 0
+    return PruneResult(
+        created_at=current.isoformat(),
+        executed=execute,
+        deleted_files=len(deleted_paths),
+        deleted_bytes=deleted_bytes,
+        removed_empty_dirs=removed_empty_dirs,
+        skipped_protected=0,
+        errors=errors,
+        deleted_paths=deleted_paths,
+    )
+
+
 def write_prune_result(result: PruneResult, output_root: str) -> Path:
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -623,6 +675,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     prune.add_argument("--json", action="store_true", help="Print prune JSON to stdout.")
     prune.add_argument("--no-write", action="store_true", help="Do not write prune report to disk.")
+    cache_prune = subparsers.add_parser(
+        "cache-prune",
+        help="Delete old rebuildable SPXW replay/session-surface caches.",
+    )
+    cache_prune.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually delete cache files. Default is dry-run only.",
+    )
+    cache_prune.add_argument("--json", action="store_true", help="Print JSON result.")
     purge_latest = subparsers.add_parser(
         "purge-latest-provider",
         help="Remove one provider's quotes from latest/state.json.",
@@ -687,6 +749,17 @@ def run(argv: list[str] | None = None) -> int:
                 f"({payload['best_quote_count']} best quotes remain)."
             )
         return 0
+    if args.command == "cache-prune":
+        result = prune_rebuildable_surface_caches(settings, execute=args.execute)
+        if args.json:
+            print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        else:
+            mode = "deleted" if result.executed else "would delete"
+            print(
+                f"Surface cache {mode}: {result.deleted_files} files, "
+                f"{human_bytes(result.deleted_bytes)}"
+            )
+        return 1 if result.errors else 0
     if args.command == "trim-review-audit":
         payload = trim_review_audit(settings, days=args.days)
         if args.json:

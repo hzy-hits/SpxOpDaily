@@ -15,7 +15,7 @@ import shutil
 from collections import Counter, defaultdict
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 from uuid import uuid4
@@ -29,7 +29,6 @@ from spx_spark.data_platform.lake.compact_support import (
 from spx_spark.data_platform.lake.layout import (
     RawQuotePartition,
     discover_raw_quote_partitions,
-    parse_raw_quote_partition,
 )
 from spx_spark.data_platform.lake.manifest import CompactionManifest, load_manifest
 from spx_spark.data_platform.replay_artifact_contract import (
@@ -451,23 +450,26 @@ def cleanup_authorized_replay_sources(
     max_backlog_days: int = 7,
     dry_run: bool = False,
 ) -> ReplayCleanupSummary:
+    """Delete verified raw quote partitions after the configured age.
+
+    Replay artifacts remain independently verifiable through the compaction
+    manifest and durable raw-deletion audit.  Cleanup is deliberately
+    partition-scoped: a late or immature source no longer blocks every other
+    verified hour from the same trading date.
+    """
     if grace_hours < 24:
         raise ValueError("replay raw deletion grace must be at least 24 hours")
     if max_backlog_days <= 0:
         raise ValueError("max_backlog_days must be positive")
-    if not pressure.action_required:
-        return _cleanup_summary("pressure_normal", dry_run=dry_run, pressure=pressure)
-
     root = Path(data_root)
-    grouped = _artifact_manifests_by_date(root)
-    dates = _cleanup_candidate_dates(
+    partitions = discover_raw_quote_partitions(
         root,
-        grouped,
         raw_file_name=raw_file_name,
-        limit=max_backlog_days,
     )
+    dates = tuple(sorted({row.session_date for row in partitions})[:max_backlog_days])
+    selected = tuple(row for row in partitions if row.session_date in dates)
     results: list[ReplayDeleteResult] = []
-    authorized_dates: list[str] = []
+    authorized_dates: set[str] = set()
     blocked_dates: list[tuple[str, str]] = []
     deleter = QuoteLakeCompactor(
         root,
@@ -477,104 +479,76 @@ def cleanup_authorized_replay_sources(
         raw_delete_grace_hours=grace_hours,
     )
     utc_now = _as_utc(now)
-    for trading_date in dates:
-        expected_manifests: dict[str, CompactionManifest] = {}
-        try:
-            manifest = _latest_verified_manifest(root, grouped[trading_date])
-            current = discover_partitions_for_window(
-                root,
-                start=_parse_aware(manifest.window_start),
-                end=_parse_aware(manifest.window_end),
-                raw_file_name=raw_file_name,
+    for partition in selected:
+        manifest = load_manifest(partition.manifest_path)
+        source_size = partition.source_path.stat().st_size
+        if manifest is None or manifest.status != "verified":
+            detail = "verified compaction manifest is unavailable"
+            blocked_dates.append((partition.session_date, detail))
+            results.append(
+                ReplayDeleteResult(
+                    partition.session_date,
+                    partition.source_relative_path,
+                    "raw_delete_blocked",
+                    source_size,
+                    detail,
+                )
             )
-            current_paths = {partition.source_relative_path for partition in current}
-            authorized_paths = {source.source_path for source in manifest.sources}
-            extra = sorted(current_paths - authorized_paths)
-            if extra:
-                raise ReplayArtifactError(
-                    "published replay does not authorize late/current source(s): "
-                    + ", ".join(extra)
-                )
-            present = [
-                source
-                for source in manifest.sources
-                if source.source_size > 0 and (root / source.source_path).exists()
-            ]
-            for source in present:
-                expected = load_manifest(root / source.compaction_manifest_path)
-                if expected is None:
-                    raise ReplayArtifactError(
-                        f"compaction manifest missing: {source.compaction_manifest_path}"
-                    )
-                _compare_compaction_manifest(source, expected)
-                expected_manifests[source.source_path] = expected
-            immature = [
-                source.source_path
-                for source in present
-                if not _source_grace_elapsed(source, now=utc_now, grace_hours=grace_hours)
-            ]
-            if immature:
-                blocked_dates.append(
-                    (trading_date, "grace_not_elapsed: " + ", ".join(immature))
-                )
-                continue
-        except ReplayArtifactError as exc:
-            blocked_dates.append((trading_date, str(exc)))
             continue
-
-        if not present:
-            continue
-        authorized_dates.append(trading_date)
-        # All target-day validation and grace checks complete before the first unlink.
-        for source in present:
-            partition = parse_raw_quote_partition(root, root / source.source_path)
-            if partition is None:
-                result = ReplayDeleteResult(
-                    trading_date,
-                    source.source_path,
-                    "blocked",
-                    source.source_size,
-                    "artifact source is not a strict raw quote partition",
-                )
-            else:
-                compacted = deleter.delete_raw_if_manifest_matches(
-                    partition,
-                    expected_manifest=expected_manifests[source.source_path],
-                    now=utc_now,
-                    dry_run=dry_run,
-                )
-                result = ReplayDeleteResult(
-                    trading_date,
-                    source.source_path,
-                    compacted.status,
-                    source.source_size,
-                    compacted.detail,
-                )
-            results.append(result)
+        authorized_dates.add(partition.session_date)
+        compacted = deleter.delete_raw_if_manifest_matches(
+            partition,
+            expected_manifest=manifest,
+            now=utc_now,
+            dry_run=dry_run,
+        )
+        if compacted.status == "raw_delete_blocked":
+            blocked_dates.append(
+                (partition.session_date, compacted.detail or "raw delete blocked")
+            )
+        results.append(
+            ReplayDeleteResult(
+                partition.session_date,
+                partition.source_relative_path,
+                compacted.status,
+                source_size,
+                compacted.detail,
+            )
+        )
 
     deleted = [result for result in results if result.status == "raw_deleted"]
     planned = [result for result in results if result.status == "would_delete_raw"]
+    blocked = [result for result in results if result.status == "raw_delete_blocked"]
     failures = [
         result
         for result in results
-        if result.status not in {"raw_deleted", "would_delete_raw"}
+        if result.status
+        not in {
+            "raw_deleted",
+            "would_delete_raw",
+            "up_to_date",
+            "empty_up_to_date",
+            "raw_delete_blocked",
+        }
     ]
     if failures:
         status = "delete_failed"
-    elif blocked_dates:
+    elif blocked:
         status = "blocked"
     elif deleted:
         status = "deleted"
     elif planned:
         status = "would_delete"
+    elif results:
+        status = "waiting_for_age"
     else:
-        status = "no_authorized_sources"
+        status = "no_verified_sources"
     return ReplayCleanupSummary(
         status=status,
         dry_run=dry_run,
         pressure=pressure,
         artifact_dates_scanned=dates,
-        authorized_dates=tuple(authorized_dates),
+        authorized_dates=tuple(sorted(authorized_dates)),
         blocked_dates=tuple(blocked_dates),
         results=tuple(results),
         deleted_files=len(deleted),
@@ -642,51 +616,6 @@ def _artifact_manifests_by_date(data_root: Path) -> dict[str, tuple[Path, ...]]:
         if date_part.startswith("date="):
             grouped[date_part.removeprefix("date=")].append(path)
     return {key: tuple(sorted(value)) for key, value in grouped.items()}
-
-
-def _cleanup_candidate_dates(
-    data_root: Path,
-    grouped: dict[str, tuple[Path, ...]],
-    *,
-    raw_file_name: str,
-    limit: int,
-) -> tuple[str, ...]:
-    """Select the oldest artifact dates that still have raw cleanup work.
-
-    Already-clean dates do not consume the bounded batch forever. Invalid
-    artifact metadata remains selected so corruption is visible and cannot be
-    skipped in favor of deleting newer evidence.
-    """
-
-    raw_partitions = discover_raw_quote_partitions(
-        data_root,
-        raw_file_name=raw_file_name,
-    )
-    selected: list[str] = []
-    for trading_date in sorted(grouped):
-        try:
-            loaded = [load_replay_manifest(path) for path in grouped[trading_date]]
-            latest = max(
-                loaded,
-                key=lambda item: (
-                    _parse_aware(item.generated_at),
-                    len(item.sources),
-                    item.revision,
-                ),
-            )
-            start = _parse_aware(latest.window_start)
-            end = _parse_aware(latest.window_end)
-            has_raw_work = any(
-                partition.start_at < end and partition.end_at > start
-                for partition in raw_partitions
-            )
-        except (ReplayArtifactError, ValueError):
-            has_raw_work = True
-        if has_raw_work:
-            selected.append(trading_date)
-            if len(selected) >= limit:
-                break
-    return tuple(selected)
 
 
 def _verify_artifact_source(
@@ -804,18 +733,6 @@ def _raw_deleted_evidence(data_root: Path) -> set[tuple[object, ...]]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ReplayArtifactError(f"raw deletion audit is unreadable: {exc}") from exc
     return evidence
-
-
-def _source_grace_elapsed(
-    source: ReplaySourceEvidence,
-    *,
-    now: datetime,
-    grace_hours: int,
-) -> bool:
-    grace = timedelta(hours=grace_hours)
-    source_mtime = datetime.fromtimestamp(source.source_mtime_ns / 1_000_000_000, tz=timezone.utc)
-    completed_at = _parse_aware(source.compaction_completed_at)
-    return now >= source_mtime + grace and now >= completed_at + grace
 
 
 def _verify_artifact_file(data_root: Path, evidence: ReplayFileEvidence) -> None:
