@@ -31,11 +31,18 @@ unavailable_state = stream_deps.unavailable_state
 update_option_cache = stream_deps.update_option_cache
 
 RAW_CHECKPOINT_SECONDS = 60.0
+_NON_MARKET_FINGERPRINT_FIELDS = (
+    "received_at",
+    "quote_time",
+    "source_latency_ms",
+    "sampling_group",
+)
 
 
 def _quote_fingerprint(quote: object) -> str:
     payload = quote.to_dict()
-    payload.pop("received_at", None)
+    for field in _NON_MARKET_FINGERPRINT_FIELDS:
+        payload.pop(field, None)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 

@@ -2032,7 +2032,13 @@ def test_ibkr_raw_persistence_is_change_only_with_periodic_checkpoint() -> None:
         ProviderSnapshot(provider=Provider.IBKR, received_at=now, quotes=(quote,)),
         received_at=now,
     )
-    unchanged = replace(quote, received_at=now.replace(second=2))
+    unchanged = replace(
+        quote,
+        received_at=now.replace(second=2),
+        quote_time=now.replace(second=2),
+        source_latency_ms=4.0,
+        sampling_group=12,
+    )
     second = collector._raw_quotes_for_persistence(
         ProviderSnapshot(provider=Provider.IBKR, received_at=unchanged.received_at, quotes=(unchanged,)),
         received_at=unchanged.received_at,
