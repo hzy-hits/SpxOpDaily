@@ -212,8 +212,16 @@ def _rth_evidence(
         return None, ["confirmed_price_trigger_unavailable"]
     if thesis == "fade":
         setup = "FAILED_BREAK_RECLAIM"
-    elif thesis == "breakout" and (regime.get("path_state"), regime.get("path_direction")) == ("TREND", direction):
-        setup = "TREND_PULLBACK"
+    elif thesis == "breakout":
+        path_state = str(regime.get("path_state") or "")
+        path_direction = str(regime.get("path_direction") or "")
+        if path_state == "TREND" and path_direction != direction:
+            return None, ["price_trigger_conflicts_with_established_path"]
+        setup = (
+            "TREND_PULLBACK"
+            if (path_state, path_direction) == ("TREND", direction)
+            else "BREAKOUT_ACCEPTANCE"
+        )
     else:
         return None, ["price_trigger_not_aligned_with_supported_setup"]
     source = "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"

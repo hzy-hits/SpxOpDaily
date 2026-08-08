@@ -271,6 +271,38 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert "direction_valid_but_entry_too_late" in rejected["why_not"]["reasons"]
 
 
+def test_rth_confirmed_breakout_can_compete_when_path_is_transitional() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    market_state = payload["minute_market_frame"]["diagnostics"]["rth_market_state"]
+    market_state["D"] = 4.0
+    market_state["input_lineage"]["values"]["efficiency_ratio"] = 0.40
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["path_state"] == "TRANSITION"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "BREAKOUT_ACCEPTANCE"
+
+
+def test_rth_confirmed_breakout_is_blocked_by_opposite_established_trend() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    market_state = payload["minute_market_frame"]["diagnostics"]["rth_market_state"]
+    market_state["D"] = -7.0
+    values = market_state["input_lineage"]["values"]
+    values["breadth_above_vwap"] = 0.30
+    values["price_vs_vwap"] = "below"
+    payload["minute_market_frame"]["es"]["vwap_slope_15m_points"] = -0.5
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["path_state"] == "TREND"
+    assert decision["regime"]["path_direction"] == "DOWN"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert "price_trigger_conflicts_with_established_path" in decision["why_not"]["reasons"]
+
+
 def test_rth_confirmed_trigger_reuses_fresh_exact_snapshot_for_pricing_only() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
