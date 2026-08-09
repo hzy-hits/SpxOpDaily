@@ -67,10 +67,13 @@ def rank_candidates(
         passed.append(scored)
         audit.append(_audit_row(scored))
 
+    # Deterministic structure/friction score picks the winner. The uncalibrated
+    # research utility (P/Q bootstrap) is display and tie-break only until the
+    # ManagementPolicy EV model passes its promotion gate.
     passed.sort(
         key=lambda item: (
-            float(_map(item.get("utility")).get("utility") or 0.0),
             float(item.get("selection_score") or 0.0),
+            float(_map(item.get("utility")).get("utility") or 0.0),
         ),
         reverse=True,
     )
@@ -381,9 +384,8 @@ def _candidate_strikes(candidate: Mapping[str, Any]) -> list[float]:
 
 
 def _candidate_score(candidate: Mapping[str, Any]) -> float:
-    utility = _number(_map(candidate.get("utility")).get("utility"))
-    if utility is not None:
-        return round(utility, 6)
+    """Report the score that actually ranks candidates (structure, not utility)."""
+
     return round(float(candidate.get("selection_score") or 0.0), 6)
 
 

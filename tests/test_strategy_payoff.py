@@ -470,6 +470,62 @@ def test_directional_confirmation_butterfly_is_research_alternative_only() -> No
     )
 
 
+def test_ranker_winner_is_structure_score_not_research_utility() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    facts = {
+        "session_date": "2026-08-06",
+        "probability": {
+            "event": {"kind": "terminal_between", "target_at": (now + timedelta(minutes=5)).isoformat()},
+            "q": 0.6,
+            "p_empirical": 0.7,
+            "p_interval_low": 0.6,
+            "n_raw": 40,
+            "n_effective": 40.0,
+            "historical_sessions": ["2026-08-05"],
+        },
+    }
+
+    def butterfly(candidate_id: str, *, selection_score: float, gain: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "strategy_type": "CALL_BUTTERFLY",
+            "setup_kind": "STABLE_PIN",
+            "direction": "NEUTRAL",
+            "selection_score": selection_score,
+            "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
+            "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
+            "economics": {"max_gain_points": gain, "max_loss_points": 3.2,
+                          "breakeven_low": 7703.2, "breakeven_high": 7716.8},
+            "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
+            "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+            "automatic_ordering": False,
+            "manual_action_only": True,
+        }
+
+    high_utility = butterfly("high-utility", selection_score=1.0, gain=16.8)
+    high_structure = butterfly("high-structure", selection_score=9.0, gain=6.8)
+    rank = rank_candidates(
+        [high_utility, high_structure],
+        facts,
+        {"pin": {"depin_risk": 0.0}},
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+
+    assert [candidate["candidate_id"] for candidate in rank.passed] == [
+        "high-structure",
+        "high-utility",
+    ]
+    assert (
+        rank.passed[0]["utility"]["utility"] < rank.passed[1]["utility"]["utility"]
+    )
+    scores = {row["candidate_id"]: row["score"] for row in rank.gate_audit}
+    assert scores["high-structure"] == pytest.approx(9.0)
+    assert scores["high-utility"] == pytest.approx(1.0)
+
+
 def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
