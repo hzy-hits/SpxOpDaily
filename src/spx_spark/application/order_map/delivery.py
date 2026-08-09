@@ -22,6 +22,7 @@ from spx_spark.application.order_map.render import render_template
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import (
     call_hypothesis_critic,
+    call_strategy_idea_memo,
     generate_push_text,
 )
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
@@ -58,6 +59,9 @@ def enqueue_strategy_decision(
     if flood is not None:
         return flood
     text = _render_strategy_candidate(decision, candidate)
+    memo, memo_error = call_strategy_idea_memo(decision)
+    if memo is not None:
+        text = f"{text}\n\n{_render_strategy_idea_memo(memo)}"
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -75,7 +79,7 @@ def enqueue_strategy_decision(
         friend=True,
         enqueued_at=now,
     )
-    return {
+    outcome = {
         "accepted": result.accepted,
         "inserted": result.inserted,
         "duplicate": result.duplicate,
@@ -83,6 +87,9 @@ def enqueue_strategy_decision(
         "event_id": result.envelope.event_id,
         "targets": list(result.targets),
     }
+    if memo is None:
+        outcome["idea_memo"] = f"omitted:{memo_error or 'unavailable'}"
+    return outcome
 
 
 def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, Any]) -> str:
@@ -128,6 +135,19 @@ def _policy_ev_text(edge: dict[str, Any]) -> str:
             return f"policyEV={float(value):g}({int(n)})"
         return f"policyEV={float(value):g}"
     return "policyEV=n/a"
+
+
+def _render_strategy_idea_memo(memo: dict[str, Any]) -> str:
+    watch_levels = ", ".join(str(level) for level in memo.get("watch_levels") or ()) or "-"
+    falsification = " | ".join(str(item) for item in memo.get("falsification") or ()) or "-"
+    risks = " | ".join(str(item) for item in memo.get("risks") or ()) or "-"
+    return "\n".join((
+        "Idea Memo (research)",
+        f"thesis  {memo.get('thesis') or '-'}",
+        f"falsification  {falsification}",
+        f"watch_levels  {watch_levels}",
+        f"risks  {risks}",
+    ))
 
 
 def _timestamp(value: object) -> datetime | None:
