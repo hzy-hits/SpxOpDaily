@@ -305,6 +305,7 @@ def build_policy_ev_table(
             not decision_id
             or decision_id in labeled_ids
             or decision_id not in censored_ids
+            or not _row_counts_for_policy_ev(decision)
         ):
             continue
         key = _policy_ev_bucket_key(decision)
@@ -572,10 +573,14 @@ def _deduped_persisted_decisions(
         session_date=session_date,
     )
     accepted = resolve_accepted_opportunity_ids(decisions)
-    return mark_duplicate_opportunities(
-        decisions,
-        accepted_opportunity_ids=accepted,
-    )
+    # Match backfill_policy_labels: empty/unavailable outbox falls back to
+    # earliest-by-time so offline historical EV tables remain usable.
+    if accepted:
+        return mark_duplicate_opportunities(
+            decisions,
+            accepted_opportunity_ids=accepted,
+        )
+    return mark_duplicate_opportunities(decisions)
 
 
 def _censored_decision_ids(
@@ -583,6 +588,11 @@ def _censored_decision_ids(
     database_path: Path,
     session_date: str | None,
 ) -> set[str]:
+    """Decisions censored at the ManagementPolicy time-stop horizon (20m).
+
+    Shorter-horizon transient quote gaps do not count toward n_censored.
+    """
+
     connection = sqlite3.connect(database_path)
     try:
         rows = connection.execute(
@@ -590,9 +600,10 @@ def _censored_decision_ids(
             SELECT o.decision_id, o.status, o.attributes_json
             FROM outcomes o
             LEFT JOIN decisions d ON d.decision_id = o.decision_id
-            WHERE (? IS NULL OR d.session_date = ?)
+            WHERE o.horizon_minutes = ?
+              AND (? IS NULL OR d.session_date = ?)
             """,
-            (session_date, session_date),
+            (DEFAULT_MANAGEMENT_POLICY.time_stop_minutes, session_date, session_date),
         ).fetchall()
     finally:
         connection.close()

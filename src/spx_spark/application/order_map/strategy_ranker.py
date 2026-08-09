@@ -396,7 +396,7 @@ def _load_policy_ev_table(
     path = Path(data_root).expanduser().joinpath(*_POLICY_EV_TABLE_PATH)
     try:
         mtime_ns = path.stat().st_mtime_ns
-    except FileNotFoundError:
+    except OSError:
         return None
     return _load_policy_ev_table_cached(str(path), mtime_ns)
 
