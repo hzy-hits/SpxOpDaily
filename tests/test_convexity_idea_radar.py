@@ -32,6 +32,28 @@ def _payload() -> dict[str, object]:
     }
 
 
+def _strategy_decision() -> dict[str, object]:
+    return {
+        "decision_id": "strategy:idea-memo",
+        "decision_at": NOW.isoformat(),
+        "action_authority": "manual",
+        "probability_evidence": {"q": 0.52, "n_raw": 12, "n_effective": 7.0},
+        "candidate": {
+            "opportunity_id": "strategy-opportunity:test",
+            "setup_kind": "TREND_PULLBACK",
+            "direction": "UP",
+            "trigger_level": 7705.0,
+            "target_spx": 7730.0,
+            "invalidation_spx": 7705.0,
+            "opportunity_valid_until": NOW.isoformat(),
+            "long": {"contract_id": "option:SPX:SPXW:20260806:7710:C"},
+            "short": {"contract_id": "option:SPX:SPXW:20260806:7720:C"},
+            "quote": {"bid": 2.8, "ask": 3.0},
+            "utility": {"event_probability": 0.61, "utility": 0.12},
+        },
+    }
+
+
 def test_radar_has_competing_hypotheses_and_no_fixed_opportunity_board() -> None:
     radar = build_convexity_idea_radar(_payload(), now=NOW)
     assert radar["mode"] == "deterministic_competing_hypotheses"
@@ -123,3 +145,103 @@ def test_llm_writer_uses_openai_compatible_json_mode(monkeypatch) -> None:
         "timeout": 12.0,
     }
     assert calls["create"]["response_format"] == {"type": "json_object"}
+
+
+def test_strategy_idea_memo_accepts_payload_fact_references_only(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+    memo = {
+        "thesis": "Focus on 7705.0 reclaim before leaning toward 7730.0.",
+        "falsification": ["Lose 7705.0 after refresh."],
+        "watch_levels": [7705.0, 7730.0],
+        "risks": ["Synthetic BBO can widen near option:SPX:SPXW:20260806:7710:C."],
+    }
+    settings = llm_writer.LlmWriterSettings(
+        enabled=True,
+        model="deepseek-v4-flash",
+        url="https://api.deepseek.com/v1/chat/completions",
+        env_file="",
+        timeout_seconds=12.0,
+        max_tokens=4096,
+        provider_order=("deepseek",),
+    )
+
+    def fake_call(prompt, *, system, settings, json_mode):
+        calls["prompt"] = prompt
+        calls["system"] = system
+        calls["timeout_seconds"] = settings.timeout_seconds
+        calls["json_mode"] = json_mode
+        return (__import__("json").dumps(memo), None)
+
+    monkeypatch.setattr(llm_writer, "call_llm_writer", fake_call)
+    result, error = llm_writer.call_strategy_idea_memo(_strategy_decision(), settings=settings)
+
+    assert error is None and result == memo
+    assert calls["timeout_seconds"] == 6.0
+    assert calls["json_mode"] is True
+    assert "Never invent contracts, prices, or probabilities." in str(calls["system"])
+
+
+def test_strategy_idea_memo_rejects_watch_levels_outside_payload(monkeypatch) -> None:
+    memo = {
+        "thesis": "Watch 7705.0 first.",
+        "falsification": ["Lose 7705.0 after refresh."],
+        "watch_levels": [9999.0],
+        "risks": ["Synthetic BBO can widen."],
+    }
+    monkeypatch.setattr(
+        llm_writer,
+        "call_llm_writer",
+        lambda *args, **kwargs: (__import__("json").dumps(memo), None),
+    )
+
+    result, error = llm_writer.call_strategy_idea_memo(_strategy_decision())
+
+    assert result is None
+    assert error == "strategy_idea_memo_validation_failed"
+
+
+def test_strategy_idea_memo_rejects_banned_terms(monkeypatch) -> None:
+    memo = {
+        "thesis": "Use a market order at 7705.0.",
+        "falsification": ["Lose 7705.0 after refresh."],
+        "watch_levels": [7705.0],
+        "risks": ["Synthetic BBO can widen."],
+    }
+    monkeypatch.setattr(
+        llm_writer,
+        "call_llm_writer",
+        lambda *args, **kwargs: (__import__("json").dumps(memo), None),
+    )
+
+    result, error = llm_writer.call_strategy_idea_memo(_strategy_decision())
+
+    assert result is None
+    assert error == "strategy_idea_memo_validation_failed"
+
+
+def test_strategy_idea_memo_rejects_overlong_thesis_and_falsification(monkeypatch) -> None:
+    memo = {
+        "thesis": "A" * 601,
+        "falsification": [],
+        "watch_levels": [7705.0],
+        "risks": ["Synthetic BBO can widen."],
+    }
+    monkeypatch.setattr(
+        llm_writer,
+        "call_llm_writer",
+        lambda *args, **kwargs: (__import__("json").dumps(memo), None),
+    )
+
+    result, error = llm_writer.call_strategy_idea_memo(_strategy_decision())
+
+    assert result is None
+    assert error == "strategy_idea_memo_validation_failed"
+
+
+def test_strategy_idea_memo_rejects_non_json(monkeypatch) -> None:
+    monkeypatch.setattr(llm_writer, "call_llm_writer", lambda *args, **kwargs: ("not-json", None))
+
+    result, error = llm_writer.call_strategy_idea_memo(_strategy_decision())
+
+    assert result is None
+    assert error is not None and error.startswith("invalid_strategy_idea_memo_json:")

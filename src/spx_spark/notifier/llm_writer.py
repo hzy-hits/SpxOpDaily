@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -283,6 +284,143 @@ def call_hypothesis_critic(
     ):
         return None, "hypothesis_fact_or_expression_validation_failed"
     return result, None
+
+
+STRATEGY_IDEA_MEMO_REQUIRED_KEYS = {"thesis", "falsification", "watch_levels", "risks"}
+STRATEGY_IDEA_MEMO_BANNED_TERMS = (
+    "市价",
+    "市價",
+    "立即",
+    "立刻",
+    "加仓",
+    "加倉",
+    "all-in",
+    "all in",
+    "allin",
+    "market order",
+    "market orders",
+    "immediately",
+    "add size",
+)
+_NUMERIC_LITERAL_RE = re.compile(r"[-+]?(?:\d+\.\d+|\d+)")
+_CONTRACT_ID_RE = re.compile(r"\boption:[A-Za-z0-9:_-]+\b")
+
+
+def _decision_numeric_values(value: object) -> set[float]:
+    numbers: set[float] = set()
+
+    def visit(node: object) -> None:
+        if isinstance(node, bool):
+            return
+        if isinstance(node, (int, float)):
+            numbers.add(float(node))
+            return
+        if isinstance(node, str):
+            if _NUMERIC_LITERAL_RE.fullmatch(node.strip()):
+                numbers.add(float(node))
+            return
+        if isinstance(node, dict):
+            for child in node.values():
+                visit(child)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return numbers
+
+
+def _decision_contract_ids(value: object) -> set[str]:
+    contracts: set[str] = set()
+
+    def visit(node: object) -> None:
+        if isinstance(node, str):
+            if node.startswith("option:"):
+                contracts.add(node)
+            return
+        if isinstance(node, dict):
+            for child in node.values():
+                visit(child)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return contracts
+
+
+def idea_memo_output_valid(memo: object, decision: dict[str, Any]) -> bool:
+    if not isinstance(memo, dict) or set(memo) != STRATEGY_IDEA_MEMO_REQUIRED_KEYS:
+        return False
+    thesis = memo.get("thesis")
+    falsification = memo.get("falsification")
+    watch_levels = memo.get("watch_levels")
+    risks = memo.get("risks")
+    if not isinstance(thesis, str) or not isinstance(falsification, list) or not isinstance(
+        watch_levels, list
+    ) or not isinstance(risks, list):
+        return False
+    if any(not isinstance(item, str) for item in falsification) or any(
+        not isinstance(item, str) for item in risks
+    ):
+        return False
+    if any(isinstance(level, bool) or not isinstance(level, (int, float)) for level in watch_levels):
+        return False
+
+    decision_numbers = _decision_numeric_values(decision)
+    if any(float(level) not in decision_numbers for level in watch_levels):
+        return False
+
+    if len(thesis) + sum(len(item) for item in falsification) > 600:
+        return False
+
+    full_text = "\n".join((thesis, *falsification, *risks))
+    lowered = full_text.casefold()
+    if any(term in lowered for term in STRATEGY_IDEA_MEMO_BANNED_TERMS):
+        return False
+
+    decision_contracts = _decision_contract_ids(decision)
+    memo_contracts = set(_CONTRACT_ID_RE.findall(full_text))
+    if not memo_contracts.issubset(decision_contracts):
+        return False
+
+    scrubbed = _CONTRACT_ID_RE.sub(" ", full_text)
+    for raw in _NUMERIC_LITERAL_RE.findall(scrubbed):
+        if float(raw) not in decision_numbers:
+            return False
+    return True
+
+
+def call_strategy_idea_memo(
+    decision: dict[str, Any], settings: LlmWriterSettings | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return a bounded research memo that only reuses decision facts."""
+
+    memo_settings = replace(settings or LlmWriterSettings.from_env(), timeout_seconds=6.0)
+    system = (
+        "You are a strategy idea memo writer. Output json only: "
+        '{"thesis":"...","falsification":["..."],"watch_levels":[0.0],"risks":["..."]}. '
+        "Only use prices, probabilities, watch levels, and contract codes already present in the "
+        "input decision. Never create execution instructions, position sizing, market orders, "
+        "urgency, or authority. Never invent contracts, prices, or probabilities."
+    )
+    text, error = call_llm_writer(
+        json.dumps(decision, ensure_ascii=False, separators=(",", ":")),
+        system=system,
+        settings=memo_settings,
+        json_mode=True,
+    )
+    if text is None:
+        return None, error
+    try:
+        memo = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, f"invalid_strategy_idea_memo_json:{exc}"
+    if not idea_memo_output_valid(memo, decision):
+        return None, "strategy_idea_memo_validation_failed"
+    return memo, None
 
 
 # --- push continuity: remember the last push so the next writer can say
