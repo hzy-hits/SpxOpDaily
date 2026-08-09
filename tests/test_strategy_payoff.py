@@ -419,6 +419,57 @@ def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
     assert rank.passed[0]["economics"]["width_points"] == pytest.approx(20.0)
 
 
+def test_directional_confirmation_butterfly_is_research_alternative_only() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    payload["level_decision"] = {
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "flip_high",
+        "level": 7710.0,
+        "event_id": "level:7710:up",
+    }
+    # Distinct target center so the directional rows do not collide with the
+    # stable-pin rows sharing the same strikes (candidate_id dedup keeps pin rows).
+    payload["option_structure_frame"]["structure"]["call_wall"] = 7730.0
+    latest = _pin_ladder_state(now)
+    facts = build_market_fact_pack(payload, latest, now)
+    regime = assess_regime(facts)
+    rows = enumerate_candidates(
+        payload, facts, regime, latest, now=now, policy=DEFAULT_STRATEGY_POLICY
+    )
+
+    directional = [
+        row for row in rows if row["source"] == "directional_confirmation_butterfly"
+    ]
+    assert directional
+    for row in directional:
+        assert row["manual_authority_eligible"] is False
+        assert row["thesis_direction"] == "UP"
+        assert row["payoff_shape"] == "TARGET_CONCENTRATED"
+        assert row["direction"] == "NEUTRAL"
+
+    rank = rank_candidates(
+        rows,
+        facts,
+        regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert all(
+        candidate.get("source") != "directional_confirmation_butterfly"
+        for candidate in rank.passed
+    )
+    assert any(
+        "research_alternative_only"
+        in [str(gate.get("gate")) for gate in row.get("gate_failures") or ()]
+        for row in rank.gate_audit
+    )
+
+
 def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
@@ -755,6 +806,24 @@ def _probability_forecast(now: datetime, kind: str) -> dict[str, object]:
                     "n_raw": 40, "n_effective": 40.0,
                     "historical_sessions": ["2026-08-04", "2026-08-05"]},
     }
+
+
+def _pin_ladder_state(now: datetime) -> LatestState:
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.option("SPX", expiry="20260806", strike=strike,
+                                           right=right, trading_class="SPXW"),
+            provider=Provider.SCHWAB, received_at=now - timedelta(seconds=1),
+            quote_time=now - timedelta(seconds=1), quality=MarketDataQuality.LIVE,
+            bid=bid, ask=ask,
+        )
+        for right in ("C", "P")
+        for strike, bid, ask in (
+            (7700, 15.1, 15.3), (7710, 7.3, 7.5), (7720, 2.5, 2.6),
+            (7730, 0.8, 0.9), (7740, 0.3, 0.4),
+        )
+    )
+    return LatestState(created_at=now, as_of=now - timedelta(seconds=1), quotes=quotes, best_quotes=quotes)
 
 
 def _pin_state(now: datetime) -> LatestState:

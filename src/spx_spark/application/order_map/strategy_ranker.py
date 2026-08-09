@@ -105,6 +105,12 @@ def _hard_gate_candidate(
         gates.append({"gate": "unsupported_strategy_type", "actual": strategy_type, "threshold": "approved_strategy"})
     if candidate.get("automatic_ordering") is not False or candidate.get("manual_action_only") is not True:
         gates.append({"gate": "manual_action_contract", "actual": candidate.get("automatic_ordering"), "threshold": False})
+    if candidate.get("manual_authority_eligible") is False:
+        gates.append({
+            "gate": "research_alternative_only",
+            "actual": candidate.get("source"),
+            "threshold": "manual_authority_eligible",
+        })
     return gates
 
 
