@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from spx_spark.data_platform.research.strategy_policy_backfill import (
+    build_policy_ev_table,
     mark_duplicate_opportunities,
     outcome_censor_distribution,
 )
@@ -69,6 +70,49 @@ def _decision() -> dict[str, object]:
         "why_not": {"reasons": []},
         "execution": {"action": "MANUAL_LIMIT", "automatic_ordering": False},
         "action_authority": "manual",
+    }
+
+
+def _policy_decision(
+    decision_id: str,
+    *,
+    session_date: str = "2026-08-07",
+    setup_kind: str = "TREND_PULLBACK",
+    direction: str = "UP",
+    terminal_state: str = "TREND_UP",
+) -> dict[str, object]:
+    decision = _decision()
+    decision["decision_id"] = decision_id
+    decision["session_date"] = session_date
+    decision["decision_at"] = NOW.isoformat()
+    decision["available_at"] = NOW.isoformat()
+    candidate = dict(decision["candidate"])
+    candidate["setup_kind"] = setup_kind
+    candidate["direction"] = direction
+    candidate["opportunity_id"] = f"strategy-opportunity:{decision_id}"
+    decision["candidate"] = candidate
+    decision["regime"] = {"path_state": "TREND", "terminal_state": terminal_state}
+    return decision
+
+
+def _policy_row(
+    decision_id: str,
+    policy_pnl_points: float,
+    *,
+    session_date: str = "2026-08-07",
+    setup_kind: str = "TREND_PULLBACK",
+    direction: str = "UP",
+    terminal_state: str = "TREND_UP",
+) -> dict[str, object]:
+    return {
+        "decision_id": decision_id,
+        "session_date": session_date,
+        "setup_kind": setup_kind,
+        "direction": direction,
+        "regime_terminal_state": terminal_state,
+        "policy_pnl_points": policy_pnl_points,
+        "duplicate_of": None,
+        "outbox_accepted": None,
     }
 
 
@@ -179,3 +223,101 @@ def test_mark_duplicate_opportunities_excludes_unaccepted_opportunities() -> Non
     # Never accepted by outbox: keep the row but do not count it as primary.
     assert by_id["dec-o2"]["duplicate_of"] is None
     assert by_id["dec-o2"]["outbox_accepted"] is False
+
+
+def test_build_policy_ev_table_groups_values_and_counts_censored(tmp_path: Path) -> None:
+    database = _migrate(tmp_path)
+    rows = []
+    for index in range(20):
+        decision_id = f"dec-{index}"
+        persist_strategy_decision(
+            _policy_decision(decision_id),
+            database_path=database,
+        )
+        rows.append(_policy_row(decision_id, float(index)))
+
+    persist_strategy_decision(
+        _policy_decision("dec-censored"),
+        database_path=database,
+    )
+    persist_strategy_outcome(
+        _outcome(20, status="censored", censor_kind="service_gap")
+        | {"decision_id": "dec-censored"},
+        database_path=database,
+    )
+
+    table = build_policy_ev_table(
+        rows,
+        database_path=database,
+        session_date="2026-08-07",
+    )
+
+    bucket = table["buckets"]["TREND_PULLBACK|UP|TREND_UP"]
+    assert table["schema_version"] == "policy_ev_table.v1"
+    assert table["management_policy_version"] == "management_policy.v1"
+    assert table["source_sessions"] == ["2026-08-07"]
+    assert bucket == {
+        "n": 20,
+        "ev_points": 9.5,
+        "p25": 4.75,
+        "p75": 14.25,
+        "n_censored": 1,
+        "reason": None,
+    }
+
+
+def test_build_policy_ev_table_uses_low_sample_reason_and_legacy_censor_mapping(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    rows = []
+    for index in range(19):
+        decision_id = f"dec-low-{index}"
+        persist_strategy_decision(
+            _policy_decision(
+                decision_id,
+                setup_kind="BREAKOUT_ACCEPTANCE",
+                direction="DOWN",
+                terminal_state="TREND_DOWN",
+            ),
+            database_path=database,
+        )
+        rows.append(
+            _policy_row(
+                decision_id,
+                float(index),
+                setup_kind="BREAKOUT_ACCEPTANCE",
+                direction="DOWN",
+                terminal_state="TREND_DOWN",
+            )
+        )
+
+    persist_strategy_decision(
+        _policy_decision(
+            "dec-legacy-censor",
+            setup_kind="BREAKOUT_ACCEPTANCE",
+            direction="DOWN",
+            terminal_state="TREND_DOWN",
+        ),
+        database_path=database,
+    )
+    persist_strategy_outcome(
+        _outcome(20, status="exit_quote_unavailable")
+        | {"decision_id": "dec-legacy-censor"},
+        database_path=database,
+    )
+
+    table = build_policy_ev_table(
+        rows,
+        database_path=database,
+        session_date="2026-08-07",
+    )
+
+    assert table["buckets"]["BREAKOUT_ACCEPTANCE|DOWN|TREND_DOWN"] == {
+        "n": 19,
+        "ev_points": None,
+        "p25": None,
+        "p75": None,
+        "n_censored": 1,
+        "reason": "low_sample",
+    }

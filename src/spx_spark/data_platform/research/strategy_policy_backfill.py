@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -256,6 +257,80 @@ def write_labels_parquet(rows: Sequence[Mapping[str, Any]], output_root: Path) -
     return written
 
 
+def build_policy_ev_table(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    database_path: Path,
+    session_date: str | None = None,
+) -> dict[str, Any]:
+    decisions = _deduped_persisted_decisions(
+        database_path=database_path,
+        session_date=session_date,
+    )
+    labeled_ids = {
+        str(row.get("decision_id") or "")
+        for row in rows
+        if _row_counts_for_policy_ev(row)
+    }
+    censored_ids = _censored_decision_ids(
+        database_path=database_path,
+        session_date=session_date,
+    )
+    buckets: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"values": [], "n_censored": 0}
+    )
+    source_sessions = {
+        str(row.get("session_date") or "")
+        for row in rows
+        if str(row.get("session_date") or "").strip()
+    }
+    source_sessions.update(
+        str(decision.get("session_date") or "")
+        for decision in decisions
+        if str(decision.get("session_date") or "").strip()
+    )
+
+    for row in rows:
+        if not _row_counts_for_policy_ev(row):
+            continue
+        policy_pnl = _number(row.get("policy_pnl_points"))
+        if policy_pnl is None:
+            continue
+        key = _policy_ev_bucket_key(row)
+        buckets[key]["values"].append(float(policy_pnl))
+
+    for decision in decisions:
+        decision_id = str(decision.get("decision_id") or "")
+        if (
+            not decision_id
+            or decision_id in labeled_ids
+            or decision_id not in censored_ids
+        ):
+            continue
+        key = _policy_ev_bucket_key(decision)
+        buckets[key]["n_censored"] += 1
+
+    return {
+        "schema_version": "policy_ev_table.v1",
+        "management_policy_version": DEFAULT_MANAGEMENT_POLICY.policy_version,
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "source_sessions": sorted(source_sessions),
+        "buckets": {
+            key: _policy_ev_bucket_summary(value["values"], value["n_censored"])
+            for key, value in sorted(buckets.items())
+        },
+    }
+
+
+def write_policy_ev_table(table: Mapping[str, Any], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(table, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def outcome_censor_distribution(
     *,
     database_path: Path,
@@ -392,6 +467,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--session-date", type=str, default=None)
     parser.add_argument("--output-root", type=Path, default=None)
+    parser.add_argument("--emit-ev-table", type=Path, default=None)
     parser.add_argument("--lookforward-minutes", type=int, default=20)
     args = parser.parse_args(argv)
     rows = backfill_policy_labels(
@@ -412,6 +488,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output_root is not None:
         path = write_labels_parquet(rows, args.output_root)
         summary["output"] = str(path) if path else None
+    if args.emit_ev_table is not None:
+        path = write_policy_ev_table(
+            build_policy_ev_table(
+                rows,
+                database_path=args.database,
+                session_date=args.session_date,
+            ),
+            args.emit_ev_table,
+        )
+        summary["ev_table_output"] = str(path)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -474,6 +560,115 @@ def _normalized_outcome_status(
     if text == "exit_quote_unavailable":
         return "censored", "quote_gap"
     return text or "unknown", None
+
+
+def _deduped_persisted_decisions(
+    *,
+    database_path: Path,
+    session_date: str | None,
+) -> list[dict[str, Any]]:
+    decisions = _read_persisted_decisions(
+        database_path=database_path,
+        session_date=session_date,
+    )
+    accepted = resolve_accepted_opportunity_ids(decisions)
+    return mark_duplicate_opportunities(
+        decisions,
+        accepted_opportunity_ids=accepted,
+    )
+
+
+def _censored_decision_ids(
+    *,
+    database_path: Path,
+    session_date: str | None,
+) -> set[str]:
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT o.decision_id, o.status, o.attributes_json
+            FROM outcomes o
+            LEFT JOIN decisions d ON d.decision_id = o.decision_id
+            WHERE (? IS NULL OR d.session_date = ?)
+            """,
+            (session_date, session_date),
+        ).fetchall()
+    finally:
+        connection.close()
+    censored: set[str] = set()
+    for decision_id, status, attributes_json in rows:
+        normalized, _ = _normalized_outcome_status(
+            status,
+            _json_map(attributes_json),
+        )
+        if normalized == "censored" and decision_id:
+            censored.add(str(decision_id))
+    return censored
+
+
+def _row_counts_for_policy_ev(row: Mapping[str, Any]) -> bool:
+    duplicate_of = str(row.get("duplicate_of") or "").strip()
+    outbox_accepted = row.get("outbox_accepted")
+    return not duplicate_of and outbox_accepted is not False
+
+
+def _policy_ev_bucket_key(row: Mapping[str, Any]) -> str:
+    candidate = _map(row.get("candidate")) or _map(_map(row.get("why_not")).get("nearest_candidate"))
+    regime = _map(row.get("regime"))
+    return "|".join(
+        (
+            _bucket_dimension(row.get("setup_kind") or candidate.get("setup_kind")),
+            _bucket_dimension(row.get("direction") or candidate.get("direction")),
+            _bucket_dimension(
+                row.get("regime_terminal_state")
+                or regime.get("terminal_state")
+                or regime.get("path_state")
+            ),
+        )
+    )
+
+
+def _bucket_dimension(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text else "unknown"
+
+
+def _policy_ev_bucket_summary(
+    values: Sequence[float],
+    n_censored: int,
+) -> dict[str, Any]:
+    usable = sorted(float(value) for value in values)
+    n = len(usable)
+    if n < 20:
+        return {
+            "n": n,
+            "ev_points": None,
+            "p25": None,
+            "p75": None,
+            "n_censored": n_censored,
+            "reason": "low_sample",
+        }
+    return {
+        "n": n,
+        "ev_points": round(sum(usable) / n, 6),
+        "p25": round(_percentile(usable, 0.25), 6),
+        "p75": round(_percentile(usable, 0.75), 6),
+        "n_censored": n_censored,
+        "reason": None,
+    }
+
+
+def _percentile(values: Sequence[float], quantile: float) -> float:
+    if not values:
+        raise ValueError("percentile requires at least one value")
+    if len(values) == 1:
+        return float(values[0])
+    position = (len(values) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(values) - 1)
+    weight = position - lower
+    return float(values[lower]) * (1.0 - weight) + float(values[upper]) * weight
 
 
 def _number(value: object) -> float | None:
