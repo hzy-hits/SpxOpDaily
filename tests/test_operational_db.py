@@ -363,3 +363,51 @@ def test_strategy_opportunity_event_dedupes_across_decisions_and_shadows(
         ("strategy:second-opportunity", expected_event_key),
     ]
     assert foreign_key_errors == []
+
+
+def test_read_due_keeps_bounded_window_and_prefers_fresh_over_service_gap(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    ancient_at = NOW - timedelta(hours=6)
+    ancient_source = (ancient_at - timedelta(seconds=1)).isoformat()
+    ancient_candidate = _candidate()["candidate"]
+    ancient = {
+        **_candidate(),
+        "decision_id": "strategy:ancient",
+        "decision_at": ancient_at.isoformat(),
+        "available_at": ancient_at.isoformat(),
+        "session_date": ancient_at.date().isoformat(),
+        "candidate": {
+            **ancient_candidate,
+            "long": {**ancient_candidate["long"], "source_at": ancient_source},
+            "short": {**ancient_candidate["short"], "source_at": ancient_source},
+        },
+    }
+    recent_at = NOW - timedelta(minutes=5)
+    recent_source = (recent_at - timedelta(seconds=1)).isoformat()
+    recent_candidate = _candidate()["candidate"]
+    recent = {
+        **_candidate(),
+        "decision_id": "strategy:recent",
+        "decision_at": recent_at.isoformat(),
+        "available_at": recent_at.isoformat(),
+        "candidate": {
+            **recent_candidate,
+            "long": {**recent_candidate["long"], "source_at": recent_source},
+            "short": {**recent_candidate["short"], "source_at": recent_source},
+        },
+    }
+    persist_strategy_decision(ancient, database_path=database)
+    persist_strategy_decision(recent, database_path=database)
+
+    due = read_due_strategy_observations(
+        now=NOW,
+        horizon_minutes=5,
+        maximum_lag_seconds=90.0,
+        limit=10,
+        database_path=database,
+    )
+    decision_ids = {str(item["decision"]["decision_id"]) for item in due}
+    assert "strategy:ancient" not in decision_ids
+    assert "strategy:recent" in decision_ids

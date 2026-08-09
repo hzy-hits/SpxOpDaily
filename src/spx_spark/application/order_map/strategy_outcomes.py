@@ -275,10 +275,18 @@ def _breach_hit(
     high: float,
 ) -> bool:
     direction = str(candidate.get("direction") or "").upper()
-    if direction == "UP":
+    thesis = str(candidate.get("thesis_direction") or direction).upper()
+    # Directional candidates (including confirmation butterflies that carry
+    # direction=NEUTRAL but thesis_direction=UP/DOWN with a single stop) use
+    # one-sided invalidation. A single-point NEUTRAL rule of
+    # `low <= L or high >= L` would fire on every bar.
+    sided = direction if direction in {"UP", "DOWN"} else (
+        thesis if thesis in {"UP", "DOWN"} else ""
+    )
+    if sided == "UP":
         level = _number(invalidation)
         return level is not None and low <= level
-    if direction == "DOWN":
+    if sided == "DOWN":
         level = _number(invalidation)
         return level is not None and high >= level
     levels = [
@@ -290,7 +298,7 @@ def _breach_hit(
         )
         if (level := _number(item)) is not None
     ]
-    if not levels:
+    if len(levels) < 2:
         return False
     return low <= min(levels) or high >= max(levels)
 

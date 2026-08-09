@@ -144,3 +144,38 @@ def test_mark_duplicate_opportunities_flags_later_rows_with_same_event_key() -> 
 
     assert [row["duplicate_of"] for row in rows] == [None, "dec-1", "dec-1"]
     assert sum(row["duplicate_of"] is None for row in rows) == 1
+
+
+def test_mark_duplicate_opportunities_excludes_unaccepted_opportunities() -> None:
+    rows = mark_duplicate_opportunities(
+        [
+            {
+                "decision_id": "dec-o1-a",
+                "event_key": "strategy-opportunity:2026-08-07:strategy-opportunity:o1",
+                "opportunity_id": "strategy-opportunity:o1",
+                "decision_at": "2026-08-07T18:00:00+00:00",
+            },
+            {
+                "decision_id": "dec-o1-b",
+                "event_key": "strategy-opportunity:2026-08-07:strategy-opportunity:o1",
+                "opportunity_id": "strategy-opportunity:o1",
+                "decision_at": "2026-08-07T18:01:00+00:00",
+            },
+            {
+                "decision_id": "dec-o2",
+                "event_key": "strategy-opportunity:2026-08-07:strategy-opportunity:o2",
+                "opportunity_id": "strategy-opportunity:o2",
+                "decision_at": "2026-08-07T18:00:30+00:00",
+            },
+        ],
+        accepted_opportunity_ids={"strategy-opportunity:o1"},
+    )
+
+    by_id = {row["decision_id"]: row for row in rows}
+    assert by_id["dec-o1-a"]["duplicate_of"] is None
+    assert by_id["dec-o1-a"]["outbox_accepted"] is True
+    assert by_id["dec-o1-b"]["duplicate_of"] == "dec-o1-a"
+    assert by_id["dec-o1-b"]["outbox_accepted"] is True
+    # Never accepted by outbox: keep the row but do not count it as primary.
+    assert by_id["dec-o2"]["duplicate_of"] is None
+    assert by_id["dec-o2"]["outbox_accepted"] is False

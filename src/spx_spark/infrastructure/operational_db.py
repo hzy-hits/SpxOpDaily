@@ -318,8 +318,17 @@ def read_due_strategy_observations(
     if maximum_lag_seconds <= 0 or limit <= 0:
         raise ValueError("strategy observation window must be positive")
     observed_at = now.astimezone(timezone.utc)
-    # Decisions that could have any horizon due right now.
-    latest_decision = observed_at
+    max_horizon = max(horizons)
+    # Bound the scan so multi-day service_gap backlog cannot starve fresh marks.
+    # Lower bound = max horizon + lag + a short retention window: long enough for
+    # overdue pairs to be labeled once as service_gap, short enough that a cold
+    # start after weekend downtime cannot dump thousands of ancient rows into
+    # the live path. Fresh (uncensored) rows are preferred when applying limit.
+    service_gap_retention_seconds = 30 * 60.0
+    earliest_decision = observed_at - timedelta(
+        minutes=max_horizon,
+        seconds=maximum_lag_seconds + service_gap_retention_seconds,
+    )
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     has_legs = sa.exists(
         sa.select(decision_legs.c.decision_id).where(
@@ -330,13 +339,15 @@ def read_due_strategy_observations(
         sa.select(decisions.c.decision_id, decisions.c.decision_at, decisions.c.attributes_json)
         .where(
             decisions.c.strategy_name == "strategy_signal_engine_v2",
-            decisions.c.decision_at <= _utc_text(latest_decision),
+            decisions.c.decision_at <= _utc_text(observed_at),
+            decisions.c.decision_at >= _utc_text(earliest_decision),
             has_legs,
         )
-        .order_by(decisions.c.decision_at)
+        .order_by(decisions.c.decision_at.desc())
         .limit(max(limit * len(horizons), limit))
     )
-    result: list[dict[str, object]] = []
+    fresh: list[dict[str, object]] = []
+    censored: list[dict[str, object]] = []
     with _engine(str(path)).begin() as connection:
         rows = list(connection.execute(statement).mappings())
         if not rows:
@@ -368,7 +379,6 @@ def read_due_strategy_observations(
                 if (row["decision_id"], horizon) in observed_pairs:
                     continue
                 target_at = decision_at + timedelta(minutes=horizon)
-                decision_payload = json.loads(row["attributes_json"])
                 session_close = _session_close_utc(decision_payload.get("session_date"))
                 session_end_before_horizon = (
                     session_close is not None
@@ -383,19 +393,21 @@ def read_due_strategy_observations(
                     censor_hint = "service_gap"
                 elif session_end_before_horizon:
                     censor_hint = "session_end_before_horizon"
-                result.append(
-                    {
-                        "decision": decision_payload,
-                        "decision_at": row["decision_at"],
-                        "target_at": target_at.isoformat(),
-                        "horizon_minutes": horizon,
-                        "legs": legs,
-                        "censor_hint": censor_hint,
-                    }
-                )
-                if len(result) >= limit:
-                    return tuple(result)
-    return tuple(result)
+                item = {
+                    "decision": decision_payload,
+                    "decision_at": row["decision_at"],
+                    "target_at": target_at.isoformat(),
+                    "horizon_minutes": horizon,
+                    "legs": legs,
+                    "censor_hint": censor_hint,
+                }
+                if censor_hint is None:
+                    fresh.append(item)
+                else:
+                    censored.append(item)
+    # Fresh marks first so a burst of overdue service_gap rows cannot consume
+    # the entire limit and starve the live labeling path.
+    return tuple((fresh + censored)[:limit])
 
 
 def _normalize_horizons(value: int | Sequence[int]) -> tuple[int, ...]:

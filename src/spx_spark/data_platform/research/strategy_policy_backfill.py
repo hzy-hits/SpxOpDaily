@@ -45,6 +45,12 @@ def backfill_policy_labels(
                 rows.append(labeled)
     finally:
         store.close()
+    accepted = resolve_accepted_opportunity_ids(rows)
+    # Enforce outbox-first only when the outbox actually holds accepted cards.
+    # Empty/unavailable outbox (typical offline historical backfill) falls back
+    # to earliest-by-time so research labeling remains usable.
+    if accepted:
+        return mark_duplicate_opportunities(rows, accepted_opportunity_ids=accepted)
     return mark_duplicate_opportunities(rows)
 
 
@@ -279,26 +285,105 @@ def outcome_censor_distribution(
     return counts
 
 
+def resolve_accepted_opportunity_ids(
+    rows: Sequence[Mapping[str, Any]],
+) -> set[str] | None:
+    """Return opportunity ids accepted by the notification outbox.
+
+    Returns ``None`` when the outbox cannot be consulted (disabled / missing
+    settings), so callers can fall back to earliest-by-time dedupe.
+    """
+
+    try:
+        from spx_spark.config import NotificationSettings
+        from spx_spark.notifier.dispatcher import notification_event_exists
+    except Exception:
+        return None
+    try:
+        settings = NotificationSettings.from_env()
+    except Exception:
+        return None
+    accepted: set[str] = set()
+    for row in rows:
+        opportunity_id = _opportunity_id(row)
+        if not opportunity_id:
+            continue
+        try:
+            if notification_event_exists(settings, f"{opportunity_id}:ready"):
+                accepted.add(opportunity_id)
+        except Exception:
+            return None
+    return accepted
+
+
 def mark_duplicate_opportunities(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    accepted_opportunity_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    first_by_event: dict[str, str] = {}
-    result: list[dict[str, Any]] = []
-    for row in sorted(
+    """Mark later decisions that share an opportunity identity.
+
+    When ``accepted_opportunity_ids`` is provided, only opportunities that the
+    outbox actually accepted get a primary row (the earliest decision_at).
+    Decisions for unaccepted opportunities keep ``duplicate_of=None`` but set
+    ``outbox_accepted=False`` so aggregates can exclude them. When the set is
+    omitted, fall back to earliest-by-time (research offline mode).
+    """
+
+    ordered = sorted(
         rows,
         key=lambda item: (str(item.get("decision_at") or ""), str(item.get("decision_id") or "")),
-    ):
+    )
+    first_by_event: dict[str, str] = {}
+    for row in ordered:
         event_key = str(row.get("event_key") or "").strip()
         decision_id = str(row.get("decision_id") or "").strip()
+        if not event_key or not decision_id:
+            continue
+        opportunity_id = _opportunity_id(row)
+        if accepted_opportunity_ids is not None and opportunity_id not in accepted_opportunity_ids:
+            continue
+        first_by_event.setdefault(event_key, decision_id)
+    result: list[dict[str, Any]] = []
+    for row in ordered:
+        event_key = str(row.get("event_key") or "").strip()
+        decision_id = str(row.get("decision_id") or "").strip()
+        opportunity_id = _opportunity_id(row)
         labeled = dict(row)
-        duplicate_of = None
-        if event_key and decision_id:
-            duplicate_of = first_by_event.setdefault(event_key, decision_id)
-            if duplicate_of == decision_id:
-                duplicate_of = None
-        labeled["duplicate_of"] = duplicate_of
+        primary = first_by_event.get(event_key)
+        if primary is None:
+            labeled["duplicate_of"] = None
+            labeled["outbox_accepted"] = False if accepted_opportunity_ids is not None else None
+        elif primary == decision_id:
+            labeled["duplicate_of"] = None
+            labeled["outbox_accepted"] = True if accepted_opportunity_ids is not None else None
+        else:
+            labeled["duplicate_of"] = primary
+            labeled["outbox_accepted"] = True if accepted_opportunity_ids is not None else None
+        if opportunity_id:
+            labeled.setdefault("opportunity_id", opportunity_id)
         result.append(labeled)
     return result
+
+
+def _opportunity_id(row: Mapping[str, Any]) -> str:
+    direct = str(row.get("opportunity_id") or "").strip()
+    if direct:
+        return direct
+    candidate = row.get("candidate") if isinstance(row.get("candidate"), Mapping) else {}
+    from_candidate = str(candidate.get("opportunity_id") or "").strip()
+    if from_candidate:
+        return from_candidate
+    event_key = str(row.get("event_key") or "").strip()
+    prefix = "strategy-opportunity:"
+    if event_key.startswith(prefix):
+        # event_key = strategy-opportunity:{session_date}:{opportunity_id}
+        # opportunity_id itself may contain colons; strip session_date only.
+        rest = event_key[len(prefix) :]
+        parts = rest.split(":", 1)
+        if len(parts) == 2:
+            return parts[1]
+    return ""
 
 
 def main(argv: Sequence[str] | None = None) -> int:

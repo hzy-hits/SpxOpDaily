@@ -680,3 +680,61 @@ def test_quote_gap_becomes_explicit_censored_label(tmp_path: Path) -> None:
     assert row[1] is None
     assert row[2] is None
     assert attributes["censor_kind"] == "quote_gap"
+
+
+def test_neutral_confirmation_butterfly_uses_thesis_direction_for_single_stop(
+    tmp_path: Path,
+) -> None:
+    """direction=NEUTRAL + single stop must not fire breach on every bar."""
+
+    database = _migrate(tmp_path)
+    decision = _selected_decision(direction="UP", invalidation_spx=7730.0)
+    decision["decision_id"] = "strategy:neutral-confirmation"
+    decision["decision_type"] = "CALL_BUTTERFLY"
+    decision["candidate"] = {
+        **decision["candidate"],
+        "strategy_type": "CALL_BUTTERFLY",
+        "direction": "NEUTRAL",
+        "thesis_direction": "UP",
+        "invalidation_spx": 7730.0,
+        "legs": [
+            _leg(7725.0, 6.0, 6.2),
+            _leg(7735.0, 3.0, 3.2),
+            _leg(7745.0, 1.0, 1.2),
+        ],
+    }
+    persist_strategy_decision(decision, database_path=database)
+    # Price stays above the stop the whole window — must NOT breach.
+    rows = [
+        {
+            "minute": (NOW + timedelta(minutes=offset)).isoformat(),
+            "status": "selected",
+            "selected": {
+                "low": 7735.0 + offset,
+                "high": 7736.0 + offset,
+                "price": 7735.5 + offset,
+            },
+        }
+        for offset in range(6)
+    ]
+    _write_spx_minutes(tmp_path, rows)
+    sampled_at = NOW + timedelta(minutes=5, seconds=3)
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=_latest_quotes(sampled_at),
+        best_quotes=_latest_quotes(sampled_at),
+    )
+    observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+    with sqlite3.connect(database) as connection:
+        attributes = json.loads(
+            connection.execute("SELECT attributes_json FROM outcomes").fetchone()[0]
+        )
+    assert attributes["invalidation_breached"] is False
+    assert attributes["label_kind"] == "horizon_mark"

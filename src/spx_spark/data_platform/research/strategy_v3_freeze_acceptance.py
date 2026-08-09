@@ -31,6 +31,7 @@ from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
 from spx_spark.data_platform.research.strategy_policy_backfill import (
     mark_duplicate_opportunities,
     outcome_censor_distribution,
+    resolve_accepted_opportunity_ids,
     write_labels_parquet,
 )
 from spx_spark.marketdata import (
@@ -784,6 +785,7 @@ def _load_decisions(database_path: Path, session_date: str) -> list[dict[str, An
             FROM decisions
             WHERE strategy_name = 'strategy_signal_engine_v2'
               AND session_date = ?
+              AND status IN ('selected', 'no_trade')
             ORDER BY decision_at
             """,
             (session_date,),
@@ -802,9 +804,13 @@ def _load_decisions(database_path: Path, session_date: str) -> list[dict[str, An
                 "status": status,
                 "reason": reason,
                 "market_facts": payload.get("market_facts") or {},
+                "candidate": payload.get("candidate") or {},
                 "attributes": payload,
             }
         )
+    accepted = resolve_accepted_opportunity_ids(result)
+    if accepted:
+        return mark_duplicate_opportunities(result, accepted_opportunity_ids=accepted)
     return mark_duplicate_opportunities(result)
 
 
