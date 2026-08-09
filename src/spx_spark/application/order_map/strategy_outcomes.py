@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ def observe_due_strategy_outcomes(
     latest: LatestState,
     *,
     now: datetime,
+    data_root: str | Path,
     horizon_minutes: int | Sequence[int] | None = None,
     database_path: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -42,7 +44,12 @@ def observe_due_strategy_outcomes(
     statuses: dict[str, int] = {}
     outcome_ids = []
     for observation in pending:
-        value = _observe(observation, latest=latest, sampled_at=sampled_at)
+        value = _observe(
+            observation,
+            latest=latest,
+            sampled_at=sampled_at,
+            data_root=Path(data_root),
+        )
         outcome_id = persist_strategy_outcome(value, database_path=database_path)
         status = str(value["status"])
         statuses[status] = statuses.get(status, 0) + 1
@@ -56,7 +63,11 @@ def observe_due_strategy_outcomes(
 
 
 def _observe(
-    observation: Mapping[str, Any], *, latest: LatestState, sampled_at: datetime
+    observation: Mapping[str, Any],
+    *,
+    latest: LatestState,
+    sampled_at: datetime,
+    data_root: Path,
 ) -> dict[str, Any]:
     decision = _map(observation.get("decision"))
     legs = [dict(_map(item)) for item in observation.get("legs") or ()]
@@ -95,6 +106,13 @@ def _observe(
         _map(decision.get("why_not")).get("nearest_candidate")
     )
     regime = _map(decision.get("regime"))
+    breach = _invalidation_breach(
+        decision,
+        candidate,
+        data_root=data_root,
+        decision_at=_time(decision.get("decision_at")),
+        target_at=target_at,
+    )
     return {
         "decision_id": decision_id,
         "horizon_minutes": horizon_minutes,
@@ -121,8 +139,147 @@ def _observe(
             "sample_lag_seconds": round((sampled_at - target_at).total_seconds(), 3),
             "spot_spx": current_spx,
             "regime_terminal_state": regime.get("terminal_state") or regime.get("path_state"),
+            "invalidation_breached": breach["invalidation_breached"],
+            "breach_at": breach["breach_at"],
+            "breach_scan_gap": breach["breach_scan_gap"],
+            "label_kind": (
+                "structural_exit"
+                if breach["invalidation_breached"] is True
+                else "horizon_mark"
+            ),
         },
     }
+
+
+def _invalidation_breach(
+    decision: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    data_root: Path,
+    decision_at: datetime,
+    target_at: datetime,
+) -> dict[str, Any]:
+    session_date = str(decision.get("session_date") or "").strip()
+    invalidation = candidate.get("invalidation_spx")
+    if not session_date or invalidation in {None, ""}:
+        return {
+            "invalidation_breached": None,
+            "breach_at": None,
+            "breach_scan_gap": False,
+        }
+    path = (
+        data_root
+        / "features"
+        / "spx_standardized_samples"
+        / f"date={session_date}"
+        / "events.jsonl"
+    )
+    try:
+        stat = path.stat()
+    except OSError:
+        return {
+            "invalidation_breached": None,
+            "breach_at": None,
+            "breach_scan_gap": True,
+        }
+    rows = _load_spx_minute_session(str(path), stat.st_mtime_ns, stat.st_size)
+    start = decision_at.replace(second=0, microsecond=0)
+    end = target_at.replace(second=0, microsecond=0)
+    expected_minutes = int((end - start).total_seconds() // 60)
+    by_minute = {
+        minute: row
+        for minute, row in rows
+        if start <= minute <= end
+    }
+    gap_run = 0
+    for offset in range(expected_minutes + 1):
+        minute = start + timedelta(minutes=offset)
+        row = by_minute.get(minute)
+        low, high = _minute_bounds(row)
+        if low is None or high is None:
+            gap_run += 1
+            if gap_run > 2:
+                return {
+                    "invalidation_breached": None,
+                    "breach_at": None,
+                    "breach_scan_gap": True,
+                }
+            continue
+        gap_run = 0
+        if _breach_hit(candidate, invalidation, low=low, high=high):
+            return {
+                "invalidation_breached": True,
+                "breach_at": minute.isoformat(),
+                "breach_scan_gap": False,
+            }
+    return {
+        "invalidation_breached": False,
+        "breach_at": None,
+        "breach_scan_gap": False,
+    }
+
+
+@lru_cache(maxsize=64)
+def _load_spx_minute_session(
+    path_text: str, _mtime_ns: int, _size: int
+) -> tuple[tuple[datetime, Mapping[str, Any]], ...]:
+    rows: list[tuple[datetime, Mapping[str, Any]]] = []
+    try:
+        lines = Path(path_text).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    for line in lines:
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        row = _map(decoded)
+        minute = _time(row.get("minute")) if row else None
+        if minute is None:
+            continue
+        rows.append((minute, row))
+    rows.sort(key=lambda item: item[0])
+    return tuple(rows)
+
+
+def _minute_bounds(row: Mapping[str, Any] | None) -> tuple[float | None, float | None]:
+    if not row or row.get("status") != "selected":
+        return None, None
+    selected = _map(row.get("selected"))
+    if not selected:
+        return None, None
+    low = _number(selected.get("low"))
+    high = _number(selected.get("high"))
+    price = _number(selected.get("price"))
+    return low if low is not None else price, high if high is not None else price
+
+
+def _breach_hit(
+    candidate: Mapping[str, Any],
+    invalidation: object,
+    *,
+    low: float,
+    high: float,
+) -> bool:
+    direction = str(candidate.get("direction") or "").upper()
+    if direction == "UP":
+        level = _number(invalidation)
+        return level is not None and low <= level
+    if direction == "DOWN":
+        level = _number(invalidation)
+        return level is not None and high >= level
+    levels = [
+        level
+        for item in (
+            invalidation
+            if isinstance(invalidation, Sequence) and not isinstance(invalidation, (str, bytes))
+            else (invalidation,)
+        )
+        if (level := _number(item)) is not None
+    ]
+    if not levels:
+        return False
+    return low <= min(levels) or high >= max(levels)
 
 
 def _entry_debit(legs: list[dict[str, Any]]) -> float | None:

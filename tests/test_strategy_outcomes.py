@@ -8,6 +8,8 @@ import sqlite3
 import subprocess
 import sys
 
+import pytest
+
 from spx_spark.application.order_map.strategy_outcomes import (
     observe_due_strategy_outcomes,
 )
@@ -77,6 +79,35 @@ def _decision() -> dict[str, object]:
     }
 
 
+def _selected_decision(*, direction: str, invalidation_spx: float) -> dict[str, object]:
+    return {
+        "schema_version": "strategy_decision.v1",
+        "decision_id": f"strategy:{direction.lower()}-selected",
+        "policy_version": "strategy_policy.bootstrap.v1",
+        "decision_at": NOW.isoformat(),
+        "available_at": NOW.isoformat(),
+        "session_date": "2026-08-07",
+        "decision_type": "CALL_DEBIT_VERTICAL",
+        "candidate": {
+            "candidate_id": f"candidate:{direction.lower()}",
+            "strategy_type": "CALL_DEBIT_VERTICAL",
+            "direction": direction,
+            "opportunity_id": f"strategy-opportunity:{direction.lower()}",
+            "invalidation_spx": invalidation_spx,
+            "target_spx": 7750.0,
+            "long": _leg(7735.0, 4.8, 5.0),
+            "short": _leg(7740.0, 2.0, 2.2),
+            "quote": {"bid": 2.6, "ask": 2.8},
+        },
+        "market_facts": {"spot": {"spx": 7741.0}},
+        "regime": {"path_state": "TREND", "terminal_state": "TREND_UP"},
+        "desk_view": {"reason": "trend_pullback"},
+        "why_not": {"reasons": []},
+        "execution": {"action": "MANUAL_LIMIT", "automatic_ordering": False},
+        "action_authority": "manual",
+    }
+
+
 def _quote(instrument: InstrumentId, bid: float, ask: float, now: datetime) -> Quote:
     return Quote(
         instrument=instrument,
@@ -87,6 +118,47 @@ def _quote(instrument: InstrumentId, bid: float, ask: float, now: datetime) -> Q
         bid=bid,
         ask=ask,
     )
+
+
+def _write_spx_minutes(
+    root: Path, rows: list[dict[str, object]], *, session_date: str = "2026-08-07"
+) -> None:
+    path = root / "features" / "spx_standardized_samples" / f"date={session_date}" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _spx_row(
+    minute: datetime,
+    *,
+    price: float | None = None,
+    low: float | None = None,
+    high: float | None = None,
+    status: str = "selected",
+) -> dict[str, object]:
+    selected = None
+    if status == "selected":
+        selected = {
+            "price": price,
+            "low": low if low is not None else price,
+            "high": high if high is not None else price,
+            "provider": "schwab",
+            "source_at": minute.isoformat(),
+        }
+    return {
+        "minute": minute.isoformat(),
+        "observed_at": minute.isoformat(),
+        "session_date": "2026-08-07",
+        "official_spx_expected": True,
+        "status": status,
+        "selected": selected,
+        "selected_provider": "schwab" if selected else None,
+        "provider_diagnostics": [],
+        "drop_reasons": [],
+        "snapshot_generation": minute.isoformat(),
+        "writer_instance_id": "test",
+        "synthetic_price": False,
+    }
 
 
 def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
@@ -111,6 +183,7 @@ def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
     result = observe_due_strategy_outcomes(
         latest,
         now=sampled_at,
+        data_root=tmp_path,
         horizon_minutes=5,
         database_path=database,
     )
@@ -140,6 +213,7 @@ def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
     repeated = observe_due_strategy_outcomes(
         latest,
         now=sampled_at + timedelta(seconds=1),
+        data_root=tmp_path,
         horizon_minutes=5,
         database_path=database,
     )
@@ -166,6 +240,7 @@ def test_multi_horizon_marks_persist_independently(tmp_path: Path) -> None:
     result = observe_due_strategy_outcomes(
         latest,
         now=sampled_at,
+        data_root=tmp_path,
         horizon_minutes=(1, 2, 3, 5),
         database_path=database,
     )
@@ -181,3 +256,198 @@ def test_multi_horizon_marks_persist_independently(tmp_path: Path) -> None:
         }
     # Horizon 1 is past the 90s lag window at +3m2s; 5m is not yet due.
     assert horizons == {2, 3}
+
+
+@pytest.mark.parametrize(
+    ("direction", "invalidation_spx", "rows", "expected_breached", "expected_breach_at"),
+    [
+        (
+            "UP",
+            7740.0,
+            [
+                _spx_row(NOW, price=7741.0, low=7741.0, high=7741.2),
+                _spx_row(
+                    NOW + timedelta(minutes=1),
+                    price=7739.8,
+                    low=7739.7,
+                    high=7740.2,
+                ),
+            ],
+            True,
+            (NOW + timedelta(minutes=1)).replace(second=0, microsecond=0).isoformat(),
+        ),
+        (
+            "DOWN",
+            7742.0,
+            [
+                _spx_row(NOW, price=7741.0, low=7740.9, high=7741.1),
+                _spx_row(
+                    NOW + timedelta(minutes=2),
+                    price=7742.4,
+                    low=7741.8,
+                    high=7742.5,
+                ),
+            ],
+            True,
+            (NOW + timedelta(minutes=2)).replace(second=0, microsecond=0).isoformat(),
+        ),
+        (
+            "UP",
+            7735.0,
+            [
+                _spx_row(NOW, price=7741.0, low=7740.8, high=7741.1),
+                _spx_row(
+                    NOW + timedelta(minutes=1),
+                    price=7740.5,
+                    low=7740.3,
+                    high=7740.8,
+                ),
+                _spx_row(
+                    NOW + timedelta(minutes=2),
+                    price=7740.4,
+                    low=7740.2,
+                    high=7740.6,
+                ),
+                _spx_row(
+                    NOW + timedelta(minutes=3),
+                    price=7740.3,
+                    low=7740.1,
+                    high=7740.5,
+                ),
+                _spx_row(
+                    NOW + timedelta(minutes=4),
+                    price=7740.2,
+                    low=7740.0,
+                    high=7740.4,
+                ),
+                _spx_row(
+                    NOW + timedelta(minutes=5),
+                    price=7740.1,
+                    low=7739.9,
+                    high=7740.3,
+                ),
+            ],
+            False,
+            None,
+        ),
+    ],
+)
+def test_structural_invalidation_labels_follow_spx_minute_samples(
+    tmp_path: Path,
+    direction: str,
+    invalidation_spx: float,
+    rows: list[dict[str, object]],
+    expected_breached: bool,
+    expected_breach_at: str | None,
+) -> None:
+    database = _migrate(tmp_path)
+    persist_strategy_decision(
+        _selected_decision(direction=direction, invalidation_spx=invalidation_spx),
+        database_path=database,
+    )
+    _write_spx_minutes(tmp_path, rows)
+    sampled_at = NOW + timedelta(minutes=5, seconds=3)
+    quotes = (
+        _quote(InstrumentId.index("SPX"), 7741.9, 7742.1, sampled_at),
+        _quote(
+            InstrumentId.option(
+                "SPX", expiry="20260807", strike=7735, right="C", trading_class="SPXW"
+            ),
+            4.5,
+            4.7,
+            sampled_at,
+        ),
+        _quote(
+            InstrumentId.option(
+                "SPX", expiry="20260807", strike=7740, right="C", trading_class="SPXW"
+            ),
+            2.0,
+            2.2,
+            sampled_at,
+        ),
+    )
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+
+    observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+
+    with sqlite3.connect(database) as connection:
+        attributes = json.loads(
+            connection.execute("SELECT attributes_json FROM outcomes").fetchone()[0]
+        )
+    assert attributes["invalidation_breached"] is expected_breached
+    assert attributes["breach_at"] == expected_breach_at
+    assert attributes["label_kind"] == (
+        "structural_exit" if expected_breached else "horizon_mark"
+    )
+    assert attributes["breach_scan_gap"] is False
+
+
+def test_structural_invalidation_marks_gap_as_unknown_after_two_missing_minutes(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    persist_strategy_decision(
+        _selected_decision(direction="UP", invalidation_spx=7740.0),
+        database_path=database,
+    )
+    _write_spx_minutes(
+        tmp_path,
+        [
+            _spx_row(NOW, price=7741.0),
+            _spx_row(NOW + timedelta(minutes=4), price=7739.8),
+        ],
+    )
+    sampled_at = NOW + timedelta(minutes=5, seconds=3)
+    quotes = (
+        _quote(InstrumentId.index("SPX"), 7741.9, 7742.1, sampled_at),
+        _quote(
+            InstrumentId.option(
+                "SPX", expiry="20260807", strike=7735, right="C", trading_class="SPXW"
+            ),
+            4.5,
+            4.7,
+            sampled_at,
+        ),
+        _quote(
+            InstrumentId.option(
+                "SPX", expiry="20260807", strike=7740, right="C", trading_class="SPXW"
+            ),
+            2.0,
+            2.2,
+            sampled_at,
+        ),
+    )
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+
+    observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+
+    with sqlite3.connect(database) as connection:
+        attributes = json.loads(
+            connection.execute("SELECT attributes_json FROM outcomes").fetchone()[0]
+        )
+    assert attributes["invalidation_breached"] is None
+    assert attributes["breach_at"] is None
+    assert attributes["breach_scan_gap"] is True
+    assert attributes["label_kind"] == "horizon_mark"

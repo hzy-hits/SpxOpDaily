@@ -511,6 +511,7 @@ def run(
         strategy_outcome_observation = observe_due_strategy_outcomes(
             action_latest,
             now=action_now,
+            data_root=storage.data_root,
         )
     except Exception as exc:
         strategy_outcome_observation = {
