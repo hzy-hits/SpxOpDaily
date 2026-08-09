@@ -1122,3 +1122,31 @@ def settings_csv(dotted_path: str, *, app: AppSettings | None = None) -> str:
     if not isinstance(value, list):
         raise TypeError(f"Runtime setting must be a list: {dotted_path}")
     return ",".join(str(item) for item in value)
+
+
+@lru_cache(maxsize=1)
+def runtime_git_sha() -> str:
+    """Short git SHA of the running checkout; cached for the process lifetime.
+
+    Resolution order: live ``git rev-parse``, ``SPX_SPARK_GIT_SHA`` env, else
+    ``unknown``. Used on strategy decisions and human-visible message audit lines.
+    """
+
+    import subprocess
+
+    override = os.environ.get("SPX_SPARK_GIT_SHA", "").strip()
+    if override:
+        return override
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    sha = (result.stdout or "").strip()
+    return sha if result.returncode == 0 and sha else "unknown"

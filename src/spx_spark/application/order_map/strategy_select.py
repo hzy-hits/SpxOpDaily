@@ -331,10 +331,13 @@ def _structural_geometry(
 
 
 def _base_decision(facts: Mapping[str, Any], regime: Mapping[str, Any], identity: object) -> dict[str, Any]:
+    from spx_spark.settings.loader import runtime_git_sha
+
     return {
         "schema_version": "strategy_decision.v1",
         "decision_id": f"strategy:{_hash(identity)[:24]}",
         "policy_version": DEFAULT_STRATEGY_POLICY.policy_version,
+        "runtime_git_sha": runtime_git_sha(),
         "decision_at": facts["decision_at"],
         "available_at": facts["available_at"],
         "session_date": facts.get("session_date"),

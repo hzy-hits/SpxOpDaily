@@ -91,6 +91,11 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         if isinstance(leg, dict)
     )
     invalidation = candidate.get("invalidation_spx")
+    decision_id = str(decision.get("decision_id") or "-")
+    policy = str(decision.get("policy_version") or "-")
+    git_sha = str(decision.get("runtime_git_sha") or "-")
+    edge = candidate.get("edge") if isinstance(candidate.get("edge"), dict) else {}
+    edge_status = edge.get("edge_status") or "research_unvalidated"
     return "\n".join((
         "SPX STRATEGY DECISION · MANUAL CANDIDATE",
         f"Desk View  {candidate.get('setup_kind')} · {candidate.get('direction')} · 仅人工限价",
@@ -98,12 +103,14 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         f"有效期  {candidate.get('opportunity_valid_until')} · 提交前必须刷新报价 · 禁止市价",
         f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · SPX失效 {invalidation}",
         f"Targets  SPX {candidate.get('target_spx')}",
-        f"Edge  P={utility.get('event_probability')} · Q={evidence.get('q')} "
+        f"Edge  status={edge_status} · P={utility.get('event_probability')} · Q={evidence.get('q')} "
         f"· Utility={utility.get('utility')} "
         f"· lower=${utility.get('conservative_lower_bound')}",
         f"样本  n={evidence.get('n_raw')} · n_eff={evidence.get('n_effective')} "
         f"· shrink={evidence.get('shrinkage_weight')}",
         "Data Quality  conservative BBO · uncalibrated bootstrap · automatic_ordering=false",
+        f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因={candidate.get('setup_kind') or '-'} "
+        f"版本 policy={policy} git={git_sha}",
     ))
 
 

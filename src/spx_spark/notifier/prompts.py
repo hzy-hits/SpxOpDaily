@@ -57,13 +57,32 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
 
     kinds = {str(alert.get("kind") or "") for alert in alerts}
     management_only = bool(kinds) and kinds <= {"gth_advisory_management"}
-    badge = "🟠 只管理 · 不开新仓" if management_only else "🔴 只观察"
-    lines = [badge, f"方向  {_direct_alert_direction(alerts)}"]
+    decision = payload.get("strategy_decision")
+    if not isinstance(decision, dict):
+        decision = _load_latest_strategy_decision()
+        if decision:
+            payload = {**payload, "strategy_decision": decision}
+    decision = decision if isinstance(decision, dict) else {}
+    role, contract_line = _message_role_and_contract_line(decision)
+
     if management_only:
+        badge = "🟠 只管理 · 不开新仓"
+        lines = [badge, f"方向  {_direct_alert_direction(alerts)}"]
         lines.append("动作  仅管理已人工参与的前序机会；未验证持仓时不操作")
-    else:
+    elif role == "MANUAL_CANDIDATE":
+        badge = "🟢 结构事件 · 同期有人工候选"
+        lines = [badge, f"方向  {_direct_alert_direction(alerts)}"]
+        lines.append("等待  以同周期策略候选卡为准，本条仅提供结构背景")
+    elif role == "NO_TRADE":
+        badge = "🔴 只观察"
+        lines = [badge, f"方向  {_direct_alert_direction(alerts)}"]
         lines.append("等待  对应关键位确认，并由执行层生成精确 SPXW 合约与新鲜报价")
-    lines.append("合约  当前没有可执行合约")
+    else:
+        badge = "🔴 只观察"
+        lines = [badge, f"方向  {_direct_alert_direction(alerts)}"]
+        lines.append("等待  对应关键位确认，并由执行层生成精确 SPXW 合约与新鲜报价")
+
+    lines.append(contract_line)
     for alert in alerts[:6]:
         title = alert.get("title")
         detail = alert.get("detail")
@@ -73,7 +92,86 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
     if len(alerts) > 6:
         lines.append(f"审计  另有 {len(alerts) - 6} 个低优先级事件")
     lines.append(f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}")
+    lines.append(_decision_audit_line(decision, role=role, payload=payload))
     return "\n".join(lines)
+
+
+def _load_latest_strategy_decision() -> dict[str, object]:
+    """Best-effort same-host latest decision for STRUCTURE_EVENT messages.
+
+    Alert payloads often omit strategy_decision. Prefer an explicit payload
+    field; otherwise read the MF-written latest snapshot. Missing/unreadable
+    files yield an empty dict so the template stays honest.
+    """
+
+    import os
+    from pathlib import Path
+
+    roots = (
+        os.environ.get("SPX_DATA_ROOT"),
+        os.environ.get("MARKET_DATA_DATA_ROOT"),
+        os.environ.get("MAINTENANCE_DATA_ROOT"),
+    )
+    for root in roots:
+        if not root:
+            continue
+        path = Path(root) / "latest" / "strategy_decision.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("decision_id"):
+            return payload
+    return {}
+
+
+def _message_role_and_contract_line(decision: dict[str, object]) -> tuple[str, str]:
+    if not decision:
+        return "STRUCTURE_EVENT", "策略决策 本周期不可用"
+    decision_type = str(decision.get("decision_type") or "")
+    authority = str(decision.get("action_authority") or "")
+    decision_id = str(decision.get("decision_id") or "")
+    short_id = decision_id[9:21] if decision_id.startswith("strategy:") else decision_id[:12]
+    if authority == "manual" and decision_type and decision_type != "NO_TRADE":
+        return (
+            "MANUAL_CANDIDATE",
+            f"合约  本周期存在人工候选（{short_id or 'unknown'}），以候选卡为准",
+        )
+    if decision_type == "NO_TRADE":
+        why = decision.get("why_not") if isinstance(decision.get("why_not"), dict) else {}
+        reasons = why.get("reasons") if isinstance(why, dict) else None
+        reason = ""
+        if isinstance(reasons, list) and reasons:
+            reason = str(reasons[0])
+        suffix = f"；原因 {reason}" if reason else ""
+        return "NO_TRADE", f"合约  当前没有可执行合约{suffix}"
+    return "STRUCTURE_EVENT", "策略决策 本周期不可用"
+
+
+def _decision_audit_line(
+    decision: dict[str, object], *, role: str, payload: dict[str, object]
+) -> str:
+    decision_id = str(decision.get("decision_id") or "-")
+    short_id = decision_id[:12] if decision_id != "-" else "-"
+    why = decision.get("why_not") if isinstance(decision.get("why_not"), dict) else {}
+    reasons = why.get("reasons") if isinstance(why, dict) else None
+    top_reason = str(reasons[0]) if isinstance(reasons, list) and reasons else "-"
+    if role == "MANUAL_CANDIDATE":
+        top_reason = str(decision.get("decision_type") or "manual_candidate")
+    policy = str(decision.get("policy_version") or "-")
+    git_sha = str(decision.get("runtime_git_sha") or payload.get("runtime_git_sha") or "-")
+    degraded = payload.get("delivery_degraded_count")
+    degraded_note = ""
+    try:
+        count = int(degraded) if degraded is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count > 0:
+        degraded_note = f" · 投递 degraded({count})"
+    return (
+        f"决策 id={short_id} 角色={role} 原因={top_reason} "
+        f"版本 policy={policy} git={git_sha}{degraded_note}"
+    )
 
 
 def _format_system_alert(

@@ -2550,9 +2550,68 @@ def test_direct_market_alert_is_explicitly_observation_only() -> None:
 
     assert text.startswith("🔴 只观察")
     assert "方向  偏空（仅事件背景，不是入场授权）" in text
-    assert "合约  当前没有可执行合约" in text
+    assert "策略决策 本周期不可用" in text
+    assert "合约  当前没有可执行合约" not in text
+    assert "角色=STRUCTURE_EVENT" in text
     assert "买入  " not in text
     assert "限价  " not in text
+
+
+def test_alert_message_uses_no_trade_contract_line_only_with_decision() -> None:
+    from spx_spark.notifier.prompts import format_alert_message
+
+    payload = make_payload()
+    payload["strategy_decision"] = {
+        "decision_id": "strategy:abcdef1234567890abcd",
+        "decision_type": "NO_TRADE",
+        "action_authority": "none",
+        "policy_version": "strategy_policy.bootstrap.v1",
+        "runtime_git_sha": "deadbeef",
+        "why_not": {"reasons": ["direction_valid_but_entry_too_late"]},
+    }
+    alerts = [
+        {
+            "kind": "level_confirmed",
+            "title": "Call Wall 确认",
+            "detail": "价格确认突破",
+            "audit_context": {"direction": "up"},
+        }
+    ]
+
+    text = format_alert_message(payload, alerts)
+
+    assert "合约  当前没有可执行合约；原因 direction_valid_but_entry_too_late" in text
+    assert "角色=NO_TRADE" in text
+    assert "git=deadbeef" in text
+
+
+def test_alert_message_defers_to_manual_candidate_when_present() -> None:
+    from spx_spark.notifier.prompts import format_alert_message
+
+    payload = make_payload()
+    payload["strategy_decision"] = {
+        "decision_id": "strategy:manualcand1234567890",
+        "decision_type": "CALL_DEBIT_VERTICAL",
+        "action_authority": "manual",
+        "policy_version": "strategy_policy.bootstrap.v1",
+        "runtime_git_sha": "cafebabe",
+    }
+    payload["delivery_degraded_count"] = 2
+    alerts = [
+        {
+            "kind": "level_confirmed",
+            "title": "突破确认",
+            "detail": "结构事件",
+            "audit_context": {"direction": "up"},
+        }
+    ]
+
+    text = format_alert_message(payload, alerts)
+
+    assert text.startswith("🟢 结构事件 · 同期有人工候选")
+    assert "本周期存在人工候选" in text
+    assert "角色=MANUAL_CANDIDATE" in text
+    assert "投递 degraded(2)" in text
 
 
 def test_direct_system_alert_is_not_mislabeled_as_market_observation() -> None:
