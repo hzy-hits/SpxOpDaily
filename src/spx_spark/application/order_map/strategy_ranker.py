@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,9 @@ from spx_spark.application.market_features.physical_followthrough import (
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
+
+_POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
+_POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +69,11 @@ def rank_candidates(
                     ],
                 },
             }
+        scored = _attach_policy_ev(
+            scored,
+            regime,
+            data_root=data_root,
+        )
         passed.append(scored)
         audit.append(_audit_row(scored))
 
@@ -303,6 +313,110 @@ def _candidate_probability_evidence(
         "historical_sessions": list(estimate.historical_sessions),
         "method": estimate.model_version,
     }, event, []
+
+
+def _attach_policy_ev(
+    candidate: Mapping[str, Any],
+    regime: Mapping[str, Any],
+    *,
+    data_root: str | Path | None,
+) -> dict[str, Any]:
+    annotation = _policy_ev_annotation(
+        candidate,
+        regime,
+        data_root=data_root,
+    )
+    return {
+        **dict(candidate),
+        "edge": {
+            **dict(_map(candidate.get("edge"))),
+            **annotation,
+        },
+    }
+
+
+def _policy_ev_annotation(
+    candidate: Mapping[str, Any],
+    regime: Mapping[str, Any],
+    *,
+    data_root: str | Path | None,
+) -> dict[str, Any]:
+    table = _load_policy_ev_table(data_root)
+    if table is None:
+        return {
+            "policy_ev": None,
+            "policy_ev_n": None,
+            "policy_ev_version": None,
+            "policy_ev_reason": "table_unavailable",
+        }
+    bucket = _map(_map(table).get("buckets")).get(
+        _policy_ev_bucket_key(candidate, regime)
+    )
+    if not isinstance(bucket, Mapping):
+        return {
+            "policy_ev": None,
+            "policy_ev_n": None,
+            "policy_ev_version": str(table.get("management_policy_version") or ""),
+            "policy_ev_reason": "bucket_unavailable",
+        }
+    return {
+        "policy_ev": _number(bucket.get("ev_points")),
+        "policy_ev_n": int(n) if (n := _number(bucket.get("n"))) is not None else None,
+        "policy_ev_version": str(table.get("management_policy_version") or ""),
+        "policy_ev_reason": (
+            str(bucket.get("reason") or "")
+            or None
+        ),
+    }
+
+
+def _policy_ev_bucket_key(
+    candidate: Mapping[str, Any],
+    regime: Mapping[str, Any],
+) -> str:
+    return "|".join(
+        (
+            _bucket_dimension(candidate.get("setup_kind")),
+            _bucket_dimension(candidate.get("direction")),
+            _bucket_dimension(regime.get("terminal_state")),
+        )
+    )
+
+
+def _bucket_dimension(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text else "unknown"
+
+
+def _load_policy_ev_table(
+    data_root: str | Path | None,
+) -> Mapping[str, Any] | None:
+    if data_root is None:
+        return None
+    path = Path(data_root).expanduser().joinpath(*_POLICY_EV_TABLE_PATH)
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+    return _load_policy_ev_table_cached(str(path), mtime_ns)
+
+
+@lru_cache(maxsize=16)
+def _load_policy_ev_table_cached(
+    path_text: str,
+    mtime_ns: int,
+) -> Mapping[str, Any] | None:
+    del mtime_ns
+    path = Path(path_text)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("schema_version") != _POLICY_EV_SCHEMA_VERSION:
+        return None
+    if not isinstance(payload.get("buckets"), dict):
+        return None
+    return payload
 
 
 def _terminal_range_q_mass(values: Mapping[str, Any], lower: float | None, upper: float | None) -> float | None:

@@ -101,6 +101,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
     git_sha = str(decision.get("runtime_git_sha") or "-")
     edge = candidate.get("edge") if isinstance(candidate.get("edge"), dict) else {}
     edge_status = edge.get("edge_status") or "research_unvalidated"
+    policy_ev = _policy_ev_text(edge)
     return "\n".join((
         "SPX STRATEGY DECISION · MANUAL CANDIDATE",
         f"Desk View  {candidate.get('setup_kind')} · {candidate.get('direction')} · 仅人工限价",
@@ -110,13 +111,23 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         f"Targets  SPX {candidate.get('target_spx')}",
         f"Edge  status={edge_status} · P={utility.get('event_probability')} · Q={evidence.get('q')} "
         f"· Utility={utility.get('utility')} "
-        f"· lower=${utility.get('conservative_lower_bound')}",
+        f"· lower=${utility.get('conservative_lower_bound')} · {policy_ev}",
         f"样本  n={evidence.get('n_raw')} · n_eff={evidence.get('n_effective')} "
         f"· shrink={evidence.get('shrinkage_weight')}",
         "Data Quality  conservative BBO · uncalibrated bootstrap · automatic_ordering=false",
         f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因={candidate.get('setup_kind') or '-'} "
         f"版本 policy={policy} git={git_sha}",
     ))
+
+
+def _policy_ev_text(edge: dict[str, Any]) -> str:
+    value = edge.get("policy_ev")
+    n = edge.get("policy_ev_n")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        if isinstance(n, int | float) and not isinstance(n, bool):
+            return f"policyEV={float(value):g}({int(n)})"
+        return f"policyEV={float(value):g}"
+    return "policyEV=n/a"
 
 
 def _timestamp(value: object) -> datetime | None:

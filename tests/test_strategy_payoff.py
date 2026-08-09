@@ -572,6 +572,163 @@ def test_ranker_winner_is_structure_score_not_research_utility() -> None:
     assert scores["high-utility"] == pytest.approx(1.0)
 
 
+def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    facts = {
+        "session_date": "2026-08-06",
+        "probability": {
+            "event": {
+                "kind": "terminal_between",
+                "target_at": (now + timedelta(minutes=5)).isoformat(),
+            },
+            "q": 0.6,
+            "p_empirical": 0.7,
+            "p_interval_low": 0.6,
+            "n_raw": 40,
+            "n_effective": 40.0,
+            "historical_sessions": ["2026-08-05"],
+        },
+    }
+
+    def butterfly(candidate_id: str, *, selection_score: float, gain: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "strategy_type": "CALL_BUTTERFLY",
+            "setup_kind": "STABLE_PIN",
+            "direction": "NEUTRAL",
+            "selection_score": selection_score,
+            "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
+            "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
+            "economics": {
+                "max_gain_points": gain,
+                "max_loss_points": 3.2,
+                "breakeven_low": 7703.2,
+                "breakeven_high": 7716.8,
+            },
+            "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
+            "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+            "automatic_ordering": False,
+            "manual_action_only": True,
+        }
+
+    candidates = [
+        butterfly("high-utility", selection_score=1.0, gain=16.8),
+        butterfly("high-structure", selection_score=9.0, gain=6.8),
+    ]
+    regime = {"pin": {"depin_risk": 0.0}, "terminal_state": "PIN_STABLE"}
+
+    without_table = rank_candidates(
+        candidates,
+        facts,
+        regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=tmp_path,
+        probability_settings=None,
+        now=now,
+    )
+
+    research = tmp_path / "research"
+    research.mkdir(parents=True, exist_ok=True)
+    (research / "policy_ev_table.v1.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "policy_ev_table.v1",
+                "management_policy_version": "management_policy.v1",
+                "generated_at": now.isoformat(),
+                "source_sessions": ["2026-08-05", "2026-08-06"],
+                "buckets": {
+                    "STABLE_PIN|NEUTRAL|PIN_STABLE": {
+                        "n": 24,
+                        "ev_points": 0.35,
+                        "p25": -0.1,
+                        "p75": 0.8,
+                        "n_censored": 2,
+                        "reason": None,
+                    }
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    with_table = rank_candidates(
+        candidates,
+        facts,
+        regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=tmp_path,
+        probability_settings=None,
+        now=now,
+    )
+
+    assert [candidate["candidate_id"] for candidate in without_table.passed] == [
+        "high-structure",
+        "high-utility",
+    ]
+    assert [candidate["candidate_id"] for candidate in with_table.passed] == [
+        "high-structure",
+        "high-utility",
+    ]
+    assert without_table.passed[0]["edge"]["policy_ev_reason"] == "table_unavailable"
+    assert with_table.passed[0]["edge"]["policy_ev"] == pytest.approx(0.35)
+    assert with_table.passed[0]["edge"]["policy_ev_n"] == 24
+    assert with_table.passed[0]["edge"]["policy_ev_version"] == "management_policy.v1"
+    assert with_table.passed[0]["edge"]["policy_ev_reason"] is None
+
+
+def test_policy_ev_annotation_marks_missing_table_as_unavailable(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    rank = rank_candidates(
+        [
+            {
+                "candidate_id": "high-structure",
+                "strategy_type": "CALL_BUTTERFLY",
+                "setup_kind": "STABLE_PIN",
+                "direction": "NEUTRAL",
+                "selection_score": 9.0,
+                "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
+                "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
+                "economics": {
+                    "max_gain_points": 6.8,
+                    "max_loss_points": 3.2,
+                    "breakeven_low": 7703.2,
+                    "breakeven_high": 7716.8,
+                },
+                "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
+                "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+                "automatic_ordering": False,
+                "manual_action_only": True,
+            }
+        ],
+        {
+            "session_date": "2026-08-06",
+            "probability": {
+                "event": {
+                    "kind": "terminal_between",
+                    "target_at": (now + timedelta(minutes=5)).isoformat(),
+                },
+                "q": 0.6,
+                "p_empirical": 0.7,
+                "p_interval_low": 0.6,
+                "n_raw": 40,
+                "n_effective": 40.0,
+                "historical_sessions": ["2026-08-05"],
+            },
+        },
+        {"pin": {"depin_risk": 0.0}, "terminal_state": "PIN_STABLE"},
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=tmp_path,
+        probability_settings=None,
+        now=now,
+    )
+
+    assert rank.passed[0]["edge"]["policy_ev"] is None
+    assert rank.passed[0]["edge"]["policy_ev_reason"] == "table_unavailable"
+
+
 def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)

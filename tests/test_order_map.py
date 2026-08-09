@@ -4687,6 +4687,53 @@ def test_unified_strategy_candidate_enqueues_once_on_trade_ready_lane(
                       "event_id": "strategy-opportunity:test:ready"}
 
 
+@pytest.mark.parametrize(
+    ("edge", "expected"),
+    [
+        (
+            {
+                "edge_status": "research_unvalidated",
+                "policy_ev": 0.35,
+                "policy_ev_n": 24,
+            },
+            "policyEV=0.35(24)",
+        ),
+        (
+            {"edge_status": "research_unvalidated"},
+            "policyEV=n/a",
+        ),
+    ],
+)
+def test_render_strategy_candidate_shows_policy_ev(edge: dict[str, object], expected: str) -> None:
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
+
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    text = _render_strategy_candidate(
+        {
+            "decision_id": "strategy:test-policy-ev",
+            "decision_at": now.isoformat(),
+            "policy_version": "strategy_policy.bootstrap.v2",
+            "runtime_git_sha": "deadbeef",
+            "probability_evidence": {"q": 0.52, "n_raw": 12, "n_effective": 7.0, "shrinkage_weight": 0.259259},
+        },
+        {
+            "setup_kind": "TREND_PULLBACK",
+            "direction": "UP",
+            "target_spx": 7730.0,
+            "invalidation_spx": 7705.0,
+            "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+            "long": {"contract_id": "option:SPX:SPXW:20260807:7710:C"},
+            "short": {"contract_id": "option:SPX:SPXW:20260807:7720:C"},
+            "quote": {"bid": 2.8, "ask": 3.0},
+            "economics": {"max_loss_points": 3.0},
+            "utility": {"event_probability": 0.61, "utility": 0.12, "conservative_lower_bound": 40.0},
+            "edge": edge,
+        },
+    )
+
+    assert expected in text
+
+
 def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
     tmp_path: Path, monkeypatch
 ) -> None:
