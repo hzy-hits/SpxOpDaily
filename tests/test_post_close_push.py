@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
 from spx_spark.config import NotificationSettings
 from spx_spark.post_close_review import build_push_summary, push_review
+
+# RTH mid-session ET summer: outside the post-RTH→GTH quiet window so the
+# Python delivery path exercises Feishu sinks rather than quiet-window policy.
+_DELIVERY_NOW = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture(autouse=True)
@@ -170,7 +175,9 @@ def test_push_review_agent_fallback(tmp_path, monkeypatch: pytest.MonkeyPatch) -
         "spx_spark.post_close_runtime.generate_push_text",
         lambda template, prompt, settings, **kwargs: (template, "template"),
     )
-    result = push_review(payload, latest_markdown_path="/tmp/review.md")
+    result = push_review(
+        payload, latest_markdown_path="/tmp/review.md", now=_DELIVERY_NOW
+    )
     assert result["used_agent"] is False
     assert result["writer"] == "template"
     assert result["text"] == summary
@@ -204,6 +211,7 @@ def test_push_review_uses_writer_and_attaches_full_report(
         sample_payload(),
         latest_markdown_path="/tmp/review.md",
         full_markdown="# Full Review\n\n## Price Path\n完整价格路径",
+        now=_DELIVERY_NOW,
     )
 
     assert result["writer"] == "grok_cli"
@@ -242,7 +250,9 @@ def test_push_review_rejects_unsupported_llm_causality_before_delivery(
         lambda url, payload, timeout: cards.append(payload) or {"code": 0, "msg": "success"},
     )
 
-    result = push_review(payload, latest_markdown_path="/tmp/review.md")
+    result = push_review(
+        payload, latest_markdown_path="/tmp/review.md", now=_DELIVERY_NOW
+    )
 
     assert result["writer"] == "template"
     assert result["used_agent"] is False

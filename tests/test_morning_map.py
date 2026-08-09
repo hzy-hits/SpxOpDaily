@@ -187,13 +187,16 @@ def test_send_morning_map_falls_back_to_template_when_agent_fails(
     payload = sample_payload()
     template = render_template(payload)
     settings = make_settings(str(tmp_path / "notify-state.json"), agent_enabled=True)
+    # Outside the post-RTH→GTH quiet window so delivery assertions exercise
+    # the Feishu sink rather than quiet-window suppression.
+    now = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
         if command[:2] == ["openclaw", "agent"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="agent failed")
         return subprocess.CompletedProcess(command, 0, stdout='{"ok":true}', stderr="")
 
-    result = send_morning_map(payload, settings, runner=runner)
+    result = send_morning_map(payload, settings, runner=runner, now=now)
     assert result["used_agent"] is False
     assert result["text"] == template
     assert result["im_ok"] is True
@@ -211,8 +214,9 @@ def test_send_morning_map_surfaces_feishu_failure_without_legacy_queue(
     template = render_template(payload)
     missed_path = str(tmp_path / "missed.jsonl")
     settings = make_settings(str(tmp_path / "notify-state.json"))
+    now = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
 
-    result = send_morning_map(payload, settings)
+    result = send_morning_map(payload, settings, now=now)
     assert result["im_ok"] is False
     assert result["delivered_ok"] is False
     assert result["text"] == template
