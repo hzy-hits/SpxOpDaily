@@ -4,6 +4,11 @@
 `docs/strategy-signal-engine-v2.md` 之上的增量合同，不整体替代 v2。除本文明确修订
 的条款外，v2 的全部约束继续有效。
 
+P0 三件套（flood-control 自我阻断、directional butterfly 降权、排序键降级）已于
+2026-08-09 合入 master（`bcb9a685`）。后续 P1/P2 工作的设计合同与执行方案见
+`docs/strategy-signal-engine-v3-p1p2-design.md` 与
+`docs/strategy-signal-engine-v3-p1p2-execution.md`。
+
 实现进度（同一功能分支 `cursor/strategy-engine-v3-design-2238`）：
 
 | 阶段 | 状态 |
