@@ -19,6 +19,7 @@ from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.notifier.review_audit import review_audit_path
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
 from spx_spark.storage import LatestMarketProjectionStore
+from spx_spark.surface_live_session_store import LiveSessionStateStore
 
 
 PROTECTED_DATA_SEGMENTS = frozenset({"latest", "runtime"})
@@ -367,7 +368,9 @@ def prune_rebuildable_surface_caches(
     ]
     deleted_paths: list[str] = []
     deleted_bytes = 0
+    deleted_cache_files = 0
     candidates: list[tuple[Path, int]] = []
+    archived_source_files = 0
     errors: list[str] = []
     for root in roots:
         if not root.is_dir() or root.is_symlink():
@@ -389,13 +392,37 @@ def prune_rebuildable_surface_caches(
                 path.unlink()
                 deleted_paths.append(str(path))
                 deleted_bytes += size
+                deleted_cache_files += 1
             except OSError as exc:
                 errors.append(f"{path}: {exc}")
+        live_root = publish_root / "live" / "policy=live-v2" / "bucket=1m"
+        cold_before = (current - timedelta(days=settings.surface_cache_retention_days)).date()
+        store = LiveSessionStateStore(live_root)
+        for session_dir in sorted(live_root.glob("session=*")):
+            if not session_dir.is_dir() or session_dir.is_symlink():
+                continue
+            raw_date = session_dir.name.removeprefix("session=")
+            try:
+                session_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+            except ValueError:
+                errors.append(f"{session_dir}: invalid session directory")
+                continue
+            if session_date >= cold_before:
+                continue
+            try:
+                file_count, source_bytes, archive_bytes = store.archive_boundaries(session_date)
+            except (OSError, RuntimeError) as exc:
+                errors.append(f"{session_dir}: {exc}")
+                continue
+            if file_count:
+                archived_source_files += file_count
+                deleted_paths.append(str(session_dir / "boundaries"))
+                deleted_bytes += max(source_bytes - archive_bytes, 0)
     removed_empty_dirs = remove_empty_directories(roots) if execute else 0
     return PruneResult(
         created_at=current.isoformat(),
         executed=execute,
-        deleted_files=len(deleted_paths),
+        deleted_files=deleted_cache_files + archived_source_files,
         deleted_bytes=deleted_bytes,
         removed_empty_dirs=removed_empty_dirs,
         skipped_protected=0,
@@ -677,7 +704,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     prune.add_argument("--no-write", action="store_true", help="Do not write prune report to disk.")
     cache_prune = subparsers.add_parser(
         "cache-prune",
-        help="Delete old rebuildable SPXW replay/session-surface caches.",
+        help="Delete rebuildable caches and gzip cold immutable live boundaries.",
     )
     cache_prune.add_argument(
         "--execute",

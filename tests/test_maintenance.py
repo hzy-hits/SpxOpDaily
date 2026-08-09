@@ -14,6 +14,7 @@ from spx_spark.maintenance import (
     prune_rebuildable_surface_caches,
     trim_review_audit_file,
 )
+from spx_spark.surface_live_session_store import LiveSessionStateStore
 
 
 def make_settings(tmp_path) -> MaintenanceSettings:
@@ -118,23 +119,41 @@ def test_prune_execute_deletes_old_logs(tmp_path):
     assert not old_log.exists()
 
 
-def test_surface_cache_prune_only_deletes_old_rebuildable_json(tmp_path):
+def test_surface_cache_prune_deletes_cache_and_archives_cold_live_boundaries(tmp_path):
     settings = make_settings(tmp_path)
     now = datetime(2026, 7, 4, tzinfo=timezone.utc)
     publish = tmp_path / "data" / "published" / "spxw-surface"
     old_replay = publish / "replay-cache" / "policy=v3" / "old.json"
     fresh_session = publish / "session-surface-cache" / "policy=v5" / "fresh.json"
     old_live = publish / "live" / "policy=live-v2" / "session=2026-07-01" / "old.json"
+    live_store = LiveSessionStateStore(
+        publish / "live" / "policy=live-v2" / "bucket=1m"
+    )
+    boundary_at = datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc)
+    live_store.write_boundary(
+        "2026-07-01",
+        boundary_at,
+        {
+            "schema_version": 1,
+            "kind": "spxw_live_session_boundary",
+            "session_date": "2026-07-01",
+            "end_at": boundary_at.isoformat(),
+        },
+    )
+    expected_boundaries = live_store.load_boundaries("2026-07-01")
     touch_old(old_replay, now=now, days=3)
     touch_old(fresh_session, now=now, days=1)
     touch_old(old_live, now=now, days=30)
 
     result = prune_rebuildable_surface_caches(settings, execute=True, now=now)
 
-    assert result.deleted_files == 1
+    assert result.deleted_files == 2
     assert old_replay.exists() is False
     assert fresh_session.exists()
     assert old_live.exists()
+    assert live_store.boundaries_dir("2026-07-01").exists() is False
+    assert live_store.boundaries_archive_path("2026-07-01").is_file()
+    assert live_store.load_boundaries("2026-07-01") == expected_boundaries
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
