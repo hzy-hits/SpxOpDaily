@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -249,6 +250,35 @@ def write_labels_parquet(rows: Sequence[Mapping[str, Any]], output_root: Path) -
     return written
 
 
+def outcome_censor_distribution(
+    *,
+    database_path: Path,
+    session_date: str | None = None,
+) -> dict[str, int]:
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT o.status, o.attributes_json
+            FROM outcomes o
+            LEFT JOIN decisions d ON d.decision_id = o.decision_id
+            WHERE (? IS NULL OR d.session_date = ?)
+            """,
+            (session_date, session_date),
+        ).fetchall()
+    finally:
+        connection.close()
+    counts: dict[str, int] = {}
+    for status, attributes_json in rows:
+        normalized, censor_kind = _normalized_outcome_status(
+            status, _json_map(attributes_json)
+        )
+        if normalized != "censored" or censor_kind is None:
+            continue
+        counts[censor_kind] = counts.get(censor_kind, 0) + 1
+    return counts
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, required=True)
@@ -267,6 +297,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "labeled": len(rows),
         "session_date": args.session_date,
         "policy_version": DEFAULT_MANAGEMENT_POLICY.policy_version,
+        "censor_distribution": outcome_censor_distribution(
+            database_path=args.database,
+            session_date=args.session_date,
+        ),
     }
     if args.output_root is not None:
         path = write_labels_parquet(rows, args.output_root)
@@ -277,6 +311,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _map(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _json_map(value: object) -> Mapping[str, Any]:
+    if not isinstance(value, str):
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return _map(decoded)
+
+
+def _normalized_outcome_status(
+    status: object,
+    attributes: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    text = str(status or "").strip().lower()
+    if text == "censored":
+        censor_kind = str(attributes.get("censor_kind") or "").strip().lower() or None
+        return "censored", censor_kind
+    if text == "exit_quote_unavailable":
+        return "censored", "quote_gap"
+    return text or "unknown", None
 
 
 def _number(value: object) -> float | None:

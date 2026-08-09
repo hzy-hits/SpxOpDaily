@@ -29,6 +29,7 @@ from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
 from spx_spark.data_platform.research.strategy_policy_backfill import (
+    outcome_censor_distribution,
     write_labels_parquet,
 )
 from spx_spark.marketdata import (
@@ -88,7 +89,9 @@ def run_acceptance(
         "aug7_vertical_exact_reappear": session_7.get("vertical_exact_spread_reappear", None),
         "aug7_pass_b_candidates": session_7.get("pass_b_candidates", 0),
         "aug7_labeled": session_7.get("labeled", 0),
+        "aug7_censor_distribution": session_7.get("censor_distribution", {}),
         "aug8_control_no_trade": session_8.get("control_no_trade", False),
+        "aug8_censor_distribution": session_8.get("censor_distribution", {}),
         "ev_promotion_blocked": True,
     }
     return report
@@ -304,6 +307,10 @@ def _pass_b_session(
         "decision_rows": len(decisions),
         "confirmed_rows": len(confirmed),
         "reason_counts": dict(reasons),
+        "censor_distribution": outcome_censor_distribution(
+            database_path=database_path,
+            session_date=session_date,
+        ),
         "pass_b_sampled": len(focus),
         "pass_b_rebuilt": rebuilt,
         "pass_b_candidates": candidates,
@@ -850,6 +857,20 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "",
         "```json",
         json.dumps(s["2026-08-07"].get("reason_counts"), ensure_ascii=False, indent=2, sort_keys=True),
+        "```",
+        "",
+        "## 删失分布",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "2026-08-07": s["2026-08-07"].get("censor_distribution", {}),
+                "2026-08-08": s["2026-08-08"].get("censor_distribution", {}),
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
         "```",
         "",
         "## EV 升门",

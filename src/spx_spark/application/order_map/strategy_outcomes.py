@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from spx_spark.application.order_map.strategy_regime import MARK_HORIZONS_MINUTES
 from spx_spark.infrastructure.operational_db import (
@@ -17,6 +18,7 @@ from spx_spark.infrastructure.operational_db import (
 from spx_spark.marketdata import Quote, as_utc, instrument_matches_id
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
+NEW_YORK = ZoneInfo("America/New_York")
 
 def observe_due_strategy_outcomes(
     latest: LatestState,
@@ -86,7 +88,28 @@ def _observe(
         reasons.append("entry_debit_unavailable")
     if current_spx is None:
         reasons.append(spx_reason or "exit_spx_unavailable")
-    status = "observed" if exit_credit is not None and entry_debit is not None else "exit_quote_unavailable"
+    candidate = _map(decision.get("candidate")) or _map(
+        _map(decision.get("why_not")).get("nearest_candidate")
+    )
+    regime = _map(decision.get("regime"))
+    breach = _invalidation_breach(
+        decision,
+        candidate,
+        data_root=data_root,
+        decision_at=_time(decision.get("decision_at")),
+        target_at=target_at,
+    )
+    censor_kind = _censor_kind(
+        observation,
+        decision=decision,
+        target_at=target_at,
+        breach=breach,
+        exit_credit=exit_credit,
+        entry_debit=entry_debit,
+    )
+    status = "observed" if censor_kind is None else "censored"
+    if status == "censored" and censor_kind is not None:
+        reasons.append(f"censor:{censor_kind}")
     option_return = (
         (exit_credit - entry_debit) / entry_debit * 10_000.0
         if status == "observed" and entry_debit and exit_credit is not None
@@ -99,19 +122,8 @@ def _observe(
     )
     spx_return = (
         (current_spx / entry_spx - 1.0) * 10_000.0
-        if current_spx is not None and entry_spx not in (None, 0.0)
+        if status == "observed" and current_spx is not None and entry_spx not in (None, 0.0)
         else None
-    )
-    candidate = _map(decision.get("candidate")) or _map(
-        _map(decision.get("why_not")).get("nearest_candidate")
-    )
-    regime = _map(decision.get("regime"))
-    breach = _invalidation_breach(
-        decision,
-        candidate,
-        data_root=data_root,
-        decision_at=_time(decision.get("decision_at")),
-        target_at=target_at,
     )
     return {
         "decision_id": decision_id,
@@ -139,6 +151,7 @@ def _observe(
             "sample_lag_seconds": round((sampled_at - target_at).total_seconds(), 3),
             "spot_spx": current_spx,
             "regime_terminal_state": regime.get("terminal_state") or regime.get("path_state"),
+            "censor_kind": censor_kind,
             "invalidation_breached": breach["invalidation_breached"],
             "breach_at": breach["breach_at"],
             "breach_scan_gap": breach["breach_scan_gap"],
@@ -280,6 +293,40 @@ def _breach_hit(
     if not levels:
         return False
     return low <= min(levels) or high >= max(levels)
+
+
+def _censor_kind(
+    observation: Mapping[str, Any],
+    *,
+    decision: Mapping[str, Any],
+    target_at: datetime,
+    breach: Mapping[str, Any],
+    exit_credit: float | None,
+    entry_debit: float | None,
+) -> str | None:
+    hint = str(observation.get("censor_hint") or "")
+    if hint == "service_gap":
+        return "service_gap"
+    if hint == "session_end_before_horizon" or _session_end_before_horizon(
+        decision, target_at
+    ):
+        return "session_end_before_horizon"
+    if breach.get("invalidation_breached") is True:
+        return "breach_quote_unavailable"
+    if exit_credit is None or entry_debit is None:
+        return "quote_gap"
+    return None
+
+
+def _session_end_before_horizon(
+    decision: Mapping[str, Any], target_at: datetime
+) -> bool:
+    try:
+        day = date.fromisoformat(str(decision.get("session_date") or ""))
+    except ValueError:
+        return False
+    close_at = datetime.combine(day, time(16, 0), tzinfo=NEW_YORK).astimezone(timezone.utc)
+    return target_at > close_at
 
 
 def _entry_debit(legs: list[dict[str, Any]]) -> float | None:

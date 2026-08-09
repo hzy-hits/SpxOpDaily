@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 import json
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from sqlalchemy import Engine
@@ -17,6 +18,7 @@ from spx_spark.infrastructure.notifications import create_database_engine
 
 
 metadata = sa.MetaData()
+NEW_YORK = ZoneInfo("America/New_York")
 sessions = sa.Table(
     "sessions",
     metadata,
@@ -309,10 +311,7 @@ def read_due_strategy_observations(
     min_horizon = min(horizons)
     max_horizon = max(horizons)
     # Decisions that could have any horizon due right now.
-    latest_decision = observed_at - timedelta(minutes=min_horizon)
-    earliest_decision = observed_at - timedelta(
-        minutes=max_horizon, seconds=maximum_lag_seconds
-    )
+    latest_decision = observed_at
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     has_legs = sa.exists(
         sa.select(decision_legs.c.decision_id).where(
@@ -324,7 +323,6 @@ def read_due_strategy_observations(
         .where(
             decisions.c.strategy_name == "strategy_signal_engine_v2",
             decisions.c.decision_at <= _utc_text(latest_decision),
-            decisions.c.decision_at >= _utc_text(earliest_decision),
             has_legs,
         )
         .order_by(decisions.c.decision_at)
@@ -362,9 +360,21 @@ def read_due_strategy_observations(
                 if (row["decision_id"], horizon) in observed_pairs:
                     continue
                 target_at = decision_at + timedelta(minutes=horizon)
+                decision_payload = json.loads(row["attributes_json"])
+                session_close = _session_close_utc(decision_payload.get("session_date"))
+                session_end_before_horizon = (
+                    session_close is not None
+                    and target_at > session_close
+                    and observed_at >= session_close
+                )
                 lag = (observed_at - target_at).total_seconds()
-                if lag < 0 or lag > maximum_lag_seconds:
+                if lag < 0 and not session_end_before_horizon:
                     continue
+                censor_hint = None
+                if lag > maximum_lag_seconds:
+                    censor_hint = "service_gap"
+                elif session_end_before_horizon:
+                    censor_hint = "session_end_before_horizon"
                 result.append(
                     {
                         "decision": decision_payload,
@@ -372,6 +382,7 @@ def read_due_strategy_observations(
                         "target_at": target_at.isoformat(),
                         "horizon_minutes": horizon,
                         "legs": legs,
+                        "censor_hint": censor_hint,
                     }
                 )
                 if len(result) >= limit:
@@ -389,6 +400,14 @@ def _normalize_horizons(value: int | Sequence[int]) -> tuple[int, ...]:
     return tuple(dict.fromkeys(horizons))
 
 
+def _session_close_utc(session_date: object) -> datetime | None:
+    try:
+        day = date.fromisoformat(str(session_date))
+    except ValueError:
+        return None
+    return datetime.combine(day, time(16, 0), tzinfo=NEW_YORK).astimezone(timezone.utc)
+
+
 def persist_strategy_outcome(
     value: Mapping[str, object],
     *,
@@ -402,22 +421,32 @@ def persist_strategy_outcome(
         raise ValueError("strategy outcome horizon must be positive")
     target_at = _time(value.get("target_at"), "target_at")
     sampled_at = _time(value.get("sampled_at"), "sampled_at")
-    if sampled_at < target_at:
+    attributes = _mapping(value.get("attributes"))
+    censor_kind = str(attributes.get("censor_kind") or "")
+    if sampled_at < target_at and not (
+        str(value.get("status") or "") == "censored"
+        and censor_kind == "session_end_before_horizon"
+    ):
         raise ValueError("strategy outcome cannot be sampled before target")
     outcome_id = f"strategy-outcome:{decision_id}:{horizon_minutes}m"
     event_key = f"strategy-observation:{decision_id}:{horizon_minutes}m"
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     now_text = _utc_text(datetime.now(tz=timezone.utc))
-    attributes = _mapping(value.get("attributes"))
     with _engine(str(path)).begin() as connection:
         decision = connection.execute(
             sa.select(decisions).where(decisions.c.decision_id == decision_id)
         ).mappings().one()
+        event_source_at = (
+            sampled_at
+            if str(value.get("status") or "") == "censored"
+            and censor_kind == "session_end_before_horizon"
+            else target_at
+        )
         event_row = {
             "event_key": event_key,
             "event_type": "strategy_outcome_observation",
             "session_date": str(decision["session_date"] or ""),
-            "source_at": _utc_text(target_at),
+            "source_at": _utc_text(event_source_at),
             "available_at": _utc_text(sampled_at),
             "received_at": _utc_text(sampled_at),
             "phase": str(value.get("status") or "unavailable"),

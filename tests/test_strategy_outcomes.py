@@ -79,14 +79,19 @@ def _decision() -> dict[str, object]:
     }
 
 
-def _selected_decision(*, direction: str, invalidation_spx: float) -> dict[str, object]:
+def _selected_decision(
+    *,
+    direction: str,
+    invalidation_spx: float,
+    decision_at: datetime = NOW,
+) -> dict[str, object]:
     return {
         "schema_version": "strategy_decision.v1",
         "decision_id": f"strategy:{direction.lower()}-selected",
         "policy_version": "strategy_policy.bootstrap.v1",
-        "decision_at": NOW.isoformat(),
-        "available_at": NOW.isoformat(),
-        "session_date": "2026-08-07",
+        "decision_at": decision_at.isoformat(),
+        "available_at": decision_at.isoformat(),
+        "session_date": decision_at.date().isoformat(),
         "decision_type": "CALL_DEBIT_VERTICAL",
         "candidate": {
             "candidate_id": f"candidate:{direction.lower()}",
@@ -148,7 +153,7 @@ def _spx_row(
     return {
         "minute": minute.isoformat(),
         "observed_at": minute.isoformat(),
-        "session_date": "2026-08-07",
+        "session_date": minute.date().isoformat(),
         "official_spx_expected": True,
         "status": status,
         "selected": selected,
@@ -159,6 +164,60 @@ def _spx_row(
         "writer_instance_id": "test",
         "synthetic_price": False,
     }
+
+
+def _window_rows(
+    start: datetime,
+    *,
+    minutes: int = 6,
+    base: float = 7741.0,
+    invalidation_touch_minute: int | None = None,
+    direction: str = "UP",
+    invalidation_spx: float | None = None,
+) -> list[dict[str, object]]:
+    rows = []
+    for offset in range(minutes):
+        minute = start + timedelta(minutes=offset)
+        price = base - offset * 0.1
+        low = price - 0.1
+        high = price + 0.1
+        if (
+            invalidation_touch_minute is not None
+            and invalidation_spx is not None
+            and offset == invalidation_touch_minute
+        ):
+            if direction == "UP":
+                low = invalidation_spx - 0.1
+            else:
+                high = invalidation_spx + 0.1
+        rows.append(_spx_row(minute, price=price, low=low, high=high))
+    return rows
+
+
+def _latest_quotes(sampled_at: datetime, *, complete: bool = True) -> tuple[Quote, ...]:
+    quotes: list[Quote] = [
+        _quote(InstrumentId.index("SPX"), 7741.9, 7742.1, sampled_at),
+        _quote(
+            InstrumentId.option(
+                "SPX", expiry="20260807", strike=7735, right="C", trading_class="SPXW"
+            ),
+            4.5,
+            4.7,
+            sampled_at,
+        ),
+    ]
+    if complete:
+        quotes.append(
+            _quote(
+                InstrumentId.option(
+                    "SPX", expiry="20260807", strike=7740, right="C", trading_class="SPXW"
+                ),
+                2.0,
+                2.2,
+                sampled_at,
+            )
+        )
+    return tuple(quotes)
 
 
 def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
@@ -245,7 +304,8 @@ def test_multi_horizon_marks_persist_independently(tmp_path: Path) -> None:
         database_path=database,
     )
 
-    assert result["observed"] == 2
+    assert result["observed"] == 3
+    assert result["statuses"] == {"censored": 1, "observed": 2}
     assert set(result["horizons"]) == {1, 2, 3, 5}
     with sqlite3.connect(database) as connection:
         horizons = {
@@ -254,8 +314,8 @@ def test_multi_horizon_marks_persist_independently(tmp_path: Path) -> None:
                 "SELECT horizon_minutes FROM outcomes ORDER BY horizon_minutes"
             )
         }
-    # Horizon 1 is past the 90s lag window at +3m2s; 5m is not yet due.
-    assert horizons == {2, 3}
+    # Horizon 1 now lands as explicit service_gap censor; 5m is not yet due.
+    assert horizons == {1, 2, 3}
 
 
 @pytest.mark.parametrize(
@@ -451,3 +511,172 @@ def test_structural_invalidation_marks_gap_as_unknown_after_two_missing_minutes(
     assert attributes["breach_at"] is None
     assert attributes["breach_scan_gap"] is True
     assert attributes["label_kind"] == "horizon_mark"
+
+
+def test_service_gap_becomes_explicit_censored_label_and_stays_idempotent(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    persist_strategy_decision(
+        _selected_decision(direction="UP", invalidation_spx=7730.0),
+        database_path=database,
+    )
+    _write_spx_minutes(tmp_path, _window_rows(NOW, invalidation_spx=7730.0))
+    sampled_at = NOW + timedelta(minutes=5, seconds=95)
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=_latest_quotes(sampled_at),
+        best_quotes=_latest_quotes(sampled_at),
+    )
+
+    result = observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+
+    assert result["statuses"] == {"censored": 1}
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT status, spx_return_bps, option_return_bps, attributes_json FROM outcomes"
+        ).fetchone()
+    attributes = json.loads(row[3])
+    assert row[0] == "censored"
+    assert row[1] is None
+    assert row[2] is None
+    assert attributes["censor_kind"] == "service_gap"
+
+    repeated = observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at + timedelta(seconds=1),
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+    assert repeated["observed"] == 0
+
+
+def test_session_end_before_horizon_becomes_censored_label(tmp_path: Path) -> None:
+    database = _migrate(tmp_path)
+    decision_at = datetime(2026, 8, 7, 19, 55, tzinfo=timezone.utc)
+    persist_strategy_decision(
+        _selected_decision(
+            direction="UP",
+            invalidation_spx=7730.0,
+            decision_at=decision_at,
+        ),
+        database_path=database,
+    )
+    _write_spx_minutes(
+        tmp_path,
+        _window_rows(decision_at, minutes=6, invalidation_spx=7730.0),
+        session_date="2026-08-07",
+    )
+    sampled_at = datetime(2026, 8, 7, 20, 1, tzinfo=timezone.utc)
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=_latest_quotes(sampled_at),
+        best_quotes=_latest_quotes(sampled_at),
+    )
+
+    result = observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=10,
+        database_path=database,
+    )
+
+    assert result["statuses"] == {"censored": 1}
+    with sqlite3.connect(database) as connection:
+        attributes = json.loads(
+            connection.execute("SELECT attributes_json FROM outcomes").fetchone()[0]
+        )
+    assert attributes["censor_kind"] == "session_end_before_horizon"
+
+
+def test_breach_quote_unavailable_overrides_horizon_mark(tmp_path: Path) -> None:
+    database = _migrate(tmp_path)
+    persist_strategy_decision(
+        _selected_decision(direction="UP", invalidation_spx=7740.0),
+        database_path=database,
+    )
+    _write_spx_minutes(
+        tmp_path,
+        _window_rows(
+            NOW,
+            invalidation_touch_minute=1,
+            direction="UP",
+            invalidation_spx=7740.0,
+        ),
+    )
+    sampled_at = NOW + timedelta(minutes=5, seconds=3)
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=_latest_quotes(sampled_at),
+        best_quotes=_latest_quotes(sampled_at),
+    )
+
+    result = observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+
+    assert result["statuses"] == {"censored": 1}
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT status, spx_return_bps, option_return_bps, attributes_json FROM outcomes"
+        ).fetchone()
+    attributes = json.loads(row[3])
+    assert row[0] == "censored"
+    assert row[1] is None
+    assert row[2] is None
+    assert attributes["censor_kind"] == "breach_quote_unavailable"
+    assert attributes["label_kind"] == "structural_exit"
+    assert attributes["breach_at"] == (NOW + timedelta(minutes=1)).replace(
+        second=0, microsecond=0
+    ).isoformat()
+
+
+def test_quote_gap_becomes_explicit_censored_label(tmp_path: Path) -> None:
+    database = _migrate(tmp_path)
+    persist_strategy_decision(
+        _selected_decision(direction="UP", invalidation_spx=7730.0),
+        database_path=database,
+    )
+    _write_spx_minutes(tmp_path, _window_rows(NOW, invalidation_spx=7730.0))
+    sampled_at = NOW + timedelta(minutes=5, seconds=3)
+    quotes = _latest_quotes(sampled_at, complete=False)
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+
+    result = observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+
+    assert result["statuses"] == {"censored": 1}
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT status, spx_return_bps, option_return_bps, attributes_json FROM outcomes"
+        ).fetchone()
+    attributes = json.loads(row[3])
+    assert row[0] == "censored"
+    assert row[1] is None
+    assert row[2] is None
+    assert attributes["censor_kind"] == "quote_gap"
