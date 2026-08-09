@@ -15,18 +15,29 @@ from typing import Any
 
 
 def load_policy_labels(root: Path) -> list[dict[str, Any]]:
-    try:
-        import pyarrow.parquet as pq
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("pyarrow is required to load strategy_policy_labels") from exc
+    import duckdb
 
     rows: list[dict[str, Any]] = []
     base = root / "features" / "strategy_policy_labels"
     if not base.exists():
         return rows
-    for path in sorted(base.glob("date=*/labels.parquet")):
-        table = pq.read_table(path)
-        rows.extend(table.to_pylist())
+    con = duckdb.connect()
+    try:
+        for directory in sorted(base.glob("date=*")):
+            parquet = directory / "labels.parquet"
+            jsonl = directory / "labels.jsonl"
+            if parquet.exists():
+                relation = con.execute("SELECT * FROM read_parquet(?)", [str(parquet)])
+                columns = [item[0] for item in relation.description]
+                for values in relation.fetchall():
+                    rows.append(dict(zip(columns, values, strict=True)))
+            elif jsonl.exists():
+                with jsonl.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.strip():
+                            rows.append(json.loads(line))
+    finally:
+        con.close()
     return rows
 
 

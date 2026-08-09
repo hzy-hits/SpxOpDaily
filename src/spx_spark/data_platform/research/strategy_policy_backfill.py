@@ -208,11 +208,6 @@ def _entry_ask(legs: Sequence[Mapping[str, Any]]) -> float | None:
 def write_labels_parquet(rows: Sequence[Mapping[str, Any]], output_root: Path) -> Path | None:
     if not rows:
         return None
-    try:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-    except ImportError as exc:  # pragma: no cover - optional for unit tests
-        raise RuntimeError("pyarrow is required to write strategy_policy_labels") from exc
 
     by_session: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -220,17 +215,37 @@ def write_labels_parquet(rows: Sequence[Mapping[str, Any]], output_root: Path) -
         by_session.setdefault(session, []).append(dict(row))
     written = None
     for session, items in sorted(by_session.items()):
-        path = (
+        directory = (
             output_root
             / "features"
             / "strategy_policy_labels"
             / f"date={session}"
-            / "labels.parquet"
         )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        table = pa.Table.from_pylist(items)
-        pq.write_table(table, path)
-        written = path
+        directory.mkdir(parents=True, exist_ok=True)
+        jsonl = directory / "labels.jsonl"
+        with jsonl.open("w", encoding="utf-8") as handle:
+            for item in items:
+                handle.write(json.dumps(item, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+        path = directory / "labels.parquet"
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            table = pa.Table.from_pylist(items)
+            pq.write_table(table, path)
+            written = path
+        except ImportError:
+            import duckdb
+
+            con = duckdb.connect()
+            try:
+                con.execute(
+                    f"COPY (SELECT * FROM read_json_auto('{jsonl.as_posix()}')) "
+                    f"TO '{path.as_posix()}' (FORMAT PARQUET)"
+                )
+            finally:
+                con.close()
+            written = path
     return written
 
 

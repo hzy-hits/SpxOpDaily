@@ -1,0 +1,56 @@
+{
+  "bucket_stats": [
+    {
+      "bucket": "NONE|CONFIRMATION_TARGET_PIN|CALL_BUTTERFLY",
+      "hit_rate": 0.0,
+      "mean_policy_pnl": -3.511018,
+      "n": 11
+    },
+    {
+      "bucket": "NONE|CONFIRMATION_TARGET_PIN|PUT_BUTTERFLY",
+      "hit_rate": 0.0,
+      "mean_policy_pnl": -3.120109,
+      "n": 11
+    },
+    {
+      "bucket": "NONE|FAILED_BREAK_RECLAIM|CALL_DEBIT_VERTICAL",
+      "hit_rate": 1.0,
+      "mean_policy_pnl": 4.176367,
+      "n": 24
+    },
+    {
+      "bucket": "PIN_MIGRATING|CONFIRMATION_TARGET_PIN|CALL_BUTTERFLY",
+      "hit_rate": 0.0,
+      "mean_policy_pnl": -4.0042,
+      "n": 2
+    },
+    {
+      "bucket": "PIN_MIGRATING|CONFIRMATION_TARGET_PIN|PUT_BUTTERFLY",
+      "hit_rate": 0.0,
+      "mean_policy_pnl": -3.2792,
+      "n": 2
+    },
+    {
+      "bucket": "PIN_MIGRATING|FAILED_BREAK_RECLAIM|CALL_DEBIT_VERTICAL",
+      "hit_rate": 1.0,
+      "mean_policy_pnl": 3.4347,
+      "n": 4
+    }
+  ],
+  "gates": {
+    "bucket_fallback_needed": true,
+    "bucket_min_n": 2,
+    "labeled_rows": 54,
+    "promotion_ready": false,
+    "sessions_covered": 1,
+    "sessions_gate": false,
+    "sessions_required": 25,
+    "top_vs_bottom_mean_diff": -0.732333
+  },
+  "note": "EV scoring may rank candidates but must not veto until §7.4 gates pass and the user re-approves a policy_version bump.",
+  "policy_authority": "rank_only",
+  "schema_version": "strategy_policy_calibration.v1",
+  "sessions": [
+    "2026-08-07"
+  ]
+}
