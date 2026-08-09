@@ -4687,6 +4687,103 @@ def test_unified_strategy_candidate_enqueues_once_on_trade_ready_lane(
                       "event_id": "strategy-opportunity:test:ready"}
 
 
+def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """First delivery must never be blocked by the just-persisted decision itself.
+
+    Flood-control authority is what the outbox accepted: produced-but-undelivered
+    decisions consume no quota, repeats of the same opportunity are outbox
+    duplicates, and only a previously accepted card triggers the cooldown.
+    """
+
+    import os
+    import subprocess
+    import sys
+
+    from spx_spark.app_settings import get_settings as app_get_settings
+    from spx_spark.application.order_map.delivery import enqueue_strategy_decision
+    from spx_spark.infrastructure.operational_db import persist_strategy_decision
+
+    migrate = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        check=False, capture_output=True, text=True,
+        env=os.environ | {"SPX_DATA_ROOT": str(tmp_path)},
+    )
+    assert migrate.returncode == 0, migrate.stderr
+    monkeypatch.setenv("SPX_DATA_ROOT", str(tmp_path))
+    app_get_settings.cache_clear()
+
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    settings = make_settings(str(tmp_path / "strategy.json"))
+    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
+
+    def decision(decision_id: str, opportunity: str, at: datetime) -> dict:
+        return {
+            "schema_version": "strategy_decision.v2",
+            "decision_id": decision_id,
+            "policy_version": "strategy_policy.bootstrap.v2",
+            "decision_at": at.isoformat(),
+            "available_at": at.isoformat(),
+            "session_date": "2026-08-07",
+            "decision_type": "CALL_DEBIT_VERTICAL",
+            "action_authority": "manual",
+            "regime": {"path_state": "TREND"},
+            "desk_view": {"reason": "TREND_PULLBACK"},
+            "why_not": {"reasons": []},
+            "execution": {"action": "MANUAL_LIMIT", "automatic_ordering": False},
+            "candidate": {
+                "opportunity_id": opportunity,
+                "setup_kind": "TREND_PULLBACK",
+                "direction": "UP",
+                "trigger_level": 7705.0,
+                "target_spx": 7730.0,
+                "invalidation_spx": 7705.0,
+                "opportunity_valid_until": (at + timedelta(minutes=5)).isoformat(),
+                "long": {"contract_id": "option:SPX:SPXW:20260807:7710:C",
+                         "strike": 7710.0, "right": "C", "provider": "schwab",
+                         "bid": 3.8, "ask": 4.0,
+                         "source_at": (at - timedelta(seconds=1)).isoformat()},
+                "short": {"contract_id": "option:SPX:SPXW:20260807:7720:C",
+                          "strike": 7720.0, "right": "C", "provider": "schwab",
+                          "bid": 1.0, "ask": 1.2,
+                          "source_at": (at - timedelta(seconds=1)).isoformat()},
+                "quote": {"bid": 2.6, "ask": 3.0},
+                "economics": {"max_loss_points": 3.0},
+                "utility": {"event_probability": 0.61, "utility": 0.12,
+                            "conservative_lower_bound": 40.0},
+            },
+        }
+
+    try:
+        # A produced-but-never-delivered selected decision consumes no quota.
+        persist_strategy_decision(decision("strategy:undelivered", "strategy-opportunity:o0", now - timedelta(minutes=1)))
+
+        first = decision("strategy:first", "strategy-opportunity:o1", now)
+        persist_strategy_decision(first)  # production order: persist before enqueue
+        accepted = enqueue_strategy_decision(first, now=now)
+        assert accepted["accepted"] is True
+        assert accepted["outcome"] not in {"flood_control_cooldown", "flood_control_session_cap"}
+        assert accepted["targets"] == ["feishu"]
+
+        # Same stable opportunity on a later cycle is an outbox duplicate, not flood.
+        repeat = enqueue_strategy_decision(first, now=now + timedelta(seconds=30))
+        assert repeat["outcome"] == "outbox_already_accepted"
+
+        # A new opportunity with the same setup/direction/trigger inside the
+        # cooldown window is blocked by the previously accepted card.
+        second = decision("strategy:second", "strategy-opportunity:o2", now + timedelta(minutes=1))
+        persist_strategy_decision(second)
+        blocked = enqueue_strategy_decision(second, now=now + timedelta(minutes=1))
+        assert blocked == {
+            "accepted": False,
+            "outcome": "flood_control_cooldown",
+            "counts": {"session_direction": 1, "cooldown_hits": 1},
+        }
+    finally:
+        app_get_settings.cache_clear()
+
+
 def test_order_map_refresh_same_slot_replay_and_material_change_have_stable_ids(
     tmp_path: Path, monkeypatch
 ) -> None:

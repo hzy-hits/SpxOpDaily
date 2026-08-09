@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from spx_spark.application.notifications.report_enqueue import (
@@ -37,9 +37,6 @@ def enqueue_strategy_decision(
     candidate = decision.get("candidate")
     if decision.get("action_authority") != "manual" or not isinstance(candidate, dict):
         return {"accepted": False, "outcome": "no_manual_candidate"}
-    flood = _flood_control_block(decision, candidate, now=now)
-    if flood is not None:
-        return flood
     opportunity_id = str(candidate.get("opportunity_id") or "")
     occurred_at = _timestamp(decision.get("decision_at")) or now
     expires_at = _timestamp(candidate.get("opportunity_valid_until"))
@@ -47,6 +44,8 @@ def enqueue_strategy_decision(
         return {"accepted": False, "outcome": "candidate_identity_or_ttl_invalid"}
     settings = NotificationSettings.from_env()
     event_id = f"{opportunity_id}:ready"
+    # Repeat cycles of the same stable opportunity are an outbox duplicate,
+    # never a flood-control hit, so the dedup check must run first.
     if notification_event_exists(settings, event_id):
         return {
             "accepted": True,
@@ -55,6 +54,9 @@ def enqueue_strategy_decision(
             "outcome": "outbox_already_accepted",
             "event_id": event_id,
         }
+    flood = _flood_control_block(decision, candidate, settings, now=now)
+    if flood is not None:
+        return flood
     text = _render_strategy_candidate(decision, candidate)
     result = enqueue_notification(
         settings,
@@ -126,10 +128,22 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def _flood_control_block(
-    decision: dict[str, Any], candidate: dict[str, Any], *, now: datetime
+    decision: dict[str, Any],
+    candidate: dict[str, Any],
+    settings: NotificationSettings,
+    *,
+    now: datetime,
 ) -> dict[str, Any] | None:
+    """Rate-limit human cards by what the outbox actually accepted.
+
+    The authority is delivered/accepted notification events, not produced
+    decisions: a decision persisted as ``selected`` whose card never reached
+    the outbox must not consume quota, and the current decision (already
+    persisted before delivery) must never block itself.
+    """
+
     from spx_spark.application.order_map.strategy_regime import DEFAULT_STRATEGY_POLICY
-    from spx_spark.infrastructure.operational_db import count_recent_manual_strategy_cards
+    from spx_spark.infrastructure.operational_db import recent_selected_strategy_cards
 
     session_date = str(decision.get("session_date") or "")
     setup_kind = str(candidate.get("setup_kind") or "")
@@ -138,21 +152,49 @@ def _flood_control_block(
         return None
     trigger = candidate.get("trigger_level")
     trigger_level = float(trigger) if isinstance(trigger, (int, float)) else None
-    counts = count_recent_manual_strategy_cards(
+    opportunity_id = str(candidate.get("opportunity_id") or "")
+    rows = recent_selected_strategy_cards(
         session_date=session_date,
-        setup_kind=setup_kind,
-        direction=direction,
-        trigger_level=trigger_level,
-        now=now,
-        cooldown_seconds=DEFAULT_STRATEGY_POLICY.candidate_cooldown_seconds,
+        exclude_decision_id=str(decision.get("decision_id") or "") or None,
     )
-    if counts["cooldown_hits"] > 0:
+    accepted: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_opportunity = str(row.get("opportunity_id") or "")
+        if not row_opportunity or row_opportunity == opportunity_id:
+            continue
+        known = accepted.get(row_opportunity)
+        if known is not None:
+            if row["decision_at"] > known["decision_at"]:
+                accepted[row_opportunity] = row
+            continue
+        if notification_event_exists(settings, f"{row_opportunity}:ready"):
+            accepted[row_opportunity] = row
+    cooldown_start = now - timedelta(
+        seconds=max(DEFAULT_STRATEGY_POLICY.candidate_cooldown_seconds, 0.0)
+    )
+    session_direction = 0
+    cooldown_hits = 0
+    for row in accepted.values():
+        if str(row.get("direction") or "").upper() != direction.upper():
+            continue
+        session_direction += 1
+        if str(row.get("setup_kind") or "") != setup_kind:
+            continue
+        if row["decision_at"] < cooldown_start:
+            continue
+        stored_trigger = row.get("trigger_level")
+        if trigger_level is None or stored_trigger is None:
+            cooldown_hits += 1
+        elif abs(float(stored_trigger) - float(trigger_level)) <= 0.01:
+            cooldown_hits += 1
+    counts = {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
+    if cooldown_hits > 0:
         return {
             "accepted": False,
             "outcome": "flood_control_cooldown",
             "counts": counts,
         }
-    if counts["session_direction"] >= DEFAULT_STRATEGY_POLICY.max_cards_per_direction_per_session:
+    if session_direction >= DEFAULT_STRATEGY_POLICY.max_cards_per_direction_per_session:
         return {
             "accepted": False,
             "outcome": "flood_control_session_cap",
