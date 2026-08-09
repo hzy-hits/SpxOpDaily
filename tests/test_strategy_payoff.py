@@ -8,10 +8,12 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from spx_spark.analytics.options.strategy_payoff import (
+    PolicyMark,
     butterfly_economics,
     butterfly_payoff,
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
+    simulate_management_policy,
     vertical_economics,
     vertical_payoff,
 )
@@ -673,3 +675,56 @@ def _opportunity(opportunity_id: str, pnl: tuple[float, float, float, float]) ->
             }
         ],
     }
+
+
+def test_management_policy_arms_then_trails() -> None:
+    start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=1), combo_bid=1.2),
+        PolicyMark(at=start + timedelta(minutes=2), combo_bid=1.6),  # arm at 1.5
+        PolicyMark(at=start + timedelta(minutes=3), combo_bid=1.8),
+        PolicyMark(at=start + timedelta(minutes=4), combo_bid=1.2),  # trail below peak*0.75=1.35 but floor=entry
+    ]
+    label = simulate_management_policy(
+        marks, entry_ask=1.0, leg_count=3, entry_at=start
+    )
+    assert label.tp_armed is True
+    assert label.time_to_arm_seconds == pytest.approx(120.0)
+    assert label.exit_reason == "trail"
+    assert label.mfe_points == pytest.approx(0.8)
+    assert label.policy_pnl_points < 0.8  # fees deducted
+
+
+def test_management_policy_premium_stop_before_arm() -> None:
+    start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=1), combo_bid=0.8),
+        PolicyMark(at=start + timedelta(minutes=2), combo_bid=0.4),
+    ]
+    label = simulate_management_policy(
+        marks, entry_ask=1.0, leg_count=2, entry_at=start
+    )
+    assert label.tp_armed is False
+    assert label.exit_reason == "premium_stop"
+    assert label.mae_points == pytest.approx(-0.6)
+
+
+@given(
+    entry=st.floats(min_value=0.5, max_value=5.0, allow_nan=False, allow_infinity=False),
+    peak_mult=st.floats(min_value=1.5, max_value=3.0, allow_nan=False, allow_infinity=False),
+)
+def test_management_policy_pnl_bounded_by_path(entry: float, peak_mult: float) -> None:
+    start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
+    peak = entry * peak_mult
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=1), combo_bid=entry * 1.1),
+        PolicyMark(at=start + timedelta(minutes=2), combo_bid=peak),
+        PolicyMark(at=start + timedelta(minutes=3), combo_bid=entry * 0.9),
+    ]
+    label = simulate_management_policy(
+        marks, entry_ask=entry, leg_count=2, entry_at=start
+    )
+    fees = label.fees_points
+    assert label.mae_points <= 0.0 <= label.mfe_points
+    assert label.policy_pnl_points <= peak - entry - fees + 1e-9
+    assert label.policy_pnl_points >= -entry - fees - 1e-9

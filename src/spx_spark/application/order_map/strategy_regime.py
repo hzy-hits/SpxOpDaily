@@ -7,6 +7,24 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 
+from spx_spark.analytics.options.strategy_payoff import (
+    DEFAULT_MANAGEMENT_POLICY,
+    ManagementPolicy,
+)
+
+# Forward mark horizons for strategy_outcomes (v3). Frozen code constant.
+MARK_HORIZONS_MINUTES: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20)
+
+__all__ = (
+    "DEFAULT_MANAGEMENT_POLICY",
+    "DEFAULT_STRATEGY_POLICY",
+    "MARK_HORIZONS_MINUTES",
+    "ManagementPolicy",
+    "StrategyPolicy",
+    "assess_regime",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
     policy_version: str = "strategy_policy.bootstrap.v1"
@@ -29,6 +47,9 @@ class StrategyPolicy:
     late_chase_distance_atr: float = 1.0
     late_chase_impulse_atr: float = 1.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
+    # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
+    candidate_cooldown_seconds: float = 300.0
+    max_cards_per_direction_per_session: int = 6
 
     def entry_quality_kwargs(self) -> dict[str, float]:
         names = (

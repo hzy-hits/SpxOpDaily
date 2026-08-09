@@ -1,13 +1,14 @@
-"""Causal five-minute marks for selected and rejected strategy candidates."""
+"""Causal multi-horizon marks for selected and rejected strategy candidates."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from spx_spark.application.order_map.strategy_regime import MARK_HORIZONS_MINUTES
 from spx_spark.infrastructure.operational_db import (
     persist_strategy_outcome,
     read_due_strategy_observations,
@@ -20,15 +21,22 @@ def observe_due_strategy_outcomes(
     latest: LatestState,
     *,
     now: datetime,
-    horizon_minutes: int = 5,
+    horizon_minutes: int | Sequence[int] | None = None,
     database_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Persist one fresh conservative exit mark without claiming a fill."""
+    """Persist fresh conservative exit marks without claiming a fill.
+
+    Default horizons follow ``MARK_HORIZONS_MINUTES`` (v3 multi-horizon marks).
+    Pass a single int to retain the legacy one-horizon behaviour in tests.
+    """
 
     sampled_at = as_utc(now)
+    horizons: int | Sequence[int] = (
+        MARK_HORIZONS_MINUTES if horizon_minutes is None else horizon_minutes
+    )
     pending = read_due_strategy_observations(
         now=sampled_at,
-        horizon_minutes=horizon_minutes,
+        horizon_minutes=horizons,
         database_path=database_path,
     )
     statuses: dict[str, int] = {}
@@ -43,7 +51,7 @@ def observe_due_strategy_outcomes(
         "observed": len(outcome_ids),
         "statuses": statuses,
         "outcome_ids": outcome_ids,
-        "horizon_minutes": horizon_minutes,
+        "horizons": list(horizons) if not isinstance(horizons, int) else [horizons],
     }
 
 
@@ -86,6 +94,7 @@ def _observe(
     candidate = _map(decision.get("candidate")) or _map(
         _map(decision.get("why_not")).get("nearest_candidate")
     )
+    regime = _map(decision.get("regime"))
     return {
         "decision_id": decision_id,
         "horizon_minutes": horizon_minutes,
@@ -96,10 +105,12 @@ def _observe(
         "spx_return_bps": round(spx_return, 6) if spx_return is not None else None,
         "option_return_bps": round(option_return, 6) if option_return is not None else None,
         "attributes": {
-            "schema_version": "strategy_outcome_mark.v1",
+            "schema_version": "strategy_outcome_mark.v2",
             "label_basis": "decision_quote_shadow_not_fill",
             "entry_combo_ask": entry_debit,
             "exit_combo_bid": exit_credit,
+            "combo_bid": exit_credit,
+            "combo_ask": _exit_ask(exit_legs) if not exit_reasons else None,
             "gross_option_pnl": gross_pnl,
             "net_option_pnl": None,
             "commission": None,
@@ -108,6 +119,8 @@ def _observe(
             "reasons": sorted(set(reasons)),
             "exit_legs": exit_legs,
             "sample_lag_seconds": round((sampled_at - target_at).total_seconds(), 3),
+            "spot_spx": current_spx,
+            "regime_terminal_state": regime.get("terminal_state") or regime.get("path_state"),
         },
     }
 
@@ -131,6 +144,17 @@ def _exit_credit(legs: list[dict[str, Any]]) -> float | None:
             return None
         values.append(quantity * (bid if quantity > 0 else ask))
     return round(max(sum(values), 0.0), 4)
+
+
+def _exit_ask(legs: list[dict[str, Any]]) -> float | None:
+    values = []
+    for leg in legs:
+        quantity, bid, ask = (_number(leg.get(key)) for key in ("quantity", "bid", "ask"))
+        if quantity is None or bid is None or ask is None:
+            return None
+        values.append(quantity * (ask if quantity > 0 else bid))
+    ask = sum(values)
+    return round(ask, 4) if ask > 0.0 else None
 
 
 def _exit_legs(

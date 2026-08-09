@@ -191,63 +191,103 @@ def read_strategy_decisions(
 def read_due_strategy_observations(
     *,
     now: datetime,
-    horizon_minutes: int = 5,
+    horizon_minutes: int | Sequence[int] = 5,
     maximum_lag_seconds: float = 90.0,
     limit: int = 100,
     database_path: str | Path | None = None,
 ) -> tuple[dict[str, object], ...]:
-    """Load recent decisions with frozen legs that need one causal exit mark."""
+    """Load recent decisions with frozen legs that need causal exit marks.
 
-    if horizon_minutes <= 0 or maximum_lag_seconds <= 0 or limit <= 0:
+    ``horizon_minutes`` may be a single int (legacy) or a sequence. One SQL
+    window covers all horizons; each (decision, horizon) pair that is due and
+    not yet observed is returned.
+    """
+
+    horizons = _normalize_horizons(horizon_minutes)
+    if maximum_lag_seconds <= 0 or limit <= 0:
         raise ValueError("strategy observation window must be positive")
     observed_at = now.astimezone(timezone.utc)
-    target_cutoff = observed_at - timedelta(minutes=horizon_minutes)
-    earliest = target_cutoff - timedelta(seconds=maximum_lag_seconds)
+    min_horizon = min(horizons)
+    max_horizon = max(horizons)
+    # Decisions that could have any horizon due right now.
+    latest_decision = observed_at - timedelta(minutes=min_horizon)
+    earliest_decision = observed_at - timedelta(
+        minutes=max_horizon, seconds=maximum_lag_seconds
+    )
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     has_legs = sa.exists(
         sa.select(decision_legs.c.decision_id).where(
             decision_legs.c.decision_id == decisions.c.decision_id
         )
     )
-    already_observed = sa.exists(
-        sa.select(outcomes.c.outcome_id).where(
-            outcomes.c.decision_id == decisions.c.decision_id,
-            outcomes.c.horizon_minutes == horizon_minutes,
-        )
-    )
     statement = (
         sa.select(decisions.c.decision_id, decisions.c.decision_at, decisions.c.attributes_json)
         .where(
             decisions.c.strategy_name == "strategy_signal_engine_v2",
-            decisions.c.decision_at <= _utc_text(target_cutoff),
-            decisions.c.decision_at >= _utc_text(earliest),
+            decisions.c.decision_at <= _utc_text(latest_decision),
+            decisions.c.decision_at >= _utc_text(earliest_decision),
             has_legs,
-            ~already_observed,
         )
         .order_by(decisions.c.decision_at)
-        .limit(limit)
+        .limit(max(limit * len(horizons), limit))
     )
-    result = []
+    result: list[dict[str, object]] = []
     with _engine(str(path)).begin() as connection:
-        for row in connection.execute(statement).mappings():
-            legs = connection.execute(
-                sa.select(decision_legs)
-                .where(decision_legs.c.decision_id == row["decision_id"])
-                .order_by(decision_legs.c.leg_index)
-            ).mappings().all()
-            result.append(
-                {
-                    "decision": json.loads(row["attributes_json"]),
-                    "decision_at": row["decision_at"],
-                    "target_at": (
-                        _time(row["decision_at"], "decision_at")
-                        + timedelta(minutes=horizon_minutes)
-                    ).isoformat(),
-                    "horizon_minutes": horizon_minutes,
-                    "legs": [dict(leg) for leg in legs],
-                }
-            )
+        rows = list(connection.execute(statement).mappings())
+        if not rows:
+            return ()
+        decision_ids = [row["decision_id"] for row in rows]
+        observed_pairs = {
+            (item["decision_id"], int(item["horizon_minutes"]))
+            for item in connection.execute(
+                sa.select(outcomes.c.decision_id, outcomes.c.horizon_minutes).where(
+                    outcomes.c.decision_id.in_(decision_ids),
+                    outcomes.c.horizon_minutes.in_(list(horizons)),
+                )
+            ).mappings()
+        }
+        legs_by_decision: dict[str, list[dict[str, object]]] = {decision_id: [] for decision_id in decision_ids}
+        for leg in connection.execute(
+            sa.select(decision_legs)
+            .where(decision_legs.c.decision_id.in_(decision_ids))
+            .order_by(decision_legs.c.decision_id, decision_legs.c.leg_index)
+        ).mappings():
+            legs_by_decision[str(leg["decision_id"])].append(dict(leg))
+        for row in rows:
+            decision_at = _time(row["decision_at"], "decision_at")
+            legs = legs_by_decision.get(str(row["decision_id"]), [])
+            if not legs:
+                continue
+            decision_payload = json.loads(row["attributes_json"])
+            for horizon in horizons:
+                if (row["decision_id"], horizon) in observed_pairs:
+                    continue
+                target_at = decision_at + timedelta(minutes=horizon)
+                lag = (observed_at - target_at).total_seconds()
+                if lag < 0 or lag > maximum_lag_seconds:
+                    continue
+                result.append(
+                    {
+                        "decision": decision_payload,
+                        "decision_at": row["decision_at"],
+                        "target_at": target_at.isoformat(),
+                        "horizon_minutes": horizon,
+                        "legs": legs,
+                    }
+                )
+                if len(result) >= limit:
+                    return tuple(result)
     return tuple(result)
+
+
+def _normalize_horizons(value: int | Sequence[int]) -> tuple[int, ...]:
+    if isinstance(value, int):
+        horizons = (value,)
+    else:
+        horizons = tuple(int(item) for item in value)
+    if not horizons or any(item <= 0 for item in horizons):
+        raise ValueError("strategy observation horizon must be positive")
+    return tuple(dict.fromkeys(horizons))
 
 
 def persist_strategy_outcome(

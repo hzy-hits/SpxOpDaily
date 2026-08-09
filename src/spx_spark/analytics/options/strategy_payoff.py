@@ -2,9 +2,55 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+NEW_YORK = ZoneInfo("America/New_York")
+
+
+@dataclass(frozen=True, slots=True)
+class ManagementPolicy:
+    """Real exit rules for candidate evaluation (v3); not settlement binary payoff."""
+
+    policy_version: str = "management_policy.v1"
+    entry_basis: str = "conservative_combo_ask"
+    valuation_basis: str = "conservative_combo_bid"
+    profit_arm_return_on_debit: float = 0.50
+    trail_after_arm_fraction: float = 0.75
+    trail_floor_is_entry_debit: bool = True
+    premium_stop_fraction: float = 0.50
+    time_stop_minutes: int = 20
+    hard_exit_et: str = "15:45"
+    fees_per_leg_per_side: float = 1.32
+
+
+DEFAULT_MANAGEMENT_POLICY = ManagementPolicy()
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyMark:
+    at: datetime
+    combo_bid: float
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyLabel:
+    tp_armed: bool
+    tp_before_stop: bool
+    time_to_arm_seconds: float | None
+    mfe_points: float
+    mae_points: float
+    policy_pnl_points: float
+    exit_reason: str
+    exit_at: datetime | None
+    exit_bid: float | None
+    quote_gap_seconds_max: float
+    policy_version: str
+    fees_points: float
+
 
 
 def conservative_vertical_bbo(
@@ -157,3 +203,118 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("quote evaluation time must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def simulate_management_policy(
+    marks: Sequence[PolicyMark | Mapping[str, Any]],
+    *,
+    entry_ask: float,
+    leg_count: int,
+    entry_at: datetime,
+    policy: ManagementPolicy = DEFAULT_MANAGEMENT_POLICY,
+    session_date: date | None = None,
+) -> PolicyLabel:
+    """Replay conservative combo-bid marks under the frozen management policy.
+
+    Fees are charged in dollars and converted to index points at $100/point.
+    """
+
+    if entry_ask <= 0:
+        raise ValueError("entry_ask must be positive")
+    if leg_count <= 0:
+        raise ValueError("leg_count must be positive")
+    start = _utc(entry_at)
+    rows = [_coerce_mark(item) for item in marks]
+    rows = sorted((row for row in rows if row.at >= start and row.combo_bid >= 0), key=lambda row: row.at)
+    fees_dollars = policy.fees_per_leg_per_side * float(leg_count) * 2.0
+    fees_points = fees_dollars / 100.0
+    arm_level = entry_ask * (1.0 + policy.profit_arm_return_on_debit)
+    stop_level = entry_ask * policy.premium_stop_fraction
+    hard_exit = _hard_exit_at(start, policy.hard_exit_et, session_date=session_date)
+    time_stop_at = start + timedelta(minutes=policy.time_stop_minutes)
+
+    peak = entry_ask
+    armed = False
+    time_to_arm: float | None = None
+    mfe = 0.0
+    mae = 0.0
+    gap_max = 0.0
+    previous_at = start
+    exit_at: datetime | None = None
+    exit_bid: float | None = None
+    exit_reason = "marks_exhausted"
+
+    for mark in rows:
+        gap_max = max(gap_max, (mark.at - previous_at).total_seconds())
+        previous_at = mark.at
+        pnl = mark.combo_bid - entry_ask
+        mfe = max(mfe, pnl)
+        mae = min(mae, pnl)
+
+        if mark.at >= hard_exit:
+            exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "hard_close"
+            break
+        if mark.at >= time_stop_at:
+            exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "time_stop"
+            break
+        if mark.combo_bid <= stop_level:
+            exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "premium_stop"
+            break
+        if not armed and mark.combo_bid >= arm_level:
+            armed = True
+            time_to_arm = (mark.at - start).total_seconds()
+            peak = mark.combo_bid
+            continue
+        if armed:
+            peak = max(peak, mark.combo_bid)
+            trail = peak * policy.trail_after_arm_fraction
+            if policy.trail_floor_is_entry_debit:
+                trail = max(trail, entry_ask)
+            if mark.combo_bid < trail:
+                exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "trail"
+                break
+    else:
+        if rows:
+            exit_at, exit_bid = rows[-1].at, rows[-1].combo_bid
+            gap_max = max(gap_max, 0.0)
+
+    policy_pnl = (exit_bid - entry_ask - fees_points) if exit_bid is not None else -entry_ask - fees_points
+    return PolicyLabel(
+        tp_armed=armed,
+        tp_before_stop=armed and exit_reason in {"trail", "hard_close", "time_stop", "marks_exhausted"},
+        time_to_arm_seconds=time_to_arm,
+        mfe_points=round(mfe, 6),
+        mae_points=round(mae, 6),
+        policy_pnl_points=round(policy_pnl, 6),
+        exit_reason=exit_reason,
+        exit_at=exit_at,
+        exit_bid=round(exit_bid, 6) if exit_bid is not None else None,
+        quote_gap_seconds_max=round(gap_max, 3),
+        policy_version=policy.policy_version,
+        fees_points=round(fees_points, 6),
+    )
+
+
+def _coerce_mark(value: PolicyMark | Mapping[str, Any]) -> PolicyMark:
+    if isinstance(value, PolicyMark):
+        if value.at.tzinfo is None:
+            raise ValueError("policy mark time must be timezone-aware")
+        return PolicyMark(at=_utc(value.at), combo_bid=float(value.combo_bid))
+    at = value.get("at")
+    bid = value.get("combo_bid")
+    if not isinstance(at, datetime) or at.tzinfo is None:
+        raise ValueError("policy mark requires timezone-aware at")
+    if not isinstance(bid, (int, float)):
+        raise ValueError("policy mark requires numeric combo_bid")
+    return PolicyMark(at=_utc(at), combo_bid=float(bid))
+
+
+def _hard_exit_at(
+    entry_at: datetime, hard_exit_et: str, *, session_date: date | None
+) -> datetime:
+    hour_text, minute_text = hard_exit_et.split(":", 1)
+    day = session_date or entry_at.astimezone(NEW_YORK).date()
+    local = datetime.combine(
+        day, time(hour=int(hour_text), minute=int(minute_text)), tzinfo=NEW_YORK
+    )
+    return local.astimezone(timezone.utc)

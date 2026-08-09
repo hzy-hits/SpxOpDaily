@@ -111,11 +111,13 @@ def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
     result = observe_due_strategy_outcomes(
         latest,
         now=sampled_at,
+        horizon_minutes=5,
         database_path=database,
     )
 
     assert result["observed"] == 1
     assert result["statuses"] == {"observed": 1}
+    assert result["horizons"] == [5]
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             "SELECT status, spx_return_bps, option_return_bps, option_pnl, attributes_json "
@@ -126,8 +128,11 @@ def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
     assert row[1] > 0
     assert row[2] < 0
     assert row[3] is None
+    assert attributes["schema_version"] == "strategy_outcome_mark.v2"
     assert attributes["entry_combo_ask"] == 1.8
     assert attributes["exit_combo_bid"] == 0.7
+    assert attributes["combo_bid"] == 0.7
+    assert attributes["spot_spx"] is not None
     assert attributes["gross_option_pnl"] == -110.0
     assert attributes["net_option_pnl"] is None
     assert attributes["fill_status"] == "not_observed_no_order_capability"
@@ -135,6 +140,44 @@ def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
     repeated = observe_due_strategy_outcomes(
         latest,
         now=sampled_at + timedelta(seconds=1),
+        horizon_minutes=5,
         database_path=database,
     )
     assert repeated["observed"] == 0
+
+
+def test_multi_horizon_marks_persist_independently(tmp_path: Path) -> None:
+    database = _migrate(tmp_path)
+    persist_strategy_decision(_decision(), database_path=database)
+    sampled_at = NOW + timedelta(minutes=3, seconds=2)
+    quotes = (
+        _quote(InstrumentId.index("SPX"), 7741.9, 7742.1, sampled_at),
+        _quote(InstrumentId.option("SPX", expiry="20260807", strike=7735, right="C", trading_class="SPXW"), 4.5, 4.7, sampled_at),
+        _quote(InstrumentId.option("SPX", expiry="20260807", strike=7740, right="C", trading_class="SPXW"), 2.0, 2.2, sampled_at),
+        _quote(InstrumentId.option("SPX", expiry="20260807", strike=7745, right="C", trading_class="SPXW"), 0.6, 0.8, sampled_at),
+    )
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+
+    result = observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        horizon_minutes=(1, 2, 3, 5),
+        database_path=database,
+    )
+
+    assert result["observed"] == 2
+    assert set(result["horizons"]) == {1, 2, 3, 5}
+    with sqlite3.connect(database) as connection:
+        horizons = {
+            row[0]
+            for row in connection.execute(
+                "SELECT horizon_minutes FROM outcomes ORDER BY horizon_minutes"
+            )
+        }
+    # Horizon 1 is past the 90s lag window at +3m2s; 5m is not yet due.
+    assert horizons == {2, 3}
