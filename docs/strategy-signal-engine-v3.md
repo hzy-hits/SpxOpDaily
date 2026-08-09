@@ -1,11 +1,18 @@
-# SPX Spark 0DTE 策略信号引擎实施合同 v3（草案）
+# SPX Spark 0DTE 策略信号引擎实施合同 v3
 
-状态：**草案，未获批准**。本文是 `docs/strategy-signal-engine-v2.md` 之上的增量合同，
-不整体替代 v2。除本文明确修订的条款外，v2 的全部约束（五类候选上限、SPX 坐标、
-conservative synthetic BBO、LLM bounded critic、`automatic_ordering=false`、回放因果
-`available_at <= decision_at`、冻结案例 8/5 与 8/6）继续有效。
+状态：**已批准并开工**（2026-08-09 用户确认「开工吧」）。本文是
+`docs/strategy-signal-engine-v2.md` 之上的增量合同，不整体替代 v2。除本文明确修订
+的条款外，v2 的全部约束继续有效。
 
-批准本文即同时批准第 11 节列出的豁免项；未批准前不得开始编码。
+实现进度（同一功能分支 `cursor/strategy-engine-v3-design-2238`）：
+
+| 阶段 | 状态 |
+|---|---|
+| V3-1 多 horizon 打标 + ManagementPolicy + Pass-A 回填 | 已落地 |
+| V3-0 人类消息可观测性 | 已落地 |
+| V3-2 几何统一 + candidate factory + ranker | 已落地 |
+| V3-3a utility 降级为排序权 + 防洪水 | 已落地 |
+| V3-3b ManagementPolicy EV 评分与校准报告框架 | 已落地（仅 rank_only，未升门） |
 
 ---
 

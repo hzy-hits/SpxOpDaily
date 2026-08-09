@@ -188,6 +188,51 @@ def read_strategy_decisions(
     return tuple(json.loads(value) for value in rows)
 
 
+def count_recent_manual_strategy_cards(
+    *,
+    session_date: str,
+    setup_kind: str,
+    direction: str,
+    trigger_level: float | None,
+    now: datetime,
+    cooldown_seconds: float,
+    database_path: str | Path | None = None,
+) -> dict[str, int]:
+    """Count recent manual cards for flood control (cooldown + session/direction cap)."""
+
+    path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
+    observed = now.astimezone(timezone.utc)
+    cooldown_start = observed - timedelta(seconds=max(cooldown_seconds, 0.0))
+    with _engine(str(path)).begin() as connection:
+        rows = connection.execute(
+            sa.select(decisions.c.decision_at, decisions.c.attributes_json).where(
+                decisions.c.strategy_name == "strategy_signal_engine_v2",
+                decisions.c.session_date == session_date,
+                decisions.c.status == "selected",
+            )
+        ).mappings().all()
+    session_direction = 0
+    cooldown_hits = 0
+    for row in rows:
+        payload = json.loads(row["attributes_json"])
+        candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
+        if str(candidate.get("direction") or "").upper() != direction.upper():
+            continue
+        session_direction += 1
+        if str(candidate.get("setup_kind") or "") != setup_kind:
+            continue
+        decision_at = _time(row["decision_at"], "decision_at")
+        if decision_at < cooldown_start:
+            continue
+        stored_trigger = candidate.get("trigger_level")
+        if trigger_level is None or stored_trigger is None:
+            cooldown_hits += 1
+            continue
+        if abs(float(stored_trigger) - float(trigger_level)) <= 0.01:
+            cooldown_hits += 1
+    return {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
+
+
 def read_due_strategy_observations(
     *,
     now: datetime,

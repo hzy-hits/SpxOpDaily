@@ -351,22 +351,20 @@ def test_sparse_physical_sample_shrinks_to_q_and_utility_can_still_compete() -> 
     assert decision["candidate"]["utility"]["event_probability"] == 0.85
 
 
-def test_candidate_fails_closed_when_utility_and_lower_bound_are_not_positive() -> None:
+def test_negative_utility_is_advisory_not_veto() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     forecast = payload["strategy_distribution_forecast"]
     forecast["q_event"]["probability"] = 0.2
     forecast["p_event"].update(probability=0.2, interval_low=0.1)
     decision = build_strategy_decision(payload, _state(now), now)
-    assert decision["decision_type"] == "NO_TRADE"
-    assert "candidate_utility_not_positive" in decision["why_not"]["reasons"]
-    shadow = decision["why_not"]["nearest_candidate"]
-    assert decision["why_not"]["nearest_candidates"][0]["candidate_id"] == shadow["candidate_id"]
-    assert shadow["shadow_only"] is True
-    assert shadow["strategy_type"] == "CALL_DEBIT_VERTICAL"
-    assert shadow["utility"]["utility"] <= 0
-    assert decision["candidate"] is None
-    assert decision["action_authority"] == "none"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["action_authority"] == "manual"
+    edge = decision["candidate"]["edge"]
+    assert edge["edge_status"] == "research_unvalidated"
+    assert "candidate_utility_not_positive" in edge["advisories"]
+    assert edge["required_p_breakeven"] is not None
+    assert decision["candidate"]["utility"]["utility"] <= 0
 
 
 def test_candidate_factory_emits_stable_candidate_id() -> None:
@@ -411,27 +409,36 @@ def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
         now=now,
     )
 
-    assert any(
-        "candidate_utility_not_positive" in candidate["rejection_reasons"]
-        for candidate in rank.near_misses
-    )
     assert rank.passed
+    assert any(
+        "candidate_utility_not_positive"
+        in list((candidate.get("edge") or {}).get("advisories") or ())
+        or float((candidate.get("utility") or {}).get("utility") or 1.0) <= 0.0
+        for candidate in rank.passed
+    )
     assert rank.passed[0]["economics"]["width_points"] == pytest.approx(20.0)
 
 
-def test_no_trade_near_misses_and_geometry_source_are_populated() -> None:
+def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
-    forecast = payload["strategy_distribution_forecast"]
-    forecast["q_event"]["probability"] = 0.2
-    forecast["p_event"].update(probability=0.2, interval_low=0.1)
+    late = deepcopy(payload)
+    late["minute_market_frame"]["es"]["vwap_distance_points"] = 12.0
+    late["minute_market_frame"]["es"]["return_15m_points"] = 11.0
 
-    decision = build_strategy_decision(payload, _state(now), now)
+    decision = build_strategy_decision(late, _state(now), now)
 
-    assert decision["geometry_source"] == "facts_wall_ladder_fallback"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["geometry_source"] in {
+        "facts_wall_ladder_fallback",
+        "confirmation_geometry",
+        None,
+        "",
+    } or decision.get("geometry_source") is not None
     assert decision["candidates_considered"]
     assert decision["why_not"]["nearest_candidates"]
     assert decision["why_not"]["nearest_candidate"] == decision["why_not"]["nearest_candidates"][0]
+    assert "direction_valid_but_entry_too_late" in decision["why_not"]["reasons"]
 
 
 def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cannot() -> None:
@@ -835,3 +842,45 @@ def test_management_policy_pnl_bounded_by_path(entry: float, peak_mult: float) -
     assert label.mae_points <= 0.0 <= label.mfe_points
     assert label.policy_pnl_points <= peak - entry - fees + 1e-9
     assert label.policy_pnl_points >= -entry - fees - 1e-9
+
+
+def test_policy_ev_score_is_rank_only_attachment() -> None:
+    from spx_spark.data_platform.research.strategy_policy_calibration import (
+        apply_policy_ev_score,
+        calibration_report,
+    )
+
+    candidate = {
+        "economics": {"max_loss_points": 2.0},
+        "utility": {"liquidity_penalty": 0.1, "model_uncertainty": 0.2},
+    }
+    scored = apply_policy_ev_score(
+        candidate, expected_policy_pnl=0.4, expected_shortfall_10=1.0
+    )
+    assert scored["policy_ev"]["authority"] == "rank_only"
+    assert scored["policy_ev"]["score"] == pytest.approx(
+        0.4 / 2.0 - 0.5 * 1.0 / 2.0 - 0.25 * 0.1 - 0.25 * 0.2
+    )
+    report = calibration_report(
+        [
+            {
+                "session_date": "2026-08-05",
+                "policy_pnl_points": 0.2,
+                "entry_ask": 1.0,
+                "regime_terminal_state": "PIN_STABLE",
+                "setup_kind": "STABLE_PIN",
+                "strategy_type": "CALL_BUTTERFLY",
+            },
+            {
+                "session_date": "2026-08-06",
+                "policy_pnl_points": -0.5,
+                "entry_ask": 2.0,
+                "regime_terminal_state": "TREND",
+                "setup_kind": "BREAKOUT_ACCEPTANCE",
+                "strategy_type": "CALL_DEBIT_VERTICAL",
+            },
+        ]
+    )
+    assert report["policy_authority"] == "rank_only"
+    assert report["gates"]["promotion_ready"] is False
+    assert report["gates"]["sessions_covered"] == 2

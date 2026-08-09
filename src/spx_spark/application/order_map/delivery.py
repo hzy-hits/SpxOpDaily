@@ -37,6 +37,9 @@ def enqueue_strategy_decision(
     candidate = decision.get("candidate")
     if decision.get("action_authority") != "manual" or not isinstance(candidate, dict):
         return {"accepted": False, "outcome": "no_manual_candidate"}
+    flood = _flood_control_block(decision, candidate, now=now)
+    if flood is not None:
+        return flood
     opportunity_id = str(candidate.get("opportunity_id") or "")
     occurred_at = _timestamp(decision.get("decision_at")) or now
     expires_at = _timestamp(candidate.get("opportunity_valid_until"))
@@ -120,6 +123,42 @@ def _timestamp(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
+
+
+def _flood_control_block(
+    decision: dict[str, Any], candidate: dict[str, Any], *, now: datetime
+) -> dict[str, Any] | None:
+    from spx_spark.application.order_map.strategy_regime import DEFAULT_STRATEGY_POLICY
+    from spx_spark.infrastructure.operational_db import count_recent_manual_strategy_cards
+
+    session_date = str(decision.get("session_date") or "")
+    setup_kind = str(candidate.get("setup_kind") or "")
+    direction = str(candidate.get("direction") or "")
+    if not session_date or not setup_kind or not direction:
+        return None
+    trigger = candidate.get("trigger_level")
+    trigger_level = float(trigger) if isinstance(trigger, (int, float)) else None
+    counts = count_recent_manual_strategy_cards(
+        session_date=session_date,
+        setup_kind=setup_kind,
+        direction=direction,
+        trigger_level=trigger_level,
+        now=now,
+        cooldown_seconds=DEFAULT_STRATEGY_POLICY.candidate_cooldown_seconds,
+    )
+    if counts["cooldown_hits"] > 0:
+        return {
+            "accepted": False,
+            "outcome": "flood_control_cooldown",
+            "counts": counts,
+        }
+    if counts["session_direction"] >= DEFAULT_STRATEGY_POLICY.max_cards_per_direction_per_session:
+        return {
+            "accepted": False,
+            "outcome": "flood_control_session_cap",
+            "counts": counts,
+        }
+    return None
 
 
 def send_order_map(

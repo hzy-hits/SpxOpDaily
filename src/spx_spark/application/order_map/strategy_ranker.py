@@ -53,11 +53,17 @@ def rank_candidates(
             probability_settings=probability_settings,
             now=now,
         )
+        # V3-3a: research utility never vetoes. Advisories stay on candidate.edge.
         if utility_gates:
-            rejected = _rejected(scored, utility_gates)
-            misses.append(rejected)
-            audit.append(_audit_row(rejected))
-            continue
+            scored = {
+                **scored,
+                "edge": {
+                    **dict(_map(scored.get("edge"))),
+                    "advisories": [
+                        str(gate.get("gate")) for gate in utility_gates if gate.get("gate")
+                    ],
+                },
+            }
         passed.append(scored)
         audit.append(_audit_row(scored))
 
@@ -186,6 +192,10 @@ def _score_candidate(
     friction = min(abs(float(quote.get("ask", 0.0)) - float(quote.get("bid", 0.0))) / loss, 1.0)
     uncertainty, migration = 1.0 - weight, float(_map(regime.get("pin")).get("depin_risk") or 0.0)
     utility = expected / loss - 0.75 - 0.25 * friction - 0.25 * uncertainty - 0.5 * migration
+    width = _number(economics.get("width_points"))
+    debit = _number(economics.get("max_loss_points"))
+    required_p = (1.75 * debit / width) if width and debit and width > 0 else None
+    advisories: list[str] = []
     scoring = {
         "event_probability": round(probability, 6),
         "conservative_probability": round(conservative, 6),
@@ -200,15 +210,22 @@ def _score_candidate(
         "model_uncertainty": round(uncertainty, 6),
         "method": "binary_payoff_bootstrap_bound.v1",
     }
-    scored = {**dict(candidate), "probability_evidence": evidence, "utility": scoring}
-    if utility <= 0.0 or lower_bound <= 0.0:
-        return scored, [
-            {
-                "gate": "candidate_utility_not_positive",
-                "actual": round(utility if utility <= 0.0 else lower_bound, 6),
-                "threshold": ">0",
-            }
-        ]
+    if utility <= 0.0:
+        advisories.append("candidate_utility_not_positive")
+    if lower_bound <= 0.0:
+        advisories.append("candidate_lower_bound_not_positive")
+    scored = {
+        **dict(candidate),
+        "probability_evidence": evidence,
+        "utility": scoring,
+        "edge": {
+            "edge_status": "research_unvalidated",
+            "utility": round(utility, 6),
+            "required_p_breakeven": round(required_p, 6) if required_p is not None else None,
+            "model_p": round(probability, 6),
+            "advisories": list(dict.fromkeys(advisories)),
+        },
+    }
     return scored, []
 
 
