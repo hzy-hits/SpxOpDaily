@@ -17,7 +17,13 @@ from spx_spark.analytics.options.strategy_payoff import (
     vertical_economics,
     vertical_payoff,
 )
-from spx_spark.application.order_map.strategy_regime import assess_regime
+from spx_spark.application.order_map.candidate_factory import enumerate_candidates
+from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
+from spx_spark.application.order_map.strategy_regime import (
+    DEFAULT_STRATEGY_POLICY,
+    assess_regime,
+)
+from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.data_platform.research.strategy_decision_replay import (
     build_vertical_replay_report,
@@ -248,7 +254,11 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
 
     decision = build_strategy_decision(payload, _state(now), now)
 
+    assert decision["schema_version"] == "strategy_decision.v2"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v2"
+    assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["candidate"]["candidate_id"]
     assert decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
     assert decision["probability_evidence"] == {
         "q": 0.85, "p_empirical": 0.9, "p_interval_low": 0.8,
@@ -271,6 +281,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert rejected["decision_type"] == "NO_TRADE"
     assert rejected["regime"]["entry_state"] == "LATE_CHASE"
     assert "direction_valid_but_entry_too_late" in rejected["why_not"]["reasons"]
+    assert rejected["why_not"]["nearest_candidates"]
 
 
 def test_rth_confirmed_breakout_can_compete_when_path_is_transitional() -> None:
@@ -350,11 +361,77 @@ def test_candidate_fails_closed_when_utility_and_lower_bound_are_not_positive() 
     assert decision["decision_type"] == "NO_TRADE"
     assert "candidate_utility_not_positive" in decision["why_not"]["reasons"]
     shadow = decision["why_not"]["nearest_candidate"]
+    assert decision["why_not"]["nearest_candidates"][0]["candidate_id"] == shadow["candidate_id"]
     assert shadow["shadow_only"] is True
     assert shadow["strategy_type"] == "CALL_DEBIT_VERTICAL"
     assert shadow["utility"]["utility"] <= 0
     assert decision["candidate"] is None
     assert decision["action_authority"] == "none"
+
+
+def test_candidate_factory_emits_stable_candidate_id() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    latest = _state(now)
+    facts = build_market_fact_pack(payload, latest, now)
+    regime = assess_regime(facts)
+
+    rows = enumerate_candidates(
+        payload, facts, regime, latest, now=now, policy=DEFAULT_STRATEGY_POLICY
+    )
+
+    assert rows
+    assert len(rows[0]["candidate_id"]) == 16
+    assert rows[0]["automatic_ordering"] is False
+    assert rows[0]["manual_action_only"] is True
+
+
+def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    forecast = payload["strategy_distribution_forecast"]
+    forecast["q_event"]["probability"] = 0.6
+    forecast["p_event"].update(probability=0.6, interval_low=0.6)
+    payload["call_skew_spread_shadow"]["candidate"]["long"].update(bid=4.8, ask=5.0)
+    payload["call_skew_spread_shadow"]["candidate"]["short"].update(bid=0.5, ask=0.7)
+    latest = _vertical_chain_state(now)
+    facts = build_market_fact_pack(payload, latest, now)
+    regime = assess_regime(facts)
+    rows = enumerate_candidates(
+        payload, facts, regime, latest, now=now, policy=DEFAULT_STRATEGY_POLICY
+    )
+
+    rank = rank_candidates(
+        rows,
+        facts,
+        regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+
+    assert any(
+        "candidate_utility_not_positive" in candidate["rejection_reasons"]
+        for candidate in rank.near_misses
+    )
+    assert rank.passed
+    assert rank.passed[0]["economics"]["width_points"] == pytest.approx(20.0)
+
+
+def test_no_trade_near_misses_and_geometry_source_are_populated() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    forecast = payload["strategy_distribution_forecast"]
+    forecast["q_event"]["probability"] = 0.2
+    forecast["p_event"].update(probability=0.2, interval_low=0.1)
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["geometry_source"] == "facts_wall_ladder_fallback"
+    assert decision["candidates_considered"]
+    assert decision["why_not"]["nearest_candidates"]
+    assert decision["why_not"]["nearest_candidate"] == decision["why_not"]["nearest_candidates"][0]
 
 
 def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cannot() -> None:
@@ -447,6 +524,36 @@ def test_historical_gth_record_uses_same_stop_atr_and_trend_gates() -> None:
 def _state(now: datetime) -> LatestState:
     observed = now - timedelta(seconds=1)
     return LatestState(created_at=observed, as_of=observed, quotes=(), best_quotes=())
+
+
+def _vertical_chain_state(now: datetime) -> LatestState:
+    observed = now - timedelta(seconds=1)
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.option(
+                "SPX",
+                expiry="20260807",
+                strike=strike,
+                right="C",
+                trading_class="SPXW",
+            ),
+            provider=Provider.SCHWAB,
+            received_at=observed,
+            quote_time=observed,
+            quality=MarketDataQuality.LIVE,
+            bid=bid,
+            ask=ask,
+        )
+        for strike, bid, ask in (
+            (7705, 6.2, 6.4),
+            (7710, 4.8, 5.0),
+            (7715, 2.7, 2.9),
+            (7720, 0.5, 0.7),
+            (7725, 0.5, 0.7),
+            (7730, 0.5, 0.7),
+        )
+    )
+    return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
 
 
 def _decision_payload(now: datetime) -> dict[str, object]:
