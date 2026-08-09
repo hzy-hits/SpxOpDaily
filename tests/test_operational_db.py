@@ -308,3 +308,58 @@ def test_future_available_fact_is_rejected_before_write(tmp_path: Path) -> None:
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
+
+
+def test_strategy_opportunity_event_dedupes_across_decisions_and_shadows(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    candidate = {
+        **_candidate()["candidate"],
+        "opportunity_id": "strategy-opportunity:o1",
+        "strategy_type": "CALL_DEBIT_VERTICAL",
+    }
+    first = {
+        **_candidate(),
+        "candidate": candidate,
+        "decision_id": "strategy:first-opportunity",
+        "shadow_candidates": [_shadow_candidate("shadow-a")],
+    }
+    second = {
+        **_candidate(),
+        "candidate": {**candidate, "quote": {"bid": 2.7, "ask": 3.0}},
+        "decision_id": "strategy:second-opportunity",
+        "decision_at": (NOW + timedelta(minutes=1)).isoformat(),
+        "available_at": (NOW + timedelta(minutes=1)).isoformat(),
+    }
+    expected_event_key = "strategy-opportunity:2026-08-07:strategy-opportunity:o1"
+
+    persist_strategy_decision(first, database_path=database)
+    persist_strategy_shadow_candidates(first, database_path=database)
+    persist_strategy_decision(second, database_path=database)
+    persist_strategy_decision(_no_trade(), database_path=database)
+
+    with sqlite3.connect(database) as connection:
+        events_rows = connection.execute(
+            "SELECT event_key, event_type FROM events WHERE event_key=?",
+            (expected_event_key,),
+        ).fetchall()
+        decision_rows = connection.execute(
+            "SELECT decision_id, event_key FROM decisions "
+            "WHERE decision_id IN (?, ?, ?, ?) ORDER BY decision_id",
+            (
+                "strategy:first-opportunity",
+                "strategy:first-opportunity:cand1",
+                "strategy:second-opportunity",
+                "strategy:no-trade",
+            ),
+        ).fetchall()
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+    assert events_rows == [(expected_event_key, "strategy_opportunity")]
+    assert decision_rows == [
+        ("strategy:first-opportunity", expected_event_key),
+        ("strategy:first-opportunity:cand1", expected_event_key),
+        ("strategy:no-trade", None),
+        ("strategy:second-opportunity", expected_event_key),
+    ]
+    assert foreign_key_errors == []

@@ -20,7 +20,6 @@ from spx_spark.analytics.options.strategy_payoff import (
     simulate_management_policy,
 )
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
-from spx_spark.infrastructure.operational_db import read_strategy_decisions
 
 
 def backfill_policy_labels(
@@ -32,7 +31,7 @@ def backfill_policy_labels(
 ) -> list[dict[str, Any]]:
     """Label each persisted decision (selected or nearest shadow) with policy PnL."""
 
-    decisions = read_strategy_decisions(
+    decisions = _read_persisted_decisions(
         database_path=database_path, session_date=session_date
     )
     store = QuoteStore(data_root)
@@ -46,7 +45,7 @@ def backfill_policy_labels(
                 rows.append(labeled)
     finally:
         store.close()
-    return rows
+    return mark_duplicate_opportunities(rows)
 
 
 def _label_decision(
@@ -94,6 +93,7 @@ def _label_decision(
         "schema_version": "strategy_policy_label.v1",
         "pass": "A",
         "decision_id": decision.get("decision_id"),
+        "event_key": decision.get("event_key"),
         "session_date": decision.get("session_date"),
         "decision_at": decision_at.isoformat(),
         "available_at": decision.get("available_at"),
@@ -279,6 +279,28 @@ def outcome_censor_distribution(
     return counts
 
 
+def mark_duplicate_opportunities(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    first_by_event: dict[str, str] = {}
+    result: list[dict[str, Any]] = []
+    for row in sorted(
+        rows,
+        key=lambda item: (str(item.get("decision_at") or ""), str(item.get("decision_id") or "")),
+    ):
+        event_key = str(row.get("event_key") or "").strip()
+        decision_id = str(row.get("decision_id") or "").strip()
+        labeled = dict(row)
+        duplicate_of = None
+        if event_key and decision_id:
+            duplicate_of = first_by_event.setdefault(event_key, decision_id)
+            if duplicate_of == decision_id:
+                duplicate_of = None
+        labeled["duplicate_of"] = duplicate_of
+        result.append(labeled)
+    return result
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, required=True)
@@ -311,6 +333,39 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _map(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _read_persisted_decisions(
+    *,
+    database_path: Path,
+    session_date: str | None,
+) -> list[dict[str, Any]]:
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT decision_id, event_key, attributes_json
+            FROM decisions
+            WHERE strategy_name = 'strategy_signal_engine_v2'
+              AND status IN ('selected', 'no_trade')
+              AND (? IS NULL OR session_date = ?)
+            ORDER BY decision_at, decision_id
+            """,
+            (session_date, session_date),
+        ).fetchall()
+    finally:
+        connection.close()
+    result: list[dict[str, Any]] = []
+    for decision_id, event_key, attributes_json in rows:
+        payload = _json_map(attributes_json)
+        result.append(
+            {
+                **payload,
+                "decision_id": decision_id,
+                "event_key": event_key,
+            }
+        )
+    return result
 
 
 def _json_map(value: object) -> Mapping[str, Any]:

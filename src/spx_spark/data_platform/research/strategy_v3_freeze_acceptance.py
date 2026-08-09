@@ -29,6 +29,7 @@ from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
 from spx_spark.data_platform.research.strategy_policy_backfill import (
+    mark_duplicate_opportunities,
     outcome_censor_distribution,
     write_labels_parquet,
 )
@@ -272,12 +273,15 @@ def _pass_b_session(
         for row in decisions
         if str(_map(_map(row.get("market_facts")).get("trigger")).get("phase") or "") == "confirmed"
     ]
+    unique_confirmed = [
+        row for row in confirmed if row.get("duplicate_of") is None
+    ]
     # Prefer the historical failure mode the contract cares about.
     focus = [
         row
-        for row in confirmed
+        for row in unique_confirmed
         if str(row.get("reason") or "") == "vertical_exact_spread_unavailable"
-    ] or confirmed
+    ] or unique_confirmed
     focus = _dedupe_by_minute(focus)[:sample_limit]
 
     store = QuoteStore(data_root)
@@ -305,7 +309,11 @@ def _pass_b_session(
 
     session = {
         "decision_rows": len(decisions),
+        "unique_opportunities": sum(
+            1 for row in decisions if row.get("duplicate_of") is None
+        ),
         "confirmed_rows": len(confirmed),
+        "confirmed_unique_opportunities": len(unique_confirmed),
         "reason_counts": dict(reasons),
         "censor_distribution": outcome_censor_distribution(
             database_path=database_path,
@@ -772,7 +780,7 @@ def _load_decisions(database_path: Path, session_date: str) -> list[dict[str, An
     try:
         rows = connection.execute(
             """
-            SELECT decision_id, decision_at, session_date, status, reason, attributes_json
+            SELECT decision_id, event_key, decision_at, session_date, status, reason, attributes_json
             FROM decisions
             WHERE strategy_name = 'strategy_signal_engine_v2'
               AND session_date = ?
@@ -783,11 +791,12 @@ def _load_decisions(database_path: Path, session_date: str) -> list[dict[str, An
     finally:
         connection.close()
     result = []
-    for decision_id, decision_at, session, status, reason, attrs in rows:
+    for decision_id, event_key, decision_at, session, status, reason, attrs in rows:
         payload = json.loads(attrs)
         result.append(
             {
                 "decision_id": decision_id,
+                "event_key": event_key,
                 "decision_at": decision_at,
                 "session_date": session,
                 "status": status,
@@ -796,7 +805,7 @@ def _load_decisions(database_path: Path, session_date: str) -> list[dict[str, An
                 "attributes": payload,
             }
         )
-    return result
+    return mark_duplicate_opportunities(result)
 
 
 def _dedupe_by_minute(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:

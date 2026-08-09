@@ -146,9 +146,12 @@ def persist_strategy_decision(
     """Atomically persist one strategy decision and its frozen execution legs."""
 
     row, legs = _decision_rows(decision)
+    event_row = _strategy_opportunity_event_row(decision, created_at=str(row["created_at"]))
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     engine = _engine(str(path))
     with engine.begin() as connection:
+        if event_row is not None:
+            connection.execute(sqlite_insert(events).values(event_row).on_conflict_do_nothing())
         connection.execute(sqlite_insert(decisions).values(row).on_conflict_do_nothing())
         stored = connection.execute(
             sa.select(decisions).where(decisions.c.decision_id == row["decision_id"])
@@ -216,6 +219,13 @@ def persist_strategy_shadow_candidates(
                 row, legs = _shadow_candidate_rows(decision, candidate, rank=rank)
             except ValueError:
                 continue
+            event_row = _strategy_opportunity_event_row(
+                decision, created_at=str(row["created_at"])
+            )
+            if event_row is not None:
+                connection.execute(
+                    sqlite_insert(events).values(event_row).on_conflict_do_nothing()
+                )
             connection.execute(sqlite_insert(decisions).values(row).on_conflict_do_nothing())
             stored = connection.execute(
                 sa.select(decisions).where(decisions.c.decision_id == row["decision_id"])
@@ -308,8 +318,6 @@ def read_due_strategy_observations(
     if maximum_lag_seconds <= 0 or limit <= 0:
         raise ValueError("strategy observation window must be positive")
     observed_at = now.astimezone(timezone.utc)
-    min_horizon = min(horizons)
-    max_horizon = max(horizons)
     # Decisions that could have any horizon due right now.
     latest_decision = observed_at
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
@@ -506,7 +514,7 @@ def _decision_rows(
     now_text = _utc_text(datetime.now(tz=timezone.utc))
     row = {
         "decision_id": decision_id,
-        "event_key": None,
+        "event_key": _strategy_opportunity_event_key(value),
         "session_date": str(value.get("session_date") or "") or None,
         "strategy_name": "strategy_signal_engine_v2",
         "strategy_version": _required_text(value, "policy_version"),
@@ -563,7 +571,7 @@ def _shadow_candidate_rows(
     }
     row = {
         "decision_id": decision_id,
-        "event_key": None,
+        "event_key": _strategy_opportunity_event_key(parent),
         "session_date": str(parent.get("session_date") or "") or None,
         "strategy_name": "strategy_signal_engine_v2",
         "strategy_version": policy_version,
@@ -592,6 +600,47 @@ def _shadow_available_at(parent: Mapping[str, object], candidate: Mapping[str, o
         if leg and leg.get("source_at") is not None:
             times.append(_time(leg.get("source_at"), "leg source_at"))
     return max(times)
+
+
+def _strategy_opportunity_event_key(value: Mapping[str, object]) -> str | None:
+    candidate = _mapping(value.get("candidate"))
+    session_date = str(value.get("session_date") or "").strip()
+    opportunity_id = str(candidate.get("opportunity_id") or "").strip()
+    if not candidate or not session_date or not opportunity_id:
+        return None
+    return f"strategy-opportunity:{session_date}:{opportunity_id}"
+
+
+def _strategy_opportunity_event_row(
+    value: Mapping[str, object],
+    *,
+    created_at: str,
+) -> dict[str, object] | None:
+    event_key = _strategy_opportunity_event_key(value)
+    if event_key is None:
+        return None
+    decision_at = _time(value.get("decision_at"), "decision_at")
+    candidate = _mapping(value.get("candidate"))
+    return {
+        "event_key": event_key,
+        "event_type": "strategy_opportunity",
+        "session_date": str(value.get("session_date") or ""),
+        "source_at": _utc_text(decision_at),
+        "available_at": _utc_text(decision_at),
+        "received_at": _utc_text(decision_at),
+        "phase": "selected",
+        "direction": str(candidate.get("direction") or "none").lower(),
+        "data_quality": "ready",
+        "schema_version": 1,
+        "attributes_json": _json(
+            {
+                "decision_id": _required_text(value, "decision_id"),
+                "opportunity_id": candidate.get("opportunity_id"),
+                "strategy_type": candidate.get("strategy_type"),
+            }
+        ),
+        "created_at": created_at,
+    }
 
 
 def _leg_rows(

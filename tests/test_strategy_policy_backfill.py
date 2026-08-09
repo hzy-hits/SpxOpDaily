@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from spx_spark.data_platform.research.strategy_policy_backfill import (
+    mark_duplicate_opportunities,
     outcome_censor_distribution,
 )
 from spx_spark.infrastructure.operational_db import (
@@ -118,3 +119,28 @@ def test_outcome_censor_distribution_maps_legacy_exit_quote_unavailable(tmp_path
         "quote_gap": 1,
         "service_gap": 1,
     }
+
+
+def test_mark_duplicate_opportunities_flags_later_rows_with_same_event_key() -> None:
+    rows = mark_duplicate_opportunities(
+        [
+            {
+                "decision_id": "dec-1",
+                "event_key": "strategy-opportunity:2026-08-07:o1",
+                "decision_at": "2026-08-07T18:00:00+00:00",
+            },
+            {
+                "decision_id": "dec-2",
+                "event_key": "strategy-opportunity:2026-08-07:o1",
+                "decision_at": "2026-08-07T18:01:00+00:00",
+            },
+            {
+                "decision_id": "dec-3",
+                "event_key": "strategy-opportunity:2026-08-07:o1",
+                "decision_at": "2026-08-07T18:02:00+00:00",
+            },
+        ]
+    )
+
+    assert [row["duplicate_of"] for row in rows] == [None, "dec-1", "dec-1"]
+    assert sum(row["duplicate_of"] is None for row in rows) == 1
