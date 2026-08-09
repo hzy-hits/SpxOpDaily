@@ -122,7 +122,10 @@ from spx_spark.application.order_map.level_trigger_repricing import (
 from spx_spark.config import StorageSettings
 from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
-from spx_spark.infrastructure.operational_db import persist_strategy_decision
+from spx_spark.infrastructure.operational_db import (
+    persist_strategy_decision,
+    persist_strategy_shadow_candidates,
+)
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.marketdata import as_utc
 from spx_spark.analytics.options.models import OptionsMap
@@ -614,7 +617,20 @@ def run(
             "outcome": "operational_decision_not_persisted",
         }
     else:
-        strategy_persistence = {"ok": True, "decision_id": persisted_decision_id}
+        try:
+            shadow_persisted_ids = persist_strategy_shadow_candidates(strategy_decision)
+        except Exception as exc:
+            strategy_persistence = {
+                "ok": True,
+                "decision_id": persisted_decision_id,
+                "shadow_error": f"{type(exc).__name__}:{exc}",
+            }
+        else:
+            strategy_persistence = {
+                "ok": True,
+                "decision_id": persisted_decision_id,
+                "shadow_persisted_ids": list(shadow_persisted_ids),
+            }
         save_json(
             Path(storage.data_root) / "latest" / "strategy_decision.json",
             strategy_decision,

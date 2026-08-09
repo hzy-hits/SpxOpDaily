@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,11 +51,16 @@ def build_strategy_decision(
                 now=_utc(now),
             )
             if rank.passed:
+                shadow_candidates, shadow_candidates_skipped = _shadow_candidates(
+                    rank.passed[1:3]
+                )
                 return _candidate_decision(
                     facts,
                     {**regime, "entry_state": "GOOD_LOCATION"},
                     rank.passed[0],
                     candidates_considered=_candidate_summaries(rank),
+                    shadow_candidates=shadow_candidates,
+                    shadow_candidates_skipped=shadow_candidates_skipped,
                 )
             reasons = _rank_reasons(rank)
         else:
@@ -119,6 +124,8 @@ def _candidate_decision(
     candidate: Mapping[str, Any],
     *,
     candidates_considered: list[dict[str, Any]],
+    shadow_candidates: list[dict[str, Any]],
+    shadow_candidates_skipped: list[dict[str, Any]],
 ) -> dict[str, Any]:
     legs = candidate.get("legs") or (candidate.get("long"), candidate.get("short"))
     available = max(str(facts["available_at"]), *(str(_map(leg).get("source_at") or "") for leg in legs))
@@ -132,6 +139,8 @@ def _candidate_decision(
         "probability_evidence": dict(_map(candidate.get("probability_evidence"))),
         "decision_type": candidate["strategy_type"],
         "candidate": dict(candidate),
+        "shadow_candidates": shadow_candidates,
+        "shadow_candidates_skipped": shadow_candidates_skipped,
         "desk_view": {"state": regime["path_state"], "direction": candidate["direction"],
                       "conclusion": "MANUAL CANDIDATE", "reason": candidate["setup_kind"]},
         "why_not": {"nearest_candidate": None, "reasons": [], "reauthorize_on": None},
@@ -191,6 +200,8 @@ def _no_trade_decision(
         "candidates_considered": list(candidates_considered or ())[:5],
         "decision_type": "NO_TRADE",
         "candidate": None,
+        "shadow_candidates": [],
+        "shadow_candidates_skipped": [],
         "desk_view": {"state": regime["path_state"], "direction": regime.get("path_direction"),
                       "conclusion": "NO TRADE", "reason": reasons[0]},
         "why_not": {"nearest_candidate": shadow or None, "nearest_candidates": shadows,
@@ -253,6 +264,46 @@ def _candidate_score(candidate: Mapping[str, Any]) -> float:
 def _decision_geometry_source(candidate: Mapping[str, Any]) -> str:
     source = candidate.get("geometry_source")
     return "confirmation_geometry" if source == "confirmation_geometry" else "facts_wall_ladder_fallback"
+
+
+def _shadow_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    persisted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        reason = _shadow_candidate_skip_reason(candidate)
+        if reason is None:
+            persisted.append(dict(candidate))
+            continue
+        skipped.append(
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "reason": reason,
+            }
+        )
+    return persisted, skipped
+
+
+def _shadow_candidate_skip_reason(candidate: Mapping[str, Any]) -> str | None:
+    quote = _map(candidate.get("quote"))
+    if _number(quote.get("bid")) is None or _number(quote.get("ask")) is None:
+        return "candidate_quote_incomplete"
+    raw_legs = candidate.get("legs")
+    if isinstance(raw_legs, Sequence) and not isinstance(raw_legs, (str, bytes)):
+        legs = tuple(_map(item) for item in raw_legs)
+    else:
+        legs = (_map(candidate.get("long")), _map(candidate.get("short")))
+    if not legs or any(not leg for leg in legs):
+        return "candidate_legs_incomplete"
+    for leg in legs:
+        if not str(leg.get("contract_id") or "").strip():
+            return "candidate_legs_incomplete"
+        if _number(leg.get("bid")) is None or _number(leg.get("ask")) is None:
+            return "candidate_legs_incomplete"
+        if _time(leg.get("source_at")) is None:
+            return "candidate_legs_incomplete"
+    return None
 
 
 def _hash(value: object) -> str:

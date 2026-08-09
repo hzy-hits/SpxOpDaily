@@ -14,6 +14,8 @@ from spx_spark.app_settings import get_settings
 from spx_spark.infrastructure.operational_db import (
     OperationalDecisionConflict,
     persist_strategy_decision,
+    persist_strategy_shadow_candidates,
+    read_due_strategy_observations,
     read_strategy_decisions,
 )
 
@@ -90,6 +92,36 @@ def _candidate() -> dict[str, object]:
         },
         "why_not": {"reasons": []},
         "execution": {"action": "MANUAL_LIMIT", "automatic_ordering": False},
+    }
+
+
+def _shadow_candidate(suffix: str, *, offset: float = 0.0) -> dict[str, object]:
+    source_at = NOW - timedelta(seconds=1)
+    return {
+        "candidate_id": f"shadow:{suffix}",
+        "opportunity_id": f"strategy-opportunity:{suffix}",
+        "strategy_type": "CALL_DEBIT_VERTICAL",
+        "setup_kind": "TREND_PULLBACK",
+        "direction": "UP",
+        "quote": {"bid": 2.4 + offset, "ask": 2.8 + offset},
+        "long": {
+            "contract_id": f"option:SPX:SPXW:20260807:{7750 + offset:g}:C",
+            "strike": 7750.0 + offset,
+            "right": "C",
+            "provider": "schwab",
+            "bid": 5.1 + offset,
+            "ask": 5.4 + offset,
+            "source_at": source_at.isoformat(),
+        },
+        "short": {
+            "contract_id": f"option:SPX:SPXW:20260807:{7760 + offset:g}:C",
+            "strike": 7760.0 + offset,
+            "right": "C",
+            "provider": "schwab",
+            "bid": 2.3 + offset,
+            "ask": 2.6 + offset,
+            "source_at": source_at.isoformat(),
+        },
     }
 
 
@@ -175,6 +207,57 @@ def test_candidate_and_legs_commit_atomically_and_conflicts_fail(tmp_path: Path)
             {**decision, "execution": {"action": "WAIT"}},
             database_path=database,
         )
+
+
+def test_shadow_candidates_persist_join_observation_queue_and_stay_out_of_replay(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    decision = {
+        **_candidate(),
+        "market_facts": {"spot": {"spx": 7741.0}},
+        "regime": {"path_state": "TREND", "terminal_state": "TREND_UP"},
+        "shadow_candidates": [
+            _shadow_candidate("one"),
+            _shadow_candidate("two", offset=10.0),
+        ],
+    }
+
+    persist_strategy_decision(decision, database_path=database)
+    shadow_ids = persist_strategy_shadow_candidates(decision, database_path=database)
+
+    assert shadow_ids == (
+        "strategy:call-vertical:cand1",
+        "strategy:call-vertical:cand2",
+    )
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT decision_id, status FROM decisions ORDER BY decision_id"
+        ).fetchall()
+    assert rows == [
+        ("strategy:call-vertical", "selected"),
+        ("strategy:call-vertical:cand1", "shadow_candidate"),
+        ("strategy:call-vertical:cand2", "shadow_candidate"),
+    ]
+
+    observations = read_due_strategy_observations(
+        now=NOW + timedelta(minutes=5, seconds=3),
+        horizon_minutes=5,
+        database_path=database,
+    )
+    assert {
+        str(row["decision"]["decision_id"])
+        for row in observations
+    } == {
+        "strategy:call-vertical",
+        "strategy:call-vertical:cand1",
+        "strategy:call-vertical:cand2",
+    }
+    replay = read_strategy_decisions(
+        database_path=database,
+        session_date="2026-08-07",
+    )
+    assert [row["decision_id"] for row in replay] == ["strategy:call-vertical"]
 
 
 def test_rejected_shadow_candidate_persists_legs_without_trade_authority(

@@ -4703,7 +4703,10 @@ def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
 
     from spx_spark.app_settings import get_settings as app_get_settings
     from spx_spark.application.order_map.delivery import enqueue_strategy_decision
-    from spx_spark.infrastructure.operational_db import persist_strategy_decision
+    from spx_spark.infrastructure.operational_db import (
+        persist_strategy_decision,
+        persist_strategy_shadow_candidates,
+    )
 
     migrate = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
@@ -4755,12 +4758,46 @@ def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
             },
         }
 
+    def shadow_candidate(opportunity: str, at: datetime) -> dict:
+        return {
+            "candidate_id": f"{opportunity}:shadow",
+            "opportunity_id": f"{opportunity}:shadow",
+            "strategy_type": "CALL_DEBIT_VERTICAL",
+            "setup_kind": "TREND_PULLBACK",
+            "direction": "UP",
+            "trigger_level": 7705.0,
+            "target_spx": 7730.0,
+            "invalidation_spx": 7705.0,
+            "quote": {"bid": 2.5, "ask": 2.8},
+            "long": {
+                "contract_id": "option:SPX:SPXW:20260807:7730:C",
+                "strike": 7730.0,
+                "right": "C",
+                "provider": "schwab",
+                "bid": 3.3,
+                "ask": 3.5,
+                "source_at": (at - timedelta(seconds=1)).isoformat(),
+            },
+            "short": {
+                "contract_id": "option:SPX:SPXW:20260807:7740:C",
+                "strike": 7740.0,
+                "right": "C",
+                "provider": "schwab",
+                "bid": 0.8,
+                "ask": 1.0,
+                "source_at": (at - timedelta(seconds=1)).isoformat(),
+            },
+        }
+
     try:
         # A produced-but-never-delivered selected decision consumes no quota.
         persist_strategy_decision(decision("strategy:undelivered", "strategy-opportunity:o0", now - timedelta(minutes=1)))
 
         first = decision("strategy:first", "strategy-opportunity:o1", now)
         persist_strategy_decision(first)  # production order: persist before enqueue
+        persist_strategy_shadow_candidates(
+            {**first, "shadow_candidates": [shadow_candidate("strategy-opportunity:o1", now)]}
+        )
         accepted = enqueue_strategy_decision(first, now=now)
         assert accepted["accepted"] is True
         assert accepted["outcome"] not in {"flood_control_cooldown", "flood_control_session_cap"}

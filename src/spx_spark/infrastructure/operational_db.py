@@ -180,12 +180,65 @@ def read_strategy_decisions(
 ) -> tuple[dict[str, object], ...]:
     """Read persisted strategy payloads for replay without consulting JSON exports."""
 
-    statement = sa.select(decisions.c.attributes_json).order_by(decisions.c.decision_at)
+    statement = (
+        sa.select(decisions.c.attributes_json)
+        .where(decisions.c.status.in_(("selected", "no_trade")))
+        .order_by(decisions.c.decision_at)
+    )
     if session_date is not None:
         statement = statement.where(decisions.c.session_date == session_date)
     with _engine(str(database_path)).begin() as connection:
         rows = connection.execute(statement).scalars().all()
     return tuple(json.loads(value) for value in rows)
+
+
+def persist_strategy_shadow_candidates(
+    decision: Mapping[str, object],
+    *,
+    database_path: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Persist rank-2/3 shadow candidates as immutable decision rows."""
+
+    raw_candidates = decision.get("shadow_candidates")
+    if not isinstance(raw_candidates, Sequence) or isinstance(raw_candidates, (str, bytes)):
+        return ()
+    candidates = tuple(_mapping(item) for item in raw_candidates if _mapping(item))
+    if not candidates:
+        return ()
+    path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
+    engine = _engine(str(path))
+    persisted_ids: list[str] = []
+    with engine.begin() as connection:
+        for rank, candidate in enumerate(candidates, start=1):
+            try:
+                row, legs = _shadow_candidate_rows(decision, candidate, rank=rank)
+            except ValueError:
+                continue
+            connection.execute(sqlite_insert(decisions).values(row).on_conflict_do_nothing())
+            stored = connection.execute(
+                sa.select(decisions).where(decisions.c.decision_id == row["decision_id"])
+            ).mappings().one()
+            _assert_same("shadow decision", stored, row)
+            for leg in legs:
+                connection.execute(
+                    sqlite_insert(decision_legs).values(leg).on_conflict_do_nothing()
+                )
+                stored_leg = connection.execute(
+                    sa.select(decision_legs).where(
+                        decision_legs.c.decision_id == leg["decision_id"],
+                        decision_legs.c.leg_index == leg["leg_index"],
+                    )
+                ).mappings().one()
+                _assert_same("shadow decision leg", stored_leg, leg)
+            stored_count = connection.execute(
+                sa.select(sa.func.count()).select_from(decision_legs).where(
+                    decision_legs.c.decision_id == row["decision_id"]
+                )
+            ).scalar_one()
+            if stored_count != len(legs):
+                raise OperationalDecisionConflict("conflicting immutable shadow decision leg set")
+            persisted_ids.append(str(row["decision_id"]))
+    return tuple(persisted_ids)
 
 
 def recent_selected_strategy_cards(
@@ -439,6 +492,77 @@ def _decision_rows(
         "created_at": now_text,
     }
     return row, _leg_rows(candidate or nearest_candidate, decision_id, available_at, now_text)
+
+
+def _shadow_candidate_rows(
+    parent: Mapping[str, object],
+    candidate: Mapping[str, object],
+    *,
+    rank: int,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    parent_id = _required_text(parent, "decision_id")
+    decision_id = f"{parent_id}:cand{rank}"
+    decision_at = _time(parent.get("decision_at"), "decision_at")
+    available_at = _shadow_available_at(parent, candidate)
+    if available_at > decision_at:
+        raise ValueError("strategy decision used facts unavailable at decision time")
+    policy_version = _required_text(parent, "policy_version")
+    regime = _mapping(parent.get("regime"))
+    execution = _mapping(parent.get("execution"))
+    candidate_payload = dict(candidate)
+    candidate_payload.setdefault("shadow_only", True)
+    now_text = _utc_text(datetime.now(tz=timezone.utc))
+    payload = {
+        "schema_version": str(parent.get("schema_version") or "strategy_decision.v2"),
+        "decision_id": decision_id,
+        "parent_decision_id": parent_id,
+        "shadow_rank": rank,
+        "policy_version": policy_version,
+        "decision_at": _utc_text(decision_at),
+        "available_at": _utc_text(available_at),
+        "session_date": str(parent.get("session_date") or "") or None,
+        "decision_type": candidate.get("strategy_type"),
+        "market_facts": dict(_mapping(parent.get("market_facts"))),
+        "regime": dict(regime),
+        "candidate": candidate_payload,
+        "action_authority": "none",
+        "execution": {
+            "action": str(execution.get("action") or "MANUAL_LIMIT"),
+            "automatic_ordering": False,
+            "manual_action_only": True,
+        },
+    }
+    row = {
+        "decision_id": decision_id,
+        "event_key": None,
+        "session_date": str(parent.get("session_date") or "") or None,
+        "strategy_name": "strategy_signal_engine_v2",
+        "strategy_version": policy_version,
+        "decision_at": _utc_text(decision_at),
+        "available_at": _utc_text(available_at),
+        "status": "shadow_candidate",
+        "action": str(execution.get("action") or "MANUAL_LIMIT").lower(),
+        "side": str(candidate.get("direction") or "none").lower(),
+        "reason": "shadow_candidate",
+        "gamma_regime": str(regime.get("terminal_state") or regime.get("path_state") or "") or None,
+        "attributes_json": _json(payload),
+        "created_at": now_text,
+    }
+    return row, _leg_rows(candidate, decision_id, available_at, now_text)
+
+
+def _shadow_available_at(parent: Mapping[str, object], candidate: Mapping[str, object]) -> datetime:
+    available_at = _time(parent.get("available_at"), "available_at")
+    raw_legs = candidate.get("legs")
+    if isinstance(raw_legs, Sequence) and not isinstance(raw_legs, (str, bytes)):
+        legs = tuple(_mapping(item) for item in raw_legs)
+    else:
+        legs = (_mapping(candidate.get("long")), _mapping(candidate.get("short")))
+    times = [available_at]
+    for leg in legs:
+        if leg and leg.get("source_at") is not None:
+            times.append(_time(leg.get("source_at"), "leg source_at"))
+    return max(times)
 
 
 def _leg_rows(

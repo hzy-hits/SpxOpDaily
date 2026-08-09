@@ -269,6 +269,8 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert decision["execution"]["action"] == "MANUAL_LIMIT"
     assert decision["execution"]["limit"] == pytest.approx(3.0)
     assert decision["automatic_ordering"] is False
+    assert decision["shadow_candidates"] == []
+    assert decision["shadow_candidates_skipped"] == []
     assert datetime.fromisoformat(decision["candidate"]["opportunity_valid_until"]) == (
         now + timedelta(minutes=5)
     )
@@ -280,8 +282,52 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
 
     assert rejected["decision_type"] == "NO_TRADE"
     assert rejected["regime"]["entry_state"] == "LATE_CHASE"
+    assert rejected["shadow_candidates"] == []
+    assert rejected["shadow_candidates_skipped"] == []
     assert "direction_valid_but_entry_too_late" in rejected["why_not"]["reasons"]
     assert rejected["why_not"]["nearest_candidates"]
+
+
+def test_selected_decision_carries_shadow_candidates_and_skips_incomplete_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_ranker import RankResult
+
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    base = build_strategy_decision(payload, _state(now), now)
+    selected = deepcopy(base["candidate"])
+    valid_shadow = deepcopy(selected)
+    valid_shadow["candidate_id"] = "shadow-valid"
+    valid_shadow["opportunity_id"] = "strategy-opportunity:shadow-valid"
+    invalid_shadow = deepcopy(selected)
+    invalid_shadow["candidate_id"] = "shadow-invalid"
+    invalid_shadow["opportunity_id"] = "strategy-opportunity:shadow-invalid"
+    invalid_shadow["quote"] = {"bid": None, "ask": 2.8}
+
+    monkeypatch.setattr(
+        strategy_select,
+        "enumerate_candidates",
+        lambda *args, **kwargs: [selected, valid_shadow, invalid_shadow],
+    )
+    monkeypatch.setattr(
+        strategy_select,
+        "rank_candidates",
+        lambda *args, **kwargs: RankResult(
+            passed=[selected, valid_shadow, invalid_shadow],
+            near_misses=[],
+            gate_audit=[],
+        ),
+    )
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["candidate"]["candidate_id"] == selected["candidate_id"]
+    assert [row["candidate_id"] for row in decision["shadow_candidates"]] == ["shadow-valid"]
+    assert decision["shadow_candidates_skipped"] == [
+        {"candidate_id": "shadow-invalid", "reason": "candidate_quote_incomplete"}
+    ]
 
 
 def test_rth_confirmed_breakout_can_compete_when_path_is_transitional() -> None:
