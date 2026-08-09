@@ -294,13 +294,26 @@ STRATEGY_IDEA_MEMO_BANNED_TERMS = (
     "立刻",
     "加仓",
     "加倉",
-    "all-in",
     "all in",
     "allin",
     "market order",
     "market orders",
     "immediately",
     "add size",
+    "automatic",
+    "automatic ordering",
+    "action authority",
+    "自动下单",
+    "自動下單",
+)
+STRATEGY_IDEA_MEMO_FOREIGN_TICKERS = (
+    "spy",
+    "qqq",
+    "iwm",
+    "dia",
+    "tlt",
+    "uvxy",
+    "vix",
 )
 _NUMERIC_LITERAL_RE = re.compile(r"[-+]?(?:\d+\.\d+|\d+)")
 _CONTRACT_ID_RE = re.compile(r"\boption:[A-Za-z0-9:_-]+\b")
@@ -351,6 +364,30 @@ def _decision_contract_ids(value: object) -> set[str]:
     return contracts
 
 
+def _normalize_memo_text(text: str) -> str:
+    """Collapse punctuation/whitespace variants used to evade banned-term checks."""
+
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    for ch in (
+        "\u00a0",
+        "\u200b",
+        "\u2010",
+        "\u2011",
+        "\u2012",
+        "\u2013",
+        "\u2014",
+        "\u2212",
+        "-",
+        "_",
+        "/",
+        ".",
+    ):
+        normalized = normalized.replace(ch, " ")
+    return " ".join(normalized.split())
+
+
 def idea_memo_output_valid(memo: object, decision: dict[str, Any]) -> bool:
     if not isinstance(memo, dict) or set(memo) != STRATEGY_IDEA_MEMO_REQUIRED_KEYS:
         return False
@@ -370,15 +407,18 @@ def idea_memo_output_valid(memo: object, decision: dict[str, Any]) -> bool:
         return False
 
     decision_numbers = _decision_numeric_values(decision)
-    if any(float(level) not in decision_numbers for level in watch_levels):
+    try:
+        if any(float(level) not in decision_numbers for level in watch_levels):
+            return False
+    except (TypeError, ValueError):
         return False
 
     if len(thesis) + sum(len(item) for item in falsification) > 600:
         return False
 
     full_text = "\n".join((thesis, *falsification, *risks))
-    lowered = full_text.casefold()
-    if any(term in lowered for term in STRATEGY_IDEA_MEMO_BANNED_TERMS):
+    normalized = _normalize_memo_text(full_text)
+    if any(term in normalized for term in STRATEGY_IDEA_MEMO_BANNED_TERMS):
         return False
 
     decision_contracts = _decision_contract_ids(decision)
@@ -386,9 +426,19 @@ def idea_memo_output_valid(memo: object, decision: dict[str, Any]) -> bool:
     if not memo_contracts.issubset(decision_contracts):
         return False
 
+    decision_blob = _normalize_memo_text(json.dumps(decision, ensure_ascii=False))
+    for ticker in STRATEGY_IDEA_MEMO_FOREIGN_TICKERS:
+        if re.search(rf"\b{ticker}\b", normalized) and not re.search(
+            rf"\b{ticker}\b", decision_blob
+        ):
+            return False
+
     scrubbed = _CONTRACT_ID_RE.sub(" ", full_text)
     for raw in _NUMERIC_LITERAL_RE.findall(scrubbed):
-        if float(raw) not in decision_numbers:
+        try:
+            if float(raw) not in decision_numbers:
+                return False
+        except ValueError:
             return False
     return True
 

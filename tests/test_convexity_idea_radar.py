@@ -245,3 +245,37 @@ def test_strategy_idea_memo_rejects_non_json(monkeypatch) -> None:
 
     assert result is None
     assert error is not None and error.startswith("invalid_strategy_idea_memo_json:")
+
+
+def test_strategy_idea_memo_rejects_banned_term_variants(monkeypatch) -> None:
+    memo = {
+        "thesis": "Prefer a market-order fill at 7705.0.",
+        "falsification": ["Lose 7705.0 after refresh."],
+        "watch_levels": [7705.0],
+        "risks": ["Synthetic BBO can widen."],
+    }
+    monkeypatch.setattr(
+        llm_writer,
+        "call_llm_writer",
+        lambda *args, **kwargs: (__import__("json").dumps(memo), None),
+    )
+    result, error = llm_writer.call_strategy_idea_memo(_strategy_decision())
+    assert result is None
+    assert error == "strategy_idea_memo_validation_failed"
+
+
+def test_strategy_idea_memo_rejects_foreign_ticker(monkeypatch) -> None:
+    memo = {
+        "thesis": "Rotate into SPY near 7705.0.",
+        "falsification": ["Lose 7705.0 after refresh."],
+        "watch_levels": [7705.0],
+        "risks": ["Synthetic BBO can widen."],
+    }
+    monkeypatch.setattr(
+        llm_writer,
+        "call_llm_writer",
+        lambda *args, **kwargs: (__import__("json").dumps(memo), None),
+    )
+    result, error = llm_writer.call_strategy_idea_memo(_strategy_decision())
+    assert result is None
+    assert error == "strategy_idea_memo_validation_failed"

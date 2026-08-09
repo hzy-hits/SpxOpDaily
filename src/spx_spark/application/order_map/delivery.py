@@ -59,7 +59,13 @@ def enqueue_strategy_decision(
     if flood is not None:
         return flood
     text = _render_strategy_candidate(decision, candidate)
-    memo, memo_error = call_strategy_idea_memo(decision)
+    # Memo is research-only and must never block trade_ready delivery.
+    memo = None
+    memo_error: str | None = None
+    try:
+        memo, memo_error = call_strategy_idea_memo(decision)
+    except Exception as exc:  # noqa: BLE001 - fail-open for bounded LLM side path
+        memo, memo_error = None, f"idea_memo_exception:{type(exc).__name__}"
     if memo is not None:
         text = f"{text}\n\n{_render_strategy_idea_memo(memo)}"
     result = enqueue_notification(
