@@ -17,6 +17,7 @@ from spx_spark.marketdata import (
     greeks_from_dict,
     normalize_implied_vol,
     normalize_implied_vol_percent,
+    parse_timestamp,
     quote_from_dict,
     quote_use_decision,
 )
@@ -421,6 +422,11 @@ def test_legacy_delayed_quote_is_unknown_research_only() -> None:
     assert decision.freshness == QuoteFreshness.UNKNOWN
     assert decision.research_usable is True
     assert decision.pricing_allowed is False
+
+
+@pytest.mark.parametrize("value", [0, 0.0, "0", -1])
+def test_parse_timestamp_rejects_broker_epoch_sentinels(value: object) -> None:
+    assert parse_timestamp(value) is None
 
 
 def test_future_transport_timestamp_fails_closed() -> None:

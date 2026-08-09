@@ -35,6 +35,10 @@ from spx_spark.marketdata import (
 
 LOGGER = logging.getLogger(__name__)
 
+# Drop provider_states that no longer have a writer. Deleted collectors (e.g.
+# Polymarket) otherwise remain "available" forever via last-write-wins merge.
+PROVIDER_STATE_MAX_AGE_SECONDS = 6 * 60 * 60
+
 
 @contextmanager
 def _raw_quote_path_lock(path: Path) -> Iterator[None]:
@@ -228,6 +232,7 @@ class LatestStateStore:
                 provider_priority=self.settings.provider_priority,
                 failover_mode=failover_mode,
             )
+            provider_states = latest_provider_states(provider_states, now=as_of)
         return LatestState(
             created_at=created_at,
             as_of=as_of,
@@ -267,7 +272,8 @@ class LatestStateStore:
             provider_latest = latest_by_provider(existing_quotes + incoming)
             provider_latest = prune_expired_option_quotes(provider_latest, now=now)
             provider_states_latest = latest_provider_states(
-                existing_state.provider_states + tuple(provider_states)
+                existing_state.provider_states + tuple(provider_states),
+                now=now,
             )
             aged_quotes = tuple(
                 degrade_stale_quote(
@@ -636,13 +642,24 @@ def merge_option_observations(left: Quote, right: Quote) -> Quote:
     )
 
 
-def latest_provider_states(states: Iterable[ProviderState]) -> tuple[ProviderState, ...]:
+def latest_provider_states(
+    states: Iterable[ProviderState],
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = PROVIDER_STATE_MAX_AGE_SECONDS,
+) -> tuple[ProviderState, ...]:
     result: dict[Provider, ProviderState] = {}
     for state in states:
         previous = result.get(state.provider)
         if previous is None or as_utc(state.checked_at) >= as_utc(previous.checked_at):
             result[state.provider] = state
-    return tuple(sorted(result.values(), key=lambda item: item.provider.value))
+    as_of = as_utc(now or datetime.now(tz=timezone.utc))
+    kept = [
+        state
+        for state in result.values()
+        if (as_of - as_utc(state.checked_at)).total_seconds() <= max_age_seconds
+    ]
+    return tuple(sorted(kept, key=lambda item: item.provider.value))
 
 
 def select_best_quotes(

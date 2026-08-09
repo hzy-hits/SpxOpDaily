@@ -2025,7 +2025,12 @@ def test_ibkr_raw_persistence_is_change_only_with_periodic_checkpoint() -> None:
         provider_symbol="SPX",
         mark=6900.0,
         quote_time=now,
+        last_update_at=now,
         source_session="ibkr-stream:1",
+        raw={
+            "open_interest_provider": "ibkr",
+            "open_interest_observed_at": now.isoformat(),
+        },
     )
 
     first = collector._raw_quotes_for_persistence(
@@ -2038,10 +2043,33 @@ def test_ibkr_raw_persistence_is_change_only_with_periodic_checkpoint() -> None:
         quote_time=now.replace(second=2),
         source_latency_ms=4.0,
         sampling_group=12,
+        last_update_at=now.replace(second=2),
+        raw={
+            "open_interest_provider": "ibkr",
+            "open_interest_observed_at": now.replace(second=2).isoformat(),
+        },
     )
     second = collector._raw_quotes_for_persistence(
         ProviderSnapshot(provider=Provider.IBKR, received_at=unchanged.received_at, quotes=(unchanged,)),
         received_at=unchanged.received_at,
+    )
+    # Rotation-only metadata must not create a raw write when the book is unchanged.
+    rotation_noise = replace(
+        unchanged,
+        received_at=now.replace(second=3),
+        last_update_at=now.replace(second=3),
+        raw={
+            "open_interest_provider": "ibkr",
+            "open_interest_observed_at": now.replace(second=3).isoformat(),
+        },
+    )
+    second_b = collector._raw_quotes_for_persistence(
+        ProviderSnapshot(
+            provider=Provider.IBKR,
+            received_at=rotation_noise.received_at,
+            quotes=(rotation_noise,),
+        ),
+        received_at=rotation_noise.received_at,
     )
     changed = replace(unchanged, mark=6901.0, received_at=now.replace(second=4))
     third = collector._raw_quotes_for_persistence(
@@ -2060,6 +2088,7 @@ def test_ibkr_raw_persistence_is_change_only_with_periodic_checkpoint() -> None:
 
     assert first == (quote,)
     assert second == ()
+    assert second_b == ()
     assert third == (changed,)
     assert fourth == (checkpoint,)
 

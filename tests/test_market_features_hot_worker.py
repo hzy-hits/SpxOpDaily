@@ -44,6 +44,51 @@ class FakeStopEvent:
         return self.stopped
 
 
+def test_resolve_market_features_interval_slows_outside_spx_sessions() -> None:
+    rth = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)  # Friday 11:00 ET
+    weekend = datetime(2026, 8, 9, 15, 0, tzinfo=timezone.utc)  # Sunday
+
+    assert (
+        hot_worker.resolve_market_features_interval(
+            now=rth,
+            hot_interval_seconds=5.0,
+            sample_interval_seconds=60.0,
+        )
+        == 5.0
+    )
+    assert (
+        hot_worker.resolve_market_features_interval(
+            now=weekend,
+            hot_interval_seconds=5.0,
+            sample_interval_seconds=60.0,
+        )
+        == 60.0
+    )
+
+
+def test_worker_loop_accepts_dynamic_interval_callable() -> None:
+    clock = FakeClock()
+    stop = FakeStopEvent(clock)
+    events: list[dict[str, object]] = []
+    intervals = iter((5.0, 60.0))
+
+    result = hot_worker.run_worker_loop(
+        lambda: 0,
+        interval_seconds=lambda: next(intervals),
+        stop_event=stop,
+        max_cycles=2,
+        monotonic=clock.monotonic,
+        utcnow=clock.utcnow,
+        emit=events.append,
+    )
+
+    assert result == 0
+    assert events[0]["interval_seconds"] == 5.0
+    assert events[1]["interval_seconds"] == 60.0
+    # max_cycles stops before sleeping after the final cycle.
+    assert stop.waits == [5.0]
+
+
 def test_worker_reuses_one_process_without_overlapping_slow_cycles() -> None:
     clock = FakeClock()
     stop = FakeStopEvent(clock)
@@ -177,7 +222,12 @@ def test_core_worker_holds_the_embedded_shock_owner_lock(
     monkeypatch.setattr(
         hot_worker,
         "load_app_settings",
-        lambda: SimpleNamespace(market_features=SimpleNamespace(interval_seconds=5)),
+            lambda: SimpleNamespace(
+                market_features=SimpleNamespace(
+                    interval_seconds=5,
+                    sample_interval_seconds=60,
+                )
+            ),
     )
     monkeypatch.setattr(
         hot_worker,
@@ -260,7 +310,12 @@ def test_cli_once_uses_configured_cadence_and_lock(
     monkeypatch.setattr(
         hot_worker,
         "load_app_settings",
-        lambda: SimpleNamespace(market_features=SimpleNamespace(interval_seconds=7)),
+            lambda: SimpleNamespace(
+                market_features=SimpleNamespace(
+                    interval_seconds=7,
+                    sample_interval_seconds=60,
+                )
+            ),
     )
     monkeypatch.setattr(
         hot_worker,
@@ -275,7 +330,13 @@ def test_cli_once_uses_configured_cadence_and_lock(
     assert calls == ["cycle"]
     output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [event["event"] for event in output] == ["started", "cycle_finished", "stopped"]
-    assert output[0]["interval_seconds"] == 7.0
+    assert output[0]["hot_interval_seconds"] == 7.0
+    assert output[0]["closed_interval_seconds"] == 60.0
+    assert output[0]["interval_seconds"] == hot_worker.resolve_market_features_interval(
+        now=datetime.now(tz=timezone.utc),
+        hot_interval_seconds=7.0,
+        sample_interval_seconds=60.0,
+    )
 
 
 @pytest.mark.parametrize(

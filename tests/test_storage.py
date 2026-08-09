@@ -4,6 +4,7 @@ import json
 import multiprocessing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from spx_spark.config import StorageSettings
 from spx_spark.marketdata import (
@@ -17,10 +18,12 @@ from spx_spark.marketdata import (
     QuoteFreshness,
 )
 from spx_spark.storage import (
+    PROVIDER_STATE_MAX_AGE_SECONDS,
     JsonlQuoteWriter,
     LatestStateStore,
     configured_quote_use_decision,
     degrade_stale_quote,
+    latest_provider_states,
     prune_expired_option_quotes,
 )
 
@@ -420,6 +423,62 @@ def test_latest_state_merges_provider_states_across_provider_updates(tmp_path):
     states_by_provider = {item.provider: item for item in state.provider_states}
     assert states_by_provider[Provider.IBKR].status == ProviderStatus.UNAVAILABLE
     assert states_by_provider[Provider.HYPERLIQUID].status == ProviderStatus.AVAILABLE
+
+
+def test_latest_provider_states_drop_writers_that_stop_checking() -> None:
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    fresh = ProviderState(
+        provider=Provider.IBKR,
+        status=ProviderStatus.DEGRADED,
+        checked_at=now - timedelta(minutes=1),
+        connected=True,
+        authenticated=True,
+        priority=0,
+    )
+    ghost = ProviderState(
+        provider=Provider.POLYMARKET,
+        status=ProviderStatus.AVAILABLE,
+        checked_at=now - timedelta(seconds=PROVIDER_STATE_MAX_AGE_SECONDS + 1),
+        connected=True,
+        authenticated=None,
+        priority=4,
+    )
+
+    kept = latest_provider_states((ghost, fresh), now=now)
+
+    assert [state.provider for state in kept] == [Provider.IBKR]
+
+
+def test_latest_state_load_expires_stale_provider_states(tmp_path) -> None:
+    settings = make_storage_settings(tmp_path)
+    store = LatestStateStore(settings)
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    store.update(
+        [],
+        now=now - timedelta(hours=1),
+        provider_states=[
+            ProviderState(
+                provider=Provider.POLYMARKET,
+                status=ProviderStatus.AVAILABLE,
+                checked_at=now - timedelta(hours=1),
+                connected=True,
+                authenticated=None,
+                priority=4,
+            )
+        ],
+    )
+    # Age the on-disk checked_at beyond the retention window without a writer.
+    payload = json.loads(Path(settings.latest_state_path).read_text(encoding="utf-8"))
+    payload["provider_states"][0]["checked_at"] = (
+        now - timedelta(seconds=PROVIDER_STATE_MAX_AGE_SECONDS + 5)
+    ).isoformat()
+    Path(settings.latest_state_path).write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    state = LatestStateStore(settings).load(now=now)
+
+    assert state.provider_states == ()
 
 
 def test_degrade_stale_quote_does_not_treat_flush_time_as_source_update() -> None:

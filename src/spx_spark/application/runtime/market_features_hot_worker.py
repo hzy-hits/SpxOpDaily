@@ -17,6 +17,7 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Protocol
 
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.config import StorageSettings
 from spx_spark.state_io import atomic_write_json_secure
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 LOCK_FILE_NAME = "spx-spark-market-features-hot-worker.lock"
+IntervalSeconds = float | Callable[[], float]
 
 
 class StopEvent(Protocol):
@@ -161,10 +163,27 @@ def run_locked_once(
         return 75
 
 
+def resolve_market_features_interval(
+    *,
+    now: datetime,
+    hot_interval_seconds: float,
+    sample_interval_seconds: float,
+) -> float:
+    """Use the hot cadence only while SPX RTH/GTH can produce decisions."""
+
+    if hot_interval_seconds <= 0:
+        raise ValueError("hot-worker interval must be positive")
+    if sample_interval_seconds <= 0:
+        raise ValueError("sample interval must be positive")
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(now) or DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        return float(hot_interval_seconds)
+    return max(float(hot_interval_seconds), float(sample_interval_seconds))
+
+
 def run_worker_loop(
     cycle: Callable[[], int],
     *,
-    interval_seconds: float,
+    interval_seconds: IntervalSeconds,
     stop_event: StopEvent,
     max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     max_cycles: int | None = None,
@@ -181,8 +200,12 @@ def run_worker_loop(
     Repeated failures exit so systemd can rebuild all process-local state.
     """
 
-    if interval_seconds <= 0:
-        raise ValueError("hot-worker interval must be positive")
+    def cadence_at() -> float:
+        value = float(interval_seconds() if callable(interval_seconds) else interval_seconds)
+        if value <= 0:
+            raise ValueError("hot-worker interval must be positive")
+        return value
+
     if max_consecutive_failures <= 0:
         raise ValueError("max consecutive failures must be positive")
     if max_cycles is not None and max_cycles <= 0:
@@ -193,6 +216,7 @@ def run_worker_loop(
     while not stop_event.is_set():
         cycle_number += 1
         started_at = utcnow()
+        interval = cadence_at()
         started_monotonic = monotonic()
         error: str | None = None
         exit_code = 1
@@ -216,8 +240,8 @@ def run_worker_loop(
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "duration_ms": duration_seconds * 1000.0,
-            "interval_seconds": interval_seconds,
-            "overrun_ms": max(duration_seconds - interval_seconds, 0.0) * 1000.0,
+            "interval_seconds": interval,
+            "overrun_ms": max(duration_seconds - interval, 0.0) * 1000.0,
             "consecutive_failures": consecutive_failures,
         }
         if lease_path is not None:
@@ -228,7 +252,7 @@ def run_worker_loop(
         if max_cycles is not None and cycle_number >= max_cycles:
             break
 
-        remaining = max(interval_seconds - duration_seconds, 0.0)
+        remaining = max(interval - duration_seconds, 0.0)
         if stop_event.wait(remaining):
             break
     return 0
@@ -306,11 +330,22 @@ def run_with_stop(
     emit_json: bool = True,
 ) -> int:
     app = load_app_settings()
-    cadence = float(
+    hot_cadence = float(
         interval_seconds
         if interval_seconds is not None
         else app.market_features.interval_seconds
     )
+    sample_cadence = float(
+        getattr(app.market_features, "sample_interval_seconds", None) or hot_cadence
+    )
+
+    def cadence() -> float:
+        return resolve_market_features_interval(
+            now=datetime.now(tz=timezone.utc),
+            hot_interval_seconds=hot_cadence,
+            sample_interval_seconds=sample_cadence,
+        )
+
     storage = StorageSettings.from_env()
     lease_path = Path(storage.data_root) / "latest" / "market_features_hot_worker.lease.json"
     def cycle() -> int:
@@ -332,7 +367,9 @@ def run_with_stop(
                     "event": "started",
                     "ok": True,
                     "pid": os.getpid(),
-                    "interval_seconds": cadence,
+                    "interval_seconds": cadence(),
+                    "hot_interval_seconds": hot_cadence,
+                    "closed_interval_seconds": max(hot_cadence, sample_cadence),
                     "lock_path": str(lock_path),
                 }
             )

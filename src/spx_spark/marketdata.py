@@ -913,6 +913,10 @@ def parse_timestamp(value: Any) -> datetime | None:
         return as_utc(value)
     if isinstance(value, (int, float)):
         numeric = float(value)
+        # Broker/API sentinels use 0 (and occasionally negative) for "no time".
+        # Do not materialize them as the Unix epoch.
+        if numeric <= 0:
+            return None
         if numeric > 10_000_000_000:
             numeric = numeric / 1000.0
         try:
@@ -923,7 +927,7 @@ def parse_timestamp(value: Any) -> datetime | None:
         text = value.strip()
         if not text:
             return None
-        if text.isdigit():
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
             return parse_timestamp(int(text))
         try:
             return as_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))

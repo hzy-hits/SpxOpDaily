@@ -36,6 +36,9 @@ _NON_MARKET_FINGERPRINT_FIELDS = (
     "quote_time",
     "source_latency_ms",
     "sampling_group",
+    # Local observation clocks advance on every rotation/flush even when the
+    # broker book is unchanged; keep them out of change-only raw persistence.
+    "last_update_at",
 )
 
 
@@ -43,6 +46,17 @@ def _quote_fingerprint(quote: object) -> str:
     payload = quote.to_dict()
     for field in _NON_MARKET_FINGERPRINT_FIELDS:
         payload.pop(field, None)
+    provenance = payload.get("field_provenance")
+    if isinstance(provenance, dict):
+        cleaned = {
+            key: value
+            for key, value in provenance.items()
+            if not str(key).endswith("_observed_at")
+        }
+        if cleaned:
+            payload["field_provenance"] = cleaned
+        else:
+            payload.pop("field_provenance", None)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
