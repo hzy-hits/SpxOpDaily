@@ -254,9 +254,23 @@ def test_option_failure_does_not_erase_ready_rth_market_state() -> None:
     assert "option_frame_unavailable" in result["option_overlay"]["reasons"]
 
 
-def test_unverified_open_interest_fails_closed_at_spring_gate() -> None:
+def test_schwab_unverified_open_interest_passes_spring_structure_gate() -> None:
     inputs = _inputs()
     inputs[3]["expiries"][0]["oi_quality"] = "schwab_unverified"
+    inputs[3]["expiries"][0]["quality"] = "ok"
+
+    result = _build(inputs)
+
+    assert "open_interest_quality_unavailable" not in result["option_overlay"]["reasons"]
+    assert "exposure_quality_unavailable" not in result["option_overlay"]["reasons"]
+    assert result["option_overlay"]["status"] == "ready"
+
+
+def test_missing_open_interest_still_fails_spring_structure_gate() -> None:
+    inputs = _inputs()
+    inputs[3]["expiries"][0]["oi_quality"] = "missing"
+    inputs[3]["expiries"][0]["quality"] = "no_open_interest"
+    inputs[3]["expiries"][0]["oi_weighted"]["net_gamma_ratio"] = None
 
     result = _build(inputs)
 

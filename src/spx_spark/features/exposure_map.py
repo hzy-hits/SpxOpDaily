@@ -647,9 +647,12 @@ def _build_expiry_exposure(
 
     quality = "ok"
     unavailable = not any(row.analytical_allowed for row in rows)
+    oi_weighted_disabled = oi_quality in {"stale_or_zero", "missing", "unverified_provider"}
     if unavailable:
         quality = "unavailable"
-    elif oi_quality != "ibkr_ok":
+    elif oi_weighted_disabled:
+        # Docs: only missing/stale OI nullifies oi_weighted. Schwab OI stays
+        # numeric with schwab_oi_unverified warning and downstream confidence caps.
         quality = "no_open_interest"
 
     iv_missing = iv_source == "missing"
@@ -674,7 +677,7 @@ def _build_expiry_exposure(
     if unavailable:
         strike_rows = [_nullify_all(strike) for strike in strike_rows]
     else:
-        if oi_quality != "ibkr_ok":
+        if oi_weighted_disabled:
             strike_rows = [_nullify_oi_weighted(strike) for strike in strike_rows]
         if iv_missing:
             strike_rows = [_nullify_vanna_family(strike) for strike in strike_rows]
@@ -819,7 +822,7 @@ def _build_expiry_exposure(
         pairs = pair_by_strike(
             [quote for quote in quotes if quote.instrument.canonical_id in accepted_contract_ids]
         )
-        if oi_quality != "ibkr_ok":
+        if oi_weighted_disabled:
             zero_gamma = None
             gamma_flip_zone = None
             zero_gamma_method = f"unavailable_{oi_quality}"

@@ -479,9 +479,12 @@ def _gate_reasons(
     if not expiry_row:
         reasons.append("exposure_exact_expiry_unavailable")
     else:
+        oi_quality = str(expiry_row.get("oi_quality") or "")
         if str(expiry_row.get("quality") or "") in {"", "unavailable", "no_open_interest"}:
             reasons.append("exposure_quality_unavailable")
-        if str(expiry_row.get("oi_quality") or "") != "ibkr_ok":
+        # RTH primary OI is Schwab; keep values usable with unverified label.
+        # Only missing/stale/unknown providers fail the Spring structure gate.
+        if oi_quality not in {"ibkr_ok", "schwab_unverified"}:
             reasons.append("open_interest_quality_unavailable")
         if finite_float(_child(expiry_row, "oi_weighted").get("net_gamma_ratio")) is None:
             reasons.append("net_gamma_ratio_unavailable")

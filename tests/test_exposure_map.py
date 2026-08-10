@@ -554,11 +554,14 @@ def test_schwab_oi_flags_unverified_warning() -> None:
     )
     expiry = exposure.expiries[0]
     assert expiry.oi_quality == "schwab_unverified"
-    assert expiry.quality == "no_open_interest"
-    assert expiry.oi_weighted.net_gex is None
-    assert expiry.walls.wall_method != "oi_gex"
-    assert expiry.zero_gamma is None
-    assert expiry.zero_gamma_method == "unavailable_schwab_unverified"
+    assert expiry.quality == "ok"
+    assert expiry.oi_weighted.net_gex is not None
+    assert expiry.oi_weighted.net_gamma_ratio is not None
+    assert expiry.walls.wall_method == "oi_gex"
+    assert expiry.zero_gamma is not None or expiry.zero_gamma_method.startswith(
+        "strike_profile_fallback_"
+    )
+    assert expiry.zero_gamma_method != "unavailable_schwab_unverified"
     assert "schwab_oi_unverified" in expiry.warnings
 
 
