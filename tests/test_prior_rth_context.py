@@ -230,6 +230,81 @@ def test_process_invalidates_v1_cache_and_preserves_cross_indices_under_spx_over
     assert context["cross_index"]["missing_instruments"] == []
 
 
+def test_process_backfills_prior_session_from_quote_lake_after_weekend(
+    tmp_path: Path,
+) -> None:
+    """After retention eviction the lake still restores a ready prior context."""
+
+    duckdb = pytest.importorskip("duckdb")
+    now = datetime(2026, 8, 10, 1, 0, tzinfo=UTC)  # Sunday 21:00 ET, GTH for Monday
+    prior_date = DEFAULT_MARKET_CALENDAR.previous_trading_day(
+        DEFAULT_MARKET_CALENDAR.research_expiry(now)
+    )
+    session = DEFAULT_MARKET_CALENDAR.session(prior_date)
+    assert session is not None
+    rows = []
+    cursor = session.open_at
+    minute = 0
+    while cursor <= session.close_at:
+        progress = minute / 390.0
+        for instrument_id, base, reference in (
+            ("index:SPX", 7700.0, 7690.0),
+            ("index:NDX", 29_500.0, 29_400.0),
+            ("index:DJI", 54_000.0, 53_900.0),
+            ("index:RUT", 3_020.0, 3_000.0),
+        ):
+            rows.append(
+                {
+                    "instrument_id": instrument_id,
+                    "last": base + 10.0 * progress,
+                    "close": reference,
+                    "source_at": cursor.isoformat(),
+                }
+            )
+        cursor += timedelta(minutes=1)
+        minute += 1
+    partition = (
+        tmp_path
+        / "lake"
+        / "quotes"
+        / "schema=v1"
+        / f"date={prior_date.isoformat()}"
+        / "provider=schwab"
+        / "hour=14"
+    )
+    partition.mkdir(parents=True)
+    connection = duckdb.connect()
+    try:
+        connection.execute(
+            "COPY (SELECT instrument_id, last, close,"
+            " CAST(source_at AS TIMESTAMPTZ) AS source_at"
+            " FROM (SELECT unnest(?::STRUCT(instrument_id VARCHAR, last DOUBLE,"
+            " close DOUBLE, source_at VARCHAR)[], recursive := true)))"
+            f" TO '{partition / 'quotes.parquet'}' (FORMAT PARQUET)",
+            [rows],
+        )
+    finally:
+        connection.close()
+    latest = LatestState(now, now, (), ())
+    context = process_prior_rth_context(tmp_path, [], latest, now=now)
+    assert context["status"] == "ready"
+    assert context["session_date"] == prior_date.isoformat()
+    assert context["source"] == "quote_lake_minute_backfill"
+    cross_index = context["cross_index"]
+    assert cross_index["status"] == "ready"
+    assert cross_index["missing_instruments"] == []
+    assert all(
+        value is not None for value in cross_index["return_bps"].values()
+    )
+
+
+def test_process_without_samples_or_lake_stays_unavailable(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 10, 1, 0, tzinfo=UTC)
+    latest = LatestState(now, now, (), ())
+    context = process_prior_rth_context(tmp_path, [], latest, now=now)
+    assert context["status"] == "unavailable"
+
+
 def test_gth_position_fraction_is_bounded_and_requires_a_range() -> None:
     assert gth_position_fraction(
         {"price": 7355.25, "session_low": 7354.5, "session_high": 7392.5}

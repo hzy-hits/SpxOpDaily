@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from spx_spark.application.market_features.state import load_json, save_json
@@ -23,6 +23,7 @@ from spx_spark.marketdata import as_utc
 from spx_spark.storage import LatestState
 
 
+UTC = timezone.utc
 SCHEMA_VERSION = "prior_rth_context.v2"
 CASH_INDEX_INSTRUMENTS = tuple(instrument.value for instrument in CASH_INDEX_ORDER)
 MINUTE_COVERAGE_READY = 0.95
@@ -31,6 +32,7 @@ SESSION_EDGE_TOLERANCE = timedelta(minutes=10)
 SHOCK_RETURN_FRACTION = 0.01
 EXTREME_LOCATION_FRACTION = 0.20
 TAIL_WINDOW_MINUTES = 30
+LAKE_BACKFILL_SOURCE = "quote_lake_minute_backfill"
 
 
 def prior_rth_context_path(data_root: str | Path) -> Path:
@@ -397,6 +399,19 @@ def process_prior_rth_context(
         now=now,
         official_closes=official_closes,
     )
+    if built.get("status") != "ready":
+        # The in-memory sample buffer only retains ~18 hours, so after a
+        # weekend or holiday the prior RTH session has already been evicted
+        # even though the quote lake holds its complete minute path.
+        lake_samples = _lake_cash_index_samples(data_root, prior_date)
+        if lake_samples:
+            lake_built = build_prior_rth_context(
+                _overlay_standardized_spx_samples(lake_samples, canonical_samples),
+                now=now,
+                official_closes=official_closes,
+            )
+            if _context_rank(lake_built) > _context_rank(built):
+                built = {**lake_built, "source": LAKE_BACKFILL_SOURCE}
     if (
         built.get("status") == "partial"
         and _number_signed(built.get("minute_coverage")) is not None
@@ -424,6 +439,89 @@ def process_prior_rth_context(
         return current
     save_json(path, built)
     return built
+
+
+def _context_rank(context: Mapping[str, object]) -> tuple[int, int, float]:
+    """Order candidate contexts: status, then breadth, then SPX coverage."""
+
+    status_rank = {"ready": 2, "partial": 1}.get(str(context.get("status") or ""), 0)
+    indices = context.get("indices")
+    indices = indices if isinstance(indices, Mapping) else {}
+    available = sum(
+        1
+        for instrument_id in CASH_INDEX_INSTRUMENTS
+        if isinstance(indices.get(instrument_id), Mapping)
+        and indices[instrument_id].get("status") in {"ready", "partial"}
+    )
+    coverage = _number_signed(context.get("minute_coverage")) or 0.0
+    return (status_rank, available, coverage)
+
+
+def _lake_cash_index_samples(
+    data_root: str | Path,
+    session_date: object,
+) -> list[dict[str, object]]:
+    """Rebuild cash-index minute samples for one session date from the lake."""
+
+    lake_glob = (
+        Path(data_root)
+        / "lake"
+        / "quotes"
+        / "schema=v1"
+        / f"date={session_date}"
+        / "provider=schwab"
+        / "**"
+        / "*.parquet"
+    )
+    if not (Path(data_root) / "lake" / "quotes" / "schema=v1" / f"date={session_date}").exists():
+        return []
+    try:
+        import duckdb
+
+        connection = duckdb.connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT instrument_id,
+                       date_trunc('minute', source_at AT TIME ZONE 'UTC') AS minute,
+                       arg_max(last, source_at) AS price,
+                       arg_max(close, source_at) AS reference_close,
+                       max(source_at) AS source_at
+                FROM read_parquet(?)
+                WHERE instrument_id IN (?, ?, ?, ?)
+                  AND last IS NOT NULL AND last > 0
+                  AND source_at IS NOT NULL
+                GROUP BY 1, 2
+                ORDER BY 2
+                """,
+                [str(lake_glob), *CASH_INDEX_INSTRUMENTS],
+            ).fetchall()
+        finally:
+            connection.close()
+    except Exception:
+        return []
+    by_minute: dict[str, dict[str, object]] = {}
+    for instrument_id, minute, price, reference_close, source_at in rows:
+        if price is None or minute is None or source_at is None:
+            continue
+        minute_at = as_utc(minute.replace(tzinfo=UTC) if minute.tzinfo is None else minute)
+        at_key = minute_at.isoformat()
+        sample = by_minute.setdefault(at_key, {"at": at_key, "instruments": {}})
+        instruments = sample["instruments"]
+        assert isinstance(instruments, dict)
+        instruments[str(instrument_id)] = {
+            "price": float(price),
+            "reference_close": (
+                float(reference_close)
+                if isinstance(reference_close, int | float) and reference_close > 0
+                else None
+            ),
+            "price_kind": "last",
+            "provider": "schwab",
+            "quality": "live",
+            "source_at": as_utc(source_at).isoformat(),
+        }
+    return [by_minute[at_key] for at_key in sorted(by_minute)]
 
 
 def _overlay_standardized_spx_samples(
