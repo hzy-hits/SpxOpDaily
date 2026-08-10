@@ -64,8 +64,12 @@ def _candidate_signal(
         and record.get("edge_authority")
         in {None, "validated_first_touch_time_stop_net_pnl"}
     ) or (
-        status == "structure_watch"
+        status in {"selector_candidate", "structure_watch"}
         and record.get("manual_action_eligible") is False
+        and (
+            status != "selector_candidate"
+            or record.get("selector_evidence_eligible") is True
+        )
         and record.get("edge_authority") == "none"
         and record.get("edge_authority_reason")
         == "first_touch_time_stop_net_pnl_authority_unavailable"

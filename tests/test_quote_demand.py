@@ -546,7 +546,10 @@ def test_pending_terminal_receipt_check_renews_exact_leg_pin_until_resolved_or_e
     assert exit_reason == "no_exact_leg_quote_demand"
 
 
-@pytest.mark.parametrize("status", ("structure_watch", "manual_ready"))
+@pytest.mark.parametrize(
+    "status",
+    ("structure_watch", "selector_candidate", "manual_ready"),
+)
 def test_transient_forced_clear_still_blocks_new_manual_entry(status: str) -> None:
     candidate_id = f"gth-level-manual:new-{status}"
     selected, reason = select_gth_quote_demand(

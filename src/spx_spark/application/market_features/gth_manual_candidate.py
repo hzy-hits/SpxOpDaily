@@ -63,6 +63,8 @@ from spx_spark.strategy_contract import (
 CONTRACT_VERSION = "gth_manual_candidate.v1"
 SOURCE_KIND = "gth_dip_reclaim_call"
 NET_DEBIT_PRICE_INCREMENT = 0.05
+EDGE_AUTHORITY_REQUIRED = "validated_first_touch_time_stop_net_pnl"
+EDGE_AUTHORITY_UNAVAILABLE_REASON = "first_touch_time_stop_net_pnl_authority_unavailable"
 
 
 def evaluate_gth_manual_candidate(
@@ -74,6 +76,7 @@ def evaluate_gth_manual_candidate(
     policy: MarketFeatureSettings,
     new_entries_allowed: bool,
     new_entries_block_reason: str,
+    selector_evidence: bool = False,
 ) -> dict[str, object]:
     """Return a candidate for an operator, never live broker authority."""
 
@@ -112,6 +115,8 @@ def evaluate_gth_manual_candidate(
         "candidate_scope": "manual_live",
         "execution_mode": "manual_only",
         "manual_action_eligible": False,
+        "selector_evidence_eligible": False,
+        "operator_notification_eligible": False,
         "execution_eligible": False,
         "automatic_ordering": False,
         "simulation_only": False,
@@ -137,7 +142,10 @@ def evaluate_gth_manual_candidate(
         reasons.append("source_signal_kind_mismatch")
     if not str(gth_signal.get("policy_version") or "").startswith("gth_dip_reclaim.v4+sha256:"):
         reasons.append("source_policy_incompatible")
-    reasons.extend(actionable_strategy_contract_issues(gth_signal, now=now))
+    contract_issues = actionable_strategy_contract_issues(gth_signal, now=now)
+    reasons.extend(contract_issues)
+    if selector_evidence and "strategy_event_expired" in contract_issues:
+        reasons.append("gth_dip_reclaim_signal_expired")
     entry_quality = gth_signal.get("entry_quality")
     if not isinstance(entry_quality, Mapping):
         reasons.append("source_entry_quality_unavailable")
@@ -158,10 +166,17 @@ def evaluate_gth_manual_candidate(
     session_date = str(gth_signal.get("session_date") or "")
     if session_date != DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat():
         reasons.append("signal_session_mismatch")
+    confirmed_at = _time(gth_signal.get("confirmed_at"))
+    if confirmed_at is None:
+        reasons.append("gth_dip_reclaim_confirmation_unavailable")
+    elif confirmed_at > now:
+        reasons.append("gth_dip_reclaim_confirmation_in_future")
     if macro_event.get("entry_allowed") is not True:
         reasons.append("macro_entry_blocked")
     if not new_entries_allowed:
         base["provider_incident_warning"] = new_entries_block_reason
+        if selector_evidence:
+            reasons.append("provider_entry_control_blocked")
 
     spread = gth_signal.get("spread")
     if not isinstance(spread, Mapping):
@@ -256,6 +271,23 @@ def evaluate_gth_manual_candidate(
     elif es_reference is not None and float(es_reference["price"]) <= invalidation_es:
         reasons.append("invalidation_reached_before_candidate")
 
+    basis_points = (
+        float(es_reference["price"]) - float(parity["price"])
+        if es_reference is not None and parity is not None
+        else None
+    )
+    invalidation_spx = (
+        invalidation_es - basis_points
+        if invalidation_es is not None and basis_points is not None
+        else None
+    )
+    trigger_es = _number(coordinate.get("target_value")) if isinstance(coordinate, Mapping) else None
+    trigger_spx = (
+        trigger_es - basis_points
+        if trigger_es is not None and basis_points is not None
+        else None
+    )
+
     target_spx = _number(spread.get("target_wall"))
     parity_upper_bound = None
     if target_spx is None:
@@ -334,10 +366,21 @@ def evaluate_gth_manual_candidate(
     max_profit = (width - entry_limit) * 100.0
     return {
         **base,
-        "status": "manual_ready",
-        "manual_action_eligible": True,
+        "status": "selector_candidate" if selector_evidence else "manual_ready",
+        "candidate_scope": "research_watch" if selector_evidence else "manual_live",
+        "execution_mode": "observe_only" if selector_evidence else "manual_only",
+        "manual_action_eligible": not selector_evidence,
+        "selector_evidence_eligible": selector_evidence,
+        "operator_action": "observe_only" if selector_evidence else "manual_limit_only",
+        "operator_notification_eligible": not selector_evidence,
+        "edge_authority": "none" if selector_evidence else None,
+        "edge_authority_required": EDGE_AUTHORITY_REQUIRED,
+        "edge_authority_reason": (
+            EDGE_AUTHORITY_UNAVAILABLE_REASON if selector_evidence else None
+        ),
         "valid_until": valid_until.isoformat(),
         "direction": "up",
+        "path_kind": "gth_dip_reclaim_call" if selector_evidence else None,
         "position_type": "call_debit_spread",
         "long_contract_id": long_contract_id,
         "short_contract_id": short_contract_id,
@@ -362,6 +405,7 @@ def evaluate_gth_manual_candidate(
         ),
         "reward_risk_at_limit": (round(reward_risk, 4) if reward_risk is not None else None),
         "signal_coordinate": dict(coordinate),
+        "trigger_level": trigger_spx,
         "target_spx": target_spx,
         "target_wall_kind": spread.get("target_wall_kind"),
         "current_parity_spx": float(parity["price"]),
@@ -370,10 +414,16 @@ def evaluate_gth_manual_candidate(
         "target_parity_upper_bound": parity_upper_bound,
         "target_coordinate": parity,
         "invalidation_es": invalidation_es,
+        "invalidation_spx": invalidation_spx,
         "invalidation_coordinate": es_reference,
         "exit_at": spread.get("exit_at"),
         "exact_spread_snapshot": snapshot,
-        "block_reasons": [],
+        "block_reasons": (
+            [EDGE_AUTHORITY_UNAVAILABLE_REASON] if selector_evidence else []
+        ),
+        "signal_absence_reason": (
+            EDGE_AUTHORITY_UNAVAILABLE_REASON if selector_evidence else None
+        ),
         "ranking_diagnostics": list(dict.fromkeys(ranking_diagnostics)),
     }
 

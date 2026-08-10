@@ -316,7 +316,11 @@ def _manual_candidate_demand(
             status = "pending"
             order_at_risk = True
             break
-    if not source and last.get("status") in {"manual_ready", "structure_watch"}:
+    if not source and last.get("status") in {
+        "manual_ready",
+        "selector_candidate",
+        "structure_watch",
+    }:
         source = last
         source_until = _optional_time(source.get("valid_until"))
         status = "pending" if last.get("status") == "structure_watch" else "confirmed"

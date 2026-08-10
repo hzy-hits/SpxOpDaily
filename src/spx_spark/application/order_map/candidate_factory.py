@@ -278,33 +278,65 @@ def _rth_evidence(
 
 
 def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
-    evidence = _map(facts.get("gth_evidence"))
-    eligible = evidence.get("manual_action_eligible") is True or evidence.get("selector_evidence_eligible") is True
-    if evidence.get("status") not in {"manual_ready", "selector_candidate"} or not eligible:
-        return None, list(map(str, evidence.get("block_reasons") or ())) or ["gth_confirmed_level_candidate_unavailable"]
-    path_kind = str(evidence.get("path_kind") or "")
-    if path_kind.startswith("trend_transition_"):
-        return None, ["trend_background_cannot_authorize_entry"]
-    direction = _direction(evidence.get("direction"))
-    if not direction:
-        return None, ["gth_candidate_direction_unavailable"]
-    target, stop = _number(evidence.get("target_spx")), _number(evidence.get("invalidation_spx"))
-    if target is None or stop is None:
-        return None, ["gth_spx_target_or_invalidation_unavailable"]
-    snapshot = _map(evidence.get("exact_spread_snapshot"))
-    setup = "FAILED_BREAK_RECLAIM" if any(token in path_kind for token in ("rejection", "reclaim", "dip")) else "TREND_PULLBACK"
-    return {
-        "setup_kind": setup,
-        "direction": direction,
-        "trigger_level": _number(evidence.get("trigger_level")),
-        "target_spx": target,
-        "invalidation_spx": stop,
-        "long": _gth_leg(snapshot.get("long"), evidence.get("long_contract_id")),
-        "short": _gth_leg(snapshot.get("short"), evidence.get("short_contract_id")),
-        "valid_until": evidence.get("valid_until"),
-        "source": "gth_level_manual_candidate",
-        "geometry_source": "gth_level_manual_candidate",
-    }, []
+    reasons: list[str] = []
+    sources = (
+        (
+            "gth_level_manual_candidate",
+            _map(facts.get("gth_evidence")),
+            "gth_confirmed_level_candidate_unavailable",
+        ),
+        (
+            "gth_dip_reclaim_evidence",
+            _map(facts.get("gth_dip_reclaim_evidence")),
+            "gth_dip_reclaim_evidence_unavailable",
+        ),
+    )
+    for source, evidence, unavailable_reason in sources:
+        evidence_reasons = list(map(str, evidence.get("block_reasons") or ()))
+        eligible = (
+            evidence.get("manual_action_eligible") is True
+            or evidence.get("selector_evidence_eligible") is True
+        )
+        if evidence.get("status") not in {"manual_ready", "selector_candidate"} or not eligible:
+            reasons.extend(evidence_reasons or [unavailable_reason])
+            continue
+        path_kind = str(evidence.get("path_kind") or "")
+        if path_kind.startswith("trend_transition_"):
+            reasons.append("trend_background_cannot_authorize_entry")
+            continue
+        direction = _direction(evidence.get("direction"))
+        if not direction:
+            reasons.append("gth_candidate_direction_unavailable")
+            continue
+        target = _number(evidence.get("target_spx"))
+        stop = _number(evidence.get("invalidation_spx"))
+        if target is None or stop is None:
+            reasons.extend(
+                ["gth_spx_target_or_invalidation_unavailable", *evidence_reasons]
+            )
+            continue
+        snapshot = _map(evidence.get("exact_spread_snapshot"))
+        setup = (
+            "FAILED_BREAK_RECLAIM"
+            if any(token in path_kind for token in ("rejection", "reclaim", "dip"))
+            else "TREND_PULLBACK"
+        )
+        return {
+            "setup_kind": setup,
+            "direction": direction,
+            "trigger_level": _number(evidence.get("trigger_level")),
+            "target_spx": target,
+            "invalidation_spx": stop,
+            "long": _gth_leg(snapshot.get("long"), evidence.get("long_contract_id")),
+            "short": _gth_leg(snapshot.get("short"), evidence.get("short_contract_id")),
+            "valid_until": evidence.get("valid_until"),
+            "source": source,
+            "geometry_source": source,
+            "source_block_reasons": evidence_reasons,
+            "edge_authority": evidence.get("edge_authority"),
+            "edge_authority_reason": evidence.get("edge_authority_reason"),
+        }, []
+    return None, list(dict.fromkeys(reasons))
 
 
 def _butterfly_candidates(

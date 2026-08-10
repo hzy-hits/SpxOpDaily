@@ -33,6 +33,9 @@ from spx_spark.application.market_features.gamma_prearm_plan import (
 from spx_spark.application.market_features.gth_level_manual_candidate import (
     process_gth_level_manual_candidate,
 )
+from spx_spark.application.market_features.gth_manual_candidate import (
+    evaluate_gth_manual_candidate,
+)
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
     merge_minute_sample,
@@ -582,6 +585,16 @@ def run(
         play_stats=play_stats,
         operator_authority=False,
     )
+    gth_dip_reclaim_evidence = evaluate_gth_manual_candidate(
+        action_latest,
+        gth_signal,
+        macro_event=action_macro_event,
+        now=action_now,
+        policy=policy,
+        new_entries_allowed=gth_entries_allowed,
+        new_entries_block_reason=gth_entry_block_reason,
+        selector_evidence=True,
+    )
     spx_quote = action_latest.best_quote("index:SPX")
     strategy_payload = {
         "trading_date": market_frame.session_id,
@@ -593,6 +606,7 @@ def run(
         "macro_event": action_macro_event,
         "level_decision": raw_level_decision,
         "gth_level_manual_candidate": gth_level_manual_candidate,
+        "gth_dip_reclaim_evidence": gth_dip_reclaim_evidence,
         "trade_intent": strategy_trigger_intent,
         "strategy_distribution_forecast": strategy_distribution_forecast,
         "candidates": [],
@@ -733,6 +747,7 @@ def run(
             "virtual_strategy": virtual_strategy,
             "gamma_prearm_plan": gamma_prearm_plan,
             "gth_level_manual_candidate": gth_level_manual_candidate,
+            "gth_dip_reclaim_evidence": gth_dip_reclaim_evidence,
             "spring_gamma_v3_shadow": spring_gamma_v3,
             "strategy_distribution_forecast": strategy_distribution_forecast,
             "strategy_distribution_forecast_error": strategy_distribution_forecast_error,

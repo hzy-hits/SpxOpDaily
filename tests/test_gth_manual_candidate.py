@@ -96,7 +96,9 @@ def test_runtime_only_consumes_unified_gth_manual_candidate() -> None:
     order_map_source = inspect.getsource(order_map_service.build_order_payload_with_retry)
 
     assert "process_gth_manual_candidate(" not in market_source
+    assert "evaluate_gth_manual_candidate(" in market_source
     assert "process_gth_level_manual_candidate(" in market_source
+    assert '"gth_dip_reclaim_evidence": gth_dip_reclaim_evidence' in market_source
     assert '"gth_manual_candidate": gth_manual_candidate' not in market_source
     assert '"gth_manual_candidate"' not in order_map_source
     assert '"gth_level_manual_candidate"' in order_map_source
@@ -159,6 +161,63 @@ def test_gth_signal_candidate_keeps_five_minute_opportunity_near_quote_age_limit
 
     assert candidate["status"] == "manual_ready"
     assert candidate["valid_until"] == (NOW + timedelta(minutes=5)).isoformat()
+
+
+def test_fresh_dip_reclaim_is_selector_evidence_without_operator_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW)
+
+    candidate = evaluate_gth_manual_candidate(
+        object(),
+        _signal(NOW),
+        macro_event={"mode": "normal", "entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+        selector_evidence=True,
+    )
+
+    assert candidate["status"] == "selector_candidate"
+    assert candidate["path_kind"] == "gth_dip_reclaim_call"
+    assert candidate["candidate_scope"] == "research_watch"
+    assert candidate["execution_mode"] == "observe_only"
+    assert candidate["selector_evidence_eligible"] is True
+    assert candidate["manual_action_eligible"] is False
+    assert candidate["operator_notification_eligible"] is False
+    assert candidate["edge_authority"] == "none"
+    assert candidate["edge_authority_required"] == (
+        "validated_first_touch_time_stop_net_pnl"
+    )
+    assert candidate["block_reasons"] == [
+        "first_touch_time_stop_net_pnl_authority_unavailable"
+    ]
+    assert candidate["trigger_level"] == pytest.approx(7528.0)
+    assert candidate["invalidation_spx"] == pytest.approx(7524.0)
+    assert candidate["automatic_ordering"] is False
+
+
+def test_expired_dip_reclaim_has_explicit_selector_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW)
+    signal = {**_signal(NOW), "valid_until": NOW.isoformat()}
+
+    candidate = evaluate_gth_manual_candidate(
+        object(),
+        signal,
+        macro_event={"mode": "normal", "entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+        selector_evidence=True,
+    )
+
+    assert candidate["status"] == "blocked"
+    assert "strategy_event_expired" in candidate["block_reasons"]
+    assert "gth_dip_reclaim_signal_expired" in candidate["block_reasons"]
 
 
 def test_confirmed_gth_flip_low_breakdown_builds_put_manual_ready(
@@ -541,7 +600,7 @@ def test_confirmed_gth_upper_acceptance_builds_call_manual_ready(
     assert candidate["automatic_ordering"] is False
 
 
-def test_expiry_payoff_geometry_without_time_stop_edge_authority_is_watch_only(
+def test_expiry_payoff_geometry_without_time_stop_edge_authority_is_selector_evidence(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -578,7 +637,9 @@ def test_expiry_payoff_geometry_without_time_stop_edge_authority_is_watch_only(
         new_entries_block_reason="allowed",
     )
 
-    assert candidate["status"] == "structure_watch"
+    assert candidate["status"] == "selector_candidate"
+    assert candidate["candidate_scope"] == "research_watch"
+    assert candidate["selector_evidence_eligible"] is True
     assert candidate["manual_action_eligible"] is False
     assert candidate["operator_notification_eligible"] is False
     assert candidate["operator_action"] == "observe_only"
@@ -586,6 +647,9 @@ def test_expiry_payoff_geometry_without_time_stop_edge_authority_is_watch_only(
     assert candidate["edge_authority_reason"] == (
         "first_touch_time_stop_net_pnl_authority_unavailable"
     )
+    assert candidate["block_reasons"] == [
+        "first_touch_time_stop_net_pnl_authority_unavailable"
+    ]
     assert candidate["expiry_payoff_ratio_role"] == "diagnostic_only"
     assert candidate["reward_risk_at_limit"] == pytest.approx(1.5641)
     assert candidate["trigger_level"] == 7730.0
@@ -613,7 +677,7 @@ def test_expiry_payoff_geometry_without_time_stop_edge_authority_is_watch_only(
     )
     replay = [json.loads(row) for row in replay_path.read_text().splitlines()]
     assert len(replay) == 1
-    assert replay[0]["status"] == "structure_watch"
+    assert replay[0]["status"] == "selector_candidate"
     assert replay[0]["exact_spread_snapshot"]["ask"] == 15.60
     loaded = load_gth_level_candidate_signals(tmp_path / "features")
     assert len(loaded) == 1
@@ -1857,7 +1921,7 @@ def test_static_gth_trend_regime_does_not_create_a_manual_card(
     )
 
     assert candidate["status"] == "blocked"
-    assert candidate["block_reasons"] == ["source_signal_unavailable"]
+    assert candidate["block_reasons"] == ["gth_level_not_confirmed_or_near"]
 
 
 def test_fresh_trend_transition_takes_priority_over_fresh_confirmed_level(

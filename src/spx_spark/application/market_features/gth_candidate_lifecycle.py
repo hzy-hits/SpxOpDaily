@@ -359,6 +359,7 @@ def seed_replayed_candidate_ids(
     previous = state.get("last_candidate")
     if isinstance(previous, Mapping) and previous.get("status") in {
         "manual_ready",
+        "selector_candidate",
         "structure_watch",
     }:
         candidate_id = str(previous.get("candidate_id") or "")
@@ -376,6 +377,7 @@ def seed_replayed_candidate_ids(
             continue
         if not isinstance(record, Mapping) or record.get("status") not in {
             "manual_ready",
+            "selector_candidate",
             "structure_watch",
         }:
             continue
@@ -389,7 +391,11 @@ def unreplayed_candidate(
     candidate: Mapping[str, object],
     replayed_candidate_ids: set[str],
 ) -> str | None:
-    if candidate.get("status") not in {"manual_ready", "structure_watch"}:
+    if candidate.get("status") not in {
+        "manual_ready",
+        "selector_candidate",
+        "structure_watch",
+    }:
         return None
     candidate_id = str(candidate.get("candidate_id") or "")
     if not candidate_id or candidate_id in replayed_candidate_ids:

@@ -25,7 +25,9 @@ def build_market_fact_pack(
     volatility = _map(option.get("volatility"))
     market_volatility, volume = _map(market.get("volatility")), _map(market.get("volume"))
     macro = _map(payload.get("macro_event"))
-    trigger, gth = _map(payload.get("level_decision")), _map(payload.get("gth_level_manual_candidate"))
+    trigger = _map(payload.get("level_decision"))
+    gth_level = _map(payload.get("gth_level_manual_candidate"))
+    gth_dip_reclaim = _map(payload.get("gth_dip_reclaim_evidence"))
     forecast = _map(payload.get("strategy_distribution_forecast"))
     q_event, p_event = _map(forecast.get("q_event")), _map(forecast.get("p_event"))
     trading_date = str(payload.get("trading_date") or "")
@@ -115,20 +117,8 @@ def build_market_fact_pack(
                     "thesis": trigger.get("thesis"), "level_kind": trigger.get("level_kind"),
                     "level": _number(trigger.get("level")),
                     "levels": dict(_map(trigger.get("levels"))), "event_id": trigger.get("event_id")},
-        "gth_evidence": {
-            "status": gth.get("status"), "evaluated_at": gth.get("evaluated_at"),
-            "direction": gth.get("direction"), "path_kind": gth.get("path_kind"),
-            "manual_action_eligible": gth.get("manual_action_eligible") is True,
-            "execution_eligible": gth.get("execution_eligible") is True,
-            "block_reasons": list(gth.get("block_reasons") or ()),
-            "long_contract_id": gth.get("long_contract_id"), "short_contract_id": gth.get("short_contract_id"),
-            "trigger_level": _number(gth.get("trigger_level")),
-            "current_spx": _first(gth.get("current_parity_spx"), gth.get("current_spx")),
-            "target_spx": _number(gth.get("target_spx")),
-            "invalidation_spx": _number(gth.get("invalidation_spx")),
-            "valid_until": gth.get("valid_until"), "exit_at": gth.get("exit_at"),
-            "exact_spread_snapshot": gth.get("exact_spread_snapshot"),
-        },
+        "gth_evidence": _gth_fact(gth_level),
+        "gth_dip_reclaim_evidence": _gth_fact(gth_dip_reclaim),
         "probability": {
             "q": q_event.get("probability"), "p_empirical": p_event.get("probability"),
             "p_interval_low": p_event.get("interval_low"),
@@ -157,6 +147,38 @@ def _frame(payload: Mapping[str, Any], key: str, now: datetime, reasons: list[st
     else:
         return frame
     return {}
+
+
+def _gth_fact(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": evidence.get("status"),
+        "evaluated_at": evidence.get("evaluated_at"),
+        "source_kind": evidence.get("source_kind"),
+        "direction": evidence.get("direction"),
+        "path_kind": evidence.get("path_kind"),
+        "candidate_scope": evidence.get("candidate_scope"),
+        "execution_mode": evidence.get("execution_mode"),
+        "manual_action_eligible": evidence.get("manual_action_eligible") is True,
+        "selector_evidence_eligible": evidence.get("selector_evidence_eligible") is True,
+        "operator_notification_eligible": (
+            evidence.get("operator_notification_eligible") is True
+        ),
+        "execution_eligible": evidence.get("execution_eligible") is True,
+        "edge_authority": evidence.get("edge_authority"),
+        "edge_authority_required": evidence.get("edge_authority_required"),
+        "edge_authority_reason": evidence.get("edge_authority_reason"),
+        "signal_absence_reason": evidence.get("signal_absence_reason"),
+        "block_reasons": list(evidence.get("block_reasons") or ()),
+        "long_contract_id": evidence.get("long_contract_id"),
+        "short_contract_id": evidence.get("short_contract_id"),
+        "trigger_level": _number(evidence.get("trigger_level")),
+        "current_spx": _first(evidence.get("current_parity_spx"), evidence.get("current_spx")),
+        "target_spx": _number(evidence.get("target_spx")),
+        "invalidation_spx": _number(evidence.get("invalidation_spx")),
+        "valid_until": evidence.get("valid_until"),
+        "exit_at": evidence.get("exit_at"),
+        "exact_spread_snapshot": evidence.get("exact_spread_snapshot"),
+    }
 
 
 def _past_time(value: object, now: datetime, label: str, reasons: list[str]) -> datetime | None:

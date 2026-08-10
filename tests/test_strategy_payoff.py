@@ -874,6 +874,90 @@ def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cann
     assert "trend_background_cannot_authorize_entry" in rejected["why_not"]["reasons"]
 
 
+def test_gth_selector_evidence_can_compete_while_operator_edge_authority_is_unavailable() -> None:
+    now = datetime(2026, 8, 7, 3, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["gth_level_manual_candidate"] = {
+        **_gth_candidate(now, "upper_acceptance_call"),
+        "status": "selector_candidate",
+        "candidate_scope": "research_watch",
+        "execution_mode": "observe_only",
+        "manual_action_eligible": False,
+        "selector_evidence_eligible": True,
+        "operator_notification_eligible": False,
+        "edge_authority": "none",
+        "edge_authority_required": "validated_first_touch_time_stop_net_pnl",
+        "edge_authority_reason": "first_touch_time_stop_net_pnl_authority_unavailable",
+        "block_reasons": ["first_touch_time_stop_net_pnl_authority_unavailable"],
+    }
+    payload.pop("call_skew_spread_shadow")
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "gth_level_manual_candidate"
+    evidence = decision["market_facts"]["gth_evidence"]
+    assert evidence["selector_evidence_eligible"] is True
+    assert evidence["edge_authority_reason"] == (
+        "first_touch_time_stop_net_pnl_authority_unavailable"
+    )
+    assert evidence["block_reasons"] == [
+        "first_touch_time_stop_net_pnl_authority_unavailable"
+    ]
+    assert decision["automatic_ordering"] is False
+
+
+def test_fresh_dip_reclaim_evidence_overrides_trend_only_background() -> None:
+    now = datetime(2026, 8, 7, 3, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["gth_level_manual_candidate"] = {
+        **_gth_candidate(now, "trend_transition_call"),
+        "status": "selector_candidate",
+        "manual_action_eligible": False,
+        "selector_evidence_eligible": True,
+    }
+    payload["gth_dip_reclaim_evidence"] = {
+        **_gth_candidate(now, "gth_dip_reclaim_call"),
+        "status": "selector_candidate",
+        "candidate_scope": "research_watch",
+        "execution_mode": "observe_only",
+        "manual_action_eligible": False,
+        "selector_evidence_eligible": True,
+        "operator_notification_eligible": False,
+        "edge_authority": "none",
+        "edge_authority_reason": "first_touch_time_stop_net_pnl_authority_unavailable",
+        "block_reasons": ["first_touch_time_stop_net_pnl_authority_unavailable"],
+    }
+    payload.pop("call_skew_spread_shadow")
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "gth_dip_reclaim_evidence"
+    assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
+    assert decision["automatic_ordering"] is False
+
+
+def test_gth_diagnostics_distinguish_unconfirmed_level_from_expired_dip_reclaim() -> None:
+    now = datetime(2026, 8, 7, 3, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["gth_level_manual_candidate"] = {
+        "status": "blocked",
+        "block_reasons": ["gth_level_not_confirmed_or_near"],
+    }
+    payload["gth_dip_reclaim_evidence"] = {
+        "status": "blocked",
+        "block_reasons": ["gth_dip_reclaim_signal_expired"],
+    }
+    payload.pop("call_skew_spread_shadow")
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert "gth_level_not_confirmed_or_near" in decision["why_not"]["reasons"]
+    assert "gth_dip_reclaim_signal_expired" in decision["why_not"]["reasons"]
+
+
 def test_vertical_replay_is_causal_and_compares_four_slippage_levels() -> None:
     at = "2026-08-06T10:52:25+00:00"
     decisions = [

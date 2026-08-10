@@ -18,6 +18,8 @@ from spx_spark.application.market_features.gth_level_candidate_runtime import (
     persist_gth_level_manual_candidate,
 )
 from spx_spark.application.market_features.gth_manual_candidate import (
+    EDGE_AUTHORITY_REQUIRED,
+    EDGE_AUTHORITY_UNAVAILABLE_REASON,
     NET_DEBIT_PRICE_INCREMENT,
     _blocked,
     _direct_es_reference,
@@ -79,10 +81,6 @@ CONTRACT_VERSION = "gth_level_manual_candidate.v1"
 SPREAD_MIN_WIDTH_POINTS = 5.0
 SPREAD_DEFAULT_WIDTH_POINTS = 25.0
 SPREAD_MAX_WIDTH_POINTS = 40.0
-EDGE_AUTHORITY_REQUIRED = "validated_first_touch_time_stop_net_pnl"
-EDGE_AUTHORITY_UNAVAILABLE_REASON = "first_touch_time_stop_net_pnl_authority_unavailable"
-
-
 def _operator_edge_authority() -> tuple[str, str | None]:
     """Return the production authority for promoting a structure to operator READY.
 
@@ -156,6 +154,8 @@ def evaluate_gth_level_manual_candidate(
         "candidate_scope": "manual_live",
         "execution_mode": "manual_only",
         "manual_action_eligible": False,
+        "selector_evidence_eligible": False,
+        "operator_notification_eligible": False,
         "execution_eligible": False,
         "automatic_ordering": False,
         "simulation_only": False,
@@ -209,7 +209,7 @@ def evaluate_gth_level_manual_candidate(
     if not policy.gth_manual_candidate_enabled:
         return {**base, "status": "disabled", "block_reasons": ["disabled"]}
     if not source_id:
-        return _blocked(base, trend_source_reasons or ["source_signal_unavailable"])
+        return _blocked(base, trend_source_reasons or ["gth_level_not_confirmed_or_near"])
     reasons: list[str] = list(trend_source_reasons) if source_mode == "trend" else []
     ranking_diagnostics: list[str] = []
     if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
@@ -584,12 +584,15 @@ def evaluate_gth_level_manual_candidate(
     max_profit = (width - entry_limit) * 100.0
     edge_authority, edge_authority_reason = _operator_edge_authority()
     operator_ready = edge_authority == EDGE_AUTHORITY_REQUIRED and edge_authority_reason is None
+    selector_only = not operator_ready
+    selector_block_reason = edge_authority_reason or EDGE_AUTHORITY_UNAVAILABLE_REASON
     return {
         **base,
-        "status": "manual_ready" if operator_ready else "structure_watch",
+        "status": "manual_ready" if operator_ready else "selector_candidate",
         "candidate_scope": "manual_live" if operator_ready else "research_watch",
         "execution_mode": "manual_only" if operator_ready else "observe_only",
         "manual_action_eligible": operator_ready,
+        "selector_evidence_eligible": selector_only,
         "operator_action": "manual_limit_only" if operator_ready else "observe_only",
         "operator_notification_eligible": operator_ready,
         "edge_authority": edge_authority,
@@ -659,12 +662,12 @@ def evaluate_gth_level_manual_candidate(
         "exact_spread_snapshot": snapshot,
         "spring_gamma": spring_gamma_view,
         "prior_session": prior_session_view,
-        "block_reasons": [],
+        "block_reasons": ([] if operator_ready else [selector_block_reason]),
         "signal_absence_reason": None if operator_ready else edge_authority_reason,
         "gate_contract": {
             **base["gate_contract"],
             "hard_block_reasons": [],
-            "operator_ready_block_reasons": ([] if operator_ready else [edge_authority_reason]),
+            "operator_ready_block_reasons": ([] if operator_ready else [selector_block_reason]),
         },
     }
 
@@ -705,8 +708,11 @@ def process_gth_level_manual_candidate(
         candidate = {
             **candidate,
             "status": "selector_candidate",
+            "candidate_scope": "research_watch",
+            "execution_mode": "observe_only",
             "selector_evidence_eligible": True,
             "manual_action_eligible": False,
+            "operator_action": "observe_only",
             "operator_notification_eligible": False,
             "execution_eligible": False,
             "action_authority": "none",
