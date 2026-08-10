@@ -5,6 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from spx_spark.analytics.options.density import (
+    build_strike_differential_context,
+    synthetic_call_curve,
+)
+from spx_spark.analytics.options.models import SyntheticCallPoint
 from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
@@ -18,6 +23,7 @@ from spx_spark.options_map import (
     bs_gamma,
     build_gex_by_strike,
     build_options_map,
+    build_expiry_map,
     build_rn_density,
     build_wall_ladder,
     gex_weight,
@@ -423,6 +429,43 @@ def test_rn_density_recovers_lognormal_from_bs_chain() -> None:
     assert density.prob_below_put_wall == pytest.approx(0.145, abs=0.05)
     assert density.prob_above_call_wall == pytest.approx(0.145, abs=0.05)
     assert density.clipped_mass_fraction < 0.05
+    assert "strike_differential_context" not in density.to_dict()
+
+    enriched = build_rn_density(
+        pairs,
+        underlier=spot,
+        put_wall=7450.0,
+        call_wall=7550.0,
+        expected_move_points=sigma_points,
+        expiry="20260706",
+        as_of=now,
+        reference_levels={
+            "atm": spot,
+            "zero_gamma": 7500.0,
+            "flip_midpoint": 7500.0,
+            "put_wall": 7450.0,
+            "call_wall": 7550.0,
+        },
+    )
+    enriched_payload = enriched.to_dict()
+    context = enriched_payload.pop("strike_differential_context")
+    assert enriched_payload == density.to_dict()
+    assert context["feature_version"] == "strike_differential_context.v1"
+    assert context["diagnostics"]["observation_count"] <= 24
+    assert any(
+        observation["simpson_local_mass"]["rn_density_interval_mass"] is not None
+        for reference in context["references"]
+        for observation in reference["observations"]
+        if observation["simpson_local_mass"]
+        and "rn_density_interval_mass" in observation["simpson_local_mass"]
+    )
+
+    expiry_map = build_expiry_map("20260706", quotes, spot, as_of=now)
+    assert expiry_map.rn_density is not None
+    service_context = expiry_map.rn_density.strike_differential_context
+    assert service_context is not None
+    assert service_context["feature_version"] == context["feature_version"]
+    assert service_context["diagnostics"]["observation_count"] <= 24
 
 
 def test_rn_density_insufficient_strikes() -> None:
@@ -443,6 +486,370 @@ def test_rn_density_insufficient_strikes() -> None:
     density = build_rn_density(pair_by_strike(quotes), underlier=7500.0)
     assert density.quality == "insufficient_strikes"
     assert density.median is None
+
+
+def _polynomial_curve(
+    now: datetime,
+    *,
+    half_spread: float,
+    offsets: tuple[int, ...] = (-2, -1, 0, 1, 2),
+) -> tuple[SyntheticCallPoint, ...]:
+    def call_mid(strike: float) -> float:
+        x = strike - 100.0
+        return 100.0 - 2.0 * x + 0.01 * x**2 + 0.0001 * x**3 + 0.000001 * x**4
+
+    return tuple(
+        SyntheticCallPoint(
+            strike=100.0 + offset * 5.0,
+            mid=(mid := call_mid(100.0 + offset * 5.0)),
+            bid=mid - half_spread,
+            ask=mid + half_spread,
+            source_right="C",
+            source_at=now,
+        )
+        for offset in offsets
+    )
+
+
+def _single_observation(
+    curve: tuple[SyntheticCallPoint, ...],
+    now: datetime,
+) -> dict[str, object]:
+    context = build_strike_differential_context(
+        curve,
+        expiry="20260810",
+        as_of=now,
+        reference_levels={"atm": 100.0},
+        scales=(5.0, 10.0),
+    )
+    return context["references"][0]["observations"][0]
+
+
+def test_synthetic_call_curve_uses_otm_side_and_parity_bbo() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    quotes = [
+        make_option(
+            expiry="20260810",
+            strike=strike,
+            right=right,
+            mark=mark,
+            iv=0.2,
+            gamma=0.003,
+            open_interest=100,
+            now=now,
+        )
+        for strike, right, mark in (
+            (95.0, "C", 25.0),
+            (95.0, "P", 2.0),
+            (105.0, "C", 3.0),
+            (105.0, "P", 20.0),
+        )
+    ]
+
+    curve = {point.strike: point for point in synthetic_call_curve(pair_by_strike(quotes), 100.0)}
+
+    assert curve[95.0].mid == pytest.approx(7.0)
+    assert curve[95.0].bid == pytest.approx(6.9)
+    assert curve[95.0].ask == pytest.approx(7.1)
+    assert curve[95.0].source_right == "P"
+    assert curve[105.0].mid == pytest.approx(3.0)
+    assert curve[105.0].source_right == "C"
+    assert curve[95.0].source_at == now
+
+
+def test_strike_differential_identities_polynomial_exactness_and_portfolios() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    curve = _polynomial_curve(now, half_spread=0.01)
+    observation = _single_observation(curve, now)
+    h = 5.0
+    c_m2, c_m1, c_0, c_p1, c_p2 = (point.mid for point in curve)
+    fly_low = c_m2 - 2.0 * c_m1 + c_0
+    fly_center = c_m1 - 2.0 * c_0 + c_p1
+    fly_high = c_0 - 2.0 * c_p1 + c_p2
+
+    assert observation["fly_mid_points"] == pytest.approx(fly_center)
+    assert observation["strike_d2"] == pytest.approx(0.02005)
+    assert observation["strike_d3"] == pytest.approx(0.0006)
+    assert observation["strike_d4"] == pytest.approx(0.000024)
+    assert observation["adjacent_fly_spread_points"] == pytest.approx(fly_high - fly_low)
+    assert observation["fly_curvature_points"] == pytest.approx(
+        fly_low - 2.0 * fly_center + fly_high
+    )
+    assert observation["mexican_hat_points"] == pytest.approx(
+        4.0 * fly_center - (c_m2 - 2.0 * c_0 + c_p2)
+    )
+    assert 2.0 * h**3 * observation["strike_d3"] == pytest.approx(
+        observation["adjacent_fly_spread_points"]
+    )
+    assert h**4 * observation["strike_d4"] == pytest.approx(
+        observation["fly_curvature_points"]
+    )
+    assert observation["mexican_hat_points"] == pytest.approx(
+        -(h**4) * observation["strike_d4"]
+    )
+    assert observation["mexican_hat_points"] == pytest.approx(
+        2.0 * h**2 * observation["peak_vs_shoulders"]
+    )
+    richardson = observation["richardson"]
+    assert richardson["strike_d2"] == pytest.approx(0.02)
+    simpson = observation["simpson_local_mass"]
+    assert simpson["state_price_mass_proxy"] == pytest.approx(0.2015)
+    quadratic_curve = tuple(
+        replace(
+            point,
+            mid=(mid := 100.0 - 2.0 * (point.strike - 100.0) + 0.01 * (point.strike - 100.0) ** 2),
+            bid=mid - 0.01,
+            ask=mid + 0.01,
+        )
+        for point in curve
+    )
+    quadratic_observation = _single_observation(quadratic_curve, now)
+    quadratic_simpson = quadratic_observation["simpson_local_mass"]
+    assert quadratic_observation["strike_d2"] == pytest.approx(0.02)
+    assert quadratic_observation["strike_d3"] == pytest.approx(0.0, abs=1e-12)
+    assert quadratic_observation["strike_d4"] == pytest.approx(0.0, abs=1e-12)
+    assert quadratic_simpson["state_price_mass_proxy"] == pytest.approx(0.2)
+    linear_curve = tuple(
+        replace(
+            point,
+            mid=(mid := 100.0 - 2.0 * (point.strike - 100.0)),
+            bid=mid - 0.01,
+            ask=mid + 0.01,
+        )
+        for point in curve
+    )
+    linear_observation = _single_observation(linear_curve, now)
+    assert linear_observation["strike_d2"] == pytest.approx(0.0, abs=1e-12)
+    assert linear_observation["strike_d3"] == pytest.approx(0.0, abs=1e-12)
+    assert linear_observation["strike_d4"] == pytest.approx(0.0, abs=1e-12)
+
+    quintic_curve = tuple(
+        SyntheticCallPoint(
+            strike=strike,
+            mid=(mid := 200.0 - 2.0 * (x := strike - 100.0) + 0.01 * x**2 + 1e-9 * x**5),
+            bid=mid - 0.01,
+            ask=mid + 0.01,
+            source_right="C",
+            source_at=now,
+        )
+        for strike in (95.0, 100.0, 105.0, 110.0, 115.0)
+    )
+    quintic_context = build_strike_differential_context(
+        quintic_curve,
+        expiry="20260810",
+        as_of=now,
+        reference_levels={"atm": 105.0},
+        scales=(5.0, 10.0),
+    )
+    quintic_richardson = quintic_context["references"][0]["observations"][0]["richardson"]
+    assert quintic_richardson["strike_d2"] == pytest.approx(0.0200025)
+
+    units = observation["virtual_portfolio_units"]
+    assert units == {
+        "d2_gross": 4,
+        "d2_raw_coefficients": [1, -2, 1],
+        "d3_gross": 8,
+        "d3_raw_coefficients": [-1, 2, 0, -2, 1],
+        "d4_gross": 16,
+        "d4_raw_coefficients": [1, -4, 6, -4, 1],
+        "mexican_hat_gross": 16,
+        "mexican_hat_raw_coefficients": [-1, 4, -6, 4, -1],
+        "richardson_gross": 64,
+        "richardson_raw_coefficients": [-1, 16, -30, 16, -1],
+        "simpson_netted_gross": 12,
+        "simpson_raw_coefficients": [1, 2, -6, 2, 1],
+    }
+
+
+def test_strike_differential_noise_bounds_are_operator_specific_and_monotone() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    narrow = _single_observation(_polynomial_curve(now, half_spread=0.01), now)
+    widened_curve = list(_polynomial_curve(now, half_spread=0.01))
+    widened_curve[0] = replace(
+        widened_curve[0],
+        bid=widened_curve[0].mid - 0.5,
+        ask=widened_curve[0].mid + 0.5,
+    )
+    wide = _single_observation(tuple(widened_curve), now)
+    zero = _single_observation(_polynomial_curve(now, half_spread=0.0), now)
+
+    assert wide["d3_noise_bound"] > narrow["d3_noise_bound"]
+    assert wide["d4_noise_bound"] > narrow["d4_noise_bound"]
+    assert wide["richardson"]["noise_bound"] > narrow["richardson"]["noise_bound"]
+    assert wide["simpson_local_mass"]["noise_bound"] > narrow["simpson_local_mass"]["noise_bound"]
+    assert zero["d2_noise_bound"] == 0.0
+    assert zero["d3_noise_bound"] == 0.0
+    assert zero["d4_noise_bound"] == 0.0
+    assert zero["richardson"]["noise_bound"] == 0.0
+
+
+def test_strike_differential_missing_outer_strikes_keeps_only_exact_d2() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    observation = _single_observation(
+        _polynomial_curve(now, half_spread=0.01, offsets=(-1, 0, 1)),
+        now,
+    )
+
+    assert observation["quality"] == "unavailable_missing_strikes"
+    assert observation["strike_d2"] is not None
+    assert observation["strike_d3"] is None
+    assert observation["strike_d4"] is None
+    assert observation["richardson"]["quality"] == "unavailable_missing_strikes"
+    assert observation["simpson_local_mass"]["quality"] == "unavailable_missing_strikes"
+
+
+def test_local_context_is_independent_of_global_density_and_missing_bbo() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    quotes = [
+        make_option(
+            expiry="20260810",
+            strike=strike,
+            right="C",
+            mark=mid,
+            iv=0.2,
+            gamma=0.003,
+            open_interest=100,
+            now=now,
+        )
+        for strike, mid in zip(
+            (90.0, 95.0, 100.0, 105.0, 110.0),
+            (20.0, 15.0, 11.0, 8.0, 6.0),
+            strict=True,
+        )
+    ]
+    density = build_rn_density(
+        pair_by_strike(quotes),
+        underlier=100.0,
+        expiry="20260810",
+        as_of=now,
+        reference_levels={"atm": 100.0},
+    )
+
+    assert density.quality == "insufficient_strikes"
+    assert density.strike_differential_context is not None
+    observation = density.strike_differential_context["references"][0]["observations"][0]
+    assert observation["strike_d2"] == pytest.approx(0.04)
+
+    mid_only = tuple(replace(point, bid=None, ask=None) for point in _polynomial_curve(now, half_spread=0.01))
+    degraded = _single_observation(mid_only, now)
+    assert degraded["quality"] == "degraded_missing_bbo"
+    assert degraded["strike_d2"] is not None
+    assert degraded["d2_noise_bound"] is None
+    assert degraded["d2_snr"] is None
+    assert degraded["richardson"]["noise_bound"] is None
+
+
+def test_strike_differential_blocks_raw_negative_convexity_without_clipping() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    curve = tuple(
+        SyntheticCallPoint(
+            strike=strike,
+            mid=mid,
+            bid=mid - 0.01,
+            ask=mid + 0.01,
+            source_right="C",
+            source_at=now,
+        )
+        for strike, mid in zip(
+            (90.0, 95.0, 100.0, 105.0, 110.0),
+            (20.0, 15.0, 9.0, 2.0, 1.0),
+            strict=True,
+        )
+    )
+
+    observation = _single_observation(curve, now)
+
+    assert observation["quality"] == "blocked_convexity_violation"
+    assert observation["fly_mid_points"] == pytest.approx(-1.0)
+    assert observation["strike_d2"] == pytest.approx(-0.04)
+    assert observation["strike_d3"] is None
+    assert observation["strike_d4"] is None
+
+
+def test_strike_differential_is_causal_and_compact() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    curve = tuple(
+        SyntheticCallPoint(
+            strike=float(strike),
+            mid=300.0 - float(strike),
+            bid=299.99 - float(strike),
+            ask=300.01 - float(strike),
+            source_right="C",
+            source_at=now,
+        )
+        for strike in range(50, 151, 5)
+    )
+    future_curve = tuple(
+        replace(point, source_at=now + timedelta(seconds=1))
+        if point.strike == 100.0
+        else point
+        for point in curve
+    )
+    levels = {f"reference_{index}": 70.0 + index * 5.0 for index in range(8)}
+    levels.update(atm=100.0, q_mode=99.0)
+
+    context = build_strike_differential_context(
+        future_curve,
+        expiry="20260810",
+        as_of=now,
+        reference_levels=levels,
+    )
+
+    assert len(context["references"]) == 6
+    assert context["diagnostics"]["observation_count"] == 24
+    assert context["references"][0]["labels"][:2] == ["atm", "q_mode"]
+    assert all(
+        observation["quality"] == "unavailable_future_quote"
+        for observation in context["references"][0]["observations"]
+    )
+    assert all(
+        observation["reasons"]
+        for reference in context["references"]
+        for observation in reference["observations"]
+    )
+
+
+def test_future_curve_point_suppresses_global_density_cross_diagnostics() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    quotes = []
+    for strike in range(50, 151, 5):
+        x = float(strike) - 100.0
+        quote = make_option(
+            expiry="20260810",
+            strike=float(strike),
+            right="C",
+            mark=100.0 - x + 0.001 * x**2,
+            iv=0.2,
+            gamma=0.003,
+            open_interest=100,
+            now=now,
+        )
+        quotes.append(
+            replace(quote, quote_time=now + timedelta(seconds=1))
+            if strike == 150
+            else quote
+        )
+
+    density = build_rn_density(
+        pair_by_strike(quotes),
+        underlier=100.0,
+        expiry="20260810",
+        as_of=now,
+        reference_levels={"atm": 100.0},
+    )
+
+    context = density.strike_differential_context
+    assert context is not None
+    assert all("q_mode" not in reference["labels"] for reference in context["references"])
+    simpson_rows = [
+        observation["simpson_local_mass"]
+        for reference in context["references"]
+        for observation in reference["observations"]
+        if observation["simpson_local_mass"]
+        and "rn_density_interval_mass" in observation["simpson_local_mass"]
+    ]
+    assert simpson_rows
+    assert all(row["rn_density_interval_mass"] is None for row in simpson_rows)
 
 
 def test_options_map_warns_when_open_interest_missing() -> None:

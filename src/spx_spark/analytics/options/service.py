@@ -326,6 +326,17 @@ def build_expiry_map(
             put_wall=put_wall,
             call_wall=call_wall,
             expected_move_points=expected_move,
+            expiry=expiry,
+            as_of=as_of,
+            reference_levels={
+                "atm": atm_strike,
+                "zero_gamma": zero,
+                "flip_midpoint": (
+                    sum(gamma_flip_zone) / 2.0 if gamma_flip_zone is not None else None
+                ),
+                "put_wall": put_wall,
+                "call_wall": call_wall,
+            },
         )
         if underlier
         else None

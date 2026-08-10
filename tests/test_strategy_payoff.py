@@ -214,6 +214,110 @@ def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
     assert decision["automatic_ordering"] is False
 
 
+def test_strike_differential_context_is_copied_whole_without_strategy_interference() -> None:
+    cases: list[tuple[str, datetime, dict[str, object], LatestState]] = []
+    for day in ("2026-08-05", "2026-08-06"):
+        now = datetime.fromisoformat(f"{day}T19:00:00+00:00")
+        payload = _pin_payload(now)
+        frozen = _frozen_pin_facts(day)
+        basis = 26.56
+        payload["trading_date"] = day
+        payload["option_structure_frame"]["structure"] = frozen["structure"]
+        payload["option_structure_frame"]["density"] = {
+            "mode": frozen["structure"]["q_mode"],
+            "local_mass_5pt": frozen["structure"]["q_local_mass_5pt"],
+        }
+        payload["minute_market_frame"]["es"]["pin_path_1m"] = [
+            value + basis for value in frozen["path"]["pin_path_spx"]
+        ]
+        payload["minute_market_frame"]["es"]["trend_efficiency_30m"] = frozen[
+            "path"
+        ]["efficiency_ratio_30m"]
+        payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+            "input_lineage"
+        ]["values"]["efficiency_ratio"] = frozen["path"]["efficiency_ratio_30m"]
+        payload["minute_market_frame"]["volume"]["value_centers_es"] = {
+            key.removeprefix("spx_"): value + basis
+            for key, value in frozen["value_center"].items()
+        }
+        payload["minute_market_frame"]["volatility"]["vix_return_15m_pct"] = frozen[
+            "volatility"
+        ]["vix_return_15m_pct"]
+        payload["option_structure_frame"]["volatility"][
+            "atm_straddle_decay_15m"
+        ] = frozen["volatility"]["atm_straddle_decay_15m"]
+        cases.append((day, now, payload, _pin_state(now)))
+    for day, pricing_allowed in (("2026-08-07", True), ("2026-08-08", False)):
+        now = datetime.fromisoformat(f"{day}T15:00:00+00:00")
+        payload = _decision_payload(now)
+        payload["trading_date"] = day
+        payload["pricing_allowed"] = pricing_allowed
+        cases.append((day, now, payload, _state(now)))
+
+    def context(value: float) -> dict[str, object]:
+        return {
+            "feature_version": "strike_differential_context.v1",
+            "authority": "context_only",
+            "semantics": "risk_neutral_strike_shape",
+            "status": "ready",
+            "references": [
+                {
+                    "center": 7710.0,
+                    "labels": ["atm"],
+                    "observations": [
+                        {
+                            "scale_points": 5.0,
+                            "quality": "ready",
+                            "strike_d2": value,
+                            "strike_d3": value,
+                            "strike_d4": value,
+                            "reasons": [],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    expected_decisions = {
+        "2026-08-05": "NO_TRADE",
+        "2026-08-06": "CALL_BUTTERFLY",
+        "2026-08-07": "CALL_DEBIT_VERTICAL",
+        "2026-08-08": "NO_TRADE",
+    }
+    for day, now, payload, latest in cases:
+        positive_payload, negative_payload = deepcopy(payload), deepcopy(payload)
+        positive = context(1e12)
+        negative = context(-1e12)
+        positive_payload["option_structure_frame"].setdefault("density", {})[
+            "strike_differential_context"
+        ] = positive
+        negative_payload["option_structure_frame"].setdefault("density", {})[
+            "strike_differential_context"
+        ] = negative
+
+        baseline_decision = build_strategy_decision(payload, latest, now)
+        positive_decision = build_strategy_decision(positive_payload, latest, now)
+        negative_decision = build_strategy_decision(negative_payload, latest, now)
+
+        assert baseline_decision["decision_type"] == expected_decisions[day]
+        assert baseline_decision["market_facts"]["structure"][
+            "strike_differential_context"
+        ] == {}
+        assert positive_decision["market_facts"]["structure"][
+            "strike_differential_context"
+        ] == positive
+        assert negative_decision["market_facts"]["structure"][
+            "strike_differential_context"
+        ] == negative
+        assert positive_decision["market_facts"]["quality"] == negative_decision[
+            "market_facts"
+        ]["quality"]
+        baseline_decision["market_facts"]["structure"].pop("strike_differential_context")
+        positive_decision["market_facts"]["structure"].pop("strike_differential_context")
+        negative_decision["market_facts"]["structure"].pop("strike_differential_context")
+        assert baseline_decision == positive_decision == negative_decision, day
+
+
 def test_stable_pin_builds_candidate_specific_terminal_range_probability(
     tmp_path: Path,
 ) -> None:

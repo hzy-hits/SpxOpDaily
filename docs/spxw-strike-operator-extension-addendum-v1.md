@@ -1,6 +1,6 @@
 # SPXW 执行价算子扩展与模型研究附录 v1
 
-状态：**实施设计补充合同（待实现）**  
+状态：**已实现（随主文档 SDCTX-1–5；验收见 `docs/research/strike-differential-context-acceptance-2026-08-10.md`）**  
 适用仓库：`hzy-hits/SpxOpDaily`  
 适用主文档：`docs/spxw-strike-differential-decision-context-v1.md`  
 设计边界：**扩充只读决策上下文与后续研究合同，不改变候选生成、排序、硬门、人工权限或自动下单边界**

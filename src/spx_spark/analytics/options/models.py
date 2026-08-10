@@ -49,6 +49,18 @@ class DensityDiagnostics:
 
 
 @dataclass(frozen=True)
+class SyntheticCallPoint:
+    """One OTM/parity-selected point on the synthetic Call curve."""
+
+    strike: float
+    mid: float
+    bid: float | None
+    ask: float | None
+    source_right: str
+    source_at: datetime | None
+
+
+@dataclass(frozen=True)
 class UnderlierReference:
     price: float | None
     source: str | None
@@ -124,6 +136,7 @@ class RnDensity:
     clipped_mass_fraction: float | None = None
     strike_range: tuple[float, float] | None = None
     diagnostics: DensityDiagnostics | None = None
+    strike_differential_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -134,6 +147,8 @@ class RnDensity:
             payload.pop("mode")
         if self.local_mass_5pt is None:
             payload.pop("local_mass_5pt")
+        if self.strike_differential_context is None:
+            payload.pop("strike_differential_context")
         return payload
 
 

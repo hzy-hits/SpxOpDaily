@@ -102,6 +102,9 @@ def build_market_fact_pack(
             "q_mode": _number(density.get("mode")),
             "q_local_mass_5pt": dict(_map(density.get("local_mass_5pt"))),
             "q_clipped_mass_fraction": _number(density.get("clipped_mass_fraction")),
+            "strike_differential_context": dict(
+                _map(density.get("strike_differential_context"))
+            ),
             "gex_quality": structure.get("gex_quality"),
             "zero_gamma_migration_points": _number(structure.get("zero_gamma_migration_points")),
         },

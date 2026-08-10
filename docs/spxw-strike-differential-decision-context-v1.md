@@ -1,6 +1,6 @@
 # SPXW 执行价差分特征与决策上下文接入设计 v1
 
-状态：**实施设计合同（待实现）**  
+状态：**已实现（SDCTX-1–5；验收见 `docs/research/strike-differential-context-acceptance-2026-08-10.md`）**  
 适用仓库：`hzy-hits/SpxOpDaily`  
 适用分支基线：`master`  
 设计边界：**只增加只读决策上下文，不改变候选生成、排序、硬门、人工权限或自动下单边界**  
