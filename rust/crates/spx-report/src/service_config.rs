@@ -205,7 +205,7 @@ const fn default_poll_interval_millis() -> u64 {
 }
 
 const fn default_slot_grace_seconds() -> i64 {
-    180
+    300
 }
 
 const fn default_owner_lease_seconds() -> i64 {
@@ -234,7 +234,7 @@ mod tests {
             ledger_path = "/var/lib/spx-spark-core/ledger/operations.sqlite"
             health_path = "/var/lib/spx-spark-report/health.json"
             poll_interval_millis = 1000
-            slot_grace_seconds = 180
+            slot_grace_seconds = 300
             owner_lease_seconds = 180
             source_max_bytes = 4194304
             failure_backoff_seconds = [5, 15, 60, 300]
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn strict_config_builds_typed_targets() {
         let config = ReportServiceConfig::from_toml(valid_toml()).unwrap();
-        assert_eq!(config.slot_grace_seconds, 180);
+        assert_eq!(config.slot_grace_seconds, 300);
         let targets = config.domain_targets().unwrap();
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].channel, DeliveryChannel::Bark);
