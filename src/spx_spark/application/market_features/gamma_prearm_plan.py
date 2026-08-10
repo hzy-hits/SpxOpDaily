@@ -398,21 +398,26 @@ def _notification_intent(
             targets.append("结构目标不可用；进入 READY 时再计算目标与盈亏比。")
     desk_view.append(spring_gamma_operator_line(plan.get("spring_gamma")))
     desk_view.append(_prior_session_plan_line(plan))
-    provider = str(selected.get("quote_provider") or "不可用") if selected else "不可用"
-    quote_status = (
-        "bid/ask 可用"
-        if selected
-        and _number(selected.get("decision_bid")) is not None
-        and _number(selected.get("decision_ask")) is not None
-        else "精确报价不可用"
-    )
+    if selected is not None:
+        provider = str(selected.get("quote_provider") or "不可用")
+        quote_status = (
+            "bid/ask 可用"
+            if _number(selected.get("decision_bid")) is not None
+            and _number(selected.get("decision_ask")) is not None
+            else "精确报价不可用"
+        )
+        quote_line = f"报价源  {provider} · {quote_status}"
+    else:
+        # Observation stage deliberately selects no contract; say that instead
+        # of "unavailable", which reads like a market-data outage.
+        quote_line = "报价  观察阶段未选定合约（数据正常）· 触发选边后展示报价源与 bid/ask"
     text = render_operator_card(
         desk_view="\n".join(desk_view),
         execution="\n".join(execution),
         risk="\n".join(risk),
         targets="\n".join(targets),
         data_quality=(
-            f"报价源  {provider} · {quote_status} · 卡片 TTL {int(DELIVERY_TTL_SECONDS)} 秒\n"
+            f"{quote_line} · 卡片 TTL {int(DELIVERY_TTL_SECONDS)} 秒\n"
             "Gamma/OI 仅为结构代理；dealer 持仓方向未知，不用 Gamma 猜第一步方向。"
         ),
     )

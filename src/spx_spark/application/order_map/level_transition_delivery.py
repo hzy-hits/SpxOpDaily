@@ -302,6 +302,7 @@ def render_level_transition(
             (
                 f"Structure  {_level_kind_label(state.get('level_kind'))} "
                 f"{_format_level(_number(state.get('spx_level', state.get('level'))))}"
+                "（本机会武装时冻结；实时墙位以结构卡为准）"
             ),
             (
                 f"Location  {spot_label} {_format_level(observation.spx_spot)}"
@@ -328,7 +329,7 @@ def render_level_transition(
         risk=risk,
         targets="尚未生成结构目标；关键触发位不是获利目标。",
         data_quality=(
-            f"状态  {quality} · 坐标 {coordinate} · "
+            f"坐标质量  {quality}（指价格坐标可用性，非机会状态）· 坐标 {coordinate} · "
             f"{spot_label} {_format_level(observation.spx_spot)} · "
             f"ES {_format_level(observation.es)}"
         ),
