@@ -9,6 +9,7 @@ from typing import Mapping
 from spx_spark.application.order_map.level_decision_machine import (
     LevelObservation,
     LevelPhase,
+    LevelThesis,
     LevelTransition,
 )
 from spx_spark.config import NotificationSettings
@@ -25,6 +26,11 @@ OPERATOR_TRANSITION_PHASES = frozenset(
         LevelPhase.EXPIRED,
     }
 )
+TERMINAL_NOTIFY_PHASES = frozenset({LevelPhase.INVALIDATED, LevelPhase.EXPIRED})
+# Pre-arm phases carry no path, no contract and no revocable authority; their
+# terminal transitions are structure noise (drift/coordinate churn) and belong
+# in the audit trail only, never in an operator push.
+PRE_ARM_PHASES = frozenset({LevelPhase.APPROACHING, LevelPhase.TESTING})
 
 
 def prepare_level_transition_delivery(
@@ -66,6 +72,13 @@ def prepare_level_transition_delivery(
         "queued": False,
         "delivered": False,
     }
+    if (
+        phase in TERMINAL_NOTIFY_PHASES
+        and transition.previous_phase in PRE_ARM_PHASES
+        and str(state.get("thesis") or LevelThesis.NONE.value) == LevelThesis.NONE.value
+    ):
+        result["reason"] = "audit_only_prearm_terminal"
+        return result, None
     if not (
         phase in OPERATOR_TRANSITION_PHASES
         and formal_signal_enabled
@@ -292,24 +305,25 @@ def render_level_transition(
     spot_label = "SPX" if coordinate == "official_spx" else "SPX代理"
     generation = state.get("reentry_generation", 0)
     quality = str(state.get("quality_status") or "ready").upper()
-    desk_view = "\n".join(
+    desk_lines = [
+        f"Opportunity  {state.get('event_id') or '-'} · generation {generation}",
         (
-            f"Opportunity  {state.get('event_id') or '-'} · generation {generation}",
-            (
-                f"State  {transition.previous_phase.value.upper()} → {phase.value.upper()}"
-                f" · {_path_label(state)}"
-            ),
-            (
-                f"Structure  {_level_kind_label(state.get('level_kind'))} "
-                f"{_format_level(_number(state.get('spx_level', state.get('level'))))}"
-                "（本机会武装时冻结；实时墙位以结构卡为准）"
-            ),
-            (
-                f"Location  {spot_label} {_format_level(observation.spx_spot)}"
-                f" · ES {_format_level(observation.es)}"
-            ),
-        )
-    )
+            f"State  {transition.previous_phase.value.upper()} → {phase.value.upper()}"
+            f" · {_path_label(state)}"
+        ),
+        (
+            f"Structure  {_level_kind_label(state.get('level_kind'))} "
+            f"{_format_level(_number(state.get('spx_level', state.get('level'))))}"
+            "（本机会武装时冻结；实时墙位以结构卡为准）"
+        ),
+        (
+            f"Location  {spot_label} {_format_level(observation.spx_spot)}"
+            f" · ES {_format_level(observation.es)}"
+        ),
+    ]
+    if phase in {LevelPhase.INVALIDATED, LevelPhase.EXPIRED}:
+        desk_lines.extend(_terminal_reason_lines(transition, observation))
+    desk_view = "\n".join(desk_lines)
     execution = "\n".join(
         (
             f"SPX Setup Transition · {phase.value.upper()}",
@@ -334,6 +348,33 @@ def render_level_transition(
             f"ES {_format_level(observation.es)}"
         ),
     )
+
+
+def _terminal_reason_lines(
+    transition: LevelTransition,
+    observation: LevelObservation,
+) -> list[str]:
+    """Explain why a lifecycle ended: structure update vs price rejection."""
+
+    state = transition.state
+    lines = [f"Reason  {transition.reason or state.get('reason') or 'unknown'}"]
+    kind = str(state.get("level_kind") or "")
+    frozen_level = _number(state.get("level"))
+    live_level = _number(observation.levels.get(kind)) if kind else None
+    if frozen_level is not None:
+        label = _level_kind_label(state.get("level_kind"))
+        if live_level is not None:
+            lines.append(
+                f"Drift  冻结 {label} {frozen_level:.2f} → 实时 {live_level:.2f}"
+                f"（{live_level - frozen_level:+.2f}pt）"
+            )
+        else:
+            lines.append(f"Drift  冻结 {label} {frozen_level:.2f} → 实时结构中该位已不存在")
+    frozen_coordinate = str(state.get("trigger_coordinate_kind") or "unknown")
+    observed_coordinate = str(observation.trigger_coordinate_kind or "unknown")
+    if frozen_coordinate != observed_coordinate:
+        lines.append(f"Coordinate  冻结 {frozen_coordinate} → 观察 {observed_coordinate}")
+    return lines
 
 
 def _phase_instruction(phase: LevelPhase) -> str:

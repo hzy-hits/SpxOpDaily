@@ -634,7 +634,9 @@ def test_expired_event_must_exit_reset_band_before_rearming_same_level() -> None
     assert rearmed.state["reentry_generation"] == 1
 
 
-def test_expired_event_clears_outside_reset_band_even_inside_approach_radius() -> None:
+def test_terminal_exit_inside_approach_radius_guards_same_bucket_rearm() -> None:
+    """Reset-band exit alone must not oscillate FAR -> APPROACHING again."""
+
     armed = advance(None, 0, spot=95.0, es=5000.0)
     expired = {
         **armed.state,
@@ -645,14 +647,44 @@ def test_expired_event_clears_outside_reset_band_even_inside_approach_radius() -
     # put_wall=100: seven points is outside the six-point reset band but still
     # inside the twelve-point approach radius.
     reset = advance(expired, 31, spot=93.0, es=4998.0)
-
     assert reset.current_phase is LevelPhase.FAR
     assert reset.reason == "terminal_level_exited"
     assert reset.state["next_reentry_generation"] == 1
+    assert reset.state["rearm_guard"] == {"level_kind": "put_wall", "level": 100.0}
 
-    rearmed = advance(reset.state, 32, spot=93.0, es=4998.0)
+    # Still inside the approach radius: the guarded bucket must not re-arm.
+    blocked = advance(reset.state, 32, spot=93.0, es=4998.0)
+    assert blocked.current_phase is LevelPhase.FAR
+    assert blocked.reason == "rearm_guard_active"
+    assert blocked.state["rearm_guard"] == {"level_kind": "put_wall", "level": 100.0}
+
+    # Edge trigger: price leaves the full approach radius, clearing the guard.
+    cleared = advance(blocked.state, 33, spot=87.0, es=4990.0)
+    assert cleared.current_phase is LevelPhase.FAR
+    assert "rearm_guard" not in cleared.state
+
+    # Re-entry into the approach radius may now arm a fresh generation.
+    rearmed = advance(cleared.state, 34, spot=93.0, es=4998.0)
     assert rearmed.current_phase is LevelPhase.APPROACHING
     assert rearmed.state["reentry_generation"] == 1
+
+
+def test_rearm_guard_does_not_block_a_different_level_bucket() -> None:
+    armed = advance(None, 0, spot=95.0, es=5000.0, levels={"put_wall": 100.0, "call_wall": 108.0})
+    expired = {
+        **armed.state,
+        "phase": LevelPhase.EXPIRED.value,
+        "phase_at": NOW.isoformat(),
+    }
+    reset = advance(expired, 31, spot=93.0, es=4998.0, levels={"put_wall": 100.0, "call_wall": 108.0})
+    assert reset.current_phase is LevelPhase.FAR
+    assert reset.state["rearm_guard"] == {"level_kind": "put_wall", "level": 100.0}
+
+    # spot=99: guard still active for put_wall, but call_wall 108 is nine
+    # points away (inside the approach radius) and may arm normally.
+    other = advance(reset.state, 32, spot=99.0, es=5002.0, levels={"put_wall": 100.0, "call_wall": 108.0})
+    assert other.current_phase is LevelPhase.APPROACHING
+    assert other.state["level_kind"] == "call_wall"
 
 
 def test_terminal_structure_promotion_can_rearm_without_old_level_exit() -> None:

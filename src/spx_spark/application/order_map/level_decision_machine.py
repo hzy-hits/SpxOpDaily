@@ -153,10 +153,23 @@ def advance_level_decision(
                 now,
                 observation.arm_block_reason or "new_arm_blocked",
             )
+        guard = _rearm_guard(state)
+        if (
+            guard is not None
+            and observation.spot is not None
+            and abs(float(observation.spot) - guard[1]) > settings.approach_points
+        ):
+            # Edge-triggered rehysteresis: only a full exit from the approach
+            # radius clears the guard, so a terminal event cannot oscillate
+            # back into APPROACHING while price idles between the reset band
+            # and the (much wider) approach radius.
+            state.pop("rearm_guard", None)
+            guard = None
         return _arm_nearest_level(
             observation,
             settings=settings,
             reentry_generation=_generation(state, "next_reentry_generation"),
+            rearm_guard=guard,
         )
     if phase in TERMINAL_PHASES:
         if not observation.arm_allowed:
@@ -360,17 +373,25 @@ def _arm_nearest_level(
     *,
     settings: LevelDecisionSettings,
     reentry_generation: int = 0,
+    rearm_guard: tuple[str, float] | None = None,
 ) -> LevelTransition:
     now = _utc(observation.at)
     spot = float(observation.spot or 0.0)
     eligible = [
         (abs(spot - float(level)), kind, float(level))
         for kind, level in observation.levels.items()
-        if kind in LEVEL_OUTSIDE_DIRECTION and abs(spot - float(level)) <= settings.approach_points
+        if kind in LEVEL_OUTSIDE_DIRECTION
+        and abs(spot - float(level)) <= settings.approach_points
+        and not _rearm_guard_blocks(rearm_guard, kind, float(level), settings)
     ]
     if not eligible:
         state = empty_level_state(now)
         state["next_reentry_generation"] = reentry_generation
+        if rearm_guard is not None:
+            state["rearm_guard"] = {"level_kind": rearm_guard[0], "level": rearm_guard[1]}
+            return LevelTransition(
+                LevelPhase.FAR, LevelPhase.FAR, state, False, "rearm_guard_active"
+            )
         return LevelTransition(LevelPhase.FAR, LevelPhase.FAR, state, False, "no_near_level")
     _distance, kind, level = min(eligible, key=lambda row: (row[0], row[1]))
     event_id = _event_id(observation.session_date, kind, level, now)
@@ -669,7 +690,12 @@ def _confirmed_transition(
 
 
 def _to_far(
-    state: dict[str, object], previous: LevelPhase, now: datetime, reason: str
+    state: dict[str, object],
+    previous: LevelPhase,
+    now: datetime,
+    reason: str,
+    *,
+    rearm_guard: tuple[str, float] | None = None,
 ) -> LevelTransition:
     new_state = empty_level_state(now)
     current_generation = _generation(state, "reentry_generation")
@@ -679,7 +705,35 @@ def _to_far(
         current_generation += 1
     new_state["next_reentry_generation"] = current_generation
     new_state["reason"] = reason
+    if rearm_guard is not None:
+        new_state["rearm_guard"] = {"level_kind": rearm_guard[0], "level": rearm_guard[1]}
     return LevelTransition(previous, LevelPhase.FAR, new_state, True, reason)
+
+
+def _rearm_guard(state: Mapping[str, object]) -> tuple[str, float] | None:
+    guard = state.get("rearm_guard")
+    if not isinstance(guard, Mapping):
+        return None
+    kind = guard.get("level_kind")
+    level = guard.get("level")
+    if not isinstance(kind, str) or not kind or not isinstance(level, int | float):
+        return None
+    return kind, float(level)
+
+
+def _rearm_guard_blocks(
+    guard: tuple[str, float] | None,
+    kind: str,
+    level: float,
+    settings: LevelDecisionSettings,
+) -> bool:
+    """Block re-arming the same level bucket until price fully exits and returns."""
+
+    return (
+        guard is not None
+        and kind == guard[0]
+        and abs(level - guard[1]) <= settings.structure_drift_points
+    )
 
 
 def _unchanged(
@@ -758,7 +812,20 @@ def _handle_terminal_rearm(
         reset_band_points = max(settings.retest_points, settings.reject_points)
         if abs(float(observation.spot) - float(level)) <= reset_band_points:
             return _unchanged(state, phase, now, "terminal_waiting_for_level_exit")
-    return _to_far(state, phase, now, "terminal_level_exited")
+    # Same-bucket re-arming stays blocked until price leaves the full approach
+    # radius once.  If this exit tick is already outside the approach radius,
+    # the edge condition is satisfied and no guard is needed.  A genuine
+    # structure migration re-arms via the promotion branch above and is
+    # deliberately not guarded.
+    guard: tuple[str, float] | None = None
+    if kind in LEVEL_OUTSIDE_DIRECTION and isinstance(old_level, int | float):
+        exited_radius = (
+            observation.spot is not None
+            and abs(float(observation.spot) - float(old_level)) > settings.approach_points
+        )
+        if not exited_radius:
+            guard = (kind, float(old_level))
+    return _to_far(state, phase, now, "terminal_level_exited", rearm_guard=guard)
 
 
 def _spx_decision_spot(observation: LevelObservation) -> float | None:

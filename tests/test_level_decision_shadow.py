@@ -12,6 +12,7 @@ from spx_spark.application.order_map import level_transition_delivery as transit
 from spx_spark.application.order_map.level_decision_machine import (
     LevelObservation,
     LevelPhase,
+    LevelTransition,
     advance_level_decision,
 )
 from spx_spark.application.order_map.level_decision_shadow import (
@@ -1144,3 +1145,82 @@ def _write_shadow_state(
     if decision is not None:
         payload["decision"] = decision
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+def _notify_settings(monkeypatch) -> None:
+    monkeypatch.setattr(
+        transition_delivery,
+        "NotificationSettings",
+        SimpleNamespace(
+            from_env=lambda: SimpleNamespace(
+                enabled=True,
+                feishu_enabled=True,
+                bark_enabled=False,
+                bark_friend_enabled=False,
+            )
+        ),
+    )
+
+
+def _terminal_transition(previous: LevelPhase, *, thesis: str) -> LevelTransition:
+    return LevelTransition(
+        previous_phase=previous,
+        current_phase=LevelPhase.INVALIDATED,
+        state={
+            "event_id": "level:prearm",
+            "level_kind": "call_wall",
+            "level": 7775.0,
+            "spx_level": 7775.0,
+            "thesis": thesis,
+            "reentry_generation": 0,
+            "quality_status": "ready",
+            "trigger_coordinate_kind": "chain_implied_spx",
+            "transition_count": 2,
+        },
+        changed=True,
+        reason="structure_drift",
+    )
+
+
+def _terminal_observation() -> LevelObservation:
+    return LevelObservation(
+        at=NOW,
+        spot=7757.2,
+        es=7781.0,
+        levels={"call_wall": 7800.0},
+        quality_ok=True,
+        spx_spot=7757.2,
+        trigger_coordinate_kind="chain_implied_spx",
+    )
+
+
+@pytest.mark.parametrize("previous", [LevelPhase.APPROACHING, LevelPhase.TESTING])
+def test_prearm_terminal_transition_is_audit_only(previous, monkeypatch) -> None:
+    _notify_settings(monkeypatch)
+    result, intent = transition_delivery.prepare_level_transition_delivery(
+        _terminal_transition(previous, thesis="none"),
+        _terminal_observation(),
+        now=NOW,
+        notify_transitions=True,
+        formal_signal_enabled=True,
+        notifications_enabled=True,
+    )
+    assert intent is None
+    assert result is not None
+    assert result["reason"] == "audit_only_prearm_terminal"
+
+
+def test_pathful_invalidation_still_pushes_and_explains_reason(monkeypatch) -> None:
+    _notify_settings(monkeypatch)
+    result, intent = transition_delivery.prepare_level_transition_delivery(
+        _terminal_transition(LevelPhase.REJECT_PENDING, thesis="fade"),
+        _terminal_observation(),
+        now=NOW,
+        notify_transitions=True,
+        formal_signal_enabled=True,
+        notifications_enabled=True,
+    )
+    assert result is not None
+    assert intent is not None
+    text = str(intent["text"])
+    assert "Reason  structure_drift" in text
+    assert "Drift  冻结 Call Wall 7775.00 → 实时 7800.00（+25.00pt）" in text
