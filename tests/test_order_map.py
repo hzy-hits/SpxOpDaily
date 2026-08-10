@@ -1017,7 +1017,9 @@ def test_strategy_decision_rejects_future_fact_frames() -> None:
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["market_facts"]["quality"]["status"] == "degraded"
     assert "minute_market_frame_from_future" in decision["why_not"]["reasons"]
-    assert "option_structure_frame_from_future" in decision["why_not"]["reasons"]
+    assert "option_structure_frame_from_future" in decision["market_facts"]["quality"][
+        "reasons"
+    ]
     assert decision["available_at"] <= decision["decision_at"]
 
 

@@ -314,11 +314,11 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "OR 上沿上方确认（ORL 7578 / ORH 7595）" in rendered
     assert "EM ±28.1pt" in rendered
     assert "GTH 已用" not in rendered
-    assert "Primary  方向来源  尚无价格接受/拒绝确认；趋势偏空仅为 ES/量价背景" in rendered
+    assert "Primary  Evidence · 方向来源  尚无价格接受/拒绝确认；趋势偏空仅为 ES/量价背景" in rendered
     assert "下一触发  等待当前 Flip 7560–7565 的接受或拒绝；确认前 NO TRADE" in rendered
     assert "流确认  ES 15m -2pt / 60m -7pt" in rendered
     assert "量价 同向确认 · ES/SPY 同向确认" in rendered
-    assert "Alternative  尚无单边方向；当前不存在交易失效位" in rendered
+    assert "Alternative  Evidence · 尚无单边方向；当前不存在交易失效位" in rendered
     assert "Structure  Put/Flip/Call 7550 / 7560–7565 / 7600 · event=live" in rendered
     assert "Gamma职责  Gamma 过渡" in rendered
     assert "dealer sign unknown" in rendered
@@ -343,6 +343,66 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "当前布局参考" not in rendered
     assert "Skew Spread Shadow" not in rendered
     assert "Gamma 不给" not in rendered  # transition has no inferred direction at all
+
+
+def test_desk_map_primary_conclusion_comes_from_strategy_decision_blockers() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "confirmed",
+        "direction": "up",
+        "thesis": "breakout",
+        "level_kind": "flip_high",
+        "level": 7565.0,
+    }
+    payload["trade_intent"] = {
+        "status": "trade_ready",
+        "event_id": "level:test-current",
+        "intent_id": "intent:legacy-ready",
+        "contract_id": "option:SPX:SPXW:20260715:7565:C",
+    }
+    payload["plan_candidates"] = [
+        {
+            "intent_id": "intent:legacy-ready",
+            "contract_id": "option:SPX:SPXW:20260715:7565:C",
+            "target_spx": 7600.0,
+        }
+    ]
+    payload["strategy_decision"] = {
+        "decision_type": "NO_TRADE",
+        "candidate": None,
+        "action_authority": "none",
+        "execution": {"action": "WAIT"},
+        "why_not": {
+            "reasons": ["quote_refresh_required", "max_debit_fraction_exceeded"],
+            "nearest_candidate": {
+                "strategy_type": "CALL_DEBIT_VERTICAL",
+                "long": {"strike": 7565.0},
+                "short": {"strike": 7575.0},
+                "failed_gates": [
+                    {
+                        "gate": "max_debit_fraction_exceeded",
+                        "actual": 0.52,
+                        "threshold": 0.45,
+                    }
+                ],
+            },
+            "reauthorize_on": "刷新 SPXW 两腿双边报价后重新计算",
+        },
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+    rendered = render_operator_status_brief(payload, [], NOW)
+
+    assert "Decision: NO_TRADE" in sections.desk_view
+    assert "Primary blocker: quote_refresh_required" in sections.desk_view
+    assert "Nearest candidate: CALL_DEBIT_VERTICAL 7565/7575" in sections.desk_view
+    assert "Failed gates: max_debit_fraction_exceeded" in sections.desk_view
+    assert "Reauthorize when: 刷新 SPXW 两腿双边报价后重新计算" in sections.desk_view
+    assert sections.execution.startswith("WAIT · strategy_decision=NO_TRADE")
+    assert "7600" not in sections.targets
+    assert "结构与执行门控已通过" not in rendered
+    assert "strategy_decision NO_TRADE：quote_refresh_required" in rendered
 
 
 def test_desk_sections_make_unavailable_market_facts_explicit() -> None:

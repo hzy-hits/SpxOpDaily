@@ -1,6 +1,7 @@
 # RTH Signal Unstarve v1
 
 状态：Change Brief 已确认，按现有 owner 落地；不新增 service / DB / queue / Rust / LLM / BWB。  
+实现状态（2026-08-11）：P0 已落地并通过相关 pytest；P1 的 OR / VWAP / shock 与 Butterfly 强化未开始。
 范围依据：仓库代码、冻结回放证据与生产运行时漏斗；不补盘感故事。  
 关联：`docs/strategy-signal-engine-v2.md`；架构简化执行方案 S-track；Import Linter / module-architecture 分层不变。
 
@@ -281,11 +282,18 @@ jq '{
 
 ## 9. 最小落地清单（本变更）
 
-1. 解除 exact-spread bootstrap deadlock。
-2. 全局 quality gate → per-strategy capability gate。
-3. 统一 official / parity / ES-equivalent SPX 坐标。
-4. 把 `session_episode` 接进 selector。
-5. Desk Map 完全服从 `strategy_decision` 并展示拒绝漏斗。
-6. 随后：OR Failed Break / VWAP Pullback、shock gate、Butterfly 硬门强化。
+1. [x] 解除 exact-spread bootstrap deadlock：setup evidence 不再依赖 legacy spread，RTH 直接枚举现有宽度集合。
+2. [x] 全局 quality gate → per-strategy capability gate：Gamma / OI / structure 降级不再误杀具备 exact 两腿报价的 Vertical；Butterfly fail closed。
+3. [x] 统一 official / parity / ES-equivalent SPX 坐标：Market Features 策略入口复用 `resolve_trigger_coordinate()`，underlier / spot / facts 共用同一解析结果。
+4. [x] 把 `session_episode` 接进 selector：`V_REVERSAL_CONFIRMED` / `RECOVERY` 映射为反向 `FAILED_BREAK_RECLAIM` Vertical setup。
+5. [x] Desk Map 完全服从 `strategy_decision`，level decision 降为 Evidence，并输出逐决策 rejection funnel。
+6. [ ] P1：OR Failed Break / VWAP Pullback、shock gate、Butterfly 硬门强化；本阶段未实施。
+
+P0 冻结测试覆盖：
+
+- structure / Gamma degraded + exact two-leg ready → Vertical 可枚举、Butterfly 禁止；
+- confirmed setup + 无 legacy spread → direct width enumeration；
+- `V_REVERSAL_CONFIRMED` → 反向 Failed Break/Reclaim Vertical；
+- Desk Map 的 Decision / blocker / nearest candidate / failed gates / reauthorize 条件只读 `strategy_decision`。
 
 前五项完成后，RTH 才具备正常候选供给；后几项防止错误环境给出脆弱 Butterfly。

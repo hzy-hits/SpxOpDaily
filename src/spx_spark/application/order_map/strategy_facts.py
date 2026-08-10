@@ -16,7 +16,9 @@ def build_market_fact_pack(
     decision_at, lineage = _utc(now), []
     market = _frame(payload, "minute_market_frame", decision_at, lineage)
     option = _frame(payload, "option_structure_frame", decision_at, lineage)
-    underlier, es = _map(payload.get("underlier")), _map(market.get("es"))
+    coordinate = _map(payload.get("trigger_coordinate"))
+    underlier = _map(payload.get("spot")) or _map(payload.get("underlier"))
+    es = _map(market.get("es"))
     rth = _map(_map(_map(market.get("diagnostics")).get("rth_market_state")))
     rth_lineage = _map(rth.get("input_lineage"))
     values, diagnostics = _map(rth_lineage.get("values")), _map(rth_lineage.get("diagnostics"))
@@ -28,11 +30,25 @@ def build_market_fact_pack(
     trigger = _map(payload.get("level_decision"))
     gth_level = _map(payload.get("gth_level_manual_candidate"))
     gth_dip_reclaim = _map(payload.get("gth_dip_reclaim_evidence"))
+    episode = _map(payload.get("session_episode"))
+    provider_control = _map(
+        payload.get("strategy_entry_control") or payload.get("provider_entry_control")
+    )
     forecast = _map(payload.get("strategy_distribution_forecast"))
     q_event, p_event = _map(forecast.get("q_event")), _map(forecast.get("p_event"))
     trading_date = str(payload.get("trading_date") or "")
-    spx, es_price = _number(underlier.get("price")), _first(es.get("price"), payload.get("es_last"))
+    spx = _first(
+        underlier.get("spx_observed_value"),
+        underlier.get("price"),
+        coordinate.get("spx_observed_value"),
+    )
+    es_price = _first(es.get("price"), payload.get("es_last"))
     basis = es_price - spx if es_price is not None and spx is not None else None
+    coordinate_basis = _first(
+        underlier.get("basis"),
+        underlier.get("basis_points"),
+        coordinate.get("basis_points"),
+    )
     l1, quality = _map(option.get("l1")), list(lineage)
     if spx is None:
         quality.append("spx_price_unavailable")
@@ -51,14 +67,115 @@ def build_market_fact_pack(
     ) if item]
     quality = list(dict.fromkeys([*quality, *lineage]))
     es_vwap = _number(es.get("vwap"))
+    session_mode = (
+        "rth"
+        if DEFAULT_MARKET_CALENDAR.is_rth_open(decision_at)
+        else "gth"
+        if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(decision_at)
+        else "closed"
+    )
+    coordinate_ready = spx is not None
+    market_ready = market.get("quality") == "ready"
+    atr_ready = _number(averages.get("atr_5m")) is not None
+    vwap_ready = any(
+        value is not None
+        for value in (
+            values.get("price_vs_vwap"),
+            es.get("vwap"),
+            es.get("vwap_distance_points"),
+        )
+    )
+    opening_range_ready = any(
+        value is not None
+        for value in (
+            values.get("opening_range_state"),
+            opening.get("orh"),
+            opening.get("orl"),
+        )
+    )
+    path_ready = market_ready and atr_ready and vwap_ready
+    structure_ready = (
+        option.get("quality") == "ready"
+        and l1.get("quality") == "ready"
+        and structure.get("gex_quality")
+        in {None, "", "open_interest_gex", "ibkr_ok"}
+    )
+    value_center_ready = all(
+        _number(_map(volume.get("value_centers_es")).get(window)) is not None
+        for window in ("15m", "30m", "60m")
+    )
+    pin_inputs_ready = bool(
+        value_center_ready
+        and _number(density.get("mode")) is not None
+        and _map(density.get("local_mass_5pt"))
+        and _number(volatility.get("atm_straddle_decay_15m")) is not None
+    )
+    macro_allowed = macro.get("entry_allowed") is True
+    provider_allowed = provider_control.get("allowed") is not False
+    session_legal = session_mode != "closed"
+    global_reasons = []
+    if not session_legal:
+        global_reasons.append("session_not_open_for_spxw_strategy")
+    if not coordinate_ready:
+        global_reasons.append("spx_price_unavailable")
+    if not market_ready:
+        global_reasons.append(
+            next(
+                (
+                    reason
+                    for reason in quality
+                    if reason.startswith("minute_market_frame_")
+                ),
+                "market_frame_not_ready",
+            )
+        )
+    if not macro_allowed:
+        global_reasons.append("macro_entry_not_authorized")
+    if not provider_allowed:
+        global_reasons.append(
+            str(provider_control.get("reason") or "provider_advice_not_authorized")
+        )
+    vertical_reasons = []
+    if not coordinate_ready:
+        vertical_reasons.append("spx_price_unavailable")
+    if not path_ready:
+        vertical_reasons.append("vertical_path_inputs_unavailable")
+    butterfly_reasons = list(vertical_reasons)
+    if not structure_ready:
+        butterfly_reasons.append("butterfly_structure_capability_unavailable")
+    if not pin_inputs_ready:
+        butterfly_reasons.append("butterfly_value_center_or_density_unavailable")
+    episode_phase = str(episode.get("phase") or "").strip().lower() or None
+    break_direction = str(episode.get("break_direction") or "").strip().lower() or None
+    episode_setup_direction = (
+        "UP"
+        if episode_phase in {"v_reversal_confirmed", "recovery"}
+        and break_direction == "down"
+        else "DOWN"
+        if episode_phase in {"v_reversal_confirmed", "recovery"}
+        and break_direction == "up"
+        else None
+    )
     return {
         "schema_version": "market_fact_pack.v1",
         "decision_at": decision_at.isoformat(),
         "available_at": max(source_times, default=decision_at).isoformat(),
         "session_date": trading_date or None,
         "minutes_to_close": _minutes_to_close(trading_date, decision_at),
-        "spot": {"spx": spx, "es": es_price, "es_spx_basis": basis,
-                 "pricing_source": underlier.get("source")},
+        "session": {"mode": session_mode, "legal": session_legal},
+        "spot": {
+            "spx": spx,
+            "spx_observed_value": spx,
+            "observed_value": _first(
+                underlier.get("observed_value"), coordinate.get("observed_value"), spx
+            ),
+            "es": es_price,
+            "es_spx_basis": basis,
+            "basis": coordinate_basis,
+            "kind": underlier.get("kind") or coordinate.get("kind"),
+            "source": underlier.get("source") or coordinate.get("source"),
+            "pricing_source": underlier.get("source") or coordinate.get("source"),
+        },
         "path": {
             "market_state": rth.get("market_state") or rth.get("state"),
             "direction_score": _number(rth.get("D")),
@@ -117,6 +234,16 @@ def build_market_fact_pack(
                     "thesis": trigger.get("thesis"), "level_kind": trigger.get("level_kind"),
                     "level": _number(trigger.get("level")),
                     "levels": dict(_map(trigger.get("levels"))), "event_id": trigger.get("event_id")},
+        "session_episode": {
+            "phase": episode_phase,
+            "break_direction": break_direction,
+            "break_level": _number(episode.get("break_level")),
+            "break_level_kind": episode.get("break_level_kind"),
+            "reversal_direction": episode.get("reversal_direction"),
+            "setup_direction": episode_setup_direction,
+            "episode_id": episode.get("episode_id"),
+            "phase_at": episode.get("phase_at"),
+        },
         "gth_evidence": _gth_fact(gth_level),
         "gth_dip_reclaim_evidence": _gth_fact(gth_dip_reclaim),
         "probability": {
@@ -127,6 +254,40 @@ def build_market_fact_pack(
             "historical_sessions": list(p_event.get("historical_sessions") or ()),
             "event": q_event.get("event"), "valid_until": forecast.get("valid_until"),
             "quality": forecast.get("quality") or "unavailable",
+        },
+        "capabilities": {
+            "global": {
+                "ready": not global_reasons,
+                "session_legal": session_legal,
+                "coordinate_ready": coordinate_ready,
+                "market_frame_ready": market_ready,
+                "macro_entry_allowed": macro_allowed,
+                "provider_advice_allowed": provider_allowed,
+                "reasons": global_reasons,
+            },
+            "path": {
+                "ready": path_ready,
+                "vwap_ready": vwap_ready,
+                "opening_range_ready": opening_range_ready,
+                "atr_ready": atr_ready,
+            },
+            "vertical": {
+                "ready": coordinate_ready and path_ready,
+                "setup_inputs_ready": coordinate_ready and path_ready,
+                "exact_quote_requirement": "candidate_specific_two_leg_bbo",
+                "pricing_frame_authorized": payload.get("pricing_allowed") is True,
+                "reasons": vertical_reasons,
+            },
+            "butterfly": {
+                "ready": coordinate_ready
+                and path_ready
+                and structure_ready
+                and pin_inputs_ready,
+                "structure_ready": structure_ready,
+                "value_center_density_ready": pin_inputs_ready,
+                "exact_quote_requirement": "candidate_specific_three_leg_bbo",
+                "reasons": list(dict.fromkeys(butterfly_reasons)),
+            },
         },
         "quality": {"status": "ready" if not quality else "degraded", "reasons": quality,
                     "market": market.get("quality") or "unavailable",

@@ -61,9 +61,20 @@ def candidate_generation_reasons(
     """Return legacy-compatible reasons when enumeration yields no rows."""
 
     if DEFAULT_MARKET_CALENDAR.is_rth_open(_utc(now)):
+        capability_reasons = _capability_reasons(facts, "vertical")
+        if capability_reasons:
+            return capability_reasons
         _, reasons = _rth_evidence(payload, facts, regime, latest)
-        return reasons or ["vertical_exact_spread_unavailable"]
+        if reasons:
+            return reasons
+        frame = _map(payload.get("option_structure_frame"))
+        if not frame.get("front_expiry"):
+            return ["vertical_expiry_unavailable"]
+        return ["vertical_exact_two_leg_quote_unavailable"]
     if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(_utc(now)):
+        capability_reasons = _capability_reasons(facts, "vertical")
+        if capability_reasons:
+            return capability_reasons
         _, reasons = _gth_evidence(facts)
         return reasons or ["gth_confirmed_level_candidate_unavailable"]
     return ["session_not_open_for_spxw_strategy"]
@@ -102,13 +113,23 @@ def _vertical_candidates(
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        if _capability_reasons(facts, "vertical"):
+            return []
         evidence, _ = _rth_evidence(payload, facts, regime, latest)
         if not evidence:
             return []
-        rows = [_vertical_candidate_from_evidence(evidence, facts, now=now, policy=policy)]
+        rows = []
+        if _map(evidence.get("long")) and _map(evidence.get("short")):
+            rows.append(
+                _vertical_candidate_from_evidence(
+                    evidence, facts, now=now, policy=policy
+                )
+            )
         rows.extend(_rth_width_verticals(evidence, payload, facts, latest, now=now, policy=policy))
         return [row for row in rows if row]
     if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        if _capability_reasons(facts, "vertical"):
+            return []
         evidence, _ = _gth_evidence(facts)
         row = _vertical_candidate_from_evidence(evidence, facts, now=now, policy=policy) if evidence else {}
         return [row] if row else []
@@ -238,43 +259,70 @@ def _rth_evidence(
     latest: LatestState,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     trigger = _map(facts.get("trigger"))
-    direction, thesis = _direction(trigger.get("direction")), str(trigger.get("thesis") or "").lower()
-    if trigger.get("phase") != "confirmed" or not direction:
-        return None, ["confirmed_price_trigger_unavailable"]
-    if thesis == "fade":
+    episode = _map(facts.get("session_episode"))
+    episode_phase = str(episode.get("phase") or "").lower()
+    direction = _direction(episode.get("setup_direction"))
+    trigger_level = _number(episode.get("break_level"))
+    if episode_phase in {"v_reversal_confirmed", "recovery"} and direction:
         setup = "FAILED_BREAK_RECLAIM"
-    elif thesis == "breakout":
-        path_state = str(regime.get("path_state") or "")
-        path_direction = str(regime.get("path_direction") or "")
-        if path_state == "TREND" and path_direction != direction:
-            return None, ["price_trigger_conflicts_with_established_path"]
-        setup = "TREND_PULLBACK" if (path_state, path_direction) == ("TREND", direction) else "BREAKOUT_ACCEPTANCE"
+        setup_source = "session_episode_failed_break_reclaim"
     else:
-        return None, ["price_trigger_not_aligned_with_supported_setup"]
-    source = "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
-    shadow, spread = _map(payload.get(source)), _map(_map(payload.get(source)).get("candidate"))
+        direction = _direction(trigger.get("direction"))
+        thesis = str(trigger.get("thesis") or "").lower()
+        trigger_level = _number(trigger.get("level"))
+        if str(trigger.get("phase") or "").lower() != "confirmed" or not direction:
+            return None, ["confirmed_price_trigger_unavailable"]
+        if thesis == "fade":
+            setup = "FAILED_BREAK_RECLAIM"
+        elif thesis == "breakout":
+            path_state = str(regime.get("path_state") or "")
+            path_direction = str(regime.get("path_direction") or "")
+            if path_state == "TREND" and path_direction != direction:
+                return None, ["price_trigger_conflicts_with_established_path"]
+            setup = (
+                "TREND_PULLBACK"
+                if (path_state, path_direction) == ("TREND", direction)
+                else "BREAKOUT_ACCEPTANCE"
+            )
+        else:
+            return None, ["price_trigger_not_aligned_with_supported_setup"]
+        setup_source = "confirmed_level_decision"
+    spread_source = "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
+    shadow = _map(payload.get(spread_source))
+    spread = _map(shadow.get("candidate"))
     if shadow.get("status") != "candidate" or not spread:
         spread = _intent_spread(payload.get("trade_intent"), latest)
-        source = "legacy_trade_intent_trigger_only"
+        spread_source = "legacy_trade_intent_trigger_only"
     if not spread:
         spread = _confirmed_trigger_spread(facts, direction)
-        source = "rth_confirmed_trigger_exact_spread_snapshot"
-    if not spread:
-        return None, ["vertical_exact_spread_unavailable"]
-    target, stop, geometry_source = resolve_geometry(payload, facts, direction, _number(trigger.get("level")))
+        spread_source = "rth_confirmed_trigger_exact_spread_snapshot"
+    target, stop, geometry_source = resolve_geometry(
+        payload, facts, direction, trigger_level
+    )
     if target is None or stop is None:
         return None, ["vertical_target_or_invalidation_unavailable"]
-    return {
+    evidence = {
         "setup_kind": setup,
         "direction": direction,
-        "trigger_level": _number(trigger.get("level")),
+        "trigger_level": trigger_level,
         "target_spx": target,
         "invalidation_spx": stop,
-        "long": _map(spread.get("long")),
-        "short": _map(spread.get("short")),
-        "source": source,
+        "source": setup_source,
         "geometry_source": geometry_source,
-    }, []
+    }
+    if spread:
+        evidence.update(
+            {
+                "long": _map(spread.get("long")),
+                "short": _map(spread.get("short")),
+                "spread_source": spread_source,
+            }
+        )
+        # Legacy exact-spread rows keep their quote lineage; setup_source remains
+        # the evidence owner when enumeration builds width candidates later.
+        if evidence.get("source") == "confirmed_level_decision":
+            evidence["source"] = spread_source
+    return evidence, []
 
 
 def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -349,6 +397,8 @@ def _butterfly_candidates(
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
     if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+        return []
+    if _capability_reasons(facts, "butterfly"):
         return []
     frame = _map(payload.get("option_structure_frame"))
     expiry = str(frame.get("front_expiry") or "")
@@ -659,6 +709,13 @@ def _flip_values(value: object) -> list[float | None]:
 def _direction(value: object) -> str | None:
     normalized = str(value or "").upper()
     return normalized if normalized in {"UP", "DOWN"} else None
+
+
+def _capability_reasons(facts: Mapping[str, Any], strategy: str) -> list[str]:
+    capability = _map(_map(facts.get("capabilities")).get(strategy))
+    if not capability or capability.get("ready") is True:
+        return []
+    return list(map(str, capability.get("reasons") or (f"{strategy}_capability_unavailable",)))
 
 
 def _hash(value: object) -> str:

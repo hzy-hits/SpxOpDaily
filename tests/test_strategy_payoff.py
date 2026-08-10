@@ -548,6 +548,114 @@ def test_candidate_factory_emits_stable_candidate_id() -> None:
     assert rows[0]["manual_action_only"] is True
 
 
+def test_degraded_gamma_structure_keeps_vertical_capability_and_blocks_butterfly() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    payload["option_structure_frame"].update(quality="degraded")
+    payload["option_structure_frame"]["structure"]["gex_quality"] = (
+        "no_open_interest_gex"
+    )
+    payload["level_decision"] = {
+        "phase": "confirmed",
+        "thesis": "breakout",
+        "direction": "up",
+        "level_kind": "flip_high",
+        "level": 7710.0,
+        "event_id": "level:7710:up",
+    }
+    latest = _pin_ladder_state(now)
+    facts = build_market_fact_pack(payload, latest, now)
+    rows = enumerate_candidates(
+        payload,
+        facts,
+        assess_regime(facts),
+        latest,
+        now=now,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+
+    assert facts["quality"]["status"] == "degraded"
+    assert facts["capabilities"]["vertical"]["ready"] is True
+    assert facts["capabilities"]["butterfly"]["ready"] is False
+    assert any(
+        row["strategy_type"].endswith("_DEBIT_VERTICAL")
+        and row["quote"]["status"] == "ready"
+        for row in rows
+    )
+    assert not any(row["strategy_type"].endswith("_BUTTERFLY") for row in rows)
+
+
+def test_confirmed_setup_directly_enumerates_without_legacy_spread() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+
+    decision = build_strategy_decision(payload, _vertical_chain_state(now), now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "rth_schwab_width_enumeration"
+    assert decision["candidate"]["economics"]["width_points"] in {5.0, 10.0, 15.0, 20.0}
+    assert "vertical_exact_spread_unavailable" not in decision["why_not"]["reasons"]
+    assert decision["rejection_funnel"]["setup_detected"] == 1
+    assert decision["rejection_funnel"]["candidate_enumerated"] > 0
+    assert decision["rejection_funnel"]["exact_quote_ready"] > 0
+
+
+def test_confirmed_session_episode_maps_to_failed_break_reclaim_vertical() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    payload["level_decision"] = {"phase": "far"}
+    payload["session_episode"] = {
+        "phase": "V_REVERSAL_CONFIRMED",
+        "break_direction": "down",
+        "break_level": 7705.0,
+        "break_level_kind": "flip_high",
+        "episode_id": "episode:failed-down-break",
+    }
+
+    decision = build_strategy_decision(payload, _vertical_chain_state(now), now)
+
+    assert decision["market_facts"]["session_episode"]["phase"] == (
+        "v_reversal_confirmed"
+    )
+    assert decision["market_facts"]["session_episode"]["setup_direction"] == "UP"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
+    assert decision["candidate"]["direction"] == "UP"
+    assert decision["rejection_funnel"]["setup_detected"] == 1
+
+
+def test_chain_implied_spx_coordinate_keeps_gth_facts_available() -> None:
+    now = datetime(2026, 8, 7, 3, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("underlier")
+    payload["spot"] = {
+        "price": 7711.25,
+        "spx_observed_value": 7711.25,
+        "observed_value": 7711.25,
+        "source": "chain_implied",
+        "kind": "chain_implied_spx",
+        "basis": None,
+    }
+    payload["trigger_coordinate"] = {
+        "spx_observed_value": 7711.25,
+        "observed_value": 7711.25,
+        "source": "chain_implied",
+        "kind": "chain_implied_spx",
+        "basis_points": None,
+    }
+
+    facts = build_market_fact_pack(payload, _state(now), now)
+
+    assert facts["spot"]["spx"] == pytest.approx(7711.25)
+    assert facts["spot"]["kind"] == "chain_implied_spx"
+    assert facts["capabilities"]["global"]["coordinate_ready"] is True
+    assert "spx_price_unavailable" not in facts["quality"]["reasons"]
+
+
 def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)

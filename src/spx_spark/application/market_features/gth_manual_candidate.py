@@ -59,13 +59,11 @@ from spx_spark.strategy_contract import (
     policy_version,
 )
 
-
 CONTRACT_VERSION = "gth_manual_candidate.v1"
 SOURCE_KIND = "gth_dip_reclaim_call"
 NET_DEBIT_PRICE_INCREMENT = 0.05
 EDGE_AUTHORITY_REQUIRED = "validated_first_touch_time_stop_net_pnl"
 EDGE_AUTHORITY_UNAVAILABLE_REASON = "first_touch_time_stop_net_pnl_authority_unavailable"
-
 
 def evaluate_gth_manual_candidate(
     latest: LatestState,
@@ -427,7 +425,6 @@ def evaluate_gth_manual_candidate(
         "ranking_diagnostics": list(dict.fromkeys(ranking_diagnostics)),
     }
 
-
 def process_gth_manual_candidate(
     storage: StorageSettings,
     latest: LatestState,
@@ -600,7 +597,6 @@ def process_gth_manual_candidate(
         "notification_outcome": result.get("outcome"),
     }
 
-
 def _blocked(
     base: Mapping[str, object],
     reasons: list[str],
@@ -623,7 +619,6 @@ def _blocked(
             else {}
         ),
     }
-
 
 def _gth_bbo_contract_snapshot(
     latest: LatestState,
@@ -680,7 +675,6 @@ def _gth_bbo_contract_snapshot(
         },
     }
 
-
 def _direct_es_reference(
     latest: LatestState,
     *,
@@ -712,7 +706,6 @@ def _direct_es_reference(
         ):
             return reference
     return None
-
 
 def _direct_es_quote_reference(
     quote: Quote,
@@ -759,7 +752,6 @@ def _direct_es_quote_reference(
         "transport_age_seconds": transport_age,
     }
 
-
 def _quote_from_provider(
     latest: LatestState,
     instrument_id: str,
@@ -777,11 +769,9 @@ def _quote_from_provider(
         as_of=now,
     )
 
-
 def _gth_end(now: datetime) -> datetime | None:
     session_day = DEFAULT_MARKET_CALENDAR.research_expiry(now)
     return datetime.combine(session_day, time(9, 25), tzinfo=ET).astimezone(timezone.utc)
-
 
 def _notification_intent(
     candidate: Mapping[str, object],
@@ -959,7 +949,6 @@ def _notification_intent(
         "enqueued_at": now.isoformat(),
     }
 
-
 def _gth_spread_quality_line(candidate: Mapping[str, object], ttl_text: str) -> str:
     snapshot = candidate.get("exact_spread_snapshot")
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
@@ -975,11 +964,9 @@ def _gth_spread_quality_line(candidate: Mapping[str, object], ttl_text: str) -> 
         f"{_fmt_age(snapshot.get('short_quote_age_seconds'))} · Greeks {greeks} · {ttl_text}"
     )
 
-
 def _fmt_age(value: object) -> str:
     number = _number(value)
     return f"{number:.1f}s" if number is not None else "不可用"
-
 
 def _play_stats_line(value: object) -> str | None:
     if not isinstance(value, Mapping):
@@ -996,7 +983,6 @@ def _play_stats_line(value: object) -> str | None:
         f"历史  同类触位报价 {int(samples)}笔 · {horizon_minutes:g}分钟正收益率 "
         f"{winrate:.1%} · 平均 {average:.1%} · 中位 {median:.1%}（非实盘胜率）"
     )
-
 
 def _operator_generation(value: Mapping[str, object]) -> int:
     generation = value.get("reentry_generation", 0)

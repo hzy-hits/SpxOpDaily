@@ -91,7 +91,14 @@ def assess_regime(
         and efficiency < policy.balanced_max_efficiency
         and crosses >= policy.balanced_min_vwap_crosses
     )
-    if _map(facts.get("quality")).get("status") != "ready":
+    capabilities = _map(facts.get("capabilities"))
+    path_capability = _map(capabilities.get("path"))
+    path_capability_ready = (
+        path_capability.get("ready") is True
+        if path_capability
+        else _map(facts.get("quality")).get("status") == "ready"
+    )
+    if not path_capability_ready:
         state, reasons = "UNCERTAIN", ["strategy_facts_degraded"]
     elif trend:
         state, reasons = "TREND", ["direction_score_confirmed", "path_efficiency_confirmed"]

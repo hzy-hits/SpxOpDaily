@@ -35,6 +35,7 @@ def build_strategy_decision(
     facts = build_market_fact_pack(payload, latest, now)
     regime = assess_regime(facts)
     reasons = _gate_reasons(facts, regime)
+    generation_reasons: list[str] = []
     rows: list[dict[str, Any]] = []
     rank = RankResult(passed=[], near_misses=[], gate_audit=[])
     if not reasons:
@@ -55,6 +56,14 @@ def build_strategy_decision(
                 shadow_candidates, shadow_candidates_skipped = _shadow_candidates(
                     rank.passed[1:3]
                 )
+                funnel = _rejection_funnel(
+                    facts,
+                    rows,
+                    rank,
+                    reasons=[],
+                    generation_reasons=generation_reasons,
+                    manual_candidate=True,
+                )
                 return _candidate_decision(
                     facts,
                     {**regime, "entry_state": "GOOD_LOCATION"},
@@ -62,12 +71,14 @@ def build_strategy_decision(
                     candidates_considered=_candidate_summaries(rank),
                     shadow_candidates=shadow_candidates,
                     shadow_candidates_skipped=shadow_candidates_skipped,
+                    rejection_funnel=funnel,
                 )
             reasons = _rank_reasons(rank)
         else:
-            reasons = candidate_generation_reasons(
+            generation_reasons = candidate_generation_reasons(
                 payload, facts, regime, latest, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
             )
+            reasons = generation_reasons
     if "direction_valid_but_entry_too_late" in reasons:
         regime = {**regime, "entry_state": "LATE_CHASE"}
     return _no_trade_decision(
@@ -76,16 +87,21 @@ def build_strategy_decision(
         reasons,
         nearest_candidates=rank.near_misses,
         candidates_considered=_candidate_summaries(rank) if rows else [],
+        rejection_funnel=_rejection_funnel(
+            facts,
+            rows,
+            rank,
+            reasons=reasons,
+            generation_reasons=generation_reasons,
+            manual_candidate=False,
+        ),
     )
 
 
 def _gate_reasons(facts: Mapping[str, Any], regime: Mapping[str, Any]) -> list[str]:
-    quality, event = _map(facts.get("quality")), _map(facts.get("event"))
-    reasons = list(quality.get("reasons") or ()) if quality.get("status") != "ready" else []
-    if regime.get("event_state") in {"SCHEDULED_EVENT_RISK", "POST_EVENT_DISCOVERY"}:
-        reasons.append(f"event_gate:{str(regime['event_state']).lower()}")
-    if event.get("entry_allowed") is not True:
-        reasons.append("macro_entry_not_authorized")
+    del regime
+    global_capability = _map(_map(facts.get("capabilities")).get("global"))
+    reasons = list(global_capability.get("reasons") or ())
     return list(dict.fromkeys(map(str, reasons)))
 
 
@@ -127,6 +143,7 @@ def _candidate_decision(
     candidates_considered: list[dict[str, Any]],
     shadow_candidates: list[dict[str, Any]],
     shadow_candidates_skipped: list[dict[str, Any]],
+    rejection_funnel: Mapping[str, Any],
 ) -> dict[str, Any]:
     legs = candidate.get("legs") or (candidate.get("long"), candidate.get("short"))
     available = max(str(facts["available_at"]), *(str(_map(leg).get("source_at") or "") for leg in legs))
@@ -143,6 +160,7 @@ def _candidate_decision(
         "candidate": dict(candidate),
         "shadow_candidates": shadow_candidates,
         "shadow_candidates_skipped": shadow_candidates_skipped,
+        "rejection_funnel": dict(rejection_funnel),
         "desk_view": {"state": regime["path_state"], "direction": candidate["direction"],
                       "conclusion": "MANUAL CANDIDATE", "reason": candidate["setup_kind"],
                       "shape": surface_shape["desk_line"],
@@ -167,6 +185,7 @@ def _no_trade_decision(
     facts: Mapping[str, Any], regime: Mapping[str, Any], reasons: list[str], *,
     nearest_candidates: list[Mapping[str, Any]] | None = None,
     candidates_considered: list[dict[str, Any]] | None = None,
+    rejection_funnel: Mapping[str, Any],
 ) -> dict[str, Any]:
     reasons = list(dict.fromkeys(reasons or ["no_supported_strategy_candidate"]))
     surface_shape = _surface_shape_summary(facts)
@@ -211,6 +230,7 @@ def _no_trade_decision(
         "candidate": None,
         "shadow_candidates": [],
         "shadow_candidates_skipped": [],
+        "rejection_funnel": dict(rejection_funnel),
         "desk_view": {"state": regime["path_state"], "direction": regime.get("path_direction"),
                       "conclusion": "NO TRADE", "reason": reasons[0],
                       "shape": surface_shape["desk_line"],
@@ -236,6 +256,75 @@ def _rank_reasons(rank: RankResult) -> list[str]:
                 reasons.insert(0, "quote_refresh_required")
             return list(dict.fromkeys(reasons))
     return ["no_supported_strategy_candidate"]
+
+
+def _rejection_funnel(
+    facts: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    rank: RankResult,
+    *,
+    reasons: Sequence[str],
+    generation_reasons: Sequence[str],
+    manual_candidate: bool,
+) -> dict[str, Any]:
+    global_capability = _map(_map(facts.get("capabilities")).get("global"))
+    facts_ready = all(
+        global_capability.get(key) is True
+        for key in ("session_legal", "coordinate_ready", "market_frame_ready")
+    )
+    setup_absence_reasons = {
+        "confirmed_price_trigger_unavailable",
+        "price_trigger_not_aligned_with_supported_setup",
+        "price_trigger_conflicts_with_established_path",
+        "gth_confirmed_level_candidate_unavailable",
+        "gth_dip_reclaim_evidence_unavailable",
+        "trend_background_cannot_authorize_entry",
+    }
+    setup_detected = bool(rows) or bool(
+        generation_reasons
+        and not any(str(reason) in setup_absence_reasons for reason in generation_reasons)
+    )
+    entry_window_open = setup_detected and "direction_valid_but_entry_too_late" not in reasons
+    exact_quote_ready = sum(
+        _map(row.get("quote")).get("status") == "ready" for row in rows
+    )
+    hard_gate_pass = len(rank.passed)
+    if manual_candidate:
+        stage = "manual_card_pending"
+        delivery_status = "pending_delivery"
+    elif hard_gate_pass:
+        stage = "hard_gate_pass"
+        delivery_status = "not_selected"
+    elif exact_quote_ready:
+        stage = "exact_quote_ready"
+        delivery_status = "not_applicable"
+    elif rows:
+        stage = "candidate_enumerated"
+        delivery_status = "not_applicable"
+    elif entry_window_open:
+        stage = "entry_window_open"
+        delivery_status = "not_applicable"
+    elif setup_detected:
+        stage = "setup_detected"
+        delivery_status = "not_applicable"
+    elif facts_ready:
+        stage = "facts_ready"
+        delivery_status = "not_applicable"
+    else:
+        stage = "cycles"
+        delivery_status = "not_applicable"
+    return {
+        "cycles": 1,
+        "facts_ready": int(facts_ready),
+        "setup_detected": int(setup_detected),
+        "entry_window_open": int(entry_window_open),
+        "candidate_enumerated": len(rows),
+        "exact_quote_ready": exact_quote_ready,
+        "hard_gate_pass": hard_gate_pass,
+        "manual_card_delivered": 0,
+        "manual_card_delivery_status": delivery_status,
+        "current_stage": stage,
+    }
 
 
 def _candidate_summaries(rank: RankResult) -> list[dict[str, Any]]:

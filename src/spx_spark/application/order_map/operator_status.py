@@ -19,6 +19,19 @@ from spx_spark.application.order_map.render import (
     underlier_source_label,
 )
 from spx_spark.application.order_map.state import _session_phase_of, current_session_is_gth
+from spx_spark.application.order_map.desk_strategy_view import (
+    cross_asset_confirmation_text,
+    expected_move_text,
+    level_kind_label,
+    opening_range_state_text,
+    phase_label,
+    quality_reason_text,
+    stage_label,
+    strategy_decision_desk_view,
+    strategy_reason_line,
+    thesis_label,
+    volume_alignment_text,
+)
 from spx_spark.application.order_map.status_explanation import (
     humanize_operator_trigger,
     manual_candidate_ready_authorized,
@@ -96,7 +109,7 @@ def render_operator_status_brief(
     ]
     if changes:
         lines.append(f"Change  {'；'.join(changes[:3])}")
-    lines.append(operator_reason_line(payload))
+    lines.append(strategy_reason_line(payload) or operator_reason_line(payload))
     return "\n".join(lines)
 
 
@@ -112,7 +125,7 @@ def build_desk_message_sections(
     session = _session_phase_of(dict(payload), now_utc)
     expiry = str(payload.get("expiry") or "-")
     expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
-    desk_view = _desk_view_line(projection, guidance).removeprefix("Desk View  ")
+    desk_view = _desk_view_line(payload, projection, guidance).removeprefix("Desk View  ")
     if surface_line := _strategy_surface_shape_line(payload):
         desk_view = f"{desk_view}\n{surface_line}"
 
@@ -126,9 +139,9 @@ def build_desk_message_sections(
         structure=_structure_line(payload, now=now_utc).removeprefix("Structure  "),
         primary_path=_primary_path(payload, guidance, projection),
         alternative_path=(
-            guidance.invalidation_text
+            f"Evidence · {guidance.invalidation_text}"
             if projection.direction in {"up", "down"}
-            else "尚无单边方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算"
+            else "Evidence · 尚无单边方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算"
         ),
         targets=_targets_line(payload, projection).removeprefix("Targets  "),
         execution=_execution_line(payload, projection, guidance).removeprefix("Execution  "),
@@ -304,9 +317,12 @@ def _current_ready_sources(
 
 
 def _desk_view_line(
+    payload: Mapping[str, Any],
     projection: DeskMapProjection,
     guidance: guidance_module.DecisionGuidance,
 ) -> str:
+    if strategy_line := strategy_decision_desk_view(payload):
+        return f"Desk View  {strategy_line}"
     if projection.phase in {LevelPhase.INVALIDATED, LevelPhase.EXPIRED}:
         return (
             "Desk View  NO TRADE · STANDBY · 当前没有有效机会；"
@@ -319,7 +335,7 @@ def _desk_view_line(
         "fade",
     }:
         side = "LONG / CALL" if projection.direction == "up" else "SHORT / PUT"
-        path = f"{side} {_thesis_label(projection.thesis)}"
+        path = f"{side} {thesis_label(projection.thesis)}"
         if projection.stage is DeskStage.READY:
             signal = f"READY · {path}"
         elif projection.stage is DeskStage.CONFIRMED:
@@ -330,12 +346,15 @@ def _desk_view_line(
         signal = f"NO TRADE · {guidance.bias}仅作背景，尚无价格触发"
     else:
         signal = "NO TRADE · 等待价格接受或拒绝"
-    phase_label = (
+    phase_text = (
         "已确认"
         if projection.stage is DeskStage.READY and projection.phase is LevelPhase.FAR
-        else _phase_label(projection.phase)
+        else phase_label(projection.phase)
     )
-    return f"Desk View  {signal} · 状态：{_stage_label(projection.stage)}（{phase_label}）"
+    return f"Desk View  {signal} · 状态：{stage_label(projection.stage)}（{phase_text}）"
+
+
+
 
 
 def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) -> str:
@@ -361,7 +380,7 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
         distance = (
             abs(actionable_spx - projection.level) if actionable_spx is not None else None
         )
-        level_text = f" · {_level_kind_label(projection.level_kind)} {projection.level:g}" + (
+        level_text = f" · {level_kind_label(projection.level_kind)} {projection.level:g}" + (
             f" · 距离 {distance:.1f}pt" if distance is not None else ""
         )
     market = _mapping(payload.get("minute_market_frame"))
@@ -382,7 +401,7 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
         f"Location  SPX {spx_text} · ES {_available_number(es_last)}"
         f"{level_text} · {_gamma_location_text(payload, actionable_spx)} · {vwap_text} · "
         f"{_opening_range_text(payload)} · "
-        f"{_expected_move_text(payload)}"
+        f"{expected_move_text(payload)}"
     )
 
 
@@ -418,7 +437,7 @@ def _primary_path(
         direction = "LONG" if projection.direction == "up" else "SHORT"
         path = "价格接受突破" if projection.thesis == "breakout" else "价格拒绝回归"
         basis = (
-            f"方向来源  {direction} 来自 {_level_kind_label(projection.level_kind)} "
+            f"方向来源  {direction} 来自 {level_kind_label(projection.level_kind)} "
             f"{projection.level:g} 的{path}；Gamma 不提供第一步方向"
         )
         if projection.stage is DeskStage.READY:
@@ -433,11 +452,11 @@ def _primary_path(
     flow = (
         f"流确认  ES 15m {_signed_points(es.get('return_15m_points'))} / "
         f"60m {_signed_points(es.get('return_60m_points'))} · "
-        f"量价 {_volume_alignment_text(volume.get('price_volume_alignment_5m'))} · "
+        f"量价 {volume_alignment_text(volume.get('price_volume_alignment_5m'))} · "
         "ES/SPY "
-        f"{_cross_asset_confirmation_text(cross_asset.get('es_spy_direction_confirmation_15m'))}"
+        f"{cross_asset_confirmation_text(cross_asset.get('es_spy_direction_confirmation_15m'))}"
     )
-    return f"{basis}\n下一触发  {trigger}\n{flow}"
+    return f"Evidence · {basis}\n下一触发  {trigger}\n{flow}"
 
 
 def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
@@ -650,7 +669,7 @@ def _observing_trigger(payload: Mapping[str, Any]) -> str:
         and event_kind
     ):
         return (
-            f"观察当前 {_level_kind_label(event_kind)} {event_level:g} 的接受或拒绝；"
+            f"观察当前 {level_kind_label(event_kind)} {event_level:g} 的接受或拒绝；"
             "当前事件确认前 NO TRADE"
         )
     live = _live_levels(payload)
@@ -692,6 +711,25 @@ def _observing_trigger(payload: Mapping[str, Any]) -> str:
 
 
 def _targets_line(payload: Mapping[str, Any], projection: DeskMapProjection) -> str:
+    strategy_decision = _mapping(payload.get("strategy_decision"))
+    if strategy_decision:
+        candidate = _mapping(strategy_decision.get("candidate"))
+        if not candidate or strategy_decision.get("decision_type") == "NO_TRADE":
+            return "Targets  当前 strategy_decision 为 NO_TRADE，无交易目标"
+        targets = strategy_decision.get("targets") or ()
+        target = next(
+            (
+                finite_float(_mapping(item).get("price"))
+                for item in targets
+                if finite_float(_mapping(item).get("price")) is not None
+            ),
+            finite_float(candidate.get("target_spx")),
+        )
+        return (
+            f"Targets  primary {target:g}"
+            if target is not None
+            else "Targets  strategy_decision 候选缺少有效目标"
+        )
     plans = [row for row in payload.get("plan_candidates") or () if isinstance(row, Mapping)]
     if projection.direction not in {"up", "down"} or projection.stage not in {
         DeskStage.CONFIRMED,
@@ -728,6 +766,26 @@ def _execution_line(
     projection: DeskMapProjection,
     guidance: guidance_module.DecisionGuidance,
 ) -> str:
+    strategy_decision = _mapping(payload.get("strategy_decision"))
+    if strategy_decision:
+        candidate = _mapping(strategy_decision.get("candidate"))
+        execution = _mapping(strategy_decision.get("execution"))
+        if (
+            strategy_decision.get("action_authority") == "manual"
+            and candidate
+            and execution.get("action") == "MANUAL_LIMIT"
+        ):
+            opportunity = str(candidate.get("opportunity_id") or "-")
+            short_opportunity = (
+                opportunity if len(opportunity) <= 42 else opportunity[:39] + "..."
+            )
+            return (
+                "Execution  READY · strategy_decision 人工限价候选 · "
+                f"opportunity {short_opportunity}"
+            )
+        reasons = list(_mapping(strategy_decision.get("why_not")).get("reasons") or ())
+        blocker = str(reasons[0]) if reasons else "no_supported_strategy_candidate"
+        return f"Execution  WAIT · strategy_decision=NO_TRADE · {blocker}"
     intent = _mapping(payload.get("trade_intent"))
     plans = [row for row in payload.get("plan_candidates") or () if isinstance(row, Mapping)]
     if projection.stage is DeskStage.READY:
@@ -843,41 +901,15 @@ def _data_quality_line(projection: DeskMapProjection) -> str:
     if not projection.quality_reasons:
         status = "READY · 决策坐标与结构快照可用"
     else:
-        primary = _quality_reason_text(projection.quality_reasons[0])
+        primary = quality_reason_text(projection.quality_reasons[0])
         count = len(projection.quality_reasons)
         secondary = (
-            f" · 次要影响：{_quality_reason_text(projection.quality_reasons[1])}"
+            f" · 次要影响：{quality_reason_text(projection.quality_reasons[1])}"
             if count >= 2
             else ""
         )
         status = f"{projection.data_quality} · 主要影响：{primary}{secondary} · 共 {count} 项"
     return f"Data Quality  {status}"
-
-
-def _quality_reason_text(reason: str) -> str:
-    labels = {
-        "spx_price_unavailable": "SPX 触发坐标不可用，不能确认方向",
-        "option_frame:unavailable": "期权结构帧不可用，Gamma 与墙位不可靠",
-        "option_frame:degraded": "期权结构帧降级",
-        "option_l1:unavailable": "SPXW 双边报价不可用",
-        "option_l1:degraded": "SPXW 报价覆盖降级",
-        "oi:missing": "OI 不可用，Gamma 代理失效",
-        "oi:schwab_unverified": "Schwab OI 未验证，Gamma 代理仅供审计",
-        "gex:no_open_interest_gex": "缺少 OI-GEX，不能解释 Gamma 机制",
-        "decision_snapshot_inconsistent": "旧事件与当前结构不一致",
-        "unknown_level_phase": "状态机阶段非法",
-        "market_frame:unavailable": "市场帧不可用，ES 流确认不能验证",
-        "market_frame:degraded": "市场帧降级，ES 流确认需谨慎",
-        "ready_opportunity_mismatch": "READY 不属于当前价格事件，旧机会与旧目标已禁用",
-        "ready_required_frame_unavailable": "必需数据帧缺失，READY 已暂停",
-        "ready_without_current_confirmed_path": "旧 READY 与当前价格路径不一致，已禁止执行",
-    }
-    if reason.startswith("density_clipped:"):
-        return f"概率密度裁剪偏高（{reason.partition(':')[2]}）"
-    if reason.startswith("underlier_mismatch:"):
-        return "标的坐标不匹配，墙位与 Gamma 告警已抑制"
-    return labels.get(reason, reason.replace("_", " "))
-
 
 def _opening_range_text(payload: Mapping[str, Any]) -> str:
     state = _rth_market_state(payload)
@@ -896,55 +928,10 @@ def _opening_range_text(payload: Mapping[str, Any]) -> str:
     opening = _mapping(diagnostics.get("opening_range"))
     orh = finite_float(opening.get("orh"))
     orl = finite_float(opening.get("orl"))
-    state_text = _opening_range_state_text(raw_state)
+    state_text = opening_range_state_text(raw_state)
     if opening.get("status") == "ready" and orh is not None and orl is not None:
         return f"OR {state_text}（ORL {orl:g} / ORH {orh:g}）"
     return f"OR {state_text}（区间值 unavailable）"
-
-
-def _opening_range_state_text(value: str) -> str:
-    token = value.upper()
-    return {
-        "ABOVE_ORH_CONFIRMED": "上沿上方确认",
-        "BREAKOUT_ABOVE_ORH": "突破上沿待确认",
-        "INSIDE": "区间内",
-        "BREAKDOWN_BELOW_ORL": "跌破下沿待确认",
-        "BELOW_ORL_CONFIRMED": "下沿下方确认",
-    }.get(token, token)
-
-
-def _expected_move_text(payload: Mapping[str, Any]) -> str:
-    frame = _mapping(payload.get("option_structure_frame"))
-    volatility = _mapping(frame.get("volatility"))
-    expected_move = finite_float(payload.get("expected_move_points"))
-    if expected_move is None:
-        expected_move = finite_float(volatility.get("expected_move_points_0dte"))
-    if expected_move is None or expected_move <= 0:
-        return "EM unavailable"
-
-    # A live 0DTE EM shrinks to expiry; publish usage only for an explicitly
-    # matching numerator/denominator horizon, never an earlier session range.
-    usage = _aligned_expected_move_usage(payload)
-    if usage is None:
-        return f"EM ±{expected_move:g}pt"
-    label, fraction = usage
-    return f"EM ±{expected_move:g}pt · {label} 已用 {fraction:.0%}"
-
-
-def _aligned_expected_move_usage(payload: Mapping[str, Any]) -> tuple[str, float] | None:
-    day_move = _mapping(payload.get("day_move"))
-    fraction = finite_float(day_move.get("em_used_fraction"))
-    numerator_horizon = str(day_move.get("em_numerator_horizon_id") or "").strip()
-    denominator_horizon = str(day_move.get("em_denominator_horizon_id") or "").strip()
-    if (
-        fraction is None
-        or fraction < 0
-        or not numerator_horizon
-        or numerator_horizon != denominator_horizon
-    ):
-        return None
-    label = str(day_move.get("em_usage_label") or "matched horizon").strip()
-    return label, fraction
 
 
 def _rth_market_state(payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -999,26 +986,6 @@ def _signed_points(value: object) -> str:
     parsed = finite_float(value)
     return f"{parsed:+g}pt" if parsed is not None else "unavailable"
 
-
-def _volume_alignment_text(value: object) -> str:
-    return {
-        "price_volume_aligned": "同向确认",
-        "price_volume_divergent": "背离",
-        "price_without_volume_confirmation": "价格缺少量能确认",
-        "volume_without_price_progress": "放量但价格未推进",
-        "flat": "平稳",
-        "unavailable": "unavailable",
-    }.get(str(value or ""), "unavailable")
-
-
-def _cross_asset_confirmation_text(value: object) -> str:
-    return {
-        "confirmed": "同向确认",
-        "divergent": "背离",
-        "unavailable": "unavailable",
-    }.get(str(value or ""), "unavailable")
-
-
 def _closed_direction(value: object) -> str:
     direction = str(value or "none").lower()
     return direction if direction in {"up", "down"} else "none"
@@ -1027,45 +994,3 @@ def _closed_direction(value: object) -> str:
 def _closed_thesis(value: object) -> str:
     thesis = str(value or "none").lower()
     return thesis if thesis in {"breakout", "fade"} else "none"
-
-
-def _thesis_label(value: str) -> str:
-    return {"breakout": "BREAKOUT", "fade": "FADE"}.get(value, "SETUP")
-
-
-def _level_kind_label(value: str) -> str:
-    return {
-        "put_wall": "Put Wall",
-        "flip_low": "Flip Low",
-        "flip_high": "Flip High",
-        "call_wall": "Call Wall",
-    }.get(value, "Level")
-
-
-def _phase_label(phase: LevelPhase) -> str:
-    return {
-        LevelPhase.FAR: "尚未触发",
-        LevelPhase.APPROACHING: "接近关键位",
-        LevelPhase.TESTING: "测试关键位",
-        LevelPhase.BREAK_PENDING: "突破待确认",
-        LevelPhase.REJECT_PENDING: "拒绝待确认",
-        LevelPhase.ACCEPTED: "已接受，等待回踩",
-        LevelPhase.REJECTED: "已拒绝，等待回踩",
-        LevelPhase.RETEST: "回踩确认中",
-        LevelPhase.CONFIRMED: "已确认",
-        LevelPhase.INVALIDATED: "已失效",
-        LevelPhase.EXPIRED: "已过期",
-    }[phase]
-
-
-def _stage_label(stage: DeskStage) -> str:
-    return {
-        DeskStage.OBSERVING: "观察中",
-        DeskStage.WATCHING: "接近结构",
-        DeskStage.ARMED: "条件形成中",
-        DeskStage.CONFIRMED: "方向已确认",
-        DeskStage.READY: "执行候选已就绪",
-        DeskStage.INVALIDATED: "已失效",
-        DeskStage.EXPIRED: "已过期",
-        DeskStage.PAUSED: "已暂停",
-    }[stage]

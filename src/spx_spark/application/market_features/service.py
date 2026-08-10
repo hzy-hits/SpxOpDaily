@@ -119,6 +119,9 @@ from spx_spark.application.order_map.strategy_select import build_strategy_decis
 from spx_spark.application.order_map.strategy_outcomes import (
     observe_due_strategy_outcomes,
 )
+from spx_spark.application.order_map.trigger_coordinates import (
+    resolve_trigger_coordinate,
+)
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
@@ -595,16 +598,38 @@ def run(
         new_entries_block_reason=gth_entry_block_reason,
         selector_evidence=True,
     )
-    spx_quote = action_latest.best_quote("index:SPX")
+    strategy_es_basis = _number(raw_level_decision.get("trigger_basis_points"))
+    if strategy_es_basis is None:
+        strategy_es_basis = _number(market_frame.cross_asset.get("es_spx_basis_points"))
+    strategy_coordinate = resolve_trigger_coordinate(
+        action_latest,
+        options_map,
+        now=action_now,
+        qualified_es_basis=strategy_es_basis,
+    )
+    coordinate_payload = strategy_coordinate.to_dict()
+    strategy_spot = {
+        "price": strategy_coordinate.spx_observed_value,
+        "spx_observed_value": strategy_coordinate.spx_observed_value,
+        "observed_value": strategy_coordinate.observed_value,
+        "source": strategy_coordinate.source,
+        "kind": strategy_coordinate.kind.value,
+        "basis": strategy_coordinate.basis_points,
+        "basis_points": strategy_coordinate.basis_points,
+        "instrument_id": strategy_coordinate.instrument_id,
+    }
     strategy_payload = {
         "trading_date": market_frame.session_id,
         "pricing_allowed": option_frame.quality.value == "ready" and option_frame.l1.quality.value == "ready",
-        "underlier": {"price": _number(spx_quote.effective_price) if spx_quote else None,
-                      "source": spx_quote.provider.value if spx_quote else None},
+        "underlier": dict(strategy_spot),
+        "spot": dict(strategy_spot),
+        "trigger_coordinate": coordinate_payload,
         "minute_market_frame": market_frame.to_dict(),
         "option_structure_frame": option_frame.to_dict(),
         "macro_event": action_macro_event,
+        "strategy_entry_control": action_provider_entry_control,
         "level_decision": raw_level_decision,
+        "session_episode": session_episode,
         "gth_level_manual_candidate": gth_level_manual_candidate,
         "gth_dip_reclaim_evidence": gth_dip_reclaim_evidence,
         "trade_intent": strategy_trigger_intent,
