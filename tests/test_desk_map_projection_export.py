@@ -234,6 +234,50 @@ def test_projection_is_versioned_complete_and_never_truncates_changes(tmp_path: 
     assert "dealer sign unknown" in wire["message"]["structure"]
 
 
+def test_projection_desk_view_prints_one_strategy_surface_shape_line(tmp_path: Path) -> None:
+    payload = _payload()
+    payload["strategy_decision"] = {
+        "market_facts": {
+            "structure": {
+                "strike_differential_context": {
+                    "feature_version": "strike_differential_context.v1",
+                    "status": "ready",
+                    "references": [
+                        {
+                            "center": 7500.0,
+                            "labels": ["atm"],
+                            "observations": [
+                                {
+                                    "scale_points": 5.0,
+                                    "quality": "degraded_low_snr",
+                                    "strike_d2": 0.02,
+                                    "strike_d3": 0.001,
+                                    "strike_d4": 0.0,
+                                    "d2_snr": 0.4,
+                                    "d3_snr": 0.4,
+                                    "d4_snr": 0.0,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        }
+    }
+
+    wire = build_desk_map_wire(
+        payload,
+        [],
+        now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+        trading_date="2026-08-04",
+        storage=_storage(tmp_path),
+    )
+
+    desk_view = wire["message"]["desk_view"]
+    assert desk_view.count("曲面形状") == 1
+    assert "ATM@7500/5pt · D3斜率+ · D4≈平 · SNR低" in desk_view
+
+
 def test_gamma_or_iv_change_updates_the_projection_fingerprint(tmp_path: Path) -> None:
     first_payload = _payload()
     first_payload["option_structure_frame"] = {

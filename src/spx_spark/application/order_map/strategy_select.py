@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from spx_spark.analytics.options.density import summarize_strike_surface_shape
 from spx_spark.application.order_map.candidate_factory import (
     candidate_generation_reasons,
     enumerate_candidates,
@@ -130,6 +131,7 @@ def _candidate_decision(
     legs = candidate.get("legs") or (candidate.get("long"), candidate.get("short"))
     available = max(str(facts["available_at"]), *(str(_map(leg).get("source_at") or "") for leg in legs))
     economics = _map(candidate.get("economics"))
+    surface_shape = _surface_shape_summary(facts)
     result = _base_decision(facts, regime, (facts["decision_at"], available, candidate["opportunity_id"], candidate["quote"]))
     geometry_source = _decision_geometry_source(candidate)
     result.update({
@@ -142,8 +144,11 @@ def _candidate_decision(
         "shadow_candidates": shadow_candidates,
         "shadow_candidates_skipped": shadow_candidates_skipped,
         "desk_view": {"state": regime["path_state"], "direction": candidate["direction"],
-                      "conclusion": "MANUAL CANDIDATE", "reason": candidate["setup_kind"]},
-        "why_not": {"nearest_candidate": None, "reasons": [], "reauthorize_on": None},
+                      "conclusion": "MANUAL CANDIDATE", "reason": candidate["setup_kind"],
+                      "shape": surface_shape["desk_line"],
+                      "surface_shape": surface_shape},
+        "why_not": {"nearest_candidate": None, "reasons": [], "reauthorize_on": None,
+                    "surface_shape": surface_shape},
         "execution": {"action": "MANUAL_LIMIT", "order_type": "NET_DEBIT_LIMIT",
                       "limit": _map(candidate.get("quote")).get("ask"),
                       "quote_valid_until": candidate["quote_valid_until"],
@@ -164,6 +169,10 @@ def _no_trade_decision(
     candidates_considered: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     reasons = list(dict.fromkeys(reasons or ["no_supported_strategy_candidate"]))
+    surface_shape = _surface_shape_summary(facts)
+    reasons = list(
+        dict.fromkeys([*reasons, *(str(reason) for reason in surface_shape["why_reasons"])])
+    )
     nearest_candidates = list(nearest_candidates or ())
     nearest_candidate = nearest_candidates[0] if nearest_candidates else None
     shadow = dict(nearest_candidate or {})
@@ -203,9 +212,12 @@ def _no_trade_decision(
         "shadow_candidates": [],
         "shadow_candidates_skipped": [],
         "desk_view": {"state": regime["path_state"], "direction": regime.get("path_direction"),
-                      "conclusion": "NO TRADE", "reason": reasons[0]},
+                      "conclusion": "NO TRADE", "reason": reasons[0],
+                      "shape": surface_shape["desk_line"],
+                      "surface_shape": surface_shape},
         "why_not": {"nearest_candidate": shadow or None, "nearest_candidates": shadows,
-                    "reasons": reasons, "reauthorize_on": refresh},
+                    "reasons": reasons, "reauthorize_on": refresh,
+                    "surface_shape": surface_shape},
         "execution": {"action": "WAIT", "order_type": None, "limit": None,
                       "automatic_ordering": False, "manual_action_only": True},
         "risk": {"max_loss": None, "invalidation": "没有候选被授权，不建立风险敞口"},
@@ -231,13 +243,23 @@ def _candidate_summaries(rank: RankResult) -> list[dict[str, Any]]:
 
 
 def _candidate_summary(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    summary = {
         "candidate_id": candidate.get("candidate_id"),
         "strategy_type": candidate.get("strategy_type"),
         "strikes": _candidate_strikes(candidate),
         "score": _candidate_score(candidate),
         "gate_failures": list(candidate.get("failed_gates") or ()),
     }
+    for key in ("selection_score_base", "surface_shape_prior"):
+        if key in candidate:
+            summary[key] = candidate.get(key)
+    return summary
+
+
+def _surface_shape_summary(facts: Mapping[str, Any]) -> dict[str, object]:
+    return summarize_strike_surface_shape(
+        _map(_map(facts.get("structure")).get("strike_differential_context"))
+    )
 
 
 def _candidate_strikes(candidate: Mapping[str, Any]) -> list[float]:

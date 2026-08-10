@@ -23,8 +23,11 @@ from spx_spark.marketdata import OptionRight, Quote
 
 STRIKE_DIFFERENTIAL_SCALES_POINTS = (5.0, 10.0, 15.0, 20.0)
 STRIKE_DIFFERENTIAL_FEATURE_VERSION = "strike_differential_context.v1"
+STRIKE_SURFACE_OPERATOR_SUMMARY_VERSION = "operator_summary.v1"
+STRIKE_SURFACE_HIGH_SNR_THRESHOLD = 1.0
 _STATIC_ARBITRAGE_TOLERANCE = 1e-9
 _SNR_EPSILON = 1e-12
+_SURFACE_SIGN_EPSILON = 1e-12
 _REFERENCE_LABEL_PRIORITY = (
     "atm",
     "q_mode",
@@ -227,6 +230,198 @@ def build_strike_differential_context(
             "local_convexity_violations": convexity_violations,
         },
     }
+
+
+def summarize_strike_surface_shape(
+    context: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Select one operator-facing D3/D4 observation and label its soft authority."""
+
+    base: dict[str, object] = {
+        "summary_version": STRIKE_SURFACE_OPERATOR_SUMMARY_VERSION,
+        "source_feature_version": (
+            str(context.get("feature_version")) if context and context.get("feature_version") else None
+        ),
+        "status": "missing" if not context else "unavailable",
+        "center": None,
+        "scale_points": None,
+        "labels": [],
+        "strike_d3": None,
+        "strike_d4": None,
+        "d3_snr": None,
+        "d4_snr": None,
+        "d2_snr": None,
+        "d3_sign": "unknown",
+        "d4_shape": "unknown",
+        "snr_quality": "unknown",
+        "desk_line": "曲面形状 missing" if not context else "曲面形状 unavailable",
+        "why_reasons": [
+            "surface_shape_missing" if not context else "surface_shape_unavailable"
+        ],
+        "rank_prior": 0.0,
+        "authority": "desk_explain_and_rank_soft",
+    }
+    if not context:
+        return base
+
+    references = [row for row in context.get("references") or () if isinstance(row, Mapping)]
+    references.sort(key=_surface_reference_priority)
+    selected_reference: Mapping[str, object] | None = None
+    selected_observation: Mapping[str, object] | None = None
+    for reference in references:
+        usable = [
+            row
+            for row in reference.get("observations") or ()
+            if isinstance(row, Mapping) and _surface_observation_is_usable(row)
+        ]
+        if not usable:
+            continue
+        selected_reference = reference
+        selected_observation = min(
+            usable,
+            key=lambda row: (
+                _surface_number(row.get("scale_points")) != 5.0,
+                _surface_number(row.get("scale_points")) or math.inf,
+            ),
+        )
+        break
+    if selected_reference is None or selected_observation is None:
+        return base
+
+    labels = [str(label) for label in selected_reference.get("labels") or ()]
+    center = _surface_number(selected_reference.get("center"))
+    scale = _surface_number(selected_observation.get("scale_points"))
+    d3 = _surface_number(selected_observation.get("strike_d3"))
+    d4 = _surface_number(selected_observation.get("strike_d4"))
+    mexican_hat = _surface_number(selected_observation.get("mexican_hat_points"))
+    d2_snr = _surface_number(selected_observation.get("d2_snr"))
+    d3_snr = _surface_number(selected_observation.get("d3_snr"))
+    d4_snr = _surface_number(selected_observation.get("d4_snr"))
+    d3_sign = _surface_sign(d3)
+    d4_shape = _surface_d4_shape(d4, mexican_hat)
+    shape_snrs = [value for value in (d3_snr, d4_snr) if value is not None]
+    snr_quality = (
+        "high"
+        if shape_snrs and max(shape_snrs) >= STRIKE_SURFACE_HIGH_SNR_THRESHOLD
+        else "low"
+        if shape_snrs
+        else "unknown"
+    )
+    reasons = []
+    if d3_sign != "unknown":
+        reasons.append(f"surface_shape_d3_slope_{d3_sign}")
+    if d4_shape != "unknown":
+        reasons.append(f"surface_shape_d4_{d4_shape}")
+    if snr_quality == "low":
+        reasons.append("surface_shape_low_snr")
+    elif snr_quality == "unknown":
+        reasons.append("surface_shape_snr_unknown")
+    rank_prior = (
+        0.05
+        if snr_quality == "high" and d3_sign == "up"
+        else -0.05
+        if snr_quality == "high" and d3_sign == "down"
+        else 0.0
+    )
+    base.update(
+        status=("ready" if selected_observation.get("quality") == "ready" else "partial"),
+        center=center,
+        scale_points=scale,
+        labels=labels,
+        strike_d3=d3,
+        strike_d4=d4,
+        d3_snr=d3_snr,
+        d4_snr=d4_snr,
+        d2_snr=d2_snr,
+        d3_sign=d3_sign,
+        d4_shape=d4_shape,
+        snr_quality=snr_quality,
+        desk_line=_surface_desk_line(
+            labels=labels,
+            center=center,
+            scale=scale,
+            d3_sign=d3_sign,
+            d4_shape=d4_shape,
+            snr_quality=snr_quality,
+            d3_snr=d3_snr,
+            d4_snr=d4_snr,
+        ),
+        why_reasons=reasons,
+        rank_prior=rank_prior,
+    )
+    return base
+
+
+def _surface_reference_priority(reference: Mapping[str, object]) -> int:
+    labels = [str(label).lower() for label in reference.get("labels") or ()]
+    if any("atm" in label for label in labels):
+        return 0
+    if "q_mode" in labels:
+        return 1
+    return 2
+
+
+def _surface_observation_is_usable(observation: Mapping[str, object]) -> bool:
+    quality = str(observation.get("quality") or "")
+    return not quality.startswith(("blocked_", "unavailable_")) and any(
+        _surface_number(observation.get(key)) is not None
+        for key in ("strike_d2", "strike_d3", "strike_d4")
+    )
+
+
+def _surface_sign(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value > _SURFACE_SIGN_EPSILON:
+        return "up"
+    if value < -_SURFACE_SIGN_EPSILON:
+        return "down"
+    return "flat"
+
+
+def _surface_d4_shape(value: float | None, mexican_hat: float | None) -> str:
+    peak_value = mexican_hat if mexican_hat is not None else -value if value is not None else None
+    if peak_value is None:
+        return "unknown"
+    if peak_value > _SURFACE_SIGN_EPSILON:
+        return "peaked"
+    if peak_value < -_SURFACE_SIGN_EPSILON:
+        return "trough"
+    return "flat"
+
+
+def _surface_desk_line(
+    *,
+    labels: list[str],
+    center: float | None,
+    scale: float | None,
+    d3_sign: str,
+    d4_shape: str,
+    snr_quality: str,
+    d3_snr: float | None,
+    d4_snr: float | None,
+) -> str:
+    normalized = [label.lower() for label in labels]
+    label = "ATM" if any("atm" in item for item in normalized) else "Q" if "q_mode" in normalized else (labels[0] if labels else "ref")
+    location = f"{label}@{center:g}/{scale:g}pt" if center is not None and scale is not None else label
+    d3_text = {"up": "D3斜率+", "down": "D3斜率-", "flat": "D3≈平"}.get(d3_sign, "D3 n/a")
+    d4_text = {"peaked": "D4峰形", "trough": "D4槽形", "flat": "D4≈平"}.get(d4_shape, "D4 n/a")
+    snrs = ",".join(
+        f"{name}={value:.2f}"
+        for name, value in (("d3", d3_snr), ("d4", d4_snr))
+        if value is not None
+    )
+    snr_text = {"high": "SNR高", "low": "SNR低"}.get(snr_quality, "SNR未知")
+    if snrs:
+        snr_text = f"{snr_text}({snrs})"
+    return f"曲面形状 {location} · {d3_text} · {d4_text} · {snr_text}"
+
+
+def _surface_number(value: object) -> float | None:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def _build_observation(

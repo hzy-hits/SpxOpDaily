@@ -4684,7 +4684,7 @@ def test_unified_strategy_candidate_enqueues_once_on_trade_ready_lane(
 def _strategy_decision_payload(now: datetime) -> dict[str, object]:
     return {
         "decision_id": "strategy:test",
-        "policy_version": "strategy_policy.bootstrap.v2",
+        "policy_version": "strategy_policy.bootstrap.v3",
         "runtime_git_sha": "8d1b213a",
         "decision_at": now.isoformat(),
         "action_authority": "manual",
@@ -4827,7 +4827,7 @@ def test_render_strategy_candidate_shows_policy_ev(edge: dict[str, object], expe
         {
             "decision_id": "strategy:test-policy-ev",
             "decision_at": now.isoformat(),
-            "policy_version": "strategy_policy.bootstrap.v2",
+            "policy_version": "strategy_policy.bootstrap.v3",
             "runtime_git_sha": "deadbeef",
             "probability_evidence": {"q": 0.52, "n_raw": 12, "n_effective": 7.0, "shrinkage_weight": 0.259259},
         },
@@ -4887,7 +4887,7 @@ def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
         return {
             "schema_version": "strategy_decision.v2",
             "decision_id": decision_id,
-            "policy_version": "strategy_policy.bootstrap.v2",
+            "policy_version": "strategy_policy.bootstrap.v3",
             "decision_at": at.isoformat(),
             "available_at": at.isoformat(),
             "session_date": "2026-08-07",

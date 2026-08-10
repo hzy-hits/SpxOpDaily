@@ -1,9 +1,9 @@
 # SPXW 执行价差分特征与决策上下文接入设计 v1
 
-状态：**已实现（SDCTX-1–5；验收见 `docs/research/strike-differential-context-acceptance-2026-08-10.md`）**  
+状态：**已实现（SDCTX-1–5；SDCTX-desk-v1.1 已允许 Desk 解释与硬门后 soft rank）**
 适用仓库：`hzy-hits/SpxOpDaily`  
 适用分支基线：`master`  
-设计边界：**只增加只读决策上下文，不改变候选生成、排序、硬门、人工权限或自动下单边界**  
+设计边界：**不改变候选生成、硬门、人工权限或自动下单边界；仅允许 Desk 解释与硬门后封顶 soft rank**
 上位合同：`docs/strategy-signal-engine-v2.md`、`docs/strategy-signal-engine-v3.md`、`module-architecture.md`
 
 > 用户已确认的本期目标：把 Butterfly 对应的二阶执行价差分，以及三阶、四阶和多尺度派生特征，作为期权曲面事实加入统一决策上下文。模型如何解释、是否具备预测价值、是否进入候选排序，全部留到后续独立阶段。
@@ -35,10 +35,10 @@ Noise bound / SNR：相应差分组合对 bid-ask 噪声的敏感度
 - 不新增策略类型；
 - 不直接交易三阶、四阶组合；
 - 不改变 `manual_authority_eligible`；
-- 不修改 `selection_score`、utility 或 ManagementPolicy EV；
+- 不修改 utility 或 ManagementPolicy EV；`selection_score` 仅允许 v1.1 定义的硬门后 soft prior；
 - 不新增 Transformer、分类器或训练任务；
 - 不新增服务、timer、数据库、表、队列、Rust contract 或通知路径；
-- 不增加人类可见推送字段；
+- 不增加通知 lane；现有 Desk View 可显示一行曲面形状摘要；
 - 不把 D2/D3/D4 称为现实概率、Alpha、Pin 信号或做市商仓位。
 
 ---
@@ -702,34 +702,35 @@ v1 不修改 system prompt，原因：
 
 ### 10.2 禁止的 authority leakage
 
-v1 明确禁止以下代码读取该字段并改变结果：
+**SDCTX-desk-v1.1 phase note（2026-08-10）**：本节原先对 ranker 的全面禁令已被下述窄规则取代；数学语义和 `strike_differential_context.v1` wire payload 不变。§12.4 的全量 non-interference 验收也相应收窄为“低 SNR、缺失或 unavailable 时排序不变”。
+
+以下消费者仍禁止读取该字段并改变结果：
 
 ```text
 strategy_regime.assess_regime
 candidate_factory.enumerate_candidates
 strategy_ranker._hard_gate_candidate
-strategy_ranker rank sort key
 ManagementPolicy
-notification delivery
+notification delivery authority
 ```
 
-若未来需要接入：
+`strategy_ranker` 只允许在所有 hard gates 通过后读取统一 summary：
 
 ```text
-rank_only model
+base selection_score + surface_shape_prior
 ```
 
-必须另写设计合同、完成 walk-forward / ablation，并沿用 v3 的“未校准模型不得否决”边界。
+其中 `|surface_shape_prior| <= 0.05`；低/未知 SNR、缺失或 unavailable 必须为 0。该 prior 只能在已枚举、已过硬门的候选间软排序，并记录 `selection_score_base` 与 `surface_shape_prior`。它不得创建候选、不得单独把 `NO_TRADE` 翻为人工候选、不得改变 `manual_action_eligible`、`action_authority` 或 `automatic_ordering`。方向 vertical 仅在高 SNR D3 与 CALL/PUT 方向一致时加分；Butterfly 仅在高 SNR 局部峰形时小幅加分。
 
 ### 10.3 人类文案
 
-v1 不在卡片中打印 D2/D3/D4。原因：
+~~v1 不在卡片中打印 D2/D3/D4。~~ SDCTX-desk-v1.1 允许：
 
-- 单位和尺度不直观；
-- 缺乏经验证的自然语言解释；
-- 避免把 research context 伪装成执行理由。
+- `strategy_decision.desk_view.surface_shape` 与 `why_not.surface_shape` 保存统一 structured summary；
+- Desk Map 最多追加一行 D3 斜率、D4 峰/槽/平与 SNR；
+- `why_not.reasons` 可追加 `surface_shape_*` 机器诊断，但不得替换首要交易 blocker。
 
-需要查看时从 persisted decision、debug JSON 或 replay artifact 读取。
+文案必须保留 `desk_explain_and_rank_soft` authority，不得声称 Alpha、dealer positioning 或 pin certainty；通知继续复用现有 Desk View / why_not 渲染，不新增通知路径。
 
 ---
 

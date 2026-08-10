@@ -214,7 +214,7 @@ def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
     assert decision["automatic_ordering"] is False
 
 
-def test_strike_differential_context_is_copied_whole_without_strategy_interference() -> None:
+def test_low_snr_strike_surface_is_explained_without_strategy_authority() -> None:
     cases: list[tuple[str, datetime, dict[str, object], LatestState]] = []
     for day in ("2026-08-05", "2026-08-06"):
         now = datetime.fromisoformat(f"{day}T19:00:00+00:00")
@@ -271,6 +271,9 @@ def test_strike_differential_context_is_copied_whole_without_strategy_interferen
                             "strike_d2": value,
                             "strike_d3": value,
                             "strike_d4": value,
+                            "d2_snr": 0.0,
+                            "d3_snr": 0.0,
+                            "d4_snr": 0.0,
                             "reasons": [],
                         }
                     ],
@@ -312,10 +315,21 @@ def test_strike_differential_context_is_copied_whole_without_strategy_interferen
         assert positive_decision["market_facts"]["quality"] == negative_decision[
             "market_facts"
         ]["quality"]
-        baseline_decision["market_facts"]["structure"].pop("strike_differential_context")
-        positive_decision["market_facts"]["structure"].pop("strike_differential_context")
-        negative_decision["market_facts"]["structure"].pop("strike_differential_context")
-        assert baseline_decision == positive_decision == negative_decision, day
+        for shaped in (positive_decision, negative_decision):
+            assert shaped["decision_type"] == baseline_decision["decision_type"]
+            assert shaped["action_authority"] == baseline_decision["action_authority"]
+            assert shaped["automatic_ordering"] is False
+            assert shaped["desk_view"]["surface_shape"]["snr_quality"] == "low"
+            assert shaped["desk_view"]["surface_shape"]["rank_prior"] == 0.0
+            assert "SNR低" in shaped["desk_view"]["shape"]
+            if shaped["candidate"]:
+                assert shaped["candidate"]["candidate_id"] == baseline_decision["candidate"][
+                    "candidate_id"
+                ]
+                assert shaped["candidate"]["surface_shape_prior"] == 0.0
+            else:
+                assert "surface_shape_low_snr" in shaped["why_not"]["reasons"]
+                assert shaped["desk_view"]["reason"] == baseline_decision["desk_view"]["reason"]
 
 
 def test_stable_pin_builds_candidate_specific_terminal_range_probability(
@@ -359,7 +373,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v2"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v3"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -618,6 +632,147 @@ def test_directional_confirmation_butterfly_is_research_alternative_only() -> No
         in [str(gate.get("gate")) for gate in row.get("gate_failures") or ()]
         for row in rank.gate_audit
     )
+
+
+def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+
+    def context(d3_snr: float) -> dict[str, object]:
+        return {
+            "feature_version": "strike_differential_context.v1",
+            "status": "ready",
+            "references": [
+                {
+                    "center": 100.0,
+                    "labels": ["atm"],
+                    "observations": [
+                        {
+                            "scale_points": 5.0,
+                            "quality": "ready" if d3_snr >= 1.0 else "degraded_low_snr",
+                            "strike_d2": 0.02,
+                            "strike_d3": 0.001,
+                            "strike_d4": 0.0,
+                            "d2_snr": d3_snr,
+                            "d3_snr": d3_snr,
+                            "d4_snr": 0.0,
+                        }
+                    ],
+                }
+            ],
+        }
+
+    facts = {
+        "session_date": "2026-08-07",
+        "spot": {"spx": 100.0},
+        "path": {"atr_5m": 10.0, "distance_to_vwap_points": 0.0, "impulse_15m_points": 0.0},
+        "probability": {
+            "event": {"kind": "terminal_above", "target_at": (now + timedelta(minutes=5)).isoformat()},
+            "q": 0.6,
+            "p_empirical": 0.7,
+            "p_interval_low": 0.6,
+            "n_raw": 40,
+            "n_effective": 40.0,
+            "historical_sessions": ["2026-08-06"],
+        },
+        "structure": {"strike_differential_context": context(2.0)},
+    }
+
+    def vertical(
+        candidate_id: str,
+        *,
+        strategy_type: str,
+        direction: str,
+        score: float,
+        quote_status: str = "ready",
+    ) -> dict[str, object]:
+        up = direction == "UP"
+        return {
+            "candidate_id": candidate_id,
+            "strategy_type": strategy_type,
+            "setup_kind": "TREND_PULLBACK",
+            "direction": direction,
+            "selection_score": score,
+            "long": {"strike": 100.0},
+            "short": {"strike": 110.0 if up else 90.0},
+            "quote": {
+                "status": quote_status,
+                "reasons": [] if quote_status == "ready" else ["spread_leg_quote_stale"],
+                "bid": 2.8,
+                "ask": 3.0,
+            },
+            "economics": {
+                "width_points": 10.0,
+                "max_gain_points": 7.0,
+                "max_loss_points": 3.0,
+                "debit_fraction_of_width": 0.3,
+            },
+            "trigger_level": 100.0,
+            "target_spx": 120.0 if up else 80.0,
+            "invalidation_spx": 95.0 if up else 105.0,
+            "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
+            "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+            "automatic_ordering": False,
+            "manual_action_only": True,
+        }
+
+    call = vertical(
+        "aligned-call",
+        strategy_type="CALL_DEBIT_VERTICAL",
+        direction="UP",
+        score=1.0,
+    )
+    put = vertical(
+        "unaligned-put",
+        strategy_type="PUT_DEBIT_VERTICAL",
+        direction="DOWN",
+        score=1.01,
+    )
+    hard_failed = vertical(
+        "hard-failed-call",
+        strategy_type="CALL_DEBIT_VERTICAL",
+        direction="UP",
+        score=9.0,
+        quote_status="unavailable",
+    )
+
+    high_snr = rank_candidates(
+        [call, put, hard_failed],
+        facts,
+        {"pin": {"depin_risk": 0.0}},
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert [candidate["candidate_id"] for candidate in high_snr.passed[:2]] == [
+        "aligned-call",
+        "unaligned-put",
+    ]
+    assert high_snr.passed[0]["selection_score_base"] == 1.0
+    assert high_snr.passed[0]["surface_shape_prior"] == 0.05
+    assert high_snr.passed[0]["selection_score"] == 1.05
+    assert high_snr.passed[0]["automatic_ordering"] is False
+    assert [candidate["candidate_id"] for candidate in high_snr.near_misses] == [
+        "hard-failed-call"
+    ]
+    assert "surface_shape_prior" not in high_snr.near_misses[0]
+
+    low_snr_facts = deepcopy(facts)
+    low_snr_facts["structure"]["strike_differential_context"] = context(0.2)
+    low_snr = rank_candidates(
+        [call, put],
+        low_snr_facts,
+        {"pin": {"depin_risk": 0.0}},
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert [candidate["candidate_id"] for candidate in low_snr.passed[:2]] == [
+        "unaligned-put",
+        "aligned-call",
+    ]
+    assert all(candidate["surface_shape_prior"] == 0.0 for candidate in low_snr.passed)
 
 
 def test_ranker_winner_is_structure_score_not_research_utility() -> None:

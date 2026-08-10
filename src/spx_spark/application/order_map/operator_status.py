@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
+from spx_spark.analytics.options.density import summarize_strike_surface_shape
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map import guidance as guidance_module
 from spx_spark.application.order_map.frozen_structure import option_structure_frame_is_live
@@ -111,13 +112,16 @@ def build_desk_message_sections(
     session = _session_phase_of(dict(payload), now_utc)
     expiry = str(payload.get("expiry") or "-")
     expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
+    desk_view = _desk_view_line(projection, guidance).removeprefix("Desk View  ")
+    if surface_line := _strategy_surface_shape_line(payload):
+        desk_view = f"{desk_view}\n{surface_line}"
 
     return DeskMessageSections(
         title=(
             f"【SPX Desk Map · {beijing.strftime('%H:%M')} · "
             f"0DTE {expiry_text} · {session.get('name_cn')}】"
         ),
-        desk_view=_desk_view_line(projection, guidance).removeprefix("Desk View  "),
+        desk_view=desk_view,
         location=_location_line(payload, projection).removeprefix("Location  "),
         structure=_structure_line(payload, now=now_utc).removeprefix("Structure  "),
         primary_path=_primary_path(payload, guidance, projection),
@@ -130,6 +134,16 @@ def build_desk_message_sections(
         execution=_execution_line(payload, projection, guidance).removeprefix("Execution  "),
         data_quality=_data_quality_line(projection).removeprefix("Data Quality  "),
     )
+
+
+def _strategy_surface_shape_line(payload: Mapping[str, Any]) -> str | None:
+    decision = _mapping(payload.get("strategy_decision"))
+    facts = _mapping(decision.get("market_facts"))
+    structure = _mapping(facts.get("structure"))
+    context = _mapping(structure.get("strike_differential_context"))
+    if not context:
+        return None
+    return str(summarize_strike_surface_shape(context)["desk_line"])
 
 
 def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:

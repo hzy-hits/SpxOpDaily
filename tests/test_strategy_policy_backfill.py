@@ -37,7 +37,7 @@ def _decision() -> dict[str, object]:
     return {
         "schema_version": "strategy_decision.v2",
         "decision_id": "strategy:test-censor",
-        "policy_version": "strategy_policy.bootstrap.v2",
+        "policy_version": "strategy_policy.bootstrap.v3",
         "decision_at": NOW.isoformat(),
         "available_at": NOW.isoformat(),
         "session_date": "2026-08-07",

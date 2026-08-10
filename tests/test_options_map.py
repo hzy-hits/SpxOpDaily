@@ -7,6 +7,7 @@ import pytest
 
 from spx_spark.analytics.options.density import (
     build_strike_differential_context,
+    summarize_strike_surface_shape,
     synthetic_call_curve,
 )
 from spx_spark.analytics.options.models import SyntheticCallPoint
@@ -523,6 +524,55 @@ def _single_observation(
         scales=(5.0, 10.0),
     )
     return context["references"][0]["observations"][0]
+
+
+def test_surface_shape_summary_prefers_atm_5pt_and_respects_snr() -> None:
+    now = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+    context = build_strike_differential_context(
+        _polynomial_curve(now, half_spread=0.01),
+        expiry="20260810",
+        as_of=now,
+        reference_levels={"q_mode": 95.0, "atm_reference": 100.0},
+        scales=(10.0, 5.0),
+    )
+
+    summary = summarize_strike_surface_shape(context)
+
+    assert summary["summary_version"] == "operator_summary.v1"
+    assert summary["source_feature_version"] == "strike_differential_context.v1"
+    assert summary["center"] == 100.0
+    assert summary["scale_points"] == 5.0
+    assert summary["labels"] == ["atm_reference"]
+    assert summary["d3_sign"] == "up"
+    assert summary["d4_shape"] == "trough"
+    assert summary["snr_quality"] == "high"
+    assert summary["rank_prior"] == 0.05
+    assert summary["authority"] == "desk_explain_and_rank_soft"
+    assert "D3斜率+" in summary["desk_line"]
+    assert "D4槽形" in summary["desk_line"]
+
+    low_snr = {
+        **context,
+        "references": [
+            {
+                "center": 100.0,
+                "labels": ["atm"],
+                "observations": [
+                    {
+                        **context["references"][1]["observations"][1],
+                        "quality": "degraded_low_snr",
+                        "d3_snr": 0.2,
+                        "d4_snr": 0.4,
+                    }
+                ],
+            }
+        ],
+    }
+    low_summary = summarize_strike_surface_shape(low_snr)
+    assert low_summary["snr_quality"] == "low"
+    assert low_summary["rank_prior"] == 0.0
+    assert "surface_shape_low_snr" in low_summary["why_reasons"]
+    assert summarize_strike_surface_shape(None)["status"] == "missing"
 
 
 def test_synthetic_call_curve_uses_otm_side_and_parity_bbo() -> None:
