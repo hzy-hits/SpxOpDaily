@@ -5,6 +5,11 @@ clock. `America/New_York` determines the trading date, daylight-saving
 offset, regular close, and early close. Beijing time remains a presentation
 field; it does not own report eligibility.
 
+GTH desk-map `source_slot` keys reuse the same ET quarter-hour floor
+(`floor_report_slot_et`, cadence 15 minutes) so Python projections and the
+Rust `scheduled_report` lane share one slot identity, including the `20:15`
+GTH open.
+
 ## Schedule and jitter
 
 - `rth_report_schedule()` returns 15-minute boundaries from the session open

@@ -178,10 +178,14 @@ impl ReportSlot {
     }
 }
 
-/// Returns an active GTH or RTH ET half-hour slot during its bounded grace window.
+/// Returns an active GTH or RTH ET quarter-hour slot during its bounded grace window.
+///
+/// Slot identity matches the Python `order-map-status` timer and desk-map
+/// `source_slot` contract: ET `:00` / `:15` / `:30` / `:45`, including the
+/// Sunday/weekday GTH open at `20:15`.
 pub fn active_report_slot(now: DateTime<Utc>, grace_seconds: i64) -> Option<ReportSlot> {
     let now_et = now.with_timezone(&New_York);
-    let boundary_minute = if now_et.minute() < 30 { 0 } else { 30 };
+    let boundary_minute = (now_et.minute() / 15) * 15;
     let local = now_et
         .date_naive()
         .and_hms_opt(now_et.hour(), boundary_minute, 0)?;
@@ -214,7 +218,7 @@ fn scheduled_session(local: NaiveDateTime) -> Option<(MarketSession, NaiveDate)>
     let date = local.date();
     let time = local.time();
     let weekday = date.weekday();
-    if is_weekday(weekday) && is_rth_time(time) {
+    if is_weekday(weekday) && is_rth_session_time(time) {
         return Some((MarketSession::Rth, date));
     }
     if is_weekday(weekday) && time < NaiveTime::from_hms_opt(9, 25, 0)? {
@@ -234,14 +238,26 @@ fn is_weekday(weekday: Weekday) -> bool {
     !matches!(weekday, Weekday::Sat | Weekday::Sun)
 }
 
-fn is_rth_time(time: NaiveTime) -> bool {
+fn is_quarter_minute(time: NaiveTime) -> bool {
+    time.minute() % 15 == 0
+}
+
+fn is_rth_session_time(time: NaiveTime) -> bool {
     time >= NaiveTime::from_hms_opt(9, 30, 0).expect("valid RTH open")
         && time < NaiveTime::from_hms_opt(16, 0, 0).expect("valid RTH close")
 }
 
-fn is_gth_time(time: NaiveTime) -> bool {
+fn is_gth_session_time(time: NaiveTime) -> bool {
     time < NaiveTime::from_hms_opt(9, 25, 0).expect("valid GTH close")
         || time >= NaiveTime::from_hms_opt(20, 15, 0).expect("valid GTH open")
+}
+
+fn is_rth_time(time: NaiveTime) -> bool {
+    is_quarter_minute(time) && is_rth_session_time(time)
+}
+
+fn is_gth_time(time: NaiveTime) -> bool {
+    is_quarter_minute(time) && is_gth_session_time(time)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -298,7 +314,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn half_hour_slots_use_dst_correct_et_offsets_and_bounded_grace() {
+    fn quarter_hour_slots_use_dst_correct_et_offsets_and_bounded_grace() {
         let summer = Utc.with_ymd_and_hms(2026, 8, 4, 14, 1, 53).unwrap();
         let slot = active_report_slot(summer, 180).unwrap();
         assert_eq!(slot.source_slot(), "2026-08-04:10:00");
@@ -308,6 +324,11 @@ mod tests {
         let slot = active_report_slot(winter, 180).unwrap();
         assert_eq!(slot.source_slot(), "2026-01-05:10:30");
         assert_eq!(slot.ledger_slot(), "2026-01-05T10:30:00-05:00");
+
+        let rth_quarter = Utc.with_ymd_and_hms(2026, 8, 4, 14, 15, 45).unwrap();
+        let slot = active_report_slot(rth_quarter, 180).unwrap();
+        assert_eq!(slot.source_slot(), "2026-08-04:10:15");
+        assert_eq!(slot.ledger_slot(), "2026-08-04T10:15:00-04:00");
 
         assert!(active_report_slot(summer + chrono::TimeDelta::seconds(88), 180).is_none());
     }
@@ -335,8 +356,16 @@ mod tests {
         let slot = active_report_slot(morning, 180).unwrap();
         assert_eq!(slot.source_slot(), "2026-08-04:gth:09:00");
 
-        let opening_gap = Utc.with_ymd_and_hms(2026, 8, 4, 0, 20, 0).unwrap();
-        assert!(active_report_slot(opening_gap, 180).is_none());
+        let gth_open = Utc.with_ymd_and_hms(2026, 8, 4, 0, 15, 30).unwrap();
+        let slot = active_report_slot(gth_open, 180).unwrap();
+        assert_eq!(slot.session(), MarketSession::Gth);
+        assert_eq!(slot.trading_date_et().to_string(), "2026-08-04");
+        assert_eq!(slot.source_slot(), "2026-08-04:gth:20:15");
+        assert_eq!(slot.ledger_slot(), "2026-08-03T20:15:00-04:00");
+
+        // Outside the 180s start grace for the 20:15 open slot.
+        let after_open_grace = Utc.with_ymd_and_hms(2026, 8, 4, 0, 20, 0).unwrap();
+        assert!(active_report_slot(after_open_grace, 180).is_none());
     }
 
     #[test]

@@ -20,7 +20,10 @@ from spx_spark.application.order_map.operator_status import (
     build_desk_map_projection,
     build_desk_message_sections,
 )
-from spx_spark.application.order_map.report_clock import rth_report_slot
+from spx_spark.application.order_map.report_clock import (
+    floor_report_slot_et,
+    rth_report_slot,
+)
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.state_io import atomic_write_json_secure, read_json_object
@@ -696,7 +699,10 @@ def _sha256(value: object) -> str:
 
 
 def _projection_slot_key(now: datetime, trading_date: str, session: str) -> str:
-    return f"{trading_date}:{session}:{now.astimezone(ET).strftime('%H:%M')}"
+    """Build a GTH/RTH source_slot that matches the Rust quarter-hour lane."""
+
+    slot_at = floor_report_slot_et(now)
+    return f"{trading_date}:{session}:{slot_at.strftime('%H:%M')}"
 
 
 __all__ = [

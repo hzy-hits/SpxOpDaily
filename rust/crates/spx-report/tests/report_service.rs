@@ -536,7 +536,7 @@ fn non_stop_provider_completion_still_backs_off_without_fallback() {
 }
 
 #[test]
-fn gth_half_hour_slot_persists_through_the_same_typed_outbox() {
+fn gth_quarter_hour_slot_persists_through_the_same_typed_outbox() {
     let temp = TempDir::new().unwrap();
     let config = config(&temp, true, &[5]);
     let slot_start = Utc.with_ymd_and_hms(2026, 8, 4, 1, 30, 0).unwrap();
@@ -571,6 +571,45 @@ fn gth_half_hour_slot_persists_through_the_same_typed_outbox() {
     assert_eq!(
         intents[0].lineage.slot().unwrap().as_str(),
         "2026-08-03T21:30:00-04:00"
+    );
+}
+
+#[test]
+fn gth_open_quarter_slot_persists_at_2015_et() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let slot_start = Utc.with_ymd_and_hms(2026, 8, 4, 0, 15, 0).unwrap();
+    let available_at = slot_start + TimeDelta::seconds(1);
+    write_latest(
+        &config.projection_path,
+        gth_projection("desk-map:gth-2015", "2026-08-04:gth:20:15", available_at),
+    );
+    let writer = FakeWriter::new([WriterOutcome::Success]);
+    let store = MemoryStore::default();
+    let store_inspector = store.clone();
+    let mut service = ReportService::open(
+        config,
+        true,
+        writer,
+        store,
+        available_at + TimeDelta::seconds(1),
+    )
+    .unwrap();
+
+    assert_eq!(
+        service
+            .run_once_at(available_at + TimeDelta::seconds(1))
+            .unwrap(),
+        ReportTick::Persisted {
+            slot: "2026-08-03T20:15:00-04:00".to_owned(),
+            disposition: ReportPersistDisposition::Inserted,
+        }
+    );
+    let intents = store_inspector.intents();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(
+        intents[0].lineage.slot().unwrap().as_str(),
+        "2026-08-03T20:15:00-04:00"
     );
 }
 

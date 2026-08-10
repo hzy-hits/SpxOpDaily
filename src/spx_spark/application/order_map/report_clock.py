@@ -1,4 +1,4 @@
-"""Shared exchange-local clock contract for scheduled RTH reports."""
+"""Shared exchange-local clock contract for scheduled desk reports."""
 
 from __future__ import annotations
 
@@ -14,7 +14,20 @@ from spx_spark.market_calendar import (
 
 
 RTH_REPORT_CADENCE = timedelta(minutes=15)
+# Shared with the Rust scheduled_report lane and the GTH desk-map source_slot.
+REPORT_SLOT_CADENCE = RTH_REPORT_CADENCE
 RTH_REPORT_START_GRACE_SECONDS = 120.0
+
+
+def floor_report_slot_et(now: datetime) -> datetime:
+    """Floor an aware timestamp to the ET quarter-hour report boundary."""
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("report slot flooring requires a timezone-aware timestamp")
+    ny = now.astimezone(ET)
+    cadence_minutes = int(REPORT_SLOT_CADENCE.total_seconds() // 60)
+    minute = (ny.minute // cadence_minutes) * cadence_minutes
+    return ny.replace(minute=minute, second=0, microsecond=0)
 
 
 @dataclass(frozen=True, slots=True)

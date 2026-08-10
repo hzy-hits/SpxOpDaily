@@ -434,6 +434,21 @@ def test_invalid_nested_research_is_omitted_and_disclosed_without_poisoning_desk
     assert "不影响执行数据评级" in wire["message"]["data_quality"]
 
 
+def test_gth_projection_floors_source_slot_to_et_quarter_hour(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+
+    wire = build_desk_map_wire(
+        _payload(),
+        [],
+        now=datetime(2026, 8, 4, 0, 15, 45, tzinfo=timezone.utc),
+        trading_date="2026-08-04",
+        storage=storage,
+    )
+
+    assert wire["session"] == "gth"
+    assert wire["source_slot"] == "2026-08-04:gth:20:15"
+
+
 def test_gth_projection_does_not_relabel_prior_date_research_as_current(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     context = {
