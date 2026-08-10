@@ -399,6 +399,79 @@ def test_non_live_option_structure_is_labeled_frozen_reference(
     assert "event=live" not in sections.structure
 
 
+def test_desk_structure_explains_promoted_wall_migration_when_live_unavailable() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "levels": {
+            "put_wall": 7750.0,
+            "flip_low": 7740.0,
+            "flip_high": 7745.0,
+            "call_wall": 7800.0,
+        },
+        "previous_structure_levels": {
+            "put_wall": 7730.0,
+            "flip_low": 7725.0,
+            "flip_high": 7730.0,
+            "call_wall": 7775.0,
+        },
+    }
+    payload["flip_zone"] = [7740.0, 7745.0]
+    payload["candidates"] = [
+        {"play": "put_wall_bounce_call", "level": 7750.0},
+        {"play": "call_wall_fade_put", "level": 7800.0},
+    ]
+    payload["option_structure_frame"] = {
+        "as_of": NOW.isoformat(),
+        "quality": "unavailable",
+        "l1": {"quality": "unavailable"},
+        "diagnostics": {"max_quote_age_seconds": 90.0},
+        "structure": {
+            "put_wall": 7750.0,
+            "flip_zone": [7740.0, 7745.0],
+            "call_wall": 7800.0,
+        },
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "Put/Flip/Call 7750 / 7740–7745 / 7800 · event=frozen/reference" in (
+        sections.structure
+    )
+    assert (
+        "Structure change: Call Wall 7775 → 7800 · Put Wall 7730 → 7750 · "
+        "Flip 7725–7730 → 7740–7745 · source=frozen/reference · "
+        "live confirmation unavailable"
+    ) in sections.structure
+
+
+def test_desk_structure_marks_pending_candidate_migration() -> None:
+    payload = _payload()
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "structure_change_pending": True,
+        "structure_candidate": {
+            "levels": {
+                "put_wall": 7750.0,
+                "flip_low": 7740.0,
+                "flip_high": 7745.0,
+                "call_wall": 7800.0,
+            }
+        },
+        "levels": {
+            "put_wall": 7730.0,
+            "flip_low": 7725.0,
+            "flip_high": 7730.0,
+            "call_wall": 7775.0,
+        },
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "Structure change pending: Call Wall 7775 → 7800" in sections.structure
+    assert "source=live · confirming" in sections.structure
+
+
 def test_gth_omits_rth_only_market_state_failures_but_keeps_gth_failures() -> None:
     payload = _payload()
     payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}

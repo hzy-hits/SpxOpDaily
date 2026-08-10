@@ -673,6 +673,7 @@ def _public_state(
         "expiry": (structure or {}).get("expiry"),
         "levels": levels,
         "level_bands": dict((structure or {}).get("level_bands") or {}),
+        "previous_structure_levels": dict((structure or {}).get("previous_levels") or {}),
         "structure_promoted_at": (structure or {}).get("promoted_at"),
         "structure_duration_seconds": (structure or {}).get("duration_seconds"),
         "structure_change_pending": structure_change_pending,

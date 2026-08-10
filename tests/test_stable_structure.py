@@ -46,6 +46,7 @@ def test_wall_switch_requires_distinct_time_bucket_confirmations() -> None:
     )
     assert stable["levels"]["put_wall"] == 7475
     assert state["promotion_reason"] == "multi_bucket_confirmation"
+    assert stable["previous_levels"] == {"put_wall": 7500.0, "call_wall": 7600.0}
 
 
 def test_small_wall_motion_extends_existing_structure() -> None:
@@ -98,6 +99,7 @@ def test_expiry_rollover_promotes_new_structure_immediately() -> None:
 
     assert stable["expiry"] == "20260715"
     assert stable["levels"]["put_wall"] == 7525
+    assert stable["previous_levels"] == {"put_wall": 7500.0, "call_wall": 7600.0}
     assert state["promotion_reason"] == "expiry_rollover"
 
 

@@ -450,19 +450,94 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
         finite_float(frozen.get(key)) == finite_float(live.get(key))
         for key in ("put_wall", "flip_low", "flip_high", "call_wall")
     )
-    if option_structure_frame_is_live(payload, now=now):
+    live_frame = option_structure_frame_is_live(payload, now=now)
+    if live_frame:
         levels = (
             f"Put/Flip/Call {frozen_text} · event=live"
             if same
             else f"event {frozen_text} · live {live_text}"
         )
+        source_label = "source=live"
     else:
         levels = (
             f"Put/Flip/Call {frozen_text} · event=frozen/reference"
             if same
             else f"event {frozen_text} · reference {live_text}"
         )
-    return f"Structure  {levels}\nGamma职责  {_gamma_feedback_text(payload)}"
+        source_label = "source=frozen/reference · live confirmation unavailable"
+    change_line = _structure_change_line(
+        decision,
+        current_levels=frozen if frozen else live,
+        source_label=source_label,
+    )
+    parts = [f"Structure  {levels}"]
+    if change_line:
+        parts.append(change_line)
+    parts.append(f"Gamma职责  {_gamma_feedback_text(payload)}")
+    return "\n".join(parts)
+
+
+def _structure_change_line(
+    decision: Mapping[str, Any],
+    *,
+    current_levels: Mapping[str, Any],
+    source_label: str,
+) -> str | None:
+    """Explain wall-map migration so operators do not see levels silently vanish."""
+
+    pending = decision.get("structure_change_pending") is True
+    candidate = _mapping(_mapping(decision.get("structure_candidate")).get("levels"))
+    previous = _mapping(decision.get("previous_structure_levels"))
+    if pending and candidate:
+        diff = _structure_level_diff_text(current_levels, candidate)
+        if diff:
+            return f"Structure change pending: {diff} · {source_label} · confirming"
+    if previous:
+        diff = _structure_level_diff_text(previous, current_levels)
+        if diff:
+            return f"Structure change: {diff} · {source_label}"
+    return None
+
+
+def _structure_level_diff_text(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> str | None:
+    parts: list[str] = []
+    for key, label in (
+        ("call_wall", "Call Wall"),
+        ("put_wall", "Put Wall"),
+        ("flip", "Flip"),
+    ):
+        if key == "flip":
+            before_text = _flip_text(before)
+            after_text = _flip_text(after)
+            if before_text is None and after_text is None:
+                continue
+            if before_text == after_text:
+                continue
+            parts.append(
+                f"{label} {before_text or 'unavailable'} → {after_text or 'unavailable'}"
+            )
+            continue
+        left = finite_float(before.get(key))
+        right = finite_float(after.get(key))
+        if left is None and right is None:
+            continue
+        if left is not None and right is not None and abs(left - right) < 1e-9:
+            continue
+        parts.append(f"{label} {_available_number(left)} → {_available_number(right)}")
+    return " · ".join(parts) if parts else None
+
+
+def _flip_text(levels: Mapping[str, Any]) -> str | None:
+    low = finite_float(levels.get("flip_low"))
+    high = finite_float(levels.get("flip_high"))
+    if low is None and high is None:
+        return None
+    if low is not None and high is not None:
+        return f"{_available_number(low)}–{_available_number(high)}"
+    return _available_number(low if low is not None else high)
 
 
 def _live_levels(payload: Mapping[str, Any]) -> dict[str, object]:

@@ -85,7 +85,12 @@ def advance_stable_structure(
     stable_expiry = str(stable.get("expiry") or "")
     live_expiry = str(live_row.get("expiry") or "")
     if live_expiry and stable_expiry and live_expiry != stable_expiry:
-        stable = _promoted(live_row, now=now, band=band_half_width_points)
+        stable = _promoted(
+            live_row,
+            now=now,
+            band=band_half_width_points,
+            previous_levels=_levels(stable),
+        )
         state = {
             "schema_version": 1,
             "stable": stable,
@@ -145,7 +150,12 @@ def advance_stable_structure(
         "last_seen_at": samples[-1]["at"],
     }
     if len(samples) >= required_confirmations:
-        stable = _promoted(candidate, now=now, band=band_half_width_points)
+        stable = _promoted(
+            candidate,
+            now=now,
+            band=band_half_width_points,
+            previous_levels=_levels(stable),
+        )
         state.update(
             {
                 "stable": stable,
@@ -188,12 +198,18 @@ def _public_state(
     return result
 
 
-def _promoted(source: Mapping[str, object], *, now: datetime, band: float) -> dict[str, object]:
+def _promoted(
+    source: Mapping[str, object],
+    *,
+    now: datetime,
+    band: float,
+    previous_levels: Mapping[str, float] | None = None,
+) -> dict[str, object]:
     levels = _levels(source)
-    return {
+    promoted = {
         key: value
         for key, value in dict(source).items()
-        if key not in {"samples", "level_bands"}
+        if key not in {"samples", "level_bands", "previous_levels"}
     } | {
         "levels": levels,
         "level_bands": _bands(levels, band),
@@ -203,6 +219,14 @@ def _promoted(source: Mapping[str, object], *, now: datetime, band: float) -> di
         "duration_seconds": 0.0,
         "source": "stable_intraday_oi_gex",
     }
+    retained = {
+        name: float(value)
+        for name, value in dict(previous_levels or {}).items()
+        if name in LEVEL_NAMES and isinstance(value, int | float)
+    }
+    if retained:
+        promoted["previous_levels"] = retained
+    return promoted
 
 
 def _materially_different(
