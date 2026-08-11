@@ -33,6 +33,9 @@ GTH open.
 The shared implementation is
 `spx_spark.application.order_map.report_clock`. Daily post-close acceptance
 must reuse it instead of implementing another tolerance or timezone rule.
+When Rust owns quarter-hour reports, acceptance reads `scheduled_report`
+intents from the Rust delivery ledger for slot/delivery coverage and treats
+Python `status_snapshot` audit rows as Spring projection inputs only.
 
 ## Spring projection and rolling state
 

@@ -21,12 +21,18 @@ from spx_spark.application.order_map.level_decision_acceptance import (
     build_acceptance_report,
     write_acceptance_report,
 )
+from spx_spark.application.order_map.desk_projection_export import (
+    rust_report_owner_enabled,
+)
 from spx_spark.application.order_map.report_clock import (
     RTH_REPORT_START_GRACE_SECONDS,
     rth_report_schedule_for_session,
     rth_report_slot_for_session,
 )
 from spx_spark.application.order_map.rth_daily_acceptance_support import (
+    ALLOWED_OUTBOX_JOURNAL_MODES,
+    HUMAN_TRANSPORT_CHANNELS,
+    INTERNAL_NOTIFICATION_SOURCES,
     KNOWN_MARKET_STATES,
     MARKET_STATE_RULE,
     MARKET_STATE_SCHEMA,
@@ -65,9 +71,12 @@ def build_rth_daily_acceptance(
     level_policy: LevelDecisionPolicy,
     outbox_path: str | Path | None = None,
     receipt_path: str | Path | None = None,
+    rust_delivery_ledger_path: str | Path | None = None,
+    rust_report_owner: bool | None = None,
     now: datetime | None = None,
     calendar: MarketCalendar = DEFAULT_MARKET_CALENDAR,
     spring_required: bool = True,
+    spring_report_required: bool | None = None,
 ) -> dict[str, object]:
     """Build one deterministic, fail-closed daily operational verdict."""
 
@@ -76,6 +85,12 @@ def build_rth_daily_acceptance(
     if session is None:
         raise ValueError(f"{trading_date.isoformat()} is not a trading day")
     root = Path(data_root)
+    report_owner = (
+        rust_report_owner_enabled() if rust_report_owner is None else bool(rust_report_owner)
+    )
+    report_spring_required = (
+        bool(spring_required) if spring_report_required is None else bool(spring_report_required)
+    )
     spring_rows = _read_jsonl(
         root
         / "features"
@@ -111,7 +126,9 @@ def build_rth_daily_acceptance(
             session,
             report_rows,
             outbox_path=outbox_path,
-            spring_required=spring_required,
+            rust_delivery_ledger_path=rust_delivery_ledger_path,
+            rust_report_owner=report_owner,
+            spring_report_required=report_spring_required,
         ),
         _trade_intent_producer_coverage_check(
             session,
@@ -123,8 +140,8 @@ def build_rth_daily_acceptance(
             integrity=trade_intent_integrity,
         ),
         _trade_ready_delivery_check(
-            producer_ledger_rows,
-            trade_intent_rows=trade_intent_rows,
+            outbox_path,
+            trading_date=trading_date.isoformat(),
             outbox_path=outbox_path,
             receipt_path=receipt_path,
         ),
@@ -140,6 +157,8 @@ def build_rth_daily_acceptance(
         "trading_date": trading_date.isoformat(),
         "status": "complete" if passed else "degraded",
         "spring_required": spring_required,
+        "spring_report_required": report_spring_required,
+        "rust_report_owner": report_owner,
         "session_clock": {
             "timezone": str(session.open_at.tzinfo),
             "open_at": session.open_at.isoformat(),
@@ -292,32 +311,90 @@ def _report_checks(
     rows: Iterable[Mapping[str, object]],
     *,
     outbox_path: str | Path | None,
-    spring_required: bool = True,
+    rust_delivery_ledger_path: str | Path | None = None,
+    rust_report_owner: bool = False,
+    spring_report_required: bool = True,
 ) -> tuple[OperationalCheck, ...]:
     expected_slots = _expected_report_slots(session)
-    by_slot: dict[datetime, Mapping[str, object]] = {}
+    total = len(expected_slots)
+    projection_by_slot: dict[datetime, Mapping[str, object]] = {}
+    allowed_kinds = {"status_snapshot", "status"} if rust_report_owner else {"status"}
     for row in rows:
-        if row.get("report_kind") != "status":
+        if row.get("report_kind") not in allowed_kinds:
             continue
         observed = _parse_at(row.get("occurred_at")) or _parse_at(row.get("generated_at"))
         slot = _report_slot(observed, session)
         if slot is not None:
-            by_slot[slot] = row
-    present = sum(slot in by_slot for slot in expected_slots)
-    event_ids_by_slot = {
-        slot: _report_event_id(by_slot.get(slot), session=session, slot=slot)
-        for slot in expected_slots
-    }
-    fully_delivered = _fully_delivered_event_ids(
-        outbox_path,
-        event_ids_by_slot.values(),
+            projection_by_slot[slot] = row
+    if rust_report_owner:
+        ledger = Path(rust_delivery_ledger_path) if rust_delivery_ledger_path else None
+        rust_status = "not_configured"
+        rust_rows: tuple[sqlite3.Row, ...] = ()
+        if ledger is not None and ledger.exists():
+            slot_keys = tuple(slot.isoformat() for slot in expected_slots)
+            try:
+                with sqlite3.connect(f"file:{ledger}?mode=ro", uri=True) as connection:
+                    connection.execute("PRAGMA query_only=ON")
+                    connection.row_factory = sqlite3.Row
+                    rust_rows = tuple(
+                        connection.execute(
+                            f"""
+                            SELECT e.event_id, e.report_slot,
+                                   t.target_key, t.channel, t.status
+                            FROM notification_events AS e
+                            LEFT JOIN notification_targets AS t ON t.event_id = e.event_id
+                            WHERE e.lane = 'scheduled_report'
+                              AND e.report_slot IN ({','.join('?' for _ in slot_keys)})
+                            ORDER BY e.report_slot, t.target_key
+                            """,
+                            slot_keys,
+                        ).fetchall()
+                    )
+                rust_status = "ready"
+            except (OSError, sqlite3.Error) as exc:
+                rust_status = f"query_failed:{type(exc).__name__}"
+        elif ledger is not None:
+            rust_status = "ledger_missing"
+        rust_targets_by_slot: dict[str, list[sqlite3.Row]] = {}
+        for row in rust_rows:
+            rust_targets_by_slot.setdefault(str(row["report_slot"]), []).append(row)
+        present = len(rust_targets_by_slot)
+        delivered = sum(
+            bool(human_targets)
+            and all(str(row["status"]) == "delivered" for row in human_targets)
+            for rows_for_slot in rust_targets_by_slot.values()
+            if (
+                human_targets := [
+                    row
+                    for row in rows_for_slot
+                    if str(row["channel"] or "") in HUMAN_TRANSPORT_CHANNELS
+                ]
+            )
+        )
+        slot_reason_suffix = (
+            f"; rust_ledger={rust_status}; "
+            "Python status_snapshot is projection input only"
+        )
+    else:
+        by_slot = projection_by_slot
+        present = sum(slot in by_slot for slot in expected_slots)
+        event_ids_by_slot = {
+            slot: _report_event_id(by_slot.get(slot), session=session, slot=slot)
+            for slot in expected_slots
+        }
+        fully_delivered = _fully_delivered_event_ids(
+            outbox_path,
+            event_ids_by_slot.values(),
+        )
+        delivered = sum(
+            slot in by_slot and event_ids_by_slot[slot] in fully_delivered
+            for slot in expected_slots
+        )
+        slot_reason_suffix = ""
+    projected = sum(
+        _has_spring_projection(projection_by_slot.get(slot)) for slot in expected_slots
     )
-    delivered = sum(
-        slot in by_slot and event_ids_by_slot[slot] in fully_delivered for slot in expected_slots
-    )
-    projected = sum(_has_spring_projection(by_slot.get(slot)) for slot in expected_slots)
-    summarized = sum(_has_state_window(by_slot.get(slot)) for slot in expected_slots)
-    total = len(expected_slots)
+    summarized = sum(_has_state_window(projection_by_slot.get(slot)) for slot in expected_slots)
     delivery_checks = (
         _ratio_operational_check(
             "rth_report_slot_coverage",
@@ -325,6 +402,7 @@ def _report_checks(
             total,
             MIN_REPORT_SLOT_COVERAGE,
             "scheduled RTH report slots",
+            reason_suffix=slot_reason_suffix,
         ),
         _ratio_operational_check(
             "rth_report_delivery_coverage",
@@ -332,9 +410,10 @@ def _report_checks(
             total,
             MIN_REPORT_SLOT_COVERAGE,
             "delivered scheduled RTH reports",
+            reason_suffix=slot_reason_suffix,
         ),
     )
-    if not spring_required:
+    if not spring_report_required:
         return delivery_checks
     return (
         *delivery_checks,
@@ -475,11 +554,20 @@ def _post_close_review_check(payload: Mapping[str, object]) -> OperationalCheck:
 
 
 def _outbox_check(path: str | Path | None) -> OperationalCheck:
+    human_channels = tuple(sorted(HUMAN_TRANSPORT_CHANNELS))
+    internal_sources = tuple(sorted(INTERNAL_NOTIFICATION_SOURCES))
+    channel_filter = ",".join("?" for _ in human_channels)
+    source_filter = ",".join("?" for _ in internal_sources)
+    human_scope = (
+        f"channel IN ({channel_filter}) "
+        f"AND source NOT IN ({source_filter}) "
+        "AND channel != '__cancellation__'"
+    )
     if path is None or not str(path):
         return OperationalCheck(
             name="notification_outbox_integrity",
             measured="not_configured",
-            threshold="quick_check=ok,journal_mode=delete",
+            threshold="quick_check=ok,journal_mode in {delete,wal}, human transport clear",
             passed=False,
             reason="notification delivery outbox path is not configured",
         )
@@ -488,7 +576,7 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         return OperationalCheck(
             name="notification_outbox_integrity",
             measured="missing",
-            threshold="quick_check=ok,journal_mode=delete",
+            threshold="quick_check=ok,journal_mode in {delete,wal}, human transport clear",
             passed=False,
             reason=f"notification delivery outbox is missing: {database}",
         )
@@ -496,30 +584,67 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
             quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0]).lower()
             journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            scope_params = (*human_channels, *internal_sources)
             dead_letters = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_events WHERE status = 'failed'"
+                    f"""
+                    SELECT COUNT(*) FROM notification_events
+                    WHERE status = 'failed'
+                      AND {human_scope}
+                    """,
+                    scope_params,
                 ).fetchone()[0]
             )
             pending_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_events WHERE status = 'pending'"
+                    f"""
+                    SELECT COUNT(*) FROM notification_events
+                    WHERE status = 'pending'
+                      AND {human_scope}
+                    """,
+                    scope_params,
                 ).fetchone()[0]
             )
             claimed_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_events WHERE status = 'processing'"
+                    f"""
+                    SELECT COUNT(*) FROM notification_events
+                    WHERE status = 'processing'
+                      AND {human_scope}
+                    """,
+                    scope_params,
                 ).fetchone()[0]
             )
             uncertain_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_events WHERE status = 'uncertain'"
+                    f"""
+                    SELECT COUNT(*) FROM notification_events
+                    WHERE status = 'uncertain'
+                      AND {human_scope}
+                    """,
+                    scope_params,
                 ).fetchone()[0]
             )
             unknown_targets = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM notification_events "
-                    "WHERE status NOT IN ('pending', 'processing', 'delivered', 'failed', 'uncertain')"
+                    f"""
+                    SELECT COUNT(*) FROM notification_events
+                    WHERE {human_scope}
+                      AND status NOT IN (
+                        'pending', 'processing', 'delivered', 'failed', 'uncertain', 'cancelled'
+                      )
+                    """,
+                    scope_params,
+                ).fetchone()[0]
+            )
+            internal_backlog = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*) FROM notification_events
+                    WHERE status IN ('failed', 'uncertain', 'pending', 'processing')
+                      AND NOT ({human_scope})
+                    """,
+                    scope_params,
                 ).fetchone()[0]
             )
             terminal_receipt_schema_present = (
@@ -533,8 +658,16 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             terminal_receipts_pending = (
                 int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM notification_attempts "
-                        "WHERE finished_at IS NULL"
+                        f"""
+                        SELECT COUNT(*)
+                        FROM notification_attempts AS a
+                        JOIN notification_events AS e ON e.id = a.event_id
+                        WHERE a.finished_at IS NULL
+                          AND e.channel IN ({channel_filter})
+                          AND e.source NOT IN ({source_filter})
+                          AND e.channel != '__cancellation__'
+                        """,
+                        scope_params,
                     ).fetchone()[0]
                 )
                 if terminal_receipt_schema_present
@@ -544,13 +677,13 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         return OperationalCheck(
             name="notification_outbox_integrity",
             measured="unreadable",
-            threshold="quick_check=ok,journal_mode=delete",
+            threshold="quick_check=ok,journal_mode in {delete,wal}, human transport clear",
             passed=False,
             reason=f"notification delivery outbox check failed: {type(exc).__name__}",
         )
     passed = (
         quick_check == "ok"
-        and journal_mode == "delete"
+        and journal_mode in ALLOWED_OUTBOX_JOURNAL_MODES
         and pending_targets == 0
         and claimed_targets == 0
         and uncertain_targets == 0
@@ -564,17 +697,19 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         measured={
             "quick_check": quick_check,
             "journal_mode": journal_mode,
+            "human_transport_channels": human_channels,
             "pending_targets": pending_targets,
             "claimed_targets": claimed_targets,
             "uncertain_targets": uncertain_targets,
             "dead_letter_targets": dead_letters,
             "unknown_targets": unknown_targets,
+            "internal_backlog_targets": internal_backlog,
             "terminal_receipt_schema_present": terminal_receipt_schema_present,
             "terminal_receipts_pending": terminal_receipts_pending,
         },
         threshold={
             "quick_check": "ok",
-            "journal_mode": "delete",
+            "journal_mode": sorted(ALLOWED_OUTBOX_JOURNAL_MODES),
             "pending_targets": 0,
             "claimed_targets": 0,
             "uncertain_targets": 0,
@@ -582,13 +717,15 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
             "unknown_targets": 0,
             "terminal_receipt_schema_present": True,
             "terminal_receipts_pending": 0,
+            "scope": "human transport channels only",
         },
         passed=passed,
         reason=(
             f"outbox quick_check={quick_check}, journal_mode={journal_mode}, "
-            f"pending_targets={pending_targets}, claimed_targets={claimed_targets}, "
+            f"human pending_targets={pending_targets}, claimed_targets={claimed_targets}, "
             f"uncertain_targets={uncertain_targets}, "
             f"dead_letter_targets={dead_letters}, unknown_targets={unknown_targets}, "
+            f"internal_backlog_targets={internal_backlog} (diagnostic only), "
             f"terminal_receipt_schema_present={terminal_receipt_schema_present}, "
             f"terminal_receipts_pending={terminal_receipts_pending}"
         ),
@@ -625,6 +762,8 @@ def _ratio_operational_check(
     denominator: int,
     threshold: float,
     label: str,
+    *,
+    reason_suffix: str = "",
 ) -> OperationalCheck:
     ratio = numerator / denominator if denominator else 0.0
     return OperationalCheck(
@@ -632,7 +771,10 @@ def _ratio_operational_check(
         measured=round(ratio, 6),
         threshold=threshold,
         passed=denominator > 0 and ratio >= threshold,
-        reason=(f"{label} {numerator}/{denominator} ({ratio:.1%}); required >= {threshold:.0%}"),
+        reason=(
+            f"{label} {numerator}/{denominator} ({ratio:.1%}); "
+            f"required >= {threshold:.0%}{reason_suffix}"
+        ),
     )
 
 
@@ -751,6 +893,22 @@ def _has_valid_rth_market_state(row: Mapping[str, object]) -> bool:
         )
     ):
         return False
+    classification_tier = str(state.get("classification_tier") or "")
+    status = str(state.get("status") or "")
+    status_valid = (
+        (classification_tier == "complete" and token != "UNCERTAIN" and status == "ready")
+        or (
+            classification_tier == "directional_provisional"
+            and token in {"TREND_UP", "TREND_DOWN"}
+            and status == "provisional"
+        )
+        or (token == "UNCERTAIN" and status == "uncertain")
+        or (
+            classification_tier == "unavailable"
+            and token == "UNCERTAIN"
+            and status == "unavailable"
+        )
+    )
     return bool(
         state.get("schema_version") == MARKET_STATE_SCHEMA
         and state.get("rule_version") == MARKET_STATE_RULE
@@ -763,7 +921,7 @@ def _has_valid_rth_market_state(row: Mapping[str, object]) -> bool:
         and 0 <= available <= 8
         and isinstance(complete, bool)
         and complete is (available == 8)
-        and state.get("status") == ("uncertain" if token == "UNCERTAIN" else "ready")
+        and status_valid
     )
 
 
@@ -830,15 +988,19 @@ def main(argv: list[str] | None = None) -> int:
     notification = NotificationSettings.from_env()
     app_settings = load_app_settings()
     spring_settings = app_settings.spring_gamma_v3
-    spring_required = bool(spring_settings.enabled or spring_settings.report_enabled)
+    spring_required = bool(spring_settings.enabled)
+    spring_report_required = bool(spring_settings.report_enabled)
     report = build_rth_daily_acceptance(
         storage.data_root,
         trading_date=_resolve_trading_date(args.date, now=now),
         level_policy=app_settings.level_decision,
         outbox_path=notification.notification_database_path,
         receipt_path=None,
+        rust_delivery_ledger_path=notification.rust_delivery_ledger_path or None,
+        rust_report_owner=rust_report_owner_enabled(),
         now=now,
         spring_required=spring_required,
+        spring_report_required=spring_report_required,
     )
     session = DEFAULT_MARKET_CALENDAR.session(date.fromisoformat(str(report["trading_date"])))
     if session is None:  # build_rth_daily_acceptance already validated this date.

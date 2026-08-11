@@ -4,26 +4,25 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from spx_spark.application.market_features.trade_intent_runtime_support import (
-    _trade_ready_delivery_event_id,
-)
 from spx_spark.market_calendar import MarketSession
 from spx_spark.notifier.unified_delivery import notification_event_id
 
 
 MAX_TRADE_READY_FIRST_DELIVERY_SECONDS = 5.0
-LEGAL_TRADE_READY_TERMINAL_OUTCOMES = frozenset(
-    {"cancelled_before_delivery", "expired_before_delivery"}
-)
 MARKET_STATE_SCHEMA = "market_state_5m.v1"
 MARKET_STATE_RULE = "market_state_5m_eight_variable_rules.v2"
 TRADE_INTENT_PRODUCER_LEDGER_SCHEMA = "trade_intent_producer_ledger.v1"
+STRATEGY_SIGNAL_ENGINE_NAME = "strategy_signal_engine_v2"
+HUMAN_TRANSPORT_CHANNELS = frozenset({"bark", "bark_friend", "feishu"})
+INTERNAL_NOTIFICATION_SOURCES = frozenset(
+    {"alert_pipeline", "rust_ingress", "__cancellation__"}
+)
+ALLOWED_OUTBOX_JOURNAL_MODES = frozenset({"delete", "wal"})
 KNOWN_MARKET_STATES = frozenset(
     {
         "TREND_UP",
@@ -67,6 +66,9 @@ def report_event_id(
 def _unified_rows(
     path: str | Path | None,
     event_ids: Iterable[str],
+    *,
+    source: str | None = None,
+    lane: str | None = None,
 ) -> tuple[dict[str, list[sqlite3.Row]], str | None]:
     requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
     if path is None or not str(path):
@@ -77,8 +79,17 @@ def _unified_rows(
     if not requested:
         return {}, None
     placeholders = ",".join("?" for _ in requested)
+    filters = ""
+    parameters: list[object] = list(requested)
+    if source is not None:
+        filters += " AND e.source = ?"
+        parameters.append(source)
+    if lane is not None:
+        filters += " AND e.lane = ?"
+        parameters.append(lane)
     try:
         with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            connection.execute("PRAGMA query_only=ON")
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """
@@ -91,8 +102,10 @@ def _unified_rows(
                 LEFT JOIN notification_attempts AS a ON a.event_id = e.id
                 WHERE e.logical_event_id IN ("""
                 + placeholders
-                + ") ORDER BY e.logical_event_id, e.channel, a.id",
-                requested,
+                + ")"
+                + filters
+                + " ORDER BY e.logical_event_id, e.channel, a.id",
+                parameters,
             ).fetchall()
     except (OSError, sqlite3.Error) as exc:
         return {}, f"outbox_query_failed:{type(exc).__name__}"
@@ -125,11 +138,15 @@ def fully_delivered_event_ids(
     delivered: set[str] = set()
     for event_id in requested:
         rows = grouped.get(event_id, [])
-        channels = {str(row["channel"]) for row in rows if row["channel"] != "__cancellation__"}
+        channels = {
+            str(row["channel"])
+            for row in rows
+            if row["channel"] in HUMAN_TRANSPORT_CHANNELS
+        }
         if channels and all(
             str(row["status"]) == "delivered"
             for row in rows
-            if row["channel"] != "__cancellation__"
+            if row["channel"] in HUMAN_TRANSPORT_CHANNELS
         ):
             delivered.add(event_id)
     return frozenset(delivered)
@@ -185,10 +202,12 @@ def timely_delivered_event_ids(
     event_ids: Iterable[str],
     *,
     receipt_path: str | Path | None = None,
+    source: str | None = None,
+    lane: str | None = None,
 ) -> tuple[frozenset[str], dict[str, object]]:
     del receipt_path
     requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
-    grouped, error = _unified_rows(path, requested)
+    grouped, error = _unified_rows(path, requested, source=source, lane=lane)
     if error is not None:
         return frozenset(), {"status": error, "events": {}}
     accepted: set[str] = set()
@@ -197,7 +216,7 @@ def timely_delivered_event_ids(
         all_rows = grouped.get(event_id, [])
         channels: dict[str, list[sqlite3.Row]] = {}
         for row in all_rows:
-            if row["channel"] != "__cancellation__":
+            if row["channel"] in HUMAN_TRANSPORT_CHANNELS:
                 channels.setdefault(str(row["channel"]), []).append(row)
         reasons: list[str] = []
         receipt_ids: list[str] = []
@@ -216,10 +235,7 @@ def timely_delivered_event_ids(
                 for row in rows
                 if row["ok"] == 1
                 and row["finished_at"] is not None
-                and (
-                    str(row["outcome"]) == "delivered"
-                    or (channel == "rust_ingress" and str(row["outcome"]) == "forwarded_to_rust")
-                )
+                and str(row["outcome"]) == "delivered"
             ]
             if not successful:
                 reasons.append(f"success_attempt_missing:{channel}")
@@ -259,17 +275,19 @@ def explicitly_terminal_event_ids(
     event_ids: Iterable[str],
     *,
     receipt_path: str | Path | None = None,
+    source: str | None = None,
+    lane: str | None = None,
 ) -> tuple[frozenset[str], dict[str, object]]:
     del receipt_path
     requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
-    grouped, error = _unified_rows(path, requested)
+    grouped, error = _unified_rows(path, requested, source=source, lane=lane)
     if error is not None:
         return frozenset(), {"status": error, "events": {}}
     accepted: set[str] = set()
     diagnostics: dict[str, object] = {}
     for event_id in requested:
         rows = grouped.get(event_id, [])
-        targets = [row for row in rows if row["channel"] != "__cancellation__"]
+        targets = [row for row in rows if row["channel"] in HUMAN_TRANSPORT_CHANNELS]
         fenced = any(row["channel"] == "__cancellation__" for row in rows)
         reasons: list[str] = []
         if not fenced:
@@ -295,181 +313,211 @@ def explicitly_terminal_event_ids(
     return frozenset(accepted), {"status": "ready", "events": diagnostics}
 
 
+def rust_scheduled_report_events(
+    ledger_path: str | Path | None,
+    expected_slots: Iterable[datetime],
+) -> tuple[dict[datetime, str], dict[str, object]]:
+    """Map expected RTH slots to Rust ``scheduled_report`` event ids."""
+
+    expected = tuple(expected_slots)
+    slot_by_key = {slot.isoformat(): slot for slot in expected}
+    if ledger_path is None or not str(ledger_path):
+        return {}, {"status": "not_configured", "events": {}}
+    database = Path(ledger_path)
+    if not database.exists():
+        return {}, {"status": "ledger_missing", "events": {}}
+    if not expected:
+        return {}, {"status": "ready", "events": {}}
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT event_id, report_slot, created_at_us
+                FROM notification_events
+                WHERE lane = 'scheduled_report'
+                  AND report_slot IN ({placeholders})
+                ORDER BY report_slot, created_at_us
+                """.format(placeholders=",".join("?" for _ in slot_by_key)),
+                tuple(slot_by_key),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        return {}, {"status": f"ledger_query_failed:{type(exc).__name__}", "events": {}}
+    by_slot: dict[datetime, str] = {}
+    diagnostics: dict[str, object] = {}
+    for row in rows:
+        slot = slot_by_key.get(str(row["report_slot"]))
+        if slot is None or slot in by_slot:
+            continue
+        event_id = str(row["event_id"])
+        by_slot[slot] = event_id
+        diagnostics[slot.isoformat()] = {"event_id": event_id}
+    return by_slot, {"status": "ready", "events": diagnostics}
+
+
+def rust_fully_delivered_event_ids(
+    ledger_path: str | Path | None,
+    event_ids: Iterable[str],
+) -> frozenset[str]:
+    """Accept a Rust intent only when every human transport target is delivered."""
+
+    requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
+    if ledger_path is None or not str(ledger_path) or not requested:
+        return frozenset()
+    database = Path(ledger_path)
+    if not database.exists():
+        return frozenset()
+    placeholders = ",".join("?" for _ in requested)
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""
+                SELECT event_id, channel, status
+                FROM notification_targets
+                WHERE event_id IN ({placeholders})
+                  AND channel IN ('bark', 'bark_friend', 'feishu')
+                ORDER BY event_id, channel, target_key
+                """,
+                requested,
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return frozenset()
+    by_event: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_event.setdefault(str(row["event_id"]), []).append(row)
+    delivered: set[str] = set()
+    for event_id in requested:
+        targets = by_event.get(event_id, [])
+        if targets and all(str(row["status"]) == "delivered" for row in targets):
+            delivered.add(event_id)
+    return frozenset(delivered)
+
+
 def trade_ready_delivery_check(
-    producer_rows: Iterable[Mapping[str, object]],
+    database_path: str | Path | None,
     *,
-    trade_intent_rows: Iterable[Mapping[str, object]],
+    trading_date: str,
     outbox_path: str | Path | None,
     receipt_path: str | Path | None,
 ) -> OperationalCheck:
-    producer_rows = tuple(producer_rows)
-    trade_intent_rows = tuple(trade_intent_rows)
-    expectation_rows = tuple(
-        row for row in producer_rows if row.get("record_type") == "trade_ready_delivery_expectation"
-    )
-    expectations_by_event: dict[str, str] = {}
-    events_by_semantic: dict[str, set[str]] = {}
-    expectation_conflicts: set[str] = set()
-    malformed_expectations = 0
-    for row in expectation_rows:
-        semantic = str(row.get("semantic_key") or "")
-        event_id = str(row.get("delivery_event_id") or "")
-        if not semantic or not event_id:
-            malformed_expectations += 1
-            continue
-        previous = expectations_by_event.get(event_id)
-        if previous is not None and previous != semantic:
-            expectation_conflicts.add(event_id)
-            continue
-        expectations_by_event[event_id] = semantic
-        events_by_semantic.setdefault(semantic, set()).add(event_id)
+    """Settle Trade Ready against strategy_decision opportunities and outbox."""
 
-    signal_rows = tuple(row for row in trade_intent_rows if _is_trade_ready_signal(row))
-    ready_rows = tuple(row for row in signal_rows if row.get("status") == "trade_ready")
-    diagnostic_rows = tuple(row for row in signal_rows if row.get("status") != "trade_ready")
-    signaled_by_event: dict[str, str] = {}
-    audit_conflicts: set[str] = set()
-    malformed_signal_rows = 0
-    malformed_ready_rows = 0
-    for row in signal_rows:
-        semantic = str(row.get("semantic_key") or "")
-        event_id = _trade_ready_delivery_event_id(row)
-        if not semantic or not event_id:
-            malformed_signal_rows += 1
-            if row.get("status") == "trade_ready":
-                malformed_ready_rows += 1
-            continue
-        previous = signaled_by_event.get(event_id)
-        if previous is not None and previous != semantic:
-            audit_conflicts.add(event_id)
-            continue
-        signaled_by_event[event_id] = semantic
+    decision_rows: tuple[tuple[object, ...], ...] = ()
+    decision_status = "not_configured"
+    database = Path(database_path) if database_path else None
+    if database is not None and database.exists():
+        try:
+            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                decision_rows = tuple(
+                    connection.execute(
+                        """
+                        SELECT decision_id, attributes_json
+                        FROM decisions
+                        WHERE session_date = ?
+                          AND strategy_name = ?
+                          AND status = 'selected'
+                        ORDER BY decision_at, decision_id
+                        """,
+                        (trading_date, STRATEGY_SIGNAL_ENGINE_NAME),
+                    ).fetchall()
+                )
+            decision_status = "ready"
+        except (OSError, sqlite3.Error) as exc:
+            decision_status = f"query_failed:{type(exc).__name__}"
+    elif database is not None:
+        decision_status = "database_missing"
 
-    executable_by_event = {
-        event_id: semantic
-        for row in ready_rows
-        if (event_id := _trade_ready_delivery_event_id(row))
-        and (semantic := str(row.get("semantic_key") or ""))
+    opportunity_ids: set[str] = set()
+    malformed_decisions = 0
+    for _decision_id, attributes_json in decision_rows:
+        try:
+            attributes = json.loads(str(attributes_json))
+        except (TypeError, json.JSONDecodeError):
+            malformed_decisions += 1
+            continue
+        if not isinstance(attributes, dict) or attributes.get("action_authority") != "manual":
+            continue
+        candidate = attributes.get("candidate")
+        opportunity_id = (
+            str(candidate.get("opportunity_id") or "").strip()
+            if isinstance(candidate, dict)
+            else ""
+        )
+        if not opportunity_id:
+            malformed_decisions += 1
+            continue
+        opportunity_ids.add(opportunity_id)
+    expectations_by_event = {
+        f"{opportunity_id}:ready": opportunity_id for opportunity_id in opportunity_ids
     }
-
     expected_ids = set(expectations_by_event)
-    signaled_ids = set(signaled_by_event)
-    executable_ids = set(executable_by_event)
-    diagnostic_only_ids = signaled_ids - executable_ids
-    missing_expectation_events = sorted(signaled_ids - expected_ids)
-    expectation_without_audit_events = sorted(expected_ids - signaled_ids)
-    semantic_mismatch_events = sorted(
-        event_id
-        for event_id in expected_ids & signaled_ids
-        if expectations_by_event[event_id] != signaled_by_event[event_id]
-    )
     delivered, delivery_diagnostics = timely_delivered_event_ids(
         outbox_path,
         expected_ids,
         receipt_path=receipt_path,
+        source="strategy_decision",
+        lane="trade_ready",
     )
     terminal, terminal_diagnostics = explicitly_terminal_event_ids(
         outbox_path,
         expected_ids - set(delivered),
         receipt_path=receipt_path,
+        source="strategy_decision",
+        lane="trade_ready",
     )
     accepted_ids = set(delivered) | set(terminal)
     missing_delivery_events = sorted(expected_ids - accepted_ids)
-    delivered_semantics = {
-        semantic
-        for semantic, event_ids in events_by_semantic.items()
-        if event_ids <= set(delivered)
-    }
-    terminal_semantics = {
-        semantic
-        for semantic, event_ids in events_by_semantic.items()
-        if event_ids <= accepted_ids and bool(event_ids & set(terminal))
-    }
-    missing_delivery_semantics = sorted(
-        {expectations_by_event[event_id] for event_id in missing_delivery_events}
-    )
-    passed = not any(
-        (
-            malformed_expectations,
-            malformed_signal_rows,
-            expectation_conflicts,
-            audit_conflicts,
-            missing_expectation_events,
-            expectation_without_audit_events,
-            semantic_mismatch_events,
-            missing_delivery_events,
-        )
+    passed = (
+        decision_status == "ready"
+        and malformed_decisions == 0
+        and not missing_delivery_events
     )
     reason = (
-        "producer coverage is evaluated separately; no TradeReady delivery was expected"
-        if not expectations_by_event and not signal_rows
+        "producer coverage is evaluated separately; no strategy_decision "
+        "TradeReady delivery was expected"
+        if decision_status == "ready" and not expectations_by_event
         else (
-            f"settled TradeReady delivery events "
+            f"settled strategy_decision TradeReady events "
             f"{len(accepted_ids)}/{len(expectations_by_event)} "
             f"(delivered {len(delivered)}, source-terminal {len(terminal)}); "
-            f"malformed expectations {malformed_expectations}; "
-            f"malformed signal audit rows {malformed_signal_rows}"
+            f"unique opportunities {len(opportunity_ids)}; "
+            f"decision query {decision_status}"
         )
     )
     return OperationalCheck(
         name="trade_ready_notification_delivery",
         measured={
-            "expectation_rows": len(expectation_rows),
-            "expected_semantics": len(events_by_semantic),
+            "authority": "strategy_decision",
+            "trading_date": trading_date,
+            "decision_query_status": decision_status,
+            "selected_decision_rows": len(decision_rows),
+            "malformed_selected_decisions": malformed_decisions,
+            "expected_opportunities": len(opportunity_ids),
             "expected_events": len(expectations_by_event),
-            "signal_rows": len(signal_rows),
-            "ready_rows": len(ready_rows),
-            "diagnostic_signal_rows": len(diagnostic_rows),
-            "audited_events": len(signaled_by_event),
-            "signal_events": len(signaled_by_event),
-            "executable_ready_events": len(executable_by_event),
-            "diagnostic_only_events": len(diagnostic_only_ids),
-            "diagnostic_only_event_ids": sorted(diagnostic_only_ids),
-            "diagnostic_status_counts": dict(
-                sorted(
-                    Counter(str(row.get("status") or "unknown") for row in diagnostic_rows).items()
-                )
-            ),
-            "candidate_events": len(expected_ids),
             "timely_delivered_events": len(delivered),
             "explicitly_terminal_events": len(terminal),
             "accepted_events": len(accepted_ids),
-            "delivered_semantics": len(delivered_semantics),
-            "terminally_settled_semantics": len(terminal_semantics),
-            "malformed_expectations": malformed_expectations,
-            "malformed_signal_rows": malformed_signal_rows,
-            "malformed_ready_rows": malformed_ready_rows,
-            "expectation_identity_conflicts": sorted(expectation_conflicts),
-            "audit_identity_conflicts": sorted(audit_conflicts),
-            "missing_expectation_events": missing_expectation_events,
-            "expectation_without_audit_events": expectation_without_audit_events,
-            "semantic_mismatch_events": semantic_mismatch_events,
             "missing_delivery_events": missing_delivery_events,
-            "missing_delivery_semantics": missing_delivery_semantics,
             "event_diagnostics": delivery_diagnostics,
             "terminal_diagnostics": terminal_diagnostics,
         },
         threshold=(
-            "every unique TradeReady expectation event exactly matches a "
-            "signal audit event; only status=trade_ready is executable, and "
-            "each event is either fully delivered before expiry with "
-            "first delivery <=5s and real receipt mirrors, or has explicit "
-            "per-target cancellation/expiry receipt mirrors"
+            "every unique manual strategy_decision opportunity has "
+            "notification_events(source=strategy_decision,lane=trade_ready) "
+            "that are either fully delivered before expiry with first delivery "
+            "<=5s and real receipt mirrors, or have explicit per-target "
+            "cancellation/expiry receipt mirrors"
         ),
         passed=passed,
         reason=reason,
     )
 
 
-def _is_trade_ready_signal(row: Mapping[str, object]) -> bool:
-    status = str(row.get("status") or "")
-    return bool(
-        status == "trade_ready"
-        or (
-            row.get("signal_status") == "trade_ready"
-            and status in {"ready_pending_delivery", "delivery_blocked"}
-        )
-    )
+strategy_decision_trade_ready_delivery_check = trade_ready_delivery_check
 
 
 def parse_at(value: object) -> datetime | None:

@@ -109,8 +109,8 @@ dead process's last `process_active=true` observation from remaining trusted.
 
 ## Daily hard acceptance
 
-At 17:30 ET on each trading day,
-`spx-spark-rth-daily-acceptance.timer` writes:
+At 19:00 ET on each trading day — after `spx-spark-session-finalize` owns the
+post-close review artifact — `spx-spark-rth-daily-acceptance.timer` writes:
 
 - `reports/rth_daily_acceptance/date=YYYY-MM-DD/acceptance.json`;
 - `latest/rth_daily_acceptance.json`;
@@ -118,46 +118,52 @@ At 17:30 ET on each trading day,
 
 The operational verdict always checks:
 
-- 100% of expected RTH report and delivery slots;
+- 100% of expected RTH report and delivery slots. When
+  `SPX_RUST_REPORT_OWNER=true`, slots and human delivery are read from
+  `notification.rust_delivery_ledger_path` (`scheduled_report` intents /
+  targets). Python `report_kind=status_snapshot` rows are projection inputs
+  only and never count as delivered reports;
 - 100% of the expected five-minute TradeIntent producer-heartbeat slots, plus
   parseable producer-ledger and TradeIntent audit records;
-- every unique persisted `trade_ready` intent has a durable Outbox event with
-  the exact semantic identity, at least one target, all targets delivered
-  before signal expiry, first delivery within five seconds, and a mirrored
-  success receipt for every target; each rearmed delivery event is checked
-  independently, while a source-terminal cancellation/expiry is accepted only
-  with an explicit mirrored receipt for every target; zero ready intents passes
-  only when the producer-heartbeat and audit-integrity checks pass;
+- every unique manual `strategy_decision` opportunity for the session date has
+  a durable `notification_events(source=strategy_decision,lane=trade_ready)`
+  event with at least one human target, all targets delivered before signal
+  expiry, first delivery within five seconds, and a mirrored success receipt
+  for every target; a source-terminal cancellation/expiry is accepted only
+  with an explicit mirrored receipt for every target; zero ready opportunities
+  passes only when the producer-heartbeat and audit-integrity checks pass;
 - the post-close raw market-data completeness verdict;
-- notification Outbox `quick_check=ok`, rollback journal mode, zero pending or
-  claimed targets, zero unacknowledged dead letters, no unknown status, and
-  zero terminal receipts awaiting receipt-store mirroring;
-- notification receipt-store `quick_check=ok`, rollback journal mode,
-  `synchronous=FULL`, exact schema, and a real mirror row for every Outbox
-  receipt ID;
+- notification Outbox `quick_check=ok`, journal mode `delete` or `wal`, and
+  zero pending/claimed/uncertain/failed/unknown human transport targets
+  (`bark` / `bark_friend` / `feishu`); internal backlog such as
+  `alert_pipeline`, `__cancellation__`, or `rust_ingress` is reported as
+  diagnostic only and does not fail the human-transport gate;
+- notification receipt-store `quick_check=ok` with the unified event/attempt
+  schema present on `spx.sqlite`;
 - formal level-decision authority is either disabled or backed by passed
   statistical acceptance gates.
 
-Spring is an isolated research dependency. When either Spring computation or
-report projection is enabled, acceptance additionally requires at least 95%
-of its expected RTH minute slots, at least 75% ready option overlays, and at
-least 95% report projection and rolling-window attachment. When both
-production flags are disabled, those Spring-only checks are omitted; they
-cannot degrade the live data, opportunity, report-delivery, or TradeReady
-verdicts.
+Spring is an isolated research dependency. When Spring computation is enabled,
+acceptance additionally requires at least 95% of its expected RTH minute slots
+and at least 75% ready option overlays. Report Spring projection and
+rolling-window attachment (≥95%) are required only when
+`spring_gamma_v3.report_enabled=true`. When both production flags are
+disabled, those Spring-only checks are omitted; they cannot degrade the live
+data, opportunity, report-delivery, or TradeReady verdicts.
 
 A historical replay from an intermediate quote-clock implementation is not a
 daily acceptance result. In particular, the 2026-07-24 `269/390` replay
 predated the final per-leg fail-closed and 13-pair production contract and was
 not persisted as a versioned replay artifact. The first full forward
-acceptance for this contract is 2026-07-27 RTH, with its verdict scheduled at
-17:30 ET. See
+acceptance for this contract is 2026-07-27 RTH; the daily verdict now runs at
+19:00 ET after session finalize. See
 [SPXW raw → merge → feature clock contract](spxw-option-clock-contract.md)
 for the evidence boundary and exact acceptance targets.
 
-A report slot counts as delivered only when its persisted Outbox event has at
-least one target and every target is `delivered`; the legacy
-`delivered_ok=any_sink` audit flag cannot satisfy this gate.
+A Rust-owned report slot counts as delivered only when its `scheduled_report`
+intent has at least one human transport target and every such target is
+`delivered`. The legacy `delivered_ok=any_sink` audit flag cannot satisfy this
+gate.
 
 A degraded verdict exits non-zero for systemd visibility and queues one
 idempotent `ops_transition` alert. Statistical level-decision promotion gates
