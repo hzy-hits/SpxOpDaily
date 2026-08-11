@@ -438,6 +438,77 @@ def test_missing_live_spx_labels_latched_decision_spot_as_non_actionable_referen
     assert "Gamma位置 Flip 位置 unavailable" in sections.location
 
 
+def test_gth_location_uses_chain_implied_or_es_not_cash_spx_missing() -> None:
+    gth_now = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    payload = _payload()
+    payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}
+    payload["underlier"] = {
+        "price": 7758.7,
+        "source": "chain_implied",
+        "kind": "chain_implied_spx",
+        "observed_value": 7758.7,
+        "spx_observed_value": 7758.7,
+    }
+    payload["trigger_coordinate"] = {
+        "kind": "chain_implied_spx",
+        "observed_value": 7758.7,
+        "spx_observed_value": 7758.7,
+        "source": "chain_implied",
+    }
+    payload["es_last"] = 7782.0
+    payload["option_structure_frame"] = {
+        "as_of": gth_now.isoformat(),
+        "quality": "ready",
+        "l1": {"quality": "ready"},
+        "diagnostics": {"max_quote_age_seconds": 90.0},
+        "structure": {
+            "put_wall": 7700.0,
+            "flip_zone": [7740.0, 7745.0],
+            "call_wall": 7775.0,
+            "gex_quality": "open_interest_gex",
+        },
+    }
+    payload["flip_zone"] = [7740.0, 7745.0]
+
+    sections = build_desk_message_sections(payload, gth_now)
+
+    assert "夜盘观察坐标 7758.7（期权隐含）" in sections.location
+    assert "可用 SPX 坐标缺失" not in sections.desk_view
+    assert "SPX unavailable" not in sections.location
+    assert "Put/Flip/Call 7700 / 7740–7745 / 7775 · event=live" in sections.structure
+    assert "event=live" in sections.structure
+    assert "frozen/reference" not in sections.structure
+
+
+def test_gth_missing_coordinate_does_not_demand_cash_spx() -> None:
+    gth_now = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    payload = _payload()
+    payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}
+    payload["underlier"] = {"price": None, "source": None}
+    payload["es_last"] = 7782.0
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "session_mode": "gth",
+        "spot": 7756.65,
+        "trigger_coordinate_kind": "es_equivalent",
+    }
+    payload["option_structure_frame"] = {
+        "as_of": gth_now.isoformat(),
+        "quality": "unavailable",
+        "l1": {"quality": "unavailable"},
+        "diagnostics": {"max_quote_age_seconds": 90.0},
+        "structure": {},
+    }
+
+    sections = build_desk_message_sections(payload, gth_now)
+
+    assert "夜盘观察坐标" in sections.location
+    assert "现金 SPX 不适用" in sections.location
+    assert "SPX unavailable" not in sections.location
+    assert "GTH期权帧未就绪" in sections.structure
+    assert "frozen/reference" not in sections.structure
+
+
 @pytest.mark.parametrize(
     "frame_update",
     (

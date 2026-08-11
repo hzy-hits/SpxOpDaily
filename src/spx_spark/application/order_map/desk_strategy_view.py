@@ -117,7 +117,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "surface_shape_d4_peak": "曲面呈峰形（仅研究）",
         "surface_shape_low_snr": "曲面信号噪声比偏低（仅研究）",
         "pricing_not_authorized": "定价未授权，不能当作可执行候选",
-        "spx_price_unavailable": "可用 SPX 坐标缺失",
+        "spx_price_unavailable": "触发坐标不可用（RTH 需现金 SPX；GTH 需期权隐含或 ES 折算）",
         "macro_entry_not_authorized": "宏观事件窗口禁止新建议",
         "session_not_open_for_spxw_strategy": "当前不在可评估 SPXW 的时段",
         "no_supported_strategy_candidate": "没有通过门控的可交易候选",
@@ -148,7 +148,7 @@ def humanize_strategy_reason(reason: str) -> str:
 
 def quality_reason_text(reason: str) -> str:
     labels = {
-        "spx_price_unavailable": "SPX 触发坐标不可用，不能确认方向",
+        "spx_price_unavailable": "触发坐标不可用（GTH 以期权隐含/ES 为准，不要求现金 SPX）",
         "option_frame:unavailable": "期权结构帧不可用，Gamma 与墙位不可靠",
         "option_frame:degraded": "期权结构帧降级",
         "option_l1:unavailable": "SPXW 双边报价不可用",

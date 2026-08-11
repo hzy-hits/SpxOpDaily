@@ -93,6 +93,7 @@ from spx_spark.application.order_map.spring_gamma_projection import (
     attach_spring_gamma_v3_shadow,
 )
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
+from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
 from spx_spark.application.order_map.state import (
     REFRESH_COOLDOWN_SECONDS_DEFAULT,
     already_sent,
@@ -441,6 +442,10 @@ def build_order_payload_with_retry(
     attach_convexity_idea_radar(payload, now=evaluation_now)
     if state is None:
         raise RuntimeError("order map did not load a latest state")
+    # Desk/strategy must use the same GTH coordinate contract as market_features:
+    # chain-implied SPX, else ES+basis. Do not leave underlier empty just because
+    # cash SPX is closed or Hyperliquid pricing gates blocked trade math.
+    _attach_strategy_trigger_coordinate(payload, state, now=evaluation_now)
     payload["strategy_decision"] = build_strategy_decision(
         payload,
         state,
@@ -449,6 +454,61 @@ def build_order_payload_with_retry(
         probability_settings=app.strategy_distribution,
     )
     return payload
+
+
+def _attach_strategy_trigger_coordinate(
+    payload: dict[str, Any],
+    state: LatestState,
+    *,
+    now: datetime,
+) -> None:
+    """Fill underlier/spot/trigger_coordinate from the shared trigger contract."""
+
+    options_map = build_options_map(state)
+    decision = payload.get("level_decision")
+    decision = decision if isinstance(decision, dict) else {}
+    market = payload.get("minute_market_frame")
+    market = market if isinstance(market, dict) else {}
+    cross_asset = market.get("cross_asset")
+    cross_asset = cross_asset if isinstance(cross_asset, dict) else {}
+    basis = finite_float(decision.get("trigger_basis_points"))
+    if basis is None:
+        basis = finite_float(cross_asset.get("es_spx_basis_points"))
+    coordinate = resolve_trigger_coordinate(
+        state,
+        options_map,
+        now=now,
+        qualified_es_basis=basis,
+    )
+    payload["trigger_coordinate"] = coordinate.to_dict()
+    if not coordinate.usable:
+        return
+    source = (
+        "chain_implied"
+        if coordinate.kind.value == "chain_implied_spx"
+        else str(coordinate.source)
+    )
+    spot = {
+        "price": coordinate.spx_observed_value,
+        "spx_observed_value": coordinate.spx_observed_value,
+        "observed_value": coordinate.observed_value,
+        "source": source,
+        "kind": coordinate.kind.value,
+        "basis": coordinate.basis_points,
+        "basis_points": coordinate.basis_points,
+        "instrument_id": coordinate.instrument_id,
+    }
+    payload["underlier"] = {
+        "price": coordinate.spx_observed_value,
+        "source": source,
+        "kind": coordinate.kind.value,
+        "spx_observed_value": coordinate.spx_observed_value,
+        "observed_value": coordinate.observed_value,
+        "basis": coordinate.basis_points,
+        "basis_points": coordinate.basis_points,
+        "instrument_id": coordinate.instrument_id,
+    }
+    payload["spot"] = dict(spot)
 
 
 def run_status(

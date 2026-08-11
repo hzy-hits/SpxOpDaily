@@ -360,23 +360,72 @@ def _desk_view_line(
 
 
 def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) -> str:
+    decision = _mapping(payload.get("level_decision"))
+    gth = current_session_is_gth(payload, decision)
     underlier = _mapping(payload.get("underlier"))
-    spx = finite_float(underlier.get("price"))
-    actionable_spx = spx
-    source = str(underlier.get("source") or "")
-    if spx is None:
-        decision = _mapping(payload.get("level_decision"))
-        spx = finite_float(decision.get("spot"))
-        spx_text = "unavailable"
-        if spx is not None:
-            spx_text += (
-                f" · reference {spx:g}（{_decision_spot_reference_label(decision)}；"
-                "latched/proxy，not actionable）"
-            )
+    coordinate = _mapping(payload.get("trigger_coordinate"))
+    strategy_spot = _mapping(
+        _mapping(_mapping(payload.get("strategy_decision")).get("market_facts")).get("spot")
+    )
+    kind = str(
+        underlier.get("kind") or coordinate.get("kind") or strategy_spot.get("kind") or ""
+    ).strip()
+    source = str(
+        underlier.get("source") or strategy_spot.get("source") or coordinate.get("source") or ""
+    )
+    actionable_spx = _first_finite(
+        underlier.get("price"),
+        underlier.get("spx_observed_value"),
+        strategy_spot.get("spx"),
+        strategy_spot.get("spx_observed_value"),
+        coordinate.get("spx_observed_value"),
+    )
+    observed = _first_finite(
+        underlier.get("observed_value"),
+        strategy_spot.get("observed_value"),
+        coordinate.get("observed_value"),
+        actionable_spx,
+    )
+    market = _mapping(payload.get("minute_market_frame"))
+    es = _mapping(market.get("es"))
+    es_last = finite_float(payload.get("es_last"))
+    if es_last is None:
+        es_last = finite_float(es.get("price"))
+    if es_last is None:
+        es_last = finite_float(strategy_spot.get("es"))
+    if actionable_spx is not None or observed is not None:
+        display = actionable_spx if actionable_spx is not None else observed
+        source_text = _coordinate_source_label(kind=kind, source=source)
+        if gth or kind in {"chain_implied_spx", "es_equivalent"}:
+            spx_text = f"{_dash(display)}"
+            if source_text:
+                spx_text += f"（{source_text}）"
+            location_head = f"夜盘观察坐标 {spx_text}"
+        else:
+            spx_text = _dash(display)
+            if source and source != "index:SPX":
+                spx_text += f"（{underlier_source_label(source)}）"
+            location_head = f"SPX {spx_text}"
     else:
-        spx_text = _dash(spx)
-        if source and source != "index:SPX":
-            spx_text += f"（{underlier_source_label(source)}）"
+        latched = finite_float(decision.get("spot"))
+        if gth:
+            spx_text = "暂缺（现金 SPX 不适用；等待期权隐含或带基差 ES）"
+            if es_last is not None:
+                spx_text = f"暂缺 · ES {_dash(es_last)} 可参考（现金 SPX 不适用）"
+            elif latched is not None:
+                spx_text += (
+                    f" · latched {latched:g}（{_decision_spot_reference_label(decision)}；"
+                    "非当前可行动坐标）"
+                )
+            location_head = f"夜盘观察坐标 {spx_text}"
+        else:
+            spx_text = "unavailable"
+            if latched is not None:
+                spx_text += (
+                    f" · reference {latched:g}（{_decision_spot_reference_label(decision)}；"
+                    "latched/proxy，not actionable）"
+                )
+            location_head = f"SPX {spx_text}"
     level_text = ""
     if projection.level is not None:
         distance = (
@@ -385,11 +434,6 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
         level_text = f" · {level_kind_label(projection.level_kind)} {projection.level:g}" + (
             f" · 距离 {distance:.1f}pt" if distance is not None else ""
         )
-    market = _mapping(payload.get("minute_market_frame"))
-    es = _mapping(market.get("es"))
-    es_last = finite_float(payload.get("es_last"))
-    if es_last is None:
-        es_last = finite_float(es.get("price"))
     vwap = finite_float(es.get("vwap"))
     vwap_distance = finite_float(es.get("vwap_distance_points"))
     vwap_text = "ES VWAP unavailable"
@@ -400,11 +444,31 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
     elif vwap is not None:
         vwap_text += "（偏离 unavailable）"
     return (
-        f"Location  SPX {spx_text} · ES {_available_number(es_last)}"
+        f"Location  {location_head} · ES {_available_number(es_last)}"
         f"{level_text} · {_gamma_location_text(payload, actionable_spx)} · {vwap_text} · "
         f"{_opening_range_text(payload)} · "
         f"{expected_move_text(payload)}"
     )
+
+
+def _coordinate_source_label(*, kind: str, source: str) -> str:
+    if kind == "chain_implied_spx" or source == "chain_implied":
+        return "期权隐含"
+    if kind == "es_equivalent" or source.startswith("future:ES"):
+        return "ES折算"
+    if kind == "official_spx" or source == "index:SPX":
+        return "现金指数"
+    if source:
+        return underlier_source_label(source)
+    return ""
+
+
+def _first_finite(*values: object) -> float | None:
+    for value in values:
+        parsed = finite_float(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _decision_spot_reference_label(decision: Mapping[str, Any]) -> str:
@@ -471,14 +535,47 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
         finite_float(frozen.get(key)) == finite_float(live.get(key))
         for key in ("put_wall", "flip_low", "flip_high", "call_wall")
     )
+    frame = _mapping(payload.get("option_structure_frame"))
+    l1 = _mapping(frame.get("l1"))
+    structure = _mapping(frame.get("structure"))
+    frame_flip = structure.get("flip_zone")
+    frame_has_walls = any(
+        finite_float(structure.get(key)) is not None for key in ("put_wall", "call_wall")
+    ) or (
+        isinstance(frame_flip, list | tuple)
+        and len(frame_flip) >= 2
+        and finite_float(frame_flip[0]) is not None
+        and finite_float(frame_flip[1]) is not None
+    )
+    frame_ready = (
+        str(frame.get("quality") or "").lower() == "ready"
+        and str(l1.get("quality") or "").lower() == "ready"
+        and structure.get("frozen") is not True
+        and frame_has_walls
+    )
     live_frame = option_structure_frame_is_live(payload, now=now)
-    if live_frame:
+    gth = current_session_is_gth(payload, decision)
+    if frame_ready:
+        # GTH/RTH option-frame walls own the first Structure line.
+        levels = f"Put/Flip/Call {live_text} · event=live"
+        source_label = "source=live"
+        current_levels = live
+    elif live_frame:
         levels = (
             f"Put/Flip/Call {frozen_text} · event=live"
             if same
             else f"event {frozen_text} · live {live_text}"
         )
         source_label = "source=live"
+        current_levels = frozen if frozen else live
+    elif gth:
+        levels = (
+            f"Put/Flip/Call {frozen_text} · GTH期权帧未就绪（参考位，非当前确认）"
+            if frozen
+            else f"Put/Flip/Call {live_text} · GTH期权帧未就绪"
+        )
+        source_label = "source=gth_reference_pending"
+        current_levels = frozen if frozen else live
     else:
         levels = (
             f"Put/Flip/Call {frozen_text} · event=frozen/reference"
@@ -486,9 +583,10 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
             else f"event {frozen_text} · reference {live_text}"
         )
         source_label = "source=frozen/reference · live confirmation unavailable"
+        current_levels = frozen if frozen else live
     change_line = _structure_change_line(
         decision,
-        current_levels=frozen if frozen else live,
+        current_levels=current_levels,
         source_label=source_label,
     )
     parts = [f"Structure  {levels}"]

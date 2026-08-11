@@ -100,7 +100,7 @@ def build_desk_map_wire(
         quality_reasons = list(dict.fromkeys(quality_reasons))
     fingerprint = _structure_fingerprint(payload, projection, slot_key)
     observed_through = _observed_through(payload, now)
-    research_context, research_context_reason = _research_context(
+    research_context, _research_context_reason = _research_context(
         storage,
         published_at,
         trading_date=trading_date,
@@ -115,29 +115,8 @@ def build_desk_map_wire(
     desk_view = sections.desk_view
     if context := _operator_context(payload).strip():
         desk_view = f"{desk_view}\n{context}"
-    research_summary = _research_advisory_summary(research_context, session=session)
-    if research_summary is not None:
-        desk_view = f"{desk_view}\n{research_summary}"
-    distribution, distribution_reason = _strategy_distribution_forecast(
-        storage,
-        published_at,
-        trading_date=trading_date,
-        session=session,
-    )
-    distribution_summary = _strategy_distribution_summary(distribution)
-    if distribution_summary is not None:
-        desk_view = f"{desk_view}\n{distribution_summary}"
+    # Uncalibrated HMM / P-vs-Q stays on the audit wire only; never on Desk View.
     data_quality = sections.data_quality
-    if research_context_reason is not None:
-        data_quality = (
-            f"{data_quality}\n研究层：暂不可用（"
-            f"{_research_context_reason_text(research_context_reason)}）；不影响执行数据评级"
-        )
-    if distribution_reason is not None:
-        data_quality = (
-            f"{data_quality}\nP/Q实验：当前无新鲜结果（{distribution_reason}）；"
-            "不影响价格触发或执行数据评级"
-        )
 
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,

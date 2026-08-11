@@ -377,12 +377,9 @@ def test_projection_shows_bounded_fresh_p_vs_q_evidence_without_promoting_it(
     )
 
     desk_view = wire["message"]["desk_view"]
-    assert "P/Q研究（未校准，不产生方向）" in desk_view
-    assert "5分钟上行终值跟随" in desk_view
-    assert "P 62%（前日止，n=98/14日，区间52%–71%）" in desk_view
-    assert "Q代理 49%" in desk_view
-    assert "P−Q +13pp" in desk_view
-    assert "真实成交与净收益标签尚不可用 → NO TRADE" in desk_view
+    # Uncalibrated P/Q must not appear on the operator Desk View.
+    assert "P/Q研究" not in desk_view
+    assert "P−Q" not in desk_view
     assert wire["action_authority"] == "none"
     assert wire["automatic_ordering"] is False
 
@@ -406,8 +403,7 @@ def test_stale_probability_artifact_is_disclosed_but_does_not_degrade_execution(
     )
 
     assert "P/Q研究" not in wire["message"]["desk_view"]
-    assert "P/Q实验：当前无新鲜结果（概率帧已过期）" in wire["message"]["data_quality"]
-    assert "不影响价格触发或执行数据评级" in wire["message"]["data_quality"]
+    assert "P/Q实验" not in wire["message"]["data_quality"]
     assert "概率帧已过期" not in wire["quality_reasons"]
 
 
@@ -473,9 +469,8 @@ def test_invalid_nested_research_is_omitted_and_disclosed_without_poisoning_desk
     assert wire["research_context_document_id"] is None
     assert wire["research_context"] is None
     assert "research_context_contract_invalid" not in wire["quality_reasons"]
-    assert "研究层：暂不可用（研究帧契约不完整）" in wire["message"]["data_quality"]
+    assert "研究层" not in wire["message"]["data_quality"]
     assert "research_context_contract_invalid" not in wire["message"]["data_quality"]
-    assert "不影响执行数据评级" in wire["message"]["data_quality"]
 
 
 def test_gth_projection_floors_source_slot_to_et_quarter_hour(tmp_path: Path) -> None:
@@ -548,8 +543,9 @@ def test_gth_projection_embeds_same_date_uncalibrated_research_context(tmp_path:
     assert wire["session"] == "gth"
     assert wire["research_context_document_id"] == "research-context:gth-same-date"
     assert wire["research_context"] == context
-    assert "夜盘ES为主（前日RTH不可用）" in wire["message"]["desk_view"]
-    assert "HMM未校准" in wire["message"]["desk_view"]
+    # Audit wire keeps research; operator Desk View must not show uncalibrated HMM.
+    assert "HMM" not in wire["message"]["desk_view"]
+    assert "夜盘ES为主" not in wire["message"]["desk_view"]
     assert wire["action_authority"] == "none"
     assert wire["automatic_ordering"] is False
 
