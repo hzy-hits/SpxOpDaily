@@ -54,7 +54,7 @@ def test_rth_daily_acceptance_runs_on_new_york_session_clock() -> None:
 
     assert ".venv/bin/spx job rth-daily-acceptance --date auto --strict" in service
     assert "OnCalendar=Mon..Fri *-*-* 19:00:00 America/New_York" in timer
-    assert "After=network-online.target spx-spark-post-close-review.service" in service
+    assert "After=network-online.target spx-spark-session-finalize.service" in service
     assert "Persistent=true" in timer
     assert "disable --now spx-spark-post-close-review.timer" in installer
     assert "enable --now spx-spark-post-close-review.timer" not in installer
