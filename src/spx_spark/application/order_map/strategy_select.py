@@ -18,6 +18,7 @@ from spx_spark.application.order_map.strategy_facts import build_market_fact_pac
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     assess_regime,
+    assess_trade_permission,
 )
 from spx_spark.application.order_map.strategy_ranker import (
     RankResult,
@@ -34,7 +35,13 @@ def build_strategy_decision(
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
     regime = assess_regime(facts)
+    permission = assess_trade_permission(facts, regime, DEFAULT_STRATEGY_POLICY)
+    regime = {**regime, "trade_permission": permission}
     reasons = _gate_reasons(facts, regime)
+    if permission.get("state") == "NO_TRADE":
+        reasons = list(
+            dict.fromkeys([*(permission.get("hard_reasons") or ()), *reasons])
+        )
     generation_reasons: list[str] = []
     rows: list[dict[str, Any]] = []
     rank = RankResult(passed=[], near_misses=[], gate_audit=[])
@@ -42,6 +49,11 @@ def build_strategy_decision(
         rows = enumerate_candidates(
             payload, facts, regime, latest, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
         )
+        allowed = {
+            str(item) for item in permission.get("allowed_strategy_types") or () if str(item)
+        }
+        if allowed:
+            rows = [row for row in rows if str(row.get("strategy_type") or "") in allowed]
         if rows:
             rank = rank_candidates(
                 rows,
@@ -64,38 +76,54 @@ def build_strategy_decision(
                     generation_reasons=generation_reasons,
                     manual_candidate=True,
                 )
-                return _candidate_decision(
-                    facts,
-                    {**regime, "entry_state": "GOOD_LOCATION"},
-                    rank.passed[0],
-                    candidates_considered=_candidate_summaries(rank),
-                    shadow_candidates=shadow_candidates,
-                    shadow_candidates_skipped=shadow_candidates_skipped,
-                    rejection_funnel=funnel,
+                return _attach_trade_permission(
+                    _candidate_decision(
+                        facts,
+                        {**regime, "entry_state": "GOOD_LOCATION"},
+                        rank.passed[0],
+                        candidates_considered=_candidate_summaries(rank),
+                        shadow_candidates=shadow_candidates,
+                        shadow_candidates_skipped=shadow_candidates_skipped,
+                        rejection_funnel=funnel,
+                    ),
+                    permission,
                 )
             reasons = _rank_reasons(rank)
         else:
             generation_reasons = candidate_generation_reasons(
                 payload, facts, regime, latest, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
             )
-            reasons = generation_reasons
+            reasons = generation_reasons or ["permission_strategy_type_unavailable"]
     if "direction_valid_but_entry_too_late" in reasons:
         regime = {**regime, "entry_state": "LATE_CHASE"}
-    return _no_trade_decision(
-        facts,
-        regime,
-        reasons,
-        nearest_candidates=rank.near_misses,
-        candidates_considered=_candidate_summaries(rank) if rows else [],
-        rejection_funnel=_rejection_funnel(
+    return _attach_trade_permission(
+        _no_trade_decision(
             facts,
-            rows,
-            rank,
-            reasons=reasons,
-            generation_reasons=generation_reasons,
-            manual_candidate=False,
+            regime,
+            reasons,
+            nearest_candidates=rank.near_misses,
+            candidates_considered=_candidate_summaries(rank) if rows else [],
+            rejection_funnel=_rejection_funnel(
+                facts,
+                rows,
+                rank,
+                reasons=reasons,
+                generation_reasons=generation_reasons,
+                manual_candidate=False,
+            ),
         ),
+        permission,
     )
+
+
+def _attach_trade_permission(
+    decision: dict[str, Any], permission: Mapping[str, Any]
+) -> dict[str, Any]:
+    decision["trade_permission"] = dict(permission)
+    regime = dict(_map(decision.get("regime")))
+    regime["trade_permission"] = dict(permission)
+    decision["regime"] = regime
+    return decision
 
 
 def _gate_reasons(facts: Mapping[str, Any], regime: Mapping[str, Any]) -> list[str]:

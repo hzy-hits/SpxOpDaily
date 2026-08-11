@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, time
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 
 from spx_spark.analytics.options.strategy_payoff import (
@@ -14,20 +16,26 @@ from spx_spark.analytics.options.strategy_payoff import (
 
 # Forward mark horizons for strategy_outcomes (v3). Frozen code constant.
 MARK_HORIZONS_MINUTES: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20)
+_ET = ZoneInfo("America/New_York")
+DEBIT_VERTICAL_TYPES = ("CALL_DEBIT_VERTICAL", "PUT_DEBIT_VERTICAL")
+BUTTERFLY_TYPES = ("CALL_BUTTERFLY", "PUT_BUTTERFLY")
 
 __all__ = (
+    "BUTTERFLY_TYPES",
+    "DEBIT_VERTICAL_TYPES",
     "DEFAULT_MANAGEMENT_POLICY",
     "DEFAULT_STRATEGY_POLICY",
     "MARK_HORIZONS_MINUTES",
     "ManagementPolicy",
     "StrategyPolicy",
     "assess_regime",
+    "assess_trade_permission",
 )
 
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v4"
+    policy_version: str = "strategy_policy.bootstrap.v5"
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
     trend_max_vwap_crosses: float = 2.0
@@ -50,7 +58,17 @@ class StrategyPolicy:
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
     butterfly_max_debit_fraction: float = 0.35
-    butterfly_max_risk_usd: float = 1000.0
+    butterfly_max_risk_usd: float = 250.0
+    vertical_max_risk_usd: float = 250.0
+    # Desk risk policy constants only — not live IBKR account wiring.
+    max_entries_per_day: int = 2
+    max_open_positions: int = 1
+    entry_cutoff_et: str = "14:15"
+    # PIN butterflies are an afternoon structure; keep them open past the
+    # directional cutoff but still before the force-flat window.
+    pin_entry_cutoff_et: str = "15:30"
+    high_vix_no_trade: float = 30.0
+    reduced_vix_floor: float = 22.0
     # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
     candidate_cooldown_seconds: float = 300.0
     max_cards_per_direction_per_session: int = 6
@@ -63,6 +81,12 @@ class StrategyPolicy:
             "late_chase_impulse_atr",
         )
         return {name: getattr(self, name) for name in names}
+
+    def entry_cutoff_time_et(self) -> time:
+        return _parse_hhmm(self.entry_cutoff_et)
+
+    def pin_entry_cutoff_time_et(self) -> time:
+        return _parse_hhmm(self.pin_entry_cutoff_et)
 
 
 DEFAULT_STRATEGY_POLICY = StrategyPolicy()
@@ -124,6 +148,196 @@ def assess_regime(
         "confidence": round(sum(value is not None for value in inputs) / 5, 2),
         "reasons": reasons, "contradictions": contradictions, "pin": pin,
     }
+
+
+def assess_trade_permission(
+    facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> dict[str, Any]:
+    """Decide whether the desk may even consider pin or directional structures.
+
+    This is a permission governor above candidate selection. It does not size
+    live accounts, place orders, or invent hedge engines.
+    """
+
+    hard_reasons: list[str] = []
+    soft_reasons: list[str] = []
+    global_capability = _map(_map(facts.get("capabilities")).get("global"))
+    for key, reason in (
+        ("session_legal", "session_not_legal"),
+        ("coordinate_ready", "coordinate_not_ready"),
+        ("market_frame_ready", "market_frame_not_ready"),
+    ):
+        if global_capability and global_capability.get(key) is not True:
+            hard_reasons.append(reason)
+    quality = _map(facts.get("quality"))
+    if quality and quality.get("status") not in {None, "ready"}:
+        hard_reasons.append("market_facts_degraded")
+    event_state = str(regime.get("event_state") or "")
+    if event_state in {"SCHEDULED_EVENT_RISK", "POST_EVENT_DISCOVERY"}:
+        hard_reasons.append(f"event_{event_state.lower()}")
+    shock_state = str(_map(facts.get("shock")).get("state") or "NONE")
+    if shock_state in {"ACTIVE", "POST_SHOCK_DISCOVERY"}:
+        hard_reasons.append(f"shock_{shock_state.lower()}")
+    volatility = _map(facts.get("volatility"))
+    vix = _number(volatility.get("vix"))
+    vix1d = _number(volatility.get("vix1d"))
+    if vix is not None and vix >= policy.high_vix_no_trade:
+        hard_reasons.append("high_vix_defense_no_trade")
+    if (
+        vix is not None
+        and vix1d is not None
+        and vix >= policy.reduced_vix_floor
+        and vix1d > vix
+    ):
+        soft_reasons.append("short_dated_vol_backwardation")
+        if vix1d >= policy.high_vix_no_trade:
+            hard_reasons.append("term_structure_stress_no_trade")
+
+    path_state = str(regime.get("path_state") or "UNCERTAIN")
+    terminal_state = str(regime.get("terminal_state") or "NONE")
+    contradictions = [str(item) for item in regime.get("contradictions") or () if str(item)]
+    soft_reasons.extend(contradictions)
+    session_mode = str(_map(facts.get("session")).get("mode") or "")
+    decision_at = facts.get("decision_at")
+    # Cutoffs are RTH desk-clock rules; GTH uses separate evidence gates.
+    apply_rth_cutoff = session_mode == "rth"
+    past_directional_cutoff = apply_rth_cutoff and _past_cutoff(
+        decision_at, policy.entry_cutoff_time_et()
+    )
+    past_pin_cutoff = apply_rth_cutoff and _past_cutoff(
+        decision_at, policy.pin_entry_cutoff_time_et()
+    )
+
+    if hard_reasons:
+        return _permission_result(
+            "NO_TRADE",
+            0.0,
+            (),
+            hard_reasons=hard_reasons,
+            soft_reasons=soft_reasons,
+            policy=policy,
+        )
+
+    reduced = bool(
+        contradictions
+        or (vix is not None and policy.reduced_vix_floor <= vix < policy.high_vix_no_trade)
+        or "short_dated_vol_backwardation" in soft_reasons
+    )
+    size = 0.5 if reduced else 1.0
+
+    if (
+        terminal_state == "PIN_STABLE"
+        and path_state in {"BALANCED", "UNCERTAIN", "TRANSITION", "TREND"}
+    ):
+        if past_pin_cutoff:
+            return _permission_result(
+                "NO_TRADE",
+                0.0,
+                (),
+                hard_reasons=["pin_entry_cutoff_reached"],
+                soft_reasons=soft_reasons,
+                policy=policy,
+            )
+        state = "REDUCED" if reduced else "ALLOW_PIN"
+        return _permission_result(
+            state,
+            size if state == "REDUCED" else 1.0,
+            BUTTERFLY_TYPES,
+            hard_reasons=[],
+            soft_reasons=soft_reasons,
+            policy=policy,
+        )
+    if path_state == "TREND" and regime.get("path_direction") in {"UP", "DOWN"}:
+        if past_directional_cutoff:
+            return _permission_result(
+                "NO_TRADE",
+                0.0,
+                (),
+                hard_reasons=["entry_cutoff_reached"],
+                soft_reasons=soft_reasons,
+                policy=policy,
+            )
+        state = "REDUCED" if reduced else "ALLOW_DIRECTIONAL"
+        return _permission_result(
+            state,
+            size if state == "REDUCED" else 1.0,
+            DEBIT_VERTICAL_TYPES,
+            hard_reasons=[],
+            soft_reasons=soft_reasons,
+            policy=policy,
+        )
+    if path_state in {"TRANSITION", "UNCERTAIN"}:
+        hard_reasons.append("path_state_no_trade")
+    else:
+        hard_reasons.append("no_permission_regime")
+    return _permission_result(
+        "NO_TRADE",
+        0.0,
+        (),
+        hard_reasons=hard_reasons,
+        soft_reasons=soft_reasons,
+        policy=policy,
+    )
+
+
+def _permission_result(
+    state: str,
+    size_multiplier: float,
+    allowed_strategy_types: tuple[str, ...],
+    *,
+    hard_reasons: list[str],
+    soft_reasons: list[str],
+    policy: StrategyPolicy,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "trade_permission.v1",
+        "policy_version": policy.policy_version,
+        "state": state,
+        "size_multiplier": float(size_multiplier),
+        "allowed_strategy_types": list(allowed_strategy_types),
+        "hard_reasons": list(dict.fromkeys(hard_reasons)),
+        "soft_reasons": list(dict.fromkeys(soft_reasons)),
+        "desk_risk": {
+            "butterfly_max_risk_usd": policy.butterfly_max_risk_usd,
+            "vertical_max_risk_usd": policy.vertical_max_risk_usd,
+            "max_entries_per_day": policy.max_entries_per_day,
+            "max_open_positions": policy.max_open_positions,
+            "entry_cutoff_et": policy.entry_cutoff_et,
+            "pin_entry_cutoff_et": policy.pin_entry_cutoff_et,
+            "automatic_ordering": False,
+        },
+    }
+
+
+def _parse_hhmm(value: str) -> time:
+    hour_text, minute_text = value.split(":", 1)
+    return time(hour=int(hour_text), minute=int(minute_text))
+
+
+def _past_cutoff(decision_at: object, cutoff: time) -> bool:
+    observed = _as_datetime(decision_at)
+    if observed is None:
+        return False
+    local = observed.astimezone(_ET)
+    return local.timetz().replace(tzinfo=None) >= cutoff
+
+
+def _as_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return None
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
 
 
 def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[str, Any]:

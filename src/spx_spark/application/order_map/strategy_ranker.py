@@ -140,6 +140,18 @@ def _hard_gate_candidate(
         elif valid_until <= now:
             gates.append({"gate": f"{key}_expired", "actual": valid_until.isoformat(), "threshold": now.isoformat()})
     strategy_type = str(candidate.get("strategy_type") or "")
+    permission = _map(regime.get("trade_permission"))
+    allowed = {
+        str(item) for item in permission.get("allowed_strategy_types") or () if str(item)
+    }
+    if allowed and strategy_type not in allowed:
+        gates.append(
+            {
+                "gate": "permission_strategy_type_forbidden",
+                "actual": strategy_type,
+                "threshold": sorted(allowed),
+            }
+        )
     if strategy_type.endswith("_DEBIT_VERTICAL"):
         gates.extend(_vertical_hard_gates(candidate, facts, policy=policy))
     elif strategy_type.endswith("_BUTTERFLY"):
@@ -190,7 +202,18 @@ def _vertical_hard_gates(
     candidate["entry_quality"] = entry_quality
     if "direction_valid_but_entry_too_late" in reasons:
         candidate["setup_state"] = "ENTRY_TOO_LATE"
-    return [_gate_from_entry_reason(reason, entry_quality, policy) for reason in reasons]
+    gates = [_gate_from_entry_reason(reason, entry_quality, policy) for reason in reasons]
+    max_loss_points = _number(economics.get("max_loss_points"))
+    risk_usd = max_loss_points * 100.0 if max_loss_points is not None else None
+    if risk_usd is None or risk_usd > policy.vertical_max_risk_usd:
+        gates.append(
+            {
+                "gate": "vertical_risk_budget",
+                "actual": risk_usd,
+                "threshold": policy.vertical_max_risk_usd,
+            }
+        )
+    return gates
 
 
 def _butterfly_hard_gates(

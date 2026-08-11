@@ -95,6 +95,19 @@ def humanize_strategy_reason(reason: str) -> str:
         "vertical_exact_spread_unavailable": "两腿精确价差暂不可用",
         "max_debit_fraction_exceeded": "权利金相对翼宽偏贵",
         "direction_valid_but_entry_too_late": "方向成立但入场已偏晚",
+        "entry_cutoff_reached": "已过方向性新开仓截止时间，不再授权新风险",
+        "pin_entry_cutoff_reached": "已过 Pin 结构新开仓截止时间，不再授权新风险",
+        "high_vix_defense_no_trade": "高波动防守：当前不授权新交易",
+        "term_structure_stress_no_trade": "波动率期限结构紧张，关闭新开仓",
+        "path_state_no_trade": "路径状态未形成可交易权限（过渡/不确定）",
+        "permission_strategy_type_unavailable": "当前权限下没有允许的策略结构",
+        "permission_strategy_type_forbidden": "候选结构不在当前交易权限内",
+        "vertical_risk_budget": "方向价差单笔最大亏损超过 desk 风险上限",
+        "butterfly_risk_budget": "蝶式单笔最大亏损超过 desk 风险上限",
+        "shock_active": "盘中冲击仍在，关闭新开仓",
+        "shock_post_shock_discovery": "冲击后发现期，关闭新开仓",
+        "event_scheduled_event_risk": "事件风险窗口，关闭新开仓",
+        "event_post_event_discovery": "事件后发现期，关闭新开仓",
         "entry_window_not_open": "结构已出现，但入场窗口尚未打开",
         "entry_too_late": "入场窗口已过，继续追价不合规",
         "gth_dip_reclaim_evidence_unavailable": "夜盘回踩收复证据不足",
@@ -127,8 +140,6 @@ def humanize_strategy_reason(reason: str) -> str:
         "butterfly_body_far_from_value_center": "蝶式身体偏离价值中枢过远",
         "butterfly_body_far_from_q_mode": "蝶式身体偏离概率峰值过远",
         "butterfly_three_leg_bbo_unavailable": "三腿双边报价不齐",
-        "shock_active": "盘中冲击进行中",
-        "shock_post_shock_discovery": "冲击后中枢重建中",
     }
     if token in exact:
         return exact[token]

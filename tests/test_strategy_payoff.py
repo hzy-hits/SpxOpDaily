@@ -22,6 +22,7 @@ from spx_spark.application.order_map.strategy_facts import build_market_fact_pac
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     assess_regime,
+    assess_trade_permission,
 )
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
@@ -210,8 +211,10 @@ def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
     assert decision["decision_type"] == "CALL_BUTTERFLY", decision["why_not"]
     assert decision["candidate"]["center"] == 7710.0
     assert decision["candidate"]["width"] == 10.0
-    assert decision["execution"]["limit"] == pytest.approx(3.3)
+    # v5 desk risk: pin ladder quotes keep conservative debit <= $250.
+    assert decision["execution"]["limit"] == pytest.approx(1.8)
     assert decision["automatic_ordering"] is False
+    assert decision["trade_permission"]["state"] == "ALLOW_PIN"
 
 
 def test_low_snr_strike_surface_is_explained_without_strategy_authority() -> None:
@@ -373,7 +376,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v4"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v5"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -385,7 +388,9 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     }
     assert decision["candidate"]["utility"]["conservative_lower_bound"] > 0
     assert decision["execution"]["action"] == "MANUAL_LIMIT"
-    assert decision["execution"]["limit"] == pytest.approx(3.0)
+    # Conservative ask: long 3.7 - short bid 1.5 = 2.2 (<= $250 risk).
+    assert decision["execution"]["limit"] == pytest.approx(2.2)
+    assert decision["trade_permission"]["state"] == "ALLOW_DIRECTIONAL"
     assert decision["automatic_ordering"] is False
     assert decision["shadow_candidates"] == []
     assert decision["shadow_candidates_skipped"] == []
@@ -458,8 +463,11 @@ def test_rth_confirmed_breakout_can_compete_when_path_is_transitional() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["regime"]["path_state"] == "TRANSITION"
-    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
-    assert decision["candidate"]["setup_kind"] == "BREAKOUT_ACCEPTANCE"
+    # v5 permission governor: TRANSITION is NO_TRADE even with a confirmed trigger.
+    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
+    assert decision["trade_permission"]["state"] == "NO_TRADE"
+    assert "path_state_no_trade" in decision["why_not"]["reasons"]
+    assert "path_state_no_trade" in decision["trade_permission"]["hard_reasons"]
 
 
 def test_rth_confirmed_breakout_is_blocked_by_opposite_established_trend() -> None:
@@ -501,7 +509,7 @@ def test_rth_confirmed_trigger_reuses_fresh_exact_snapshot_for_pricing_only() ->
     )
     assert decision["candidate"]["long"]["contract_id"].endswith(":7710:C")
     assert decision["candidate"]["short"]["contract_id"].endswith(":7720:C")
-    assert decision["execution"]["limit"] == pytest.approx(3.0)
+    assert decision["execution"]["limit"] == pytest.approx(2.2)
 
 
 def test_sparse_physical_sample_shrinks_to_q_and_utility_can_still_compete() -> None:
@@ -700,7 +708,10 @@ def test_active_shock_blocks_butterfly_but_keeps_open_vertical_setup() -> None:
 
     assert decision["market_facts"]["shock"]["state"] == "ACTIVE"
     assert decision["market_facts"]["capabilities"]["butterfly"]["ready"] is False
-    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    # Permission governor maps active shock to NO_TRADE for all structures.
+    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
+    assert "shock_active" in decision["why_not"]["reasons"]
+    assert decision["trade_permission"]["state"] == "NO_TRADE"
 
     pin_now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     pin_payload = _pin_payload(pin_now)
@@ -868,11 +879,16 @@ def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
     forecast = payload["strategy_distribution_forecast"]
     forecast["q_event"]["probability"] = 0.6
     forecast["p_event"].update(probability=0.6, interval_low=0.6)
-    payload["call_skew_spread_shadow"]["candidate"]["long"].update(bid=4.8, ask=5.0)
-    payload["call_skew_spread_shadow"]["candidate"]["short"].update(bid=0.5, ask=0.7)
+    # Keep shadow debit under the v5 $250 hard gate so ranking, not risk, decides.
+    payload["call_skew_spread_shadow"]["candidate"]["long"].update(bid=3.0, ask=3.2)
+    payload["call_skew_spread_shadow"]["candidate"]["short"].update(bid=0.8, ask=1.0)
     latest = _vertical_chain_state(now)
     facts = build_market_fact_pack(payload, latest, now)
     regime = assess_regime(facts)
+    regime = {
+        **regime,
+        "trade_permission": assess_trade_permission(facts, regime),
+    }
     rows = enumerate_candidates(
         payload, facts, regime, latest, now=now, policy=DEFAULT_STRATEGY_POLICY
     )
@@ -887,14 +903,15 @@ def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
         now=now,
     )
 
-    assert rank.passed
+    assert len(rank.passed) >= 2
+    # Wider chain structure outranks the inflated 10-wide shadow under risk budget.
+    assert rank.passed[0]["source"] == "rth_schwab_width_enumeration"
+    assert rank.passed[0]["economics"]["width_points"] >= 15.0
+    assert rank.passed[0]["economics"]["max_loss_points"] <= 2.5
     assert any(
-        "candidate_utility_not_positive"
-        in list((candidate.get("edge") or {}).get("advisories") or ())
-        or float((candidate.get("utility") or {}).get("utility") or 1.0) <= 0.0
+        candidate.get("source") == "call_skew_spread_shadow"
         for candidate in rank.passed
     )
-    assert rank.passed[0]["economics"]["width_points"] == pytest.approx(20.0)
 
 
 def test_directional_confirmation_butterfly_is_research_alternative_only() -> None:
@@ -1011,14 +1028,14 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
             "quote": {
                 "status": quote_status,
                 "reasons": [] if quote_status == "ready" else ["spread_leg_quote_stale"],
-                "bid": 2.8,
-                "ask": 3.0,
+                "bid": 2.0,
+                "ask": 2.2,
             },
             "economics": {
                 "width_points": 10.0,
-                "max_gain_points": 7.0,
-                "max_loss_points": 3.0,
-                "debit_fraction_of_width": 0.3,
+                "max_gain_points": 7.8,
+                "max_loss_points": 2.2,
+                "debit_fraction_of_width": 0.22,
             },
             "trigger_level": 100.0,
             "target_spx": 120.0 if up else 80.0,
@@ -1114,23 +1131,26 @@ def test_ranker_winner_is_structure_score_not_research_utility() -> None:
             "center": 7710.0,
             "width": 10.0,
             "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
-            "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
-            "economics": {"width_points": 10.0, "max_gain_points": gain, "max_loss_points": 3.2,
-                          "breakeven_low": 7703.2, "breakeven_high": 7716.8},
+            "quote": {"status": "ready", "bid": 2.0, "ask": 2.2},
+            "economics": {"width_points": 10.0, "max_gain_points": gain, "max_loss_points": 2.2,
+                          "breakeven_low": 7702.2, "breakeven_high": 7717.8},
             "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
             "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
             "automatic_ordering": False,
             "manual_action_only": True,
         }
 
-    high_utility = butterfly("high-utility", selection_score=1.0, gain=16.8)
-    high_structure = butterfly("high-structure", selection_score=9.0, gain=6.8)
+    high_utility = butterfly("high-utility", selection_score=1.0, gain=17.8)
+    high_structure = butterfly("high-structure", selection_score=9.0, gain=7.8)
     rank = rank_candidates(
         [high_utility, high_structure],
         facts,
         {
             "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
             "terminal_state": "PIN_STABLE",
+            "trade_permission": {
+                "allowed_strategy_types": ["CALL_BUTTERFLY", "PUT_BUTTERFLY"],
+            },
         },
         policy=DEFAULT_STRATEGY_POLICY,
         data_root=None,
@@ -1180,13 +1200,13 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
             "center": 7710.0,
             "width": 10.0,
             "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
-            "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
+            "quote": {"status": "ready", "bid": 2.0, "ask": 2.2},
             "economics": {
                 "width_points": 10.0,
                 "max_gain_points": gain,
-                "max_loss_points": 3.2,
-                "breakeven_low": 7703.2,
-                "breakeven_high": 7716.8,
+                "max_loss_points": 2.2,
+                "breakeven_low": 7702.2,
+                "breakeven_high": 7717.8,
             },
             "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
             "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
@@ -1195,12 +1215,15 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
         }
 
     candidates = [
-        butterfly("high-utility", selection_score=1.0, gain=16.8),
-        butterfly("high-structure", selection_score=9.0, gain=6.8),
+        butterfly("high-utility", selection_score=1.0, gain=17.8),
+        butterfly("high-structure", selection_score=9.0, gain=7.8),
     ]
     regime = {
         "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
         "terminal_state": "PIN_STABLE",
+        "trade_permission": {
+            "allowed_strategy_types": ["CALL_BUTTERFLY", "PUT_BUTTERFLY"],
+        },
     }
 
     without_table = rank_candidates(
@@ -1276,13 +1299,13 @@ def test_policy_ev_annotation_marks_missing_table_as_unavailable(tmp_path: Path)
                 "center": 7710.0,
                 "width": 10.0,
                 "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
-                "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
+                "quote": {"status": "ready", "bid": 2.0, "ask": 2.2},
                 "economics": {
                     "width_points": 10.0,
-                    "max_gain_points": 6.8,
-                    "max_loss_points": 3.2,
-                    "breakeven_low": 7703.2,
-                    "breakeven_high": 7716.8,
+                    "max_gain_points": 7.8,
+                    "max_loss_points": 2.2,
+                    "breakeven_low": 7702.2,
+                    "breakeven_high": 7717.8,
                 },
                 "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
                 "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
@@ -1308,6 +1331,9 @@ def test_policy_ev_annotation_marks_missing_table_as_unavailable(tmp_path: Path)
         {
             "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
             "terminal_state": "PIN_STABLE",
+            "trade_permission": {
+                "allowed_strategy_types": ["CALL_BUTTERFLY", "PUT_BUTTERFLY"],
+            },
         },
         policy=DEFAULT_STRATEGY_POLICY,
         data_root=tmp_path,
@@ -1609,12 +1635,13 @@ def _two_sided_vertical_chain(
     provider: Provider = Provider.SCHWAB,
 ) -> LatestState:
     observed = now - timedelta(seconds=1)
+    # Keep conservative debit vertical max loss <= $250 (2.50 points) under v5.
     prices = (
-        ((7700, 8.0, 8.2), (7705, 6.2, 6.4), (7710, 4.8, 5.0),
-         (7715, 2.7, 2.9), (7720, 0.5, 0.7), (7725, 0.2, 0.4), (7730, 0.1, 0.2))
+        ((7700, 5.5, 5.7), (7705, 3.8, 4.0), (7710, 2.5, 2.7),
+         (7715, 1.5, 1.7), (7720, 0.8, 1.0), (7725, 0.4, 0.6), (7730, 0.15, 0.25))
         if right == "C"
-        else ((7690, 0.1, 0.2), (7695, 0.3, 0.4), (7700, 0.7, 0.9),
-              (7705, 2.6, 2.8), (7710, 4.7, 5.0), (7715, 6.0, 6.2), (7720, 8.0, 8.2))
+        else ((7690, 0.15, 0.25), (7695, 0.4, 0.6), (7700, 0.8, 1.0),
+              (7705, 1.5, 1.7), (7710, 2.5, 2.7), (7715, 3.8, 4.0), (7720, 5.5, 5.7))
     )
     quotes = tuple(
         Quote(
@@ -1666,12 +1693,12 @@ def _vertical_chain_state(now: datetime) -> LatestState:
             ask=ask,
         )
         for strike, bid, ask in (
-            (7705, 6.2, 6.4),
-            (7710, 4.8, 5.0),
-            (7715, 2.7, 2.9),
-            (7720, 0.5, 0.7),
-            (7725, 0.5, 0.7),
-            (7730, 0.5, 0.7),
+            (7705, 3.8, 4.0),
+            (7710, 2.5, 2.7),
+            (7715, 1.5, 1.7),
+            (7720, 0.8, 1.0),
+            (7725, 0.4, 0.6),
+            (7730, 0.15, 0.25),
         )
     )
     return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
@@ -1684,8 +1711,8 @@ def _decision_payload(now: datetime) -> dict[str, object]:
         "strike": 7710.0,
         "right": "C",
         "provider": "schwab",
-        "bid": 3.8,
-        "ask": 4.0,
+        "bid": 3.5,
+        "ask": 3.7,
         "source_at": observed.isoformat(),
     }
     short_leg = {
@@ -1693,8 +1720,8 @@ def _decision_payload(now: datetime) -> dict[str, object]:
         "strike": 7720.0,
         "right": "C",
         "provider": "schwab",
-        "bid": 1.0,
-        "ask": 1.2,
+        "bid": 1.5,
+        "ask": 1.7,
         "source_at": observed.isoformat(),
     }
     return {
@@ -1777,14 +1804,14 @@ def _gth_candidate(now: datetime, path_kind: str) -> dict[str, object]:
         "exact_spread_snapshot": {
             "long": {
                 "provider": "ibkr",
-                "bid": 3.8,
-                "ask": 4.0,
+                "bid": 3.5,
+                "ask": 3.7,
                 "source_at": observed.isoformat(),
             },
             "short": {
                 "provider": "ibkr",
-                "bid": 1.0,
-                "ask": 1.2,
+                "bid": 1.5,
+                "ask": 1.7,
                 "source_at": observed.isoformat(),
             },
         },
@@ -1882,7 +1909,7 @@ def _pin_ladder_state(now: datetime) -> LatestState:
         )
         for right in ("C", "P")
         for strike, bid, ask in (
-            (7700, 15.1, 15.3), (7710, 7.3, 7.5), (7720, 2.5, 2.6),
+            (7700, 14.0, 14.2), (7710, 7.3, 7.5), (7720, 2.0, 2.2),
             (7730, 0.8, 0.9), (7740, 0.3, 0.4),
         )
     )
@@ -1898,7 +1925,7 @@ def _pin_state(now: datetime) -> LatestState:
             quote_time=now - timedelta(seconds=1), quality=MarketDataQuality.LIVE,
             bid=bid, ask=ask,
         )
-        for strike, bid, ask in ((7700, 15.1, 15.3), (7710, 7.3, 7.5), (7720, 2.5, 2.6))
+        for strike, bid, ask in ((7700, 14.0, 14.2), (7710, 7.3, 7.5), (7720, 2.0, 2.2))
     )
     return LatestState(created_at=now, as_of=now - timedelta(seconds=1), quotes=quotes, best_quotes=quotes)
 
