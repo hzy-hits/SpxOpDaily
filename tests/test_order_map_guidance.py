@@ -394,15 +394,16 @@ def test_desk_map_primary_conclusion_comes_from_strategy_decision_blockers() -> 
     sections = build_desk_message_sections(payload, NOW)
     rendered = render_operator_status_brief(payload, [], NOW)
 
-    assert "Decision: NO_TRADE" in sections.desk_view
-    assert "Primary blocker: quote_refresh_required" in sections.desk_view
-    assert "Nearest candidate: CALL_DEBIT_VERTICAL 7565/7575" in sections.desk_view
-    assert "Failed gates: max_debit_fraction_exceeded" in sections.desk_view
-    assert "Reauthorize when: 刷新 SPXW 两腿双边报价后重新计算" in sections.desk_view
-    assert sections.execution.startswith("WAIT · strategy_decision=NO_TRADE")
+    assert "结论  不做" in sections.desk_view
+    assert "主因  精确双边报价需要刷新" in sections.desk_view
+    assert "最近候选  Call 价差 7565/7575（卡在：权利金相对翼宽偏贵）" in sections.desk_view
+    assert "下一步  刷新 SPXW 两腿双边报价后重新计算" in sections.desk_view
+    assert "quote_refresh_required" not in sections.desk_view
+    assert "max_debit_fraction_exceeded" not in sections.desk_view
+    assert sections.execution.startswith("等待 · 不做 · 精确双边报价需要刷新")
     assert "7600" not in sections.targets
     assert "结构与执行门控已通过" not in rendered
-    assert "strategy_decision NO_TRADE：quote_refresh_required" in rendered
+    assert "原因  精确双边报价需要刷新" in rendered
 
 
 def test_desk_sections_make_unavailable_market_facts_explicit() -> None:

@@ -593,7 +593,7 @@ def test_research_summary_keeps_uncalibrated_hmm_visible_without_action_authorit
     assert "HMM state_01" not in summary
     assert "潜状态到收盘位置的映射未验证" in summary
     assert "RTH收盘启发区间 7700.1/7750.5/7800.8" in summary
-    assert "不改变价格方向、触发或READY" in summary
+    assert "不改结论" in summary
 
 
 def test_gth_research_summary_does_not_claim_an_unavailable_prior_rth_input() -> None:

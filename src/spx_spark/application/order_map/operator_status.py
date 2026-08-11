@@ -22,6 +22,7 @@ from spx_spark.application.order_map.state import _session_phase_of, current_ses
 from spx_spark.application.order_map.desk_strategy_view import (
     cross_asset_confirmation_text,
     expected_move_text,
+    humanize_strategy_reason,
     level_kind_label,
     opening_range_state_text,
     phase_label,
@@ -38,7 +39,6 @@ from spx_spark.application.order_map.status_explanation import (
     operator_reason_line,
 )
 
-
 class DeskStage(StrEnum):
     OBSERVING = "OBSERVING"
     WATCHING = "WATCHING"
@@ -48,7 +48,6 @@ class DeskStage(StrEnum):
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
     PAUSED = "PAUSED"
-
 
 @dataclass(frozen=True, slots=True)
 class DeskMapProjection:
@@ -60,7 +59,6 @@ class DeskMapProjection:
     level: float | None
     data_quality: str
     quality_reasons: tuple[str, ...]
-
 
 @dataclass(frozen=True, slots=True)
 class DeskMessageSections:
@@ -75,7 +73,6 @@ class DeskMessageSections:
     targets: str
     execution: str
     data_quality: str
-
 
 _ARMED_PHASES = frozenset(
     {
@@ -156,7 +153,12 @@ def _strategy_surface_shape_line(payload: Mapping[str, Any]) -> str | None:
     context = _mapping(structure.get("strike_differential_context"))
     if not context:
         return None
-    return str(summarize_strike_surface_shape(context)["desk_line"])
+    shape = str(summarize_strike_surface_shape(context)["desk_line"]).strip()
+    if not shape:
+        return None
+    if shape.startswith("曲面"):
+        return f"{shape}（研究，不改结论）"
+    return f"曲面 {shape}（研究，不改结论）"
 
 
 def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:
@@ -715,7 +717,7 @@ def _targets_line(payload: Mapping[str, Any], projection: DeskMapProjection) -> 
     if strategy_decision:
         candidate = _mapping(strategy_decision.get("candidate"))
         if not candidate or strategy_decision.get("decision_type") == "NO_TRADE":
-            return "Targets  当前 strategy_decision 为 NO_TRADE，无交易目标"
+            return "Targets  当前不做，无交易目标"
         targets = strategy_decision.get("targets") or ()
         target = next(
             (
@@ -780,12 +782,14 @@ def _execution_line(
                 opportunity if len(opportunity) <= 42 else opportunity[:39] + "..."
             )
             return (
-                "Execution  READY · strategy_decision 人工限价候选 · "
-                f"opportunity {short_opportunity}"
+                "Execution  可看 · 人工限价候选 · "
+                f"机会 {short_opportunity}"
             )
         reasons = list(_mapping(strategy_decision.get("why_not")).get("reasons") or ())
-        blocker = str(reasons[0]) if reasons else "no_supported_strategy_candidate"
-        return f"Execution  WAIT · strategy_decision=NO_TRADE · {blocker}"
+        blocker = humanize_strategy_reason(
+            str(reasons[0]) if reasons else "no_supported_strategy_candidate"
+        )
+        return f"Execution  等待 · 不做 · {blocker}"
     intent = _mapping(payload.get("trade_intent"))
     plans = [row for row in payload.get("plan_candidates") or () if isinstance(row, Mapping)]
     if projection.stage is DeskStage.READY:

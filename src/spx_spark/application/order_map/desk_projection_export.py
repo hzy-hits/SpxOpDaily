@@ -112,7 +112,9 @@ def build_desk_map_wire(
     structure = sections.structure
     if changes:
         structure = f"{structure}\nChanges: {'；'.join(changes)}"
-    desk_view = f"{sections.desk_view}\n{_operator_context(payload)}"
+    desk_view = sections.desk_view
+    if context := _operator_context(payload).strip():
+        desk_view = f"{desk_view}\n{context}"
     research_summary = _research_advisory_summary(research_context, session=session)
     if research_summary is not None:
         desk_view = f"{desk_view}\n{research_summary}"
@@ -195,6 +197,12 @@ def persist_desk_map_projection(
 
 
 def _operator_context(payload: Mapping[str, Any]) -> str:
+    # strategy_decision Base Case already owns 结论/主因; do not append a second
+    # conflicting level-machine reason into the same screen.
+    if isinstance(payload.get("strategy_decision"), Mapping) and payload.get(
+        "strategy_decision"
+    ):
+        return ""
     from spx_spark.application.order_map.status_explanation import operator_reason_line
 
     return operator_reason_line(dict(payload))
@@ -396,11 +404,11 @@ def _research_advisory_summary(
             break
     if not facts:
         return (
-            "研究（HMM未校准，不改变价格方向、触发或READY）："
+            "研究（HMM未校准，不改结论）："
             f"基线={research_view} · 可靠性=低（{basis}） · 主要限制={primary_limitation}"
         )
     return (
-        "研究（HMM未校准，不改变价格方向、触发或READY）："
+        "研究（HMM未校准，不改结论）："
         f"基线={research_view} · "
         + " · ".join(facts[:2])
         + f" · 可靠性=低（{basis}） · 主要限制={primary_limitation}"

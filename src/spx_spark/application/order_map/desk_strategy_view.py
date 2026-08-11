@@ -8,36 +8,49 @@ from spx_spark.analytics.options.pricing import finite_float
 
 
 def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
+    """Render the human Base Case owned by strategy_decision.
+
+    Keep machine reason codes out of the operator-facing first screen. Audit
+    detail remains on strategy_decision.why_not for logs and funnel analysis.
+    """
+
     decision = _mapping(payload.get("strategy_decision"))
     if not decision:
         return None
     why_not = _mapping(decision.get("why_not"))
     candidate = _mapping(decision.get("candidate"))
     nearest = candidate or _mapping(why_not.get("nearest_candidate"))
-    reasons = [str(reason) for reason in why_not.get("reasons") or ()]
-    failed_gates = []
-    for gate in nearest.get("failed_gates") or ():
-        mapped = _mapping(gate)
-        failed_gates.append(str(mapped.get("gate") or gate))
-    if not failed_gates:
-        failed_gates = [str(reason) for reason in nearest.get("rejection_reasons") or ()]
-    if not failed_gates:
-        failed_gates = reasons[1:]
+    reasons = [str(reason) for reason in why_not.get("reasons") or () if str(reason).strip()]
+    failed_gates = _failed_gate_codes(nearest, reasons)
     decision_type = str(decision.get("decision_type") or "NO_TRADE")
-    primary_blocker = reasons[0] if reasons else "none"
-    reauthorize = str(why_not.get("reauthorize_on") or "active manual candidate")
-    return (
-        f"Decision: {decision_type} · Primary blocker: {primary_blocker} · "
-        f"Nearest candidate: {strategy_candidate_label(nearest)} · "
-        f"Failed gates: {', '.join(failed_gates) if failed_gates else 'none'} · "
-        f"Reauthorize when: {reauthorize}"
+    manual = (
+        decision.get("action_authority") == "manual"
+        and bool(candidate)
+        and decision_type != "NO_TRADE"
+    )
+    if manual:
+        conclusion = f"可看 · {strategy_candidate_label(candidate)}"
+    else:
+        conclusion = "不做"
+    primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
+    nearest_line = _nearest_candidate_line(nearest, failed_gates)
+    reauthorize = str(why_not.get("reauthorize_on") or "").strip()
+    if not reauthorize or _looks_like_machine_token(reauthorize):
+        reauthorize = "等待价格触发、精确报价与赔率同时通过后再评估"
+    return "\n".join(
+        (
+            f"结论  {conclusion}",
+            f"主因  {primary}",
+            f"最近候选  {nearest_line}",
+            f"下一步  {reauthorize}",
+        )
     )
 
 
 def strategy_candidate_label(candidate: Mapping[str, Any]) -> str:
     if not candidate:
-        return "none"
-    strategy_type = str(candidate.get("strategy_type") or "candidate")
+        return "无"
+    strategy_type = humanize_strategy_type(str(candidate.get("strategy_type") or "candidate"))
     raw_legs = candidate.get("legs") or (candidate.get("long"), candidate.get("short"))
     strikes = [
         strike
@@ -54,15 +67,83 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
         return None
     candidate = _mapping(decision.get("candidate"))
     if decision.get("action_authority") == "manual" and candidate:
-        return (
-            "原因  strategy_decision 已授权人工候选："
-            f"{candidate.get('setup_kind') or 'setup'}"
-        )
-    reasons = list(_mapping(decision.get("why_not")).get("reasons") or ())
-    return (
-        "原因  strategy_decision NO_TRADE："
-        f"{str(reasons[0]) if reasons else 'no_supported_strategy_candidate'}"
-    )
+        return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
+    reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]
+    primary = humanize_strategy_reason(reasons[0]) if reasons else "尚无支持交易的候选"
+    return f"原因  {primary}"
+
+
+def humanize_strategy_type(strategy_type: str) -> str:
+    return {
+        "NO_TRADE": "不做",
+        "CALL_DEBIT_VERTICAL": "Call 价差",
+        "PUT_DEBIT_VERTICAL": "Put 价差",
+        "CALL_BUTTERFLY": "Call 蝶式",
+        "PUT_BUTTERFLY": "Put 蝶式",
+    }.get(str(strategy_type or "").upper(), str(strategy_type or "候选").replace("_", " "))
+
+
+def humanize_strategy_reason(reason: str) -> str:
+    token = str(reason or "").strip()
+    exact = {
+        "level_source_not_confirmed": "尚未出现确认的价格触发（墙位/翻区未接受或拒绝）",
+        "level_source_formal_signal_absent": "旧 formal signal 未形成，不能当作入场依据",
+        "confirmed_price_trigger_unavailable": "价格触发尚未确认，不能枚举方向价差",
+        "quote_refresh_required": "精确双边报价需要刷新",
+        "vertical_exact_two_leg_quote_unavailable": "两腿精确报价暂不可用",
+        "vertical_exact_spread_unavailable": "两腿精确价差暂不可用",
+        "max_debit_fraction_exceeded": "权利金相对翼宽偏贵",
+        "direction_valid_but_entry_too_late": "方向成立但入场已偏晚",
+        "entry_window_not_open": "结构已出现，但入场窗口尚未打开",
+        "entry_too_late": "入场窗口已过，继续追价不合规",
+        "gth_dip_reclaim_evidence_unavailable": "夜盘回踩收复证据不足",
+        "gth_confirmed_level_candidate_unavailable": "夜盘确认墙位候选暂不可用",
+        "strategy_event_expired": "旧策略事件已过期",
+        "gth_dip_reclaim_signal_expired": "夜盘回踩收复信号已过期",
+        "source_entry_quality_blocked": "来源入场质量未过门",
+        "source_entry_quality_has_block_reasons": "来源入场质量仍有阻断",
+        "signal_session_mismatch": "信号时段与当前盘段不一致",
+        "long_leg_quote_unavailable": "多头腿报价不可用",
+        "short_leg_quote_unavailable": "空头腿报价不可用",
+        "spread_net_nbbo_invalid": "组合净买卖价无效",
+        "spread_entry_limit_invalid": "入场限价无效",
+        "chain_implied_target_unavailable": "隐含目标位不可用",
+        "gth_reclaim_too_old": "夜盘收复信号过旧",
+        "spread_exit_at_elapsed": "预定退出时点已过",
+        "spread_reward_risk_unavailable": "收益风险比不可计算",
+        "surface_shape_d3_slope_up": "曲面近端偏多（仅研究，不单独开仓）",
+        "surface_shape_d3_slope_down": "曲面近端偏空（仅研究，不单独开仓）",
+        "surface_shape_d4_trough": "曲面呈槽形（仅研究）",
+        "surface_shape_d4_peak": "曲面呈峰形（仅研究）",
+        "surface_shape_low_snr": "曲面信号噪声比偏低（仅研究）",
+        "pricing_not_authorized": "定价未授权，不能当作可执行候选",
+        "spx_price_unavailable": "可用 SPX 坐标缺失",
+        "macro_entry_not_authorized": "宏观事件窗口禁止新建议",
+        "session_not_open_for_spxw_strategy": "当前不在可评估 SPXW 的时段",
+        "no_supported_strategy_candidate": "没有通过门控的可交易候选",
+        "butterfly_requires_pin_stable": "蝶式要求稳定钉住环境",
+        "butterfly_shock_veto": "冲击状态未平复，禁止新开蝶式",
+        "butterfly_body_far_from_value_center": "蝶式身体偏离价值中枢过远",
+        "butterfly_body_far_from_q_mode": "蝶式身体偏离概率峰值过远",
+        "butterfly_three_leg_bbo_unavailable": "三腿双边报价不齐",
+        "shock_active": "盘中冲击进行中",
+        "shock_post_shock_discovery": "冲击后中枢重建中",
+    }
+    if token in exact:
+        return exact[token]
+    if token.startswith("surface_shape_"):
+        return "曲面形状仅供研究，不能单独构成入场"
+    if "quote" in token or "pricing" in token or "nbbo" in token:
+        return "精确报价尚未就绪"
+    if "expired" in token or "stale" in token or "too_old" in token:
+        return "相关信号或报价已经过期"
+    if "trigger" in token or "level_source" in token or "signal" in token:
+        return "价格触发尚未确认"
+    if "shock" in token:
+        return "冲击状态不允许该策略"
+    if _looks_like_machine_token(token):
+        return "执行条件尚未完整"
+    return token
 
 
 def quality_reason_text(reason: str) -> str:
@@ -83,11 +164,19 @@ def quality_reason_text(reason: str) -> str:
         "ready_required_frame_unavailable": "必需数据帧缺失，READY 已暂停",
         "ready_without_current_confirmed_path": "旧 READY 与当前价格路径不一致，已禁止执行",
     }
-    if reason.startswith("density_clipped:"):
-        return f"概率密度裁剪偏高（{reason.partition(':')[2]}）"
-    if reason.startswith("underlier_mismatch:"):
+    token = str(reason or "")
+    if token in labels:
+        return labels[token]
+    if token.startswith("density_clipped:"):
+        return f"概率密度裁剪偏高（{token.partition(':')[2]}）"
+    if token.startswith("underlier_mismatch:"):
         return "标的坐标不匹配，墙位与 Gamma 告警已抑制"
-    return labels.get(reason, reason.replace("_", " "))
+    lowered = token.lower()
+    if "entitlement" in lowered or "greeks feed not live" in lowered:
+        return "Greeks 实时权限不可用，分析腿暂不可用"
+    if lowered.startswith("analytical leg rejected"):
+        return "期权分析腿被拒，结构解释降级"
+    return token.replace("_", " ")
 
 
 def volume_alignment_text(value: object) -> str:
@@ -120,10 +209,6 @@ def level_kind_label(value: str) -> str:
         "flip_high": "Flip High",
         "call_wall": "Call Wall",
     }.get(value, "Level")
-
-
-def _mapping(value: object) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
 
 
 def opening_range_state_text(value: str) -> str:
@@ -167,6 +252,7 @@ def stage_label(stage: object) -> str:
         "PAUSED": "已暂停",
     }.get(str(key), str(key))
 
+
 def expected_move_text(payload: Mapping[str, Any]) -> str:
     frame = _mapping(payload.get("option_structure_frame"))
     volatility = _mapping(frame.get("volatility"))
@@ -201,3 +287,38 @@ def aligned_expected_move_usage(payload: Mapping[str, Any]) -> tuple[str, float]
     return label, fraction
 
 
+def _failed_gate_codes(nearest: Mapping[str, Any], reasons: list[str]) -> list[str]:
+    failed_gates: list[str] = []
+    for gate in nearest.get("failed_gates") or ():
+        mapped = _mapping(gate)
+        failed_gates.append(str(mapped.get("gate") or gate))
+    if not failed_gates:
+        failed_gates = [str(reason) for reason in nearest.get("rejection_reasons") or ()]
+    if not failed_gates:
+        failed_gates = reasons[1:]
+    return [code for code in failed_gates if str(code).strip()]
+
+
+def _nearest_candidate_line(nearest: Mapping[str, Any], failed_gates: list[str]) -> str:
+    if not nearest:
+        return "无"
+    label = strategy_candidate_label(nearest)
+    actionable = [
+        code
+        for code in failed_gates
+        if not str(code).startswith("surface_shape_")
+    ]
+    if not actionable:
+        return label
+    return f"{label}（卡在：{humanize_strategy_reason(actionable[0])}）"
+
+
+def _looks_like_machine_token(value: str) -> bool:
+    token = str(value or "").strip()
+    if not token or " " in token or any("\u4e00" <= char <= "\u9fff" for char in token):
+        return False
+    return "_" in token or token.isupper()
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
