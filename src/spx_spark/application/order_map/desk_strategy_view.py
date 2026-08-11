@@ -88,6 +88,7 @@ def humanize_strategy_reason(reason: str) -> str:
     exact = {
         "level_source_not_confirmed": "尚未出现确认的价格触发（墙位/翻区未接受或拒绝）",
         "level_source_formal_signal_absent": "旧 formal signal 未形成，不能当作入场依据",
+        "trend_background_cannot_authorize_entry": "趋势背景不能单独授权入场，需价格触发确认",
         "confirmed_price_trigger_unavailable": "价格触发尚未确认，不能枚举方向价差",
         "quote_refresh_required": "精确双边报价需要刷新",
         "vertical_exact_two_leg_quote_unavailable": "两腿精确报价暂不可用",
