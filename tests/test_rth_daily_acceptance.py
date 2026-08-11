@@ -6,20 +6,17 @@ import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
 from spx_spark.application.order_map.rth_daily_acceptance import (
     _outbox_check,
     _report_checks,
 )
+from spx_spark.application.order_map.report_clock import rth_report_schedule_for_session
 from spx_spark.application.order_map.rth_daily_acceptance_support import (
     explicitly_terminal_event_ids,
     fully_delivered_event_ids,
     receipt_store_check,
-    rust_fully_delivered_event_ids,
-    rust_scheduled_report_events,
-    strategy_decision_trade_ready_delivery_check,
     timely_delivered_event_ids,
+    trade_ready_delivery_check,
 )
 from spx_spark.infrastructure.notifications import (
     NotificationDraft,
@@ -44,12 +41,18 @@ def _store(tmp_path: Path):
     return engine
 
 
-def _enqueue(engine, event_id: str, *, expires_at: datetime | None = None) -> tuple[int, ...]:
+def _enqueue(
+    engine,
+    event_id: str,
+    *,
+    expires_at: datetime | None = None,
+    source: str = "test",
+) -> tuple[int, ...]:
     return enqueue(
         engine,
         NotificationDraft(
             logical_event_id=event_id,
-            source="test",
+            source=source,
             kind="trade_intent",
             lane="trade_ready",
             payload={"body": "immutable"},
@@ -122,19 +125,17 @@ def test_attempt_store_integrity_uses_spx_sqlite_only(tmp_path: Path) -> None:
     assert check.measured["schema_present"] is True
 
 
-def test_rust_scheduled_report_slot_and_delivery_coverage(tmp_path: Path) -> None:
-    ledger = tmp_path / "operations.sqlite"
-    et = ZoneInfo("America/New_York")
-    slot = datetime(2026, 8, 10, 9, 30, tzinfo=et)
-    missing = datetime(2026, 8, 10, 12, 0, tzinfo=et)
-    with sqlite3.connect(ledger) as connection:
+def _write_rust_report_ledger(
+    path: Path,
+    slots: tuple[datetime, ...],
+) -> None:
+    with sqlite3.connect(path) as connection:
         connection.executescript(
             """
             CREATE TABLE notification_events (
               event_id TEXT PRIMARY KEY,
               report_slot TEXT,
-              lane TEXT,
-              created_at_us INTEGER
+              lane TEXT
             );
             CREATE TABLE notification_targets (
               target_id TEXT PRIMARY KEY,
@@ -145,28 +146,97 @@ def test_rust_scheduled_report_slot_and_delivery_coverage(tmp_path: Path) -> Non
             );
             """
         )
-        event_id = "scheduled-report:slot-0930"
-        connection.execute(
-            "INSERT INTO notification_events VALUES (?, ?, 'scheduled_report', 1)",
-            (event_id, slot.isoformat()),
-        )
-        for channel, key in (("bark", "bark-primary"), ("feishu", "feishu-primary")):
+        for index, slot in enumerate(slots):
+            event_id = f"scheduled-report:{index}"
             connection.execute(
-                "INSERT INTO notification_targets VALUES (?, ?, ?, ?, 'delivered')",
-                (f"{event_id}:{key}", event_id, key, channel),
+                "INSERT INTO notification_events VALUES (?, ?, 'scheduled_report')",
+                (event_id, slot.isoformat()),
             )
+            for target_key, channel in (
+                ("bark-primary", "bark"),
+                ("bark-friend", "bark"),
+                ("feishu-primary", "feishu"),
+            ):
+                connection.execute(
+                    "INSERT INTO notification_targets VALUES (?, ?, ?, ?, 'delivered')",
+                    (f"{event_id}:{target_key}", event_id, target_key, channel),
+                )
 
-    by_slot, diagnostics = rust_scheduled_report_events(ledger, (slot, missing))
-    assert diagnostics["status"] == "ready"
-    assert by_slot == {slot: event_id}
-    assert rust_fully_delivered_event_ids(ledger, by_slot.values()) == {event_id}
+
+def _rust_report_checks(
+    tmp_path: Path,
+    *,
+    missing_hour: int | None = None,
+    missing_minute: int = 0,
+    spring_report_required: bool = False,
+):
+    session = DEFAULT_MARKET_CALENDAR.session(date(2026, 8, 10))
+    assert session is not None
+    expected_slots = rth_report_schedule_for_session(session)
+    slots = tuple(
+        slot
+        for slot in expected_slots
+        if not (
+            missing_hour is not None
+            and slot.hour == missing_hour
+            and slot.minute == missing_minute
+        )
+    )
+    ledger = tmp_path / "operations.sqlite"
+    _write_rust_report_ledger(ledger, slots)
+    snapshots = tuple(
+        {
+            "report_kind": "status_snapshot",
+            "occurred_at": slot.isoformat(),
+            "generated_at": slot.isoformat(),
+        }
+        for slot in expected_slots
+    )
+    return _report_checks(
+        session,
+        snapshots,
+        outbox_path=None,
+        rust_delivery_ledger_path=ledger,
+        rust_report_owner=True,
+        spring_report_required=spring_report_required,
+    )
 
 
-def test_strategy_decision_trade_ready_uses_unique_opportunities(tmp_path: Path) -> None:
+def test_rust_owner_uses_25_of_26_ledger_slots_not_python_snapshots(
+    tmp_path: Path,
+) -> None:
+    checks = _rust_report_checks(tmp_path, missing_hour=12)
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["rth_report_slot_coverage"].measured == round(25 / 26, 6)
+    assert by_name["rth_report_delivery_coverage"].measured == round(25 / 26, 6)
+    assert by_name["rth_report_slot_coverage"].passed is False
+    assert by_name["rth_report_delivery_coverage"].passed is False
+    assert "Python status_snapshot is projection input only" in by_name[
+        "rth_report_delivery_coverage"
+    ].reason
+
+
+def test_rust_owner_missing_noon_slot_still_fails(tmp_path: Path) -> None:
+    checks = _rust_report_checks(tmp_path, missing_hour=12)
+
+    assert all(check.passed is False for check in checks)
+
+
+def test_report_disabled_omits_spring_projection_hard_checks(tmp_path: Path) -> None:
+    checks = _rust_report_checks(tmp_path, spring_report_required=False)
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["rth_report_slot_coverage"].passed is True
+    assert by_name["rth_report_delivery_coverage"].passed is True
+    assert "rth_report_spring_projection_coverage" not in by_name
+    assert "rth_report_state_window_coverage" not in by_name
+
+
+def test_strategy_decision_trade_ready_delivers_three_unique_cards(tmp_path: Path) -> None:
     engine = _store(tmp_path)
     database = tmp_path / "spx.sqlite"
-    opportunity = "strategy-opportunity:abc123"
-    event_id = f"{opportunity}:ready"
+    opportunities = tuple(f"strategy-opportunity:card-{index}" for index in range(3))
     with sqlite3.connect(database) as connection:
         connection.execute(
             """
@@ -180,11 +250,7 @@ def test_strategy_decision_trade_ready_uses_unique_opportunities(tmp_path: Path)
             )
             """
         )
-        attrs = {
-            "action_authority": "manual",
-            "candidate": {"opportunity_id": opportunity},
-        }
-        for index in range(2):
+        for index, opportunity in enumerate((*opportunities, opportunities[0])):
             connection.execute(
                 """
                 INSERT INTO decisions VALUES (?, '2026-08-10', 'strategy_signal_engine_v2',
@@ -193,34 +259,34 @@ def test_strategy_decision_trade_ready_uses_unique_opportunities(tmp_path: Path)
                 (
                     f"strategy:{index}",
                     f"2026-08-10T17:0{index}:00+00:00",
-                    json.dumps(attrs),
+                    json.dumps(
+                        {
+                            "action_authority": "manual",
+                            "candidate": {"opportunity_id": opportunity},
+                        }
+                    ),
                 ),
             )
-    ids = enqueue(
-        engine,
-        NotificationDraft(
-            logical_event_id=event_id,
+    for opportunity in opportunities:
+        ids = _enqueue(
+            engine,
+            f"{opportunity}:ready",
             source="strategy_decision",
-            kind="trade_intent",
-            lane="trade_ready",
-            payload={"body": "candidate"},
-            channels=("bark", "feishu"),
-            expires_at=NOW + timedelta(minutes=5),
-        ),
-        now=NOW,
-    ).event_ids
-    _deliver(engine, ids, at=NOW + timedelta(seconds=2))
+        )
+        _deliver(engine, ids, at=NOW + timedelta(seconds=2))
     engine.dispose()
 
-    check = strategy_decision_trade_ready_delivery_check(
+    check = trade_ready_delivery_check(
         database,
         trading_date="2026-08-10",
         outbox_path=database,
         receipt_path=None,
     )
+
     assert check.passed is True
-    assert check.measured["expected_opportunities"] == 1
-    assert check.measured["timely_delivered_events"] == 1
+    assert check.measured["expected_opportunities"] == 3
+    assert check.measured["timely_delivered_events"] == 3
+    assert "no strategy_decision TradeReady delivery was expected" not in check.reason
 
 
 def test_outbox_integrity_scopes_human_transport_and_allows_wal(tmp_path: Path) -> None:
@@ -261,63 +327,3 @@ def test_outbox_integrity_scopes_human_transport_and_allows_wal(tmp_path: Path) 
     assert check.measured["journal_mode"] == "wal"
     assert check.measured["dead_letter_targets"] == 0
     assert check.measured["internal_backlog_targets"] >= 1
-
-
-def test_rust_owner_report_checks_use_ledger_not_python_status(tmp_path: Path) -> None:
-    session = DEFAULT_MARKET_CALENDAR.session(date(2026, 8, 10))
-    assert session is not None
-    et = ZoneInfo("America/New_York")
-    slot = datetime(2026, 8, 10, 9, 30, tzinfo=et)
-    ledger = tmp_path / "operations.sqlite"
-    with sqlite3.connect(ledger) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE notification_events (
-              event_id TEXT PRIMARY KEY,
-              report_slot TEXT,
-              lane TEXT,
-              created_at_us INTEGER
-            );
-            CREATE TABLE notification_targets (
-              target_id TEXT PRIMARY KEY,
-              event_id TEXT,
-              target_key TEXT,
-              channel TEXT,
-              status TEXT
-            );
-            """
-        )
-        event_id = "scheduled-report:0930"
-        connection.execute(
-            "INSERT INTO notification_events VALUES (?, ?, 'scheduled_report', 1)",
-            (event_id, slot.isoformat()),
-        )
-        connection.execute(
-            "INSERT INTO notification_targets VALUES (?, ?, 'bark-primary', 'bark', 'delivered')",
-            (f"{event_id}:bark", event_id),
-        )
-        connection.execute(
-            "INSERT INTO notification_targets VALUES (?, ?, 'feishu-primary', 'feishu', 'delivered')",
-            (f"{event_id}:feishu", event_id),
-        )
-    snapshot = {
-        "report_kind": "status_snapshot",
-        "occurred_at": slot.isoformat(),
-        "generated_at": slot.isoformat(),
-        "trading_date": "2026-08-10",
-        "expiry": "2026-08-10",
-        "spring_gamma_v3_shadow": {"state": "LOW_VOL_PIN"},
-        "spring_gamma_v3_projection_diagnostic": {"status": "attached"},
-    }
-    checks = _report_checks(
-        session,
-        (snapshot,),
-        outbox_path=None,
-        rust_delivery_ledger_path=ledger,
-        rust_report_owner=True,
-        spring_report_required=False,
-    )
-    by_name = {check.name: check for check in checks}
-    assert by_name["rth_report_slot_coverage"].measured == round(1 / 26, 6)
-    assert by_name["rth_report_delivery_coverage"].measured == round(1 / 26, 6)
-    assert "rth_report_spring_projection_coverage" not in by_name

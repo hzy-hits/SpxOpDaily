@@ -1,6 +1,6 @@
 [Unit]
 Description=SPX Spark daily RTH end-to-end operational acceptance
-After=network-online.target spx-spark-session-finalize.service
+After=network-online.target spx-spark-post-close-review.service
 Wants=network-online.target
 
 [Service]

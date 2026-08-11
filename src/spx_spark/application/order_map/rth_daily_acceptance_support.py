@@ -79,14 +79,21 @@ def _unified_rows(
     if not requested:
         return {}, None
     placeholders = ",".join("?" for _ in requested)
-    filters = ""
+    scoped_filters: list[str] = []
     parameters: list[object] = list(requested)
     if source is not None:
-        filters += " AND e.source = ?"
+        scoped_filters.append("e.source = ?")
         parameters.append(source)
     if lane is not None:
-        filters += " AND e.lane = ?"
+        scoped_filters.append("e.lane = ?")
         parameters.append(lane)
+    filters = (
+        " AND (e.channel = '__cancellation__' OR ("
+        + " AND ".join(scoped_filters)
+        + "))"
+        if scoped_filters
+        else ""
+    )
     try:
         with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
             connection.execute("PRAGMA query_only=ON")
@@ -290,6 +297,8 @@ def explicitly_terminal_event_ids(
         targets = [row for row in rows if row["channel"] in HUMAN_TRANSPORT_CHANNELS]
         fenced = any(row["channel"] == "__cancellation__" for row in rows)
         reasons: list[str] = []
+        if not targets:
+            reasons.append("missing_event_or_targets")
         if not fenced:
             reasons.append("cancellation_fence_missing")
         if targets and any(
@@ -311,89 +320,6 @@ def explicitly_terminal_event_ids(
             "reasons": reasons,
         }
     return frozenset(accepted), {"status": "ready", "events": diagnostics}
-
-
-def rust_scheduled_report_events(
-    ledger_path: str | Path | None,
-    expected_slots: Iterable[datetime],
-) -> tuple[dict[datetime, str], dict[str, object]]:
-    """Map expected RTH slots to Rust ``scheduled_report`` event ids."""
-
-    expected = tuple(expected_slots)
-    slot_by_key = {slot.isoformat(): slot for slot in expected}
-    if ledger_path is None or not str(ledger_path):
-        return {}, {"status": "not_configured", "events": {}}
-    database = Path(ledger_path)
-    if not database.exists():
-        return {}, {"status": "ledger_missing", "events": {}}
-    if not expected:
-        return {}, {"status": "ready", "events": {}}
-    try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            connection.execute("PRAGMA query_only=ON")
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(
-                """
-                SELECT event_id, report_slot, created_at_us
-                FROM notification_events
-                WHERE lane = 'scheduled_report'
-                  AND report_slot IN ({placeholders})
-                ORDER BY report_slot, created_at_us
-                """.format(placeholders=",".join("?" for _ in slot_by_key)),
-                tuple(slot_by_key),
-            ).fetchall()
-    except (OSError, sqlite3.Error) as exc:
-        return {}, {"status": f"ledger_query_failed:{type(exc).__name__}", "events": {}}
-    by_slot: dict[datetime, str] = {}
-    diagnostics: dict[str, object] = {}
-    for row in rows:
-        slot = slot_by_key.get(str(row["report_slot"]))
-        if slot is None or slot in by_slot:
-            continue
-        event_id = str(row["event_id"])
-        by_slot[slot] = event_id
-        diagnostics[slot.isoformat()] = {"event_id": event_id}
-    return by_slot, {"status": "ready", "events": diagnostics}
-
-
-def rust_fully_delivered_event_ids(
-    ledger_path: str | Path | None,
-    event_ids: Iterable[str],
-) -> frozenset[str]:
-    """Accept a Rust intent only when every human transport target is delivered."""
-
-    requested = tuple(dict.fromkeys(str(value) for value in event_ids if value))
-    if ledger_path is None or not str(ledger_path) or not requested:
-        return frozenset()
-    database = Path(ledger_path)
-    if not database.exists():
-        return frozenset()
-    placeholders = ",".join("?" for _ in requested)
-    try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            connection.execute("PRAGMA query_only=ON")
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(
-                f"""
-                SELECT event_id, channel, status
-                FROM notification_targets
-                WHERE event_id IN ({placeholders})
-                  AND channel IN ('bark', 'bark_friend', 'feishu')
-                ORDER BY event_id, channel, target_key
-                """,
-                requested,
-            ).fetchall()
-    except (OSError, sqlite3.Error):
-        return frozenset()
-    by_event: dict[str, list[sqlite3.Row]] = {}
-    for row in rows:
-        by_event.setdefault(str(row["event_id"]), []).append(row)
-    delivered: set[str] = set()
-    for event_id in requested:
-        targets = by_event.get(event_id, [])
-        if targets and all(str(row["status"]) == "delivered" for row in targets):
-            delivered.add(event_id)
-    return frozenset(delivered)
 
 
 def trade_ready_delivery_check(
@@ -515,10 +441,6 @@ def trade_ready_delivery_check(
         passed=passed,
         reason=reason,
     )
-
-
-strategy_decision_trade_ready_delivery_check = trade_ready_delivery_check
-
 
 def parse_at(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
