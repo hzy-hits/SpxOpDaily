@@ -15,9 +15,10 @@ from spx_spark.analytics.options.strategy_payoff import (
     vertical_economics,
 )
 from spx_spark.application.market_features.market import quote_source_at
+from spx_spark.application.market_features.session_quote_selection import provider_quote
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.marketdata import InstrumentId
+from spx_spark.marketdata import InstrumentId, Provider
 from spx_spark.storage import LatestState
 
 WIDTHS: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
@@ -64,7 +65,7 @@ def candidate_generation_reasons(
         capability_reasons = _capability_reasons(facts, "vertical")
         if capability_reasons:
             return capability_reasons
-        _, reasons = _rth_evidence(payload, facts, regime, latest)
+        _, reasons = _rth_evidences(payload, facts, regime, latest)
         if reasons:
             return reasons
         frame = _map(payload.get("option_structure_frame"))
@@ -115,17 +116,22 @@ def _vertical_candidates(
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         if _capability_reasons(facts, "vertical"):
             return []
-        evidence, _ = _rth_evidence(payload, facts, regime, latest)
-        if not evidence:
+        evidences, _ = _rth_evidences(payload, facts, regime, latest)
+        if not evidences:
             return []
         rows = []
-        if _map(evidence.get("long")) and _map(evidence.get("short")):
-            rows.append(
-                _vertical_candidate_from_evidence(
-                    evidence, facts, now=now, policy=policy
+        for evidence in evidences:
+            if _map(evidence.get("long")) and _map(evidence.get("short")):
+                rows.append(
+                    _vertical_candidate_from_evidence(
+                        evidence, facts, now=now, policy=policy
+                    )
+                )
+            rows.extend(
+                _rth_width_verticals(
+                    evidence, payload, facts, latest, now=now, policy=policy
                 )
             )
-        rows.extend(_rth_width_verticals(evidence, payload, facts, latest, now=now, policy=policy))
         return [row for row in rows if row]
     if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
         if _capability_reasons(facts, "vertical"):
@@ -159,12 +165,24 @@ def _rth_width_verticals(
     for long_strike in sorted(value for value in anchors if value is not None):
         for width in WIDTHS:
             short_strike = long_strike + width if right == "C" else long_strike - width
-            long = _option_leg(latest, expiry, long_strike, right, require_schwab=True)
-            short = _option_leg(latest, expiry, short_strike, right, require_schwab=True)
-            if not long or not short:
+            legs = _rth_option_legs(
+                latest,
+                expiry,
+                ((long_strike, right), (short_strike, right)),
+                now=now,
+                policy=policy,
+            )
+            if not legs:
                 continue
+            long, short = legs
+            provider = str(long.get("provider") or "")
             row = _vertical_candidate_from_evidence(
-                {**dict(evidence), "long": long, "short": short, "source": "rth_schwab_width_enumeration"},
+                {
+                    **dict(evidence),
+                    "long": long,
+                    "short": short,
+                    "source": f"rth_{provider}_width_enumeration",
+                },
                 facts,
                 now=now,
                 policy=policy,
@@ -230,6 +248,8 @@ def _vertical_candidate_from_evidence(
             key: evidence.get(key)
             for key in (
                 "setup_kind",
+                "setup_variant",
+                "setup_state",
                 "direction",
                 "trigger_level",
                 "target_spx",
@@ -252,77 +272,128 @@ def _vertical_candidate_from_evidence(
     }
 
 
-def _rth_evidence(
+def _rth_evidences(
     payload: Mapping[str, Any],
     facts: Mapping[str, Any],
     regime: Mapping[str, Any],
     latest: LatestState,
-) -> tuple[dict[str, Any] | None, list[str]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     trigger = _map(facts.get("trigger"))
-    episode = _map(facts.get("session_episode"))
-    episode_phase = str(episode.get("phase") or "").lower()
-    direction = _direction(episode.get("setup_direction"))
-    trigger_level = _number(episode.get("break_level"))
-    if episode_phase in {"v_reversal_confirmed", "recovery"} and direction:
-        setup = "FAILED_BREAK_RECLAIM"
-        setup_source = "session_episode_failed_break_reclaim"
-    else:
-        direction = _direction(trigger.get("direction"))
+    path_state = str(regime.get("path_state") or "")
+    path_direction = str(regime.get("path_direction") or "")
+    bases: list[dict[str, Any]] = []
+    reasons: list[str] = []
+    setup_facts = [_map(row) for row in facts.get("rth_setups") or ()]
+    for setup in setup_facts:
+        if setup.get("state") != "ENTRY_WINDOW_OPEN":
+            continue
+        direction = _direction(setup.get("direction"))
+        setup_kind = str(setup.get("setup_kind") or "")
+        if setup_kind == "TREND_PULLBACK" and (path_state, path_direction) != (
+            "TREND",
+            direction,
+        ):
+            reasons.append("trend_pullback_path_not_confirmed")
+            continue
+        if direction and setup_kind in {"FAILED_BREAK_RECLAIM", "TREND_PULLBACK"}:
+            bases.append(
+                {
+                    "setup_kind": setup_kind,
+                    "setup_variant": setup.get("setup_variant"),
+                    "setup_state": setup.get("state"),
+                    "direction": direction,
+                    "trigger_level": _number(setup.get("trigger_level")),
+                    "source": setup.get("source"),
+                }
+            )
+    direction = _direction(trigger.get("direction"))
+    if str(trigger.get("phase") or "").lower() == "confirmed" and direction:
         thesis = str(trigger.get("thesis") or "").lower()
         trigger_level = _number(trigger.get("level"))
-        if str(trigger.get("phase") or "").lower() != "confirmed" or not direction:
-            return None, ["confirmed_price_trigger_unavailable"]
         if thesis == "fade":
             setup = "FAILED_BREAK_RECLAIM"
         elif thesis == "breakout":
-            path_state = str(regime.get("path_state") or "")
-            path_direction = str(regime.get("path_direction") or "")
             if path_state == "TREND" and path_direction != direction:
-                return None, ["price_trigger_conflicts_with_established_path"]
-            setup = (
-                "TREND_PULLBACK"
-                if (path_state, path_direction) == ("TREND", direction)
-                else "BREAKOUT_ACCEPTANCE"
-            )
+                reasons.append("price_trigger_conflicts_with_established_path")
+                setup = ""
+            else:
+                setup = (
+                    "TREND_PULLBACK"
+                    if (path_state, path_direction) == ("TREND", direction)
+                    else "BREAKOUT_ACCEPTANCE"
+                )
         else:
-            return None, ["price_trigger_not_aligned_with_supported_setup"]
-        setup_source = "confirmed_level_decision"
-    spread_source = "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
-    shadow = _map(payload.get(spread_source))
-    spread = _map(shadow.get("candidate"))
-    if shadow.get("status") != "candidate" or not spread:
-        spread = _intent_spread(payload.get("trade_intent"), latest)
-        spread_source = "legacy_trade_intent_trigger_only"
-    if not spread:
-        spread = _confirmed_trigger_spread(facts, direction)
-        spread_source = "rth_confirmed_trigger_exact_spread_snapshot"
-    target, stop, geometry_source = resolve_geometry(
-        payload, facts, direction, trigger_level
-    )
-    if target is None or stop is None:
-        return None, ["vertical_target_or_invalidation_unavailable"]
-    evidence = {
-        "setup_kind": setup,
-        "direction": direction,
-        "trigger_level": trigger_level,
-        "target_spx": target,
-        "invalidation_spx": stop,
-        "source": setup_source,
-        "geometry_source": geometry_source,
-    }
-    if spread:
-        evidence.update(
-            {
-                "long": _map(spread.get("long")),
-                "short": _map(spread.get("short")),
-                "spread_source": spread_source,
-            }
+            reasons.append("price_trigger_not_aligned_with_supported_setup")
+            setup = ""
+        if setup:
+            bases.append(
+                {
+                    "setup_kind": setup,
+                    "setup_variant": "CONFIRMED_LEVEL",
+                    "setup_state": "ENTRY_WINDOW_OPEN",
+                    "direction": direction,
+                    "trigger_level": trigger_level,
+                    "source": "confirmed_level_decision",
+                }
+            )
+    elif not bases:
+        states = {str(row.get("state") or "") for row in setup_facts}
+        reasons.append(
+            "rth_entry_window_too_late"
+            if "ENTRY_TOO_LATE" in states
+            else "rth_setup_invalidated"
+            if states == {"INVALIDATED"}
+            else "rth_entry_window_not_open"
+            if states
+            else "confirmed_price_trigger_unavailable"
         )
-        # Legacy exact-spread rows keep their quote lineage; setup_source remains
-        # the evidence owner when enumeration builds width candidates later.
-        if evidence.get("source") == "confirmed_level_decision":
-            evidence["source"] = spread_source
-    return evidence, []
+    evidences: list[dict[str, Any]] = []
+    for base in bases:
+        direction = str(base["direction"])
+        trigger_level = _number(base.get("trigger_level"))
+        target, stop, geometry_source = resolve_geometry(
+            payload, facts, direction, trigger_level
+        )
+        if target is None or stop is None:
+            reasons.append("vertical_target_or_invalidation_unavailable")
+            continue
+        evidence = {
+            **base,
+            "target_spx": target,
+            "invalidation_spx": stop,
+            "geometry_source": geometry_source,
+        }
+        spread_source = (
+            "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
+        )
+        shadow = _map(payload.get(spread_source))
+        spread = _map(shadow.get("candidate"))
+        if shadow.get("status") != "candidate" or not spread:
+            spread = _intent_spread(payload.get("trade_intent"), latest)
+            spread_source = "legacy_trade_intent_trigger_only"
+        if spread:
+            expected_right = "C" if direction == "UP" else "P"
+            if any(
+                str(_map(spread.get(key)).get("right") or "").upper()
+                != expected_right
+                for key in ("long", "short")
+            ):
+                spread = {}
+        if not spread:
+            spread = _confirmed_trigger_spread(facts, direction)
+            spread_source = "rth_confirmed_trigger_exact_spread_snapshot"
+        if spread:
+            evidence.update(
+                {
+                    "long": _map(spread.get("long")),
+                    "short": _map(spread.get("short")),
+                    "spread_source": spread_source,
+                }
+            )
+            if evidence.get("source") == "confirmed_level_decision":
+                evidence["source"] = spread_source
+        evidences.append(evidence)
+    return evidences, list(dict.fromkeys(reasons))
 
 
 def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -493,11 +564,14 @@ def _butterfly_candidate(
     target_spx: float | None = None,
     invalidation_spx: float | list[float] | None = None,
 ) -> dict[str, Any]:
-    legs = [
-        _option_leg(latest, expiry, strike, right, require_schwab=True)
-        for strike in (center - width, center, center + width)
-    ]
-    if any(not leg for leg in legs):
+    legs = _rth_option_legs(
+        latest,
+        expiry,
+        tuple((strike, right) for strike in (center - width, center, center + width)),
+        now=now,
+        policy=policy,
+    )
+    if not legs:
         return {}
     quote = conservative_butterfly_bbo(
         *legs,
@@ -607,7 +681,8 @@ def _option_leg(
     strike: float,
     right: str,
     *,
-    require_schwab: bool = False,
+    provider: Provider | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     contract_id = InstrumentId.option(
         "SPX",
@@ -616,8 +691,12 @@ def _option_leg(
         right=right,
         trading_class="SPXW",
     ).canonical_id
-    quote = latest.best_quote(contract_id)
-    if quote is None or (require_schwab and quote.provider.value != "schwab"):
+    quote = (
+        provider_quote(latest, contract_id, provider=provider, now=now)
+        if provider is not None and now is not None
+        else latest.best_quote(contract_id)
+    )
+    if quote is None:
         return {}
     return {
         "contract_id": contract_id,
@@ -628,6 +707,47 @@ def _option_leg(
         "ask": quote.ask,
         "source_at": quote_source_at(quote).isoformat(),
     }
+
+
+def _rth_option_legs(
+    latest: LatestState,
+    expiry: str,
+    contracts: tuple[tuple[float, str], ...],
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    for provider in (Provider.SCHWAB, Provider.IBKR):
+        legs = [
+            _option_leg(
+                latest,
+                expiry,
+                strike,
+                right,
+                provider=provider,
+                now=now,
+            )
+            for strike, right in contracts
+        ]
+        times = [_time(leg.get("source_at")) for leg in legs]
+        if (
+            all(legs)
+            and all(_number(leg.get("bid")) is not None for leg in legs)
+            and all(_number(leg.get("ask")) is not None for leg in legs)
+            and all(source_at is not None for source_at in times)
+            and all(
+                0.0 <= (now - source_at).total_seconds() <= policy.quote_max_age_seconds
+                for source_at in times
+                if source_at is not None
+            )
+            and (
+                max(source_at for source_at in times if source_at is not None)
+                - min(source_at for source_at in times if source_at is not None)
+            ).total_seconds()
+            <= policy.quote_max_skew_seconds
+        ):
+            return legs
+    return []
 
 
 def _gth_leg(value: object, contract_id: object) -> dict[str, Any]:

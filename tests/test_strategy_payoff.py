@@ -373,7 +373,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v3"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v4"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -626,6 +626,212 @@ def test_confirmed_session_episode_maps_to_failed_break_reclaim_vertical() -> No
     assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
     assert decision["candidate"]["direction"] == "UP"
     assert decision["rejection_funnel"]["setup_detected"] == 1
+
+
+@pytest.mark.parametrize(
+    ("break_side", "direction", "right", "structure", "event_kind"),
+    [
+        ("UP", "DOWN", "P", "LH_LL", "terminal_below"),
+        ("DOWN", "UP", "C", "HH_HL", "terminal_above"),
+    ],
+)
+def test_opening_range_failed_break_opens_symmetric_vertical_entry_window(
+    break_side: str,
+    direction: str,
+    right: str,
+    structure: str,
+    event_kind: str,
+) -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    payload["strategy_distribution_forecast"] = _probability_forecast(
+        now, event_kind
+    )
+    _attach_rth_setup_path(payload, _or_failed_break_bars(now, break_side), structure)
+
+    latest = _two_sided_vertical_chain(now, right=right)
+    decision = build_strategy_decision(payload, latest, now)
+
+    assert decision["decision_type"] == f"{'CALL' if right == 'C' else 'PUT'}_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
+    assert decision["candidate"]["setup_variant"] == "OR_FAILED_BREAK"
+    assert decision["candidate"]["setup_state"] == "ENTRY_WINDOW_OPEN"
+    assert decision["candidate"]["direction"] == direction
+    assert decision["rejection_funnel"]["entry_window_open"] == 1
+
+
+def test_vwap_trend_pullback_opens_call_vertical_before_prior_high_break() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _vwap_pullback_payload(now)
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="C"), now
+    )
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
+    assert decision["candidate"]["setup_variant"] == "VWAP_PULLBACK"
+    assert decision["candidate"]["setup_state"] == "ENTRY_WINDOW_OPEN"
+    assert decision["rejection_funnel"]["entry_window_open"] == 1
+
+
+def test_active_shock_blocks_butterfly_but_keeps_open_vertical_setup() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _vwap_pullback_payload(now)
+    payload["intraday_shock_state"] = {
+        "active_event": {
+            "status": "shock_confirmed",
+            "anchor_at": (now - timedelta(minutes=2)).isoformat(),
+            "anchor_spx": 7720.0,
+            "extreme_spx": 7690.0,
+            "shock_spx_bps": -38.9,
+            "shock_es_bps": -37.0,
+        },
+        "samples": [],
+        "rearm": None,
+    }
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="C"), now
+    )
+
+    assert decision["market_facts"]["shock"]["state"] == "ACTIVE"
+    assert decision["market_facts"]["capabilities"]["butterfly"]["ready"] is False
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+
+    pin_now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    pin_payload = _pin_payload(pin_now)
+    pin_latest = _pin_state(pin_now)
+    control_facts = build_market_fact_pack(pin_payload, pin_latest, pin_now)
+    control_regime = assess_regime(control_facts)
+    butterfly = next(
+        row
+        for row in enumerate_candidates(
+            pin_payload,
+            control_facts,
+            control_regime,
+            pin_latest,
+            now=pin_now,
+            policy=DEFAULT_STRATEGY_POLICY,
+        )
+        if row["strategy_type"].endswith("_BUTTERFLY")
+    )
+    pin_payload["intraday_shock_state"] = deepcopy(payload["intraday_shock_state"])
+    pin_payload["intraday_shock_state"]["active_event"]["anchor_at"] = (
+        pin_now - timedelta(minutes=2)
+    ).isoformat()
+    shock_facts = build_market_fact_pack(pin_payload, pin_latest, pin_now)
+    shock_regime = assess_regime(shock_facts)
+    rank = rank_candidates(
+        [butterfly],
+        shock_facts,
+        shock_regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=pin_now,
+    )
+    shock_gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_shock_veto" in shock_gates
+
+
+def test_missing_vix_response_cannot_produce_pin_stable_or_butterfly() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    latest = _pin_state(now)
+    control_facts = build_market_fact_pack(payload, latest, now)
+    control_regime = assess_regime(control_facts)
+    butterfly = next(
+        row
+        for row in enumerate_candidates(
+            payload,
+            control_facts,
+            control_regime,
+            latest,
+            now=now,
+            policy=DEFAULT_STRATEGY_POLICY,
+        )
+        if row["strategy_type"].endswith("_BUTTERFLY")
+    )
+    payload["minute_market_frame"]["volatility"].pop("vix_return_15m_pct")
+
+    decision = build_strategy_decision(payload, latest, now)
+
+    assert decision["regime"]["terminal_state"] == "UNCERTAIN"
+    assert decision["market_facts"]["capabilities"]["butterfly"]["ready"] is False
+    assert decision["decision_type"] == "NO_TRADE"
+    rank = rank_candidates(
+        [butterfly],
+        decision["market_facts"],
+        decision["regime"],
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_vix_or_breadth_unavailable" in gates
+
+
+def test_butterfly_body_far_from_value_center_fails_ranker_hard_gate() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    latest = _pin_state(now)
+    facts = build_market_fact_pack(payload, latest, now)
+    regime = assess_regime(facts)
+    rows = enumerate_candidates(
+        payload, facts, regime, latest, now=now, policy=DEFAULT_STRATEGY_POLICY
+    )
+    butterfly = deepcopy(
+        next(row for row in rows if row["strategy_type"].endswith("_BUTTERFLY"))
+    )
+    butterfly["center"] = 7730.0
+
+    rank = rank_candidates(
+        [butterfly],
+        facts,
+        regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_body_value_center_distance" in gates
+
+
+def test_rth_vertical_uses_fresh_atomic_ibkr_fallback_when_schwab_is_stale() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _vwap_pullback_payload(now)
+    fresh_ibkr = _two_sided_vertical_chain(
+        now, right="C", provider=Provider.IBKR
+    )
+    stale_schwab = _two_sided_vertical_chain(
+        now - timedelta(seconds=30), right="C", provider=Provider.SCHWAB
+    )
+    latest = LatestState(
+        created_at=now - timedelta(seconds=1),
+        as_of=now - timedelta(seconds=1),
+        quotes=(*stale_schwab.quotes, *fresh_ibkr.quotes),
+        best_quotes=stale_schwab.quotes,
+    )
+
+    decision = build_strategy_decision(
+        payload,
+        latest,
+        now,
+    )
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "rth_ibkr_width_enumeration"
+    assert decision["candidate"]["long"]["provider"] == "ibkr"
+    assert decision["candidate"]["short"]["provider"] == "ibkr"
+    assert decision["candidate"]["quote"]["status"] == "ready"
 
 
 def test_chain_implied_spx_coordinate_keeps_gth_facts_available() -> None:
@@ -885,7 +1091,7 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
 
 def test_ranker_winner_is_structure_score_not_research_utility() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
-    facts = {
+    facts = _ranker_pin_facts({
         "session_date": "2026-08-06",
         "probability": {
             "event": {"kind": "terminal_between", "target_at": (now + timedelta(minutes=5)).isoformat()},
@@ -896,7 +1102,7 @@ def test_ranker_winner_is_structure_score_not_research_utility() -> None:
             "n_effective": 40.0,
             "historical_sessions": ["2026-08-05"],
         },
-    }
+    })
 
     def butterfly(candidate_id: str, *, selection_score: float, gain: float) -> dict:
         return {
@@ -905,9 +1111,11 @@ def test_ranker_winner_is_structure_score_not_research_utility() -> None:
             "setup_kind": "STABLE_PIN",
             "direction": "NEUTRAL",
             "selection_score": selection_score,
+            "center": 7710.0,
+            "width": 10.0,
             "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
             "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
-            "economics": {"max_gain_points": gain, "max_loss_points": 3.2,
+            "economics": {"width_points": 10.0, "max_gain_points": gain, "max_loss_points": 3.2,
                           "breakeven_low": 7703.2, "breakeven_high": 7716.8},
             "quote_valid_until": (now + timedelta(seconds=30)).isoformat(),
             "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
@@ -920,7 +1128,10 @@ def test_ranker_winner_is_structure_score_not_research_utility() -> None:
     rank = rank_candidates(
         [high_utility, high_structure],
         facts,
-        {"pin": {"depin_risk": 0.0}},
+        {
+            "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
+            "terminal_state": "PIN_STABLE",
+        },
         policy=DEFAULT_STRATEGY_POLICY,
         data_root=None,
         probability_settings=None,
@@ -943,7 +1154,7 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
-    facts = {
+    facts = _ranker_pin_facts({
         "session_date": "2026-08-06",
         "probability": {
             "event": {
@@ -957,7 +1168,7 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
             "n_effective": 40.0,
             "historical_sessions": ["2026-08-05"],
         },
-    }
+    })
 
     def butterfly(candidate_id: str, *, selection_score: float, gain: float) -> dict:
         return {
@@ -966,9 +1177,12 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
             "setup_kind": "STABLE_PIN",
             "direction": "NEUTRAL",
             "selection_score": selection_score,
+            "center": 7710.0,
+            "width": 10.0,
             "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
             "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
             "economics": {
+                "width_points": 10.0,
                 "max_gain_points": gain,
                 "max_loss_points": 3.2,
                 "breakeven_low": 7703.2,
@@ -984,7 +1198,10 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
         butterfly("high-utility", selection_score=1.0, gain=16.8),
         butterfly("high-structure", selection_score=9.0, gain=6.8),
     ]
-    regime = {"pin": {"depin_risk": 0.0}, "terminal_state": "PIN_STABLE"}
+    regime = {
+        "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
+        "terminal_state": "PIN_STABLE",
+    }
 
     without_table = rank_candidates(
         candidates,
@@ -1056,9 +1273,12 @@ def test_policy_ev_annotation_marks_missing_table_as_unavailable(tmp_path: Path)
                 "setup_kind": "STABLE_PIN",
                 "direction": "NEUTRAL",
                 "selection_score": 9.0,
+                "center": 7710.0,
+                "width": 10.0,
                 "legs": [{"strike": 7700.0}, {"strike": 7710.0}, {"strike": 7720.0}],
                 "quote": {"status": "ready", "bid": 3.0, "ask": 3.2},
                 "economics": {
+                    "width_points": 10.0,
                     "max_gain_points": 6.8,
                     "max_loss_points": 3.2,
                     "breakeven_low": 7703.2,
@@ -1070,7 +1290,7 @@ def test_policy_ev_annotation_marks_missing_table_as_unavailable(tmp_path: Path)
                 "manual_action_only": True,
             }
         ],
-        {
+        _ranker_pin_facts({
             "session_date": "2026-08-06",
             "probability": {
                 "event": {
@@ -1084,8 +1304,11 @@ def test_policy_ev_annotation_marks_missing_table_as_unavailable(tmp_path: Path)
                 "n_effective": 40.0,
                 "historical_sessions": ["2026-08-05"],
             },
+        }),
+        {
+            "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
+            "terminal_state": "PIN_STABLE",
         },
-        {"pin": {"depin_risk": 0.0}, "terminal_state": "PIN_STABLE"},
         policy=DEFAULT_STRATEGY_POLICY,
         data_root=tmp_path,
         probability_settings=None,
@@ -1287,6 +1510,136 @@ def test_historical_gth_record_uses_same_stop_atr_and_trend_gates() -> None:
     trend_only = classify_gth_vertical_record(record, atr_5m=20.0)
     assert trend_only["new_action"] == "NO_TRADE"
     assert trend_only["new_reason"] == "trend_background_cannot_authorize_entry"
+
+
+def _ranker_pin_facts(facts: dict[str, object]) -> dict[str, object]:
+    merged = deepcopy(facts)
+    merged["spot"] = {"spx": 7710.0, **dict(merged.get("spot") or {})}
+    merged["path"] = {
+        "breadth_above_vwap": 0.5,
+        **dict(merged.get("path") or {}),
+    }
+    merged["volatility"] = {
+        "vix_return_15m_pct": -0.005,
+        **dict(merged.get("volatility") or {}),
+    }
+    merged["value_center"] = {
+        "spx_30m": 7710.0,
+        **dict(merged.get("value_center") or {}),
+    }
+    merged["structure"] = {
+        "q_mode": 7710.0,
+        **dict(merged.get("structure") or {}),
+    }
+    merged["shock"] = {"state": "NONE", **dict(merged.get("shock") or {})}
+    return merged
+
+
+def _attach_rth_setup_path(
+    payload: dict[str, object],
+    bars: list[dict[str, object]],
+    structure: str,
+) -> None:
+    lineage = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]
+    lineage["values"].update(
+        opening_range_state="INSIDE",
+        market_structure=structure,
+    )
+    lineage["diagnostics"].update(
+        opening_range={"status": "ready", "orh": 7740.0, "orl": 7730.0},
+        rth_bar_path=bars,
+        rth_bar_vwaps={bar["bar_start"]: 7732.0 for bar in bars},
+    )
+
+
+def _or_failed_break_bars(
+    now: datetime, break_side: str
+) -> list[dict[str, object]]:
+    closes = (
+        (7735.0, 7736.0, 7742.0, 7743.0, 7739.0, 7738.0)
+        if break_side == "UP"
+        else (7735.0, 7734.0, 7728.0, 7727.0, 7731.0, 7732.0)
+    )
+    return [
+        {
+            "bar_start": (now - timedelta(minutes=5 * (len(closes) - index))).isoformat(),
+            "open": close - 0.5,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "quality": "ok",
+        }
+        for index, close in enumerate(closes)
+    ]
+
+
+def _vwap_pullback_payload(now: datetime) -> dict[str, object]:
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    bars = [
+        {
+            "bar_start": (now - timedelta(minutes=10)).isoformat(),
+            "open": 7735.0,
+            "high": 7736.0,
+            "low": 7731.5,
+            "close": 7734.0,
+            "quality": "ok",
+        },
+        {
+            "bar_start": (now - timedelta(minutes=5)).isoformat(),
+            "open": 7734.0,
+            "high": 7736.0,
+            "low": 7732.0,
+            "close": 7735.0,
+            "quality": "ok",
+        },
+    ]
+    _attach_rth_setup_path(payload, bars, "HL_ONLY")
+    return payload
+
+
+def _two_sided_vertical_chain(
+    now: datetime,
+    *,
+    right: str,
+    provider: Provider = Provider.SCHWAB,
+) -> LatestState:
+    observed = now - timedelta(seconds=1)
+    prices = (
+        ((7700, 8.0, 8.2), (7705, 6.2, 6.4), (7710, 4.8, 5.0),
+         (7715, 2.7, 2.9), (7720, 0.5, 0.7), (7725, 0.2, 0.4), (7730, 0.1, 0.2))
+        if right == "C"
+        else ((7690, 0.1, 0.2), (7695, 0.3, 0.4), (7700, 0.7, 0.9),
+              (7705, 2.6, 2.8), (7710, 4.7, 5.0), (7715, 6.0, 6.2), (7720, 8.0, 8.2))
+    )
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.option(
+                "SPX",
+                expiry="20260807",
+                strike=strike,
+                right=right,
+                trading_class="SPXW",
+            ),
+            provider=provider,
+            received_at=observed,
+            quote_time=observed,
+            quality=MarketDataQuality.LIVE,
+            bid=bid,
+            ask=ask,
+        )
+        for strike, bid, ask in prices
+    )
+    return LatestState(
+        created_at=observed,
+        as_of=observed,
+        quotes=quotes,
+        best_quotes=quotes if provider is Provider.SCHWAB else (),
+    )
 
 
 def _state(now: datetime) -> LatestState:

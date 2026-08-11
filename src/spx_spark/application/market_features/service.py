@@ -630,6 +630,9 @@ def run(
         "strategy_entry_control": action_provider_entry_control,
         "level_decision": raw_level_decision,
         "session_episode": session_episode,
+        "intraday_shock_state": load_json(
+            latest_root / "intraday_shock_state.json"
+        ),
         "gth_level_manual_candidate": gth_level_manual_candidate,
         "gth_dip_reclaim_evidence": gth_dip_reclaim_evidence,
         "trade_intent": strategy_trigger_intent,

@@ -279,12 +279,24 @@ def _rejection_funnel(
         "gth_confirmed_level_candidate_unavailable",
         "gth_dip_reclaim_evidence_unavailable",
         "trend_background_cannot_authorize_entry",
+        "rth_entry_window_not_open",
+        "rth_entry_window_too_late",
+        "rth_setup_invalidated",
+        "trend_pullback_path_not_confirmed",
     }
-    setup_detected = bool(rows) or bool(
+    rth_setup_states = {
+        str(_map(row).get("state") or "") for row in facts.get("rth_setups") or ()
+    }
+    setup_detected = bool(rows) or bool(rth_setup_states) or bool(
         generation_reasons
         and not any(str(reason) in setup_absence_reasons for reason in generation_reasons)
     )
-    entry_window_open = setup_detected and "direction_valid_but_entry_too_late" not in reasons
+    entry_window_open = (
+        bool(rows) or "ENTRY_WINDOW_OPEN" in rth_setup_states
+    ) and not {
+        "direction_valid_but_entry_too_late",
+        "trend_pullback_path_not_confirmed",
+    }.intersection(map(str, reasons))
     exact_quote_ready = sum(
         _map(row.get("quote")).get("status") == "ready" for row in rows
     )

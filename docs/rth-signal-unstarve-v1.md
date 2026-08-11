@@ -1,7 +1,7 @@
 # RTH Signal Unstarve v1
 
 状态：Change Brief 已确认，按现有 owner 落地；不新增 service / DB / queue / Rust / LLM / BWB。  
-实现状态（2026-08-11）：P0 已落地并通过相关 pytest；P1 的 OR / VWAP / shock 与 Butterfly 强化未开始。
+实现状态（2026-08-11）：P0、P1 已落地并通过冻结构造与相关 pytest；P2 校准未开始。
 范围依据：仓库代码、冻结回放证据与生产运行时漏斗；不补盘感故事。  
 关联：`docs/strategy-signal-engine-v2.md`；架构简化执行方案 S-track；Import Linter / module-architecture 分层不变。
 
@@ -237,6 +237,18 @@ TREND_PULLBACK_VERTICAL
 - RTH 允许经验证的 IBKR fallback；
 - `PIN_STABLE` Butterfly 强化硬门（body 对齐、无 recent extreme、debit/width、shock inactive、VIX/breadth fail-closed、风险预算）。
 
+实现状态：
+
+- [x] `session_episode`、OR Failed Break、VWAP / accepted-OR Trend Pullback 并列进入统一 selector；
+- [x] setup 显式输出 `SETUP_DETECTED / ENTRY_WINDOW_OPEN / ENTRY_TOO_LATE / INVALIDATED`，漏斗只在真实 entry window 开放时计数；
+- [x] `intraday_shock_state` 映射为 `ACTIVE / POST_SHOCK_DISCOVERY / RECLAIMED / NONE`，前两态在 capability 与 ranker 两层禁 Butterfly；
+- [x] `PIN_STABLE` 人工蝶增加 Value Center、Q mode、spot、recent extreme、de-pin、debit/width、VIX/breadth、shock 与风险预算硬门；bootstrap policy 升至 `strategy_policy.bootstrap.v4`；
+- [x] RTH exact legs 保持 15 秒 freshness 与 2 秒跨腿 skew，按同 provider 组合优先 Schwab、缺失时回退 fresh IBKR 双边报价。
+
+本阶段没有新增独立 pin-request 服务。现有 latest quote state 已能完成同 provider、同 expiry、同 snapshot-time-skew 的原子组合校验，因此 P1 只复用该路径；若未来需要主动临时订阅，必须另行获得服务/进程变更批准。
+
+`bootstrap.v4` 冻结常量：Butterfly body 距 VC30、Q mode 各不超过 5 点，距 spot 不超过 15 点；`depin_risk < 0.35`；debit/width 不超过 0.35；单份 max loss 不超过 1,000 美元。修改任一值必须再次提升 `policy_version` 并做 replay 对照，不能放进 runtime config 临时调参。
+
 ### P2：校准后再谈“好信号”
 
 至少 25 个 session，按 conservative ask/bid、+50% arm、trailing、premium stop、20m time stop、手续费点差评估后，再决定 manual authority、Butterfly 去留、宽度与是否引入 BWB。
@@ -250,6 +262,8 @@ TREND_PULLBACK_VERTICAL
 5. **漏斗完整**：每个 RTH session 输出第 5 节 funnel，可区分策略无机会 / 工程未生成 / 报价缺失 / 风险拒绝 / 通知未达。
 
 优先冻结会话：生产当日 RTH session（含午间 shock 路径）与既有 2026-08-05 / 2026-08-06 策略验收日。
+
+P1 覆盖状态：案例 3 已覆盖既有 Session Episode 路径，并新增 ORH/ORL Failed Break 对称冻结构造；案例 4 已覆盖 ACTIVE shock 禁蝶、Vertical setup 保留及 ranker 二次 veto。VWAP Trend Pullback、VIX 缺失、body 偏离 Value Center、IBKR RTH fallback 另有冻结构造。
 
 ## 7. 明确不做的“快速修复”
 
@@ -287,7 +301,7 @@ jq '{
 3. [x] 统一 official / parity / ES-equivalent SPX 坐标：Market Features 策略入口复用 `resolve_trigger_coordinate()`，underlier / spot / facts 共用同一解析结果。
 4. [x] 把 `session_episode` 接进 selector：`V_REVERSAL_CONFIRMED` / `RECOVERY` 映射为反向 `FAILED_BREAK_RECLAIM` Vertical setup。
 5. [x] Desk Map 完全服从 `strategy_decision`，level decision 降为 Evidence，并输出逐决策 rejection funnel。
-6. [ ] P1：OR Failed Break / VWAP Pullback、shock gate、Butterfly 硬门强化；本阶段未实施。
+6. [x] P1：OR Failed Break / VWAP Pullback、四态 entry window、shock gate、Butterfly 硬门强化及 RTH IBKR exact-leg fallback。
 
 P0 冻结测试覆盖：
 
@@ -295,5 +309,14 @@ P0 冻结测试覆盖：
 - confirmed setup + 无 legacy spread → direct width enumeration；
 - `V_REVERSAL_CONFIRMED` → 反向 Failed Break/Reclaim Vertical；
 - Desk Map 的 Decision / blocker / nearest candidate / failed gates / reauthorize 条件只读 `strategy_decision`。
+
+P1 冻结测试覆盖：
+
+- ORH 上破失败 → Put Vertical，ORL 下破失败 → Call Vertical；
+- VWAP 趋势回踩拒绝并由下一根 5m 守住 → `TREND_PULLBACK` Call Vertical；
+- shock ACTIVE → Butterfly capability 与 ranker 双重拒绝，合法 Vertical setup 不被误杀；
+- VIX response 缺失 → 不得 `PIN_STABLE`，Butterfly hard gate fail；
+- Butterfly body 远离 Value Center → hard gate fail；
+- Schwab exact legs 缺失、fresh IBKR 两腿同源同 skew → RTH Vertical 可枚举。
 
 前五项完成后，RTH 才具备正常候选供给；后几项防止错误环境给出脆弱 Butterfly。

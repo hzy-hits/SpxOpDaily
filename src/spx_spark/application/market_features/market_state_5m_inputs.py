@@ -132,6 +132,8 @@ def build_market_state_5m_inputs(
             "atr": atr_diagnostics,
             "vwap": vwap_diagnostics,
             "opening_range": opening_diagnostics,
+            "rth_bar_path": [dict(bar) for bar in rth_bars],
+            "rth_bar_vwaps": dict(bar_vwaps),
             "same_time_range": range_diagnostics,
             "rolling_path_percentiles": rolling_path,
             "moving_averages": moving_averages,

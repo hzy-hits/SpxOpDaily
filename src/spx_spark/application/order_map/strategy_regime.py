@@ -27,7 +27,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v3"
+    policy_version: str = "strategy_policy.bootstrap.v4"
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
     trend_max_vwap_crosses: float = 2.0
@@ -47,6 +47,10 @@ class StrategyPolicy:
     late_chase_distance_atr: float = 1.0
     late_chase_impulse_atr: float = 1.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
+    pin_body_max_center_distance_points: float = 5.0
+    pin_body_max_spot_distance_points: float = 15.0
+    butterfly_max_debit_fraction: float = 0.35
+    butterfly_max_risk_usd: float = 1000.0
     # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
     candidate_cooldown_seconds: float = 300.0
     max_cards_per_direction_per_session: int = 6
@@ -128,18 +132,26 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
     er, vc15, vc30, vc60 = (_number(path.get("efficiency_ratio_30m")), *(_number(vc.get(f"spx_{w}")) for w in ("15m", "30m", "60m")))
     q_mode, decay = _number(structure.get("q_mode")), _number(vol.get("atm_straddle_decay_15m"))
     closes = [float(value) for value in path.get("pin_path_spx") or () if isinstance(value, int | float)]
-    required = (er, vc15, vc30, vc60, q_mode, decay)
+    breadth = _number(path.get("breadth_above_vwap"))
+    vix = _number(vol.get("vix_return_15m_pct"))
+    required = (er, vc15, vc30, vc60, q_mode, decay, breadth, vix)
     if None in required or len(closes) < 4 or not mass:
         return {"terminal_state": "UNCERTAIN", "reason": "pin_inputs_unavailable", "top_centers": []}
+    shock_state = str(_map(facts.get("shock")).get("state") or "NONE")
+    if shock_state in {"ACTIVE", "POST_SHOCK_DISCOVERY"}:
+        return {
+            "terminal_state": "NONE",
+            "reason": f"shock_{shock_state.lower()}",
+            "depin_risk": 1.0,
+            "top_centers": [],
+        }
     centers = [float(key) for key in mass if str(key).replace(".", "", 1).isdigit()]
     returns = {center: _excursion_returns(closes, center) for center in centers}
     drift30, drift60 = float(vc15) - float(vc30), float(vc15) - float(vc60)
     extreme = abs(closes[-1] - closes[-4]) >= 5 and closes[-1] in {min(closes[-4:]), max(closes[-4:])}
-    breadth = _number(path.get("breadth_above_vwap"))
-    vix = _number(vol.get("vix_return_15m_pct")) or 0.0
     depin = min(1.0, 0.25 * max(abs(drift30) / 5, abs(drift60) / 8)
                 + 0.20 * min(float(er) / 0.4, 1) + 0.20 * (abs(float(breadth) - 0.5) * 2 if breadth is not None else 0)
-                + 0.15 * min(max(vix, 0) / 0.01, 1) + 0.10 * extreme
+                + 0.15 * min(max(float(vix), 0) / 0.01, 1) + 0.10 * extreme
                 + 0.10 * min(max(-float(decay), 0) / 0.05, 1))
     refs = [_number(structure.get(key)) for key in ("zero_gamma", "put_wall", "call_wall")]
     flip = structure.get("flip_zone")
@@ -161,7 +173,7 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
     aligned = gamma is not None and max(float(q_mode), float(vc30), gamma) - min(float(q_mode), float(vc30), gamma) <= 5
     stable = (facts.get("minutes_to_close") is not None and int(facts["minutes_to_close"]) <= 210
               and float(er) < er_max and abs(drift30) <= drift30_max and abs(drift60) <= drift60_max
-              and max(returns.values(), default=0) >= 2 and vix <= 0.01 and not extreme and aligned
+              and max(returns.values(), default=0) >= 2 and float(vix) <= 0.01 and not extreme and aligned
               and float(decay) > 0 and depin < stable_risk)
     terminal = "PIN_MIGRATING" if migrating or depin >= block_risk else "PIN_STABLE" if stable else "NONE"
     return {"terminal_state": terminal, "depin_risk": round(depin, 4), "drift_30m": round(drift30, 2),

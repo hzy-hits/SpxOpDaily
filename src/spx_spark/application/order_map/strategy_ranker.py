@@ -48,7 +48,9 @@ def rank_candidates(
     audit: list[dict[str, Any]] = []
     for row in rows:
         candidate = dict(row)
-        deterministic = _hard_gate_candidate(candidate, facts, now=now, policy=policy)
+        deterministic = _hard_gate_candidate(
+            candidate, facts, regime, now=now, policy=policy
+        )
         if deterministic:
             rejected = _rejected(candidate, deterministic)
             misses.append(rejected)
@@ -121,6 +123,7 @@ def _apply_surface_shape_prior(
 def _hard_gate_candidate(
     candidate: dict[str, Any],
     facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
     *,
     now: datetime,
     policy: StrategyPolicy,
@@ -140,7 +143,7 @@ def _hard_gate_candidate(
     if strategy_type.endswith("_DEBIT_VERTICAL"):
         gates.extend(_vertical_hard_gates(candidate, facts, policy=policy))
     elif strategy_type.endswith("_BUTTERFLY"):
-        gates.extend(_butterfly_hard_gates(candidate))
+        gates.extend(_butterfly_hard_gates(candidate, facts, regime, policy=policy))
     else:
         gates.append({"gate": "unsupported_strategy_type", "actual": strategy_type, "threshold": "approved_strategy"})
     if candidate.get("automatic_ordering") is not False or candidate.get("manual_action_only") is not True:
@@ -185,17 +188,65 @@ def _vertical_hard_gates(
         thresholds=policy.entry_quality_kwargs(),
     )
     candidate["entry_quality"] = entry_quality
+    if "direction_valid_but_entry_too_late" in reasons:
+        candidate["setup_state"] = "ENTRY_TOO_LATE"
     return [_gate_from_entry_reason(reason, entry_quality, policy) for reason in reasons]
 
 
-def _butterfly_hard_gates(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _butterfly_hard_gates(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    gates: list[dict[str, Any]] = []
     legs = candidate.get("legs")
     economics = _map(candidate.get("economics"))
     if not isinstance(legs, list) or len(legs) != 3 or any(not _map(leg) for leg in legs):
-        return [{"gate": "butterfly_three_leg_bbo_unavailable", "actual": None, "threshold": "three_legs"}]
+        gates.append({"gate": "butterfly_three_leg_bbo_unavailable", "actual": None, "threshold": "three_legs"})
     if _number(economics.get("max_loss_points")) is None or _number(economics.get("max_gain_points")) is None:
-        return [{"gate": "butterfly_economics_unavailable", "actual": None, "threshold": "valid_debit"}]
-    return []
+        gates.append({"gate": "butterfly_economics_unavailable", "actual": None, "threshold": "valid_debit"})
+    if regime.get("terminal_state") != "PIN_STABLE":
+        gates.append({"gate": "butterfly_requires_pin_stable", "actual": regime.get("terminal_state"), "threshold": "PIN_STABLE"})
+    shock_state = str(_map(facts.get("shock")).get("state") or "NONE")
+    if shock_state not in {"NONE", "RECLAIMED"}:
+        gates.append({"gate": "butterfly_shock_veto", "actual": shock_state, "threshold": ["NONE", "RECLAIMED"]})
+    path, vc, structure = (
+        _map(facts.get("path")),
+        _map(facts.get("value_center")),
+        _map(facts.get("structure")),
+    )
+    center = _number(candidate.get("center"))
+    spot = _number(_map(facts.get("spot")).get("spx"))
+    value_center = _number(vc.get("spx_30m"))
+    q_mode = _number(structure.get("q_mode"))
+    for gate, reference, threshold in (
+        ("butterfly_body_value_center_distance", value_center, policy.pin_body_max_center_distance_points),
+        ("butterfly_body_q_mode_distance", q_mode, policy.pin_body_max_center_distance_points),
+        ("butterfly_body_spot_distance", spot, policy.pin_body_max_spot_distance_points),
+    ):
+        distance = abs(center - reference) if center is not None and reference is not None else None
+        if distance is None or distance > threshold:
+            gates.append({"gate": gate, "actual": distance, "threshold": threshold})
+    pin = _map(regime.get("pin")) or _map(candidate.get("pin"))
+    depin = _number(pin.get("depin_risk"))
+    max_depin = policy.pin_thresholds[5]
+    if depin is None or depin >= max_depin:
+        gates.append({"gate": "butterfly_depin_risk", "actual": depin, "threshold": f"<{max_depin}"})
+    if pin.get("recent_extreme_acceptance") is not False:
+        gates.append({"gate": "butterfly_recent_extreme_acceptance", "actual": pin.get("recent_extreme_acceptance"), "threshold": False})
+    if _number(path.get("breadth_above_vwap")) is None or _number(_map(facts.get("volatility")).get("vix_return_15m_pct")) is None:
+        gates.append({"gate": "butterfly_vix_or_breadth_unavailable", "actual": None, "threshold": "both_present"})
+    width = _number(economics.get("width_points")) or _number(candidate.get("width"))
+    debit = _number(economics.get("max_loss_points"))
+    debit_fraction = debit / width if debit is not None and width is not None and width > 0 else None
+    if debit_fraction is None or debit_fraction > policy.butterfly_max_debit_fraction:
+        gates.append({"gate": "butterfly_debit_fraction", "actual": debit_fraction, "threshold": policy.butterfly_max_debit_fraction})
+    risk_usd = debit * 100.0 if debit is not None else None
+    if risk_usd is None or risk_usd > policy.butterfly_max_risk_usd:
+        gates.append({"gate": "butterfly_risk_budget", "actual": risk_usd, "threshold": policy.butterfly_max_risk_usd})
+    return gates
 
 
 def _score_candidate(
