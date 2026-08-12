@@ -21,6 +21,7 @@ from spx_spark.settings.strategy_distribution import StrategyDistributionSetting
 _POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
 _POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
 _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
+_EVENT_SETTLEMENT_MAX_DEBIT_FRACTION = 0.50
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +263,14 @@ def _event_settlement_vertical_hard_gates(
                 "gate": "event_settlement_odds_invalid",
                 "actual": debit_fraction,
                 "threshold": "0<debit_fraction<1",
+            }
+        )
+    elif debit_fraction > _EVENT_SETTLEMENT_MAX_DEBIT_FRACTION:
+        gates.append(
+            {
+                "gate": "event_settlement_debit_fraction_exceeded",
+                "actual": debit_fraction,
+                "threshold": f"<={_EVENT_SETTLEMENT_MAX_DEBIT_FRACTION}",
             }
         )
     view = _map(candidate.get("view"))
