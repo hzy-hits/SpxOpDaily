@@ -87,6 +87,36 @@ def test_public_projection_preserves_reentry_generation() -> None:
     assert projected["reentry_generation"] == 5
 
 
+def test_public_projection_exposes_top_level_trigger_basis_points() -> None:
+    projected = shadow_service._public_state(
+        {
+            "phase": "armed",
+            "thesis": "support",
+            "direction": "up",
+            "level": 6820.0,
+            "spx_level": 6820.0,
+            "trigger_coordinate_kind": "es_equivalent",
+            "trigger_instrument_id": "future:ES",
+            "trigger_basis_points": 48.5,
+        },
+        formal_signal_enabled=False,
+        latest_observation={
+            "spot": 6870.0,
+            "es": 6870.0,
+            "spx_spot": 6821.5,
+            "trigger_coordinate_kind": "es_equivalent",
+            "trigger_instrument_id": "future:ES",
+            "trigger_basis_points": 48.5,
+            "session_mode": "gth",
+            "quality_ok": True,
+        },
+    )
+
+    assert projected["trigger_basis_points"] == pytest.approx(48.5)
+    assert projected["es_basis_points"] == pytest.approx(48.5)
+    assert projected["trigger_coordinate"]["basis_points"] == pytest.approx(48.5)
+
+
 def test_frozen_structure_ttl_counts_trading_sessions() -> None:
     structure = {
         "session_date": "2026-07-10",

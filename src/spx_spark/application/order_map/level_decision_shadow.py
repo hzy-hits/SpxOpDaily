@@ -616,7 +616,14 @@ def _public_state(
     spot = _positive_float(observation.get("spx_spot")) or trigger_value
     es = _positive_float(observation.get("es", state.get("last_es")))
     spot_source = observation.get("spot_source")
-    es_basis = es - spot if spot is not None and es is not None else None
+    trigger_basis_points = _positive_or_negative_float(
+        observation.get("trigger_basis_points", state.get("trigger_basis_points"))
+    )
+    es_basis = (
+        trigger_basis_points
+        if trigger_basis_points is not None
+        else (es - spot if spot is not None and es is not None else None)
+    )
     es_equivalent_levels = {
         key: float(value) + es_basis
         for key, value in levels.items()
@@ -683,6 +690,7 @@ def _public_state(
         "es": es,
         "spot_source": spot_source,
         "trigger_value": trigger_value,
+        "trigger_basis_points": trigger_basis_points if trigger_basis_points is not None else es_basis,
         "trigger_coordinate": {
             "kind": observation.get(
                 "trigger_coordinate_kind", state.get("trigger_coordinate_kind")
@@ -694,8 +702,8 @@ def _public_state(
             "target_value": state.get("level"),
             "spx_level": state.get("spx_level", state.get("level")),
             "spx_observed_value": spot,
-            "basis_points": observation.get(
-                "trigger_basis_points", state.get("trigger_basis_points")
+            "basis_points": (
+                trigger_basis_points if trigger_basis_points is not None else es_basis
             ),
             "as_of": observation.get("observed_at", state.get("updated_at")),
         },

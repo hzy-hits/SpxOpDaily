@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Mapping
 
 from spx_spark.analytics.options.models import OptionsMap
+from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.options_map import actionable_chain_implied_spot
@@ -55,6 +56,38 @@ class TriggerCoordinate:
         payload["kind"] = self.kind.value
         payload["as_of"] = self.as_of.isoformat()
         return payload
+
+
+def qualified_es_basis_points(
+    level_decision: Mapping[str, object] | None = None,
+    *,
+    cross_asset_basis: float | None = None,
+) -> float | None:
+    """Resolve ES–SPX basis from public level-decision fields, then cross-asset.
+
+    Public projection historically exposed basis as ``es_basis_points`` and
+    ``trigger_coordinate.basis_points`` without a top-level
+    ``trigger_basis_points``. Strategy / order-map callers that only read the
+    top-level key would drop a usable GTH ES-equivalent coordinate.
+    """
+
+    decision = level_decision if isinstance(level_decision, Mapping) else {}
+    trigger_coordinate = decision.get("trigger_coordinate")
+    nested_basis = (
+        trigger_coordinate.get("basis_points")
+        if isinstance(trigger_coordinate, Mapping)
+        else None
+    )
+    for value in (
+        decision.get("trigger_basis_points"),
+        nested_basis,
+        decision.get("es_basis_points"),
+        cross_asset_basis,
+    ):
+        basis = finite_float(value)
+        if basis is not None:
+            return basis
+    return None
 
 
 def resolve_trigger_coordinate(

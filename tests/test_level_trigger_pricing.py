@@ -19,6 +19,7 @@ from spx_spark.application.order_map.spot import actionable_live_price
 from spx_spark.application.order_map.touch_time_model import estimate_touch_time
 from spx_spark.application.order_map.trigger_coordinates import (
     TriggerCoordinateKind,
+    qualified_es_basis_points,
     resolve_trigger_coordinate,
 )
 from spx_spark.config import StorageSettings
@@ -241,6 +242,60 @@ def test_trigger_coordinate_uses_official_rth_chain_gth_then_es(monkeypatch) -> 
     assert equivalent.kind is TriggerCoordinateKind.ES_EQUIVALENT
     assert equivalent.observed_value == pytest.approx(6050.0)
     assert equivalent.trigger_level(6000.0) == pytest.approx(6050.0)
+
+
+def test_qualified_es_basis_points_reads_nested_public_fields() -> None:
+    assert qualified_es_basis_points({"trigger_basis_points": 41.5}) == pytest.approx(41.5)
+    assert qualified_es_basis_points(
+        {
+            "trigger_coordinate": {"basis_points": 42.25},
+            "es_basis_points": 99.0,
+        }
+    ) == pytest.approx(42.25)
+    assert qualified_es_basis_points({"es_basis_points": 43.0}) == pytest.approx(43.0)
+    assert qualified_es_basis_points(
+        {},
+        cross_asset_basis=44.0,
+    ) == pytest.approx(44.0)
+    assert qualified_es_basis_points(None) is None
+
+
+def test_gth_strategy_basis_wiring_enables_es_equivalent(monkeypatch) -> None:
+    """Public level_decision without top-level trigger_basis must still resolve."""
+
+    es = Quote(
+        instrument=InstrumentId.future("ES"),
+        provider=Provider.IBKR,
+        provider_symbol="ESU6",
+        received_at=NOW,
+        last_update_at=NOW,
+        quote_time=NOW,
+        quality=MarketDataQuality.LIVE,
+        bid=6049.75,
+        ask=6050.25,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.trigger_coordinates.DEFAULT_MARKET_CALENDAR.is_rth_open",
+        lambda _now: False,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.trigger_coordinates.actionable_chain_implied_spot",
+        lambda *_args, **_kwargs: None,
+    )
+    public_decision = {
+        "es_basis_points": 50.0,
+        "trigger_coordinate": {"kind": "es_equivalent", "basis_points": 50.0},
+    }
+    basis = qualified_es_basis_points(public_decision, cross_asset_basis=None)
+    coordinate = resolve_trigger_coordinate(
+        _state(es),
+        SimpleNamespace(expiries=[SimpleNamespace(expiry="20260713")]),
+        now=NOW,
+        qualified_es_basis=basis,
+    )
+    assert basis == pytest.approx(50.0)
+    assert coordinate.kind is TriggerCoordinateKind.ES_EQUIVALENT
+    assert coordinate.spx_observed_value == pytest.approx(6000.0)
 
 
 def test_rth_trigger_coordinate_rejects_close_only_spx(

@@ -93,7 +93,10 @@ from spx_spark.application.order_map.spring_gamma_projection import (
     attach_spring_gamma_v3_shadow,
 )
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
-from spx_spark.application.order_map.trigger_coordinates import resolve_trigger_coordinate
+from spx_spark.application.order_map.trigger_coordinates import (
+    qualified_es_basis_points,
+    resolve_trigger_coordinate,
+)
 from spx_spark.application.order_map.state import (
     REFRESH_COOLDOWN_SECONDS_DEFAULT,
     already_sent,
@@ -471,9 +474,10 @@ def _attach_strategy_trigger_coordinate(
     market = market if isinstance(market, dict) else {}
     cross_asset = market.get("cross_asset")
     cross_asset = cross_asset if isinstance(cross_asset, dict) else {}
-    basis = finite_float(decision.get("trigger_basis_points"))
-    if basis is None:
-        basis = finite_float(cross_asset.get("es_spx_basis_points"))
+    basis = qualified_es_basis_points(
+        decision,
+        cross_asset_basis=finite_float(cross_asset.get("es_spx_basis_points")),
+    )
     coordinate = resolve_trigger_coordinate(
         state,
         options_map,

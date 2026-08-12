@@ -121,6 +121,7 @@ from spx_spark.application.order_map.strategy_outcomes import (
 )
 from spx_spark.application.order_map.trigger_coordinates import (
     resolve_trigger_coordinate,
+    qualified_es_basis_points,
 )
 from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
@@ -598,9 +599,10 @@ def run(
         new_entries_block_reason=gth_entry_block_reason,
         selector_evidence=True,
     )
-    strategy_es_basis = _number(raw_level_decision.get("trigger_basis_points"))
-    if strategy_es_basis is None:
-        strategy_es_basis = _number(market_frame.cross_asset.get("es_spx_basis_points"))
+    strategy_es_basis = qualified_es_basis_points(
+        raw_level_decision,
+        cross_asset_basis=_number(market_frame.cross_asset.get("es_spx_basis_points")),
+    )
     strategy_coordinate = resolve_trigger_coordinate(
         action_latest,
         options_map,
