@@ -3,7 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 
-from spx_spark.application.order_map.candidate_factory import enumerate_candidates
+from spx_spark.application.order_map.event_settlement_vertical import (
+    enumerate_event_settlement_candidates,
+)
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
@@ -131,22 +133,20 @@ def _regime() -> dict[str, object]:
     }
 
 
-def test_prior_close_event_view_enumerates_adjacent_call_and_put_verticals() -> None:
-    now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
-    policy = StrategyPolicy()
-
-    rows = enumerate_candidates(
+def _event_rows(now: datetime) -> list[dict[str, object]]:
+    return enumerate_event_settlement_candidates(
         _payload(),
         {"session_date": "2026-08-12"},
-        {},
         _state(now),
         now=now,
-        policy=policy,
+        policy=StrategyPolicy(),
     )
 
-    event_rows = [
-        row for row in rows if row.get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD"
-    ]
+
+def test_prior_close_event_view_enumerates_adjacent_call_and_put_verticals() -> None:
+    now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
+    event_rows = _event_rows(now)
+
     assert len(event_rows) == 4
     assert {row["strategy_type"] for row in event_rows} == {
         "CALL_DEBIT_VERTICAL",
@@ -179,17 +179,7 @@ def test_prior_close_event_view_enumerates_adjacent_call_and_put_verticals() -> 
 def test_event_view_can_pass_pre_event_macro_gate_without_path_geometry() -> None:
     now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
     policy = StrategyPolicy()
-    rows = enumerate_candidates(
-        _payload(),
-        {"session_date": "2026-08-12"},
-        {},
-        _state(now),
-        now=now,
-        policy=policy,
-    )
-    event_rows = [
-        row for row in rows if row.get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD"
-    ]
+    event_rows = _event_rows(now)
     facts = _facts(now)
     regime = _regime()
 
@@ -274,15 +264,4 @@ def test_build_strategy_decision_promotes_event_view_to_manual_candidate(
 def test_event_view_expires_after_the_release() -> None:
     now = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
 
-    rows = enumerate_candidates(
-        _payload(),
-        {"session_date": "2026-08-12"},
-        {},
-        _state(now),
-        now=now,
-        policy=StrategyPolicy(),
-    )
-
-    assert not any(
-        row.get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD" for row in rows
-    )
+    assert not _event_rows(now)
