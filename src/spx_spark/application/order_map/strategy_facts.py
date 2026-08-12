@@ -44,17 +44,25 @@ def build_market_fact_pack(
         coordinate.get("spx_observed_value"),
     )
     es_price = _first(es.get("price"), payload.get("es_last"))
-    basis = es_price - spx if es_price is not None and spx is not None else None
     coordinate_basis = _first(
         underlier.get("basis"),
         underlier.get("basis_points"),
         coordinate.get("basis_points"),
     )
+    spot_kind = underlier.get("kind") or coordinate.get("kind")
+    spot_source = underlier.get("source") or coordinate.get("source")
+    if spx is None and es_price is not None and coordinate_basis is not None:
+        # Resolver already intended ES-equivalent when official/parity SPX is
+        # briefly unactionable; reuse the same-cycle market-frame ES + basis
+        # rather than fail-closed on a stale cash print.
+        spx = es_price - coordinate_basis
+        if not spot_kind or spot_kind == "unavailable":
+            spot_kind = "es_equivalent"
+            spot_source = f"future:ES+basis:{coordinate_basis:.4f}"
+    basis = es_price - spx if es_price is not None and spx is not None else None
     l1, quality = _map(option.get("l1")), list(lineage)
     if spx is None:
         quality.append("spx_price_unavailable")
-    if payload.get("pricing_allowed") is not True:
-        quality.append("pricing_not_authorized")
     for label, status in (
         ("market_frame", market.get("quality")),
         ("option_frame", option.get("quality")),
@@ -77,7 +85,12 @@ def build_market_fact_pack(
     )
     coordinate_ready = spx is not None
     market_ready = market.get("quality") == "ready"
-    atr_ready = _number(averages.get("atr_5m")) is not None
+    atr = _first(
+        averages.get("atr_5m"),
+        _map(diagnostics.get("rolling_path_percentiles")).get("atr_5m"),
+        _map(diagnostics.get("atr")).get("value"),
+    )
+    atr_ready = atr is not None
     vwap_ready = any(
         value is not None
         for value in (
@@ -180,7 +193,7 @@ def build_market_fact_pack(
     )
     shock = _shock_fact(
         shock_state,
-        atr=_number(averages.get("atr_5m")),
+        atr=atr,
         session_date=trading_date,
     )
     shock_blocks_butterfly = shock["state"] in {"ACTIVE", "POST_SHOCK_DISCOVERY"}
@@ -202,9 +215,9 @@ def build_market_fact_pack(
             "es": es_price,
             "es_spx_basis": basis,
             "basis": coordinate_basis,
-            "kind": underlier.get("kind") or coordinate.get("kind"),
-            "source": underlier.get("source") or coordinate.get("source"),
-            "pricing_source": underlier.get("source") or coordinate.get("source"),
+            "kind": spot_kind,
+            "source": spot_source,
+            "pricing_source": spot_source,
         },
         "path": {
             "market_state": rth.get("market_state") or rth.get("state"),
@@ -222,7 +235,7 @@ def build_market_fact_pack(
             "distance_to_vwap_points": _number(es.get("vwap_distance_points")),
             "impulse_15m_points": _number(es.get("return_15m_points")),
             "return_60m_points": _number(es.get("return_60m_points")),
-            "atr_5m": _number(averages.get("atr_5m")),
+            "atr_5m": atr,
             "pin_path_spx": [
                 float(value) - basis for value in es.get("pin_path_1m") or ()
                 if isinstance(value, int | float) and basis is not None

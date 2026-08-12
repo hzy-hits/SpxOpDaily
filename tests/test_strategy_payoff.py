@@ -862,6 +862,82 @@ def test_chain_implied_spx_coordinate_keeps_gth_facts_available() -> None:
     assert "spx_price_unavailable" not in facts["quality"]["reasons"]
 
 
+def test_es_equivalent_fills_when_official_spx_print_is_missing() -> None:
+    now = datetime(2026, 8, 12, 16, 10, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["pricing_allowed"] = True
+    payload["underlier"] = {
+        "price": None,
+        "spx_observed_value": None,
+        "kind": "unavailable",
+        "source": "unavailable",
+        "basis": 21.925,
+        "basis_points": 21.925,
+    }
+    payload["spot"] = dict(payload["underlier"])
+    payload["trigger_coordinate"] = {
+        "kind": "unavailable",
+        "spx_observed_value": None,
+        "observed_value": None,
+        "basis_points": 21.925,
+        "source": "unavailable",
+    }
+    payload["minute_market_frame"]["es"]["price"] = 7768.125
+
+    facts = build_market_fact_pack(payload, _state(now), now)
+
+    assert facts["spot"]["spx"] == pytest.approx(7746.2)
+    assert facts["spot"]["kind"] == "es_equivalent"
+    assert facts["capabilities"]["global"]["coordinate_ready"] is True
+    assert "spx_price_unavailable" not in facts["quality"]["reasons"]
+    assert "pricing_not_authorized" not in facts["quality"]["reasons"]
+
+
+def test_rolling_path_atr_keeps_vertical_capability_when_sma_atr_is_missing() -> None:
+    now = datetime(2026, 8, 12, 16, 19, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    lineage = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["diagnostics"]
+    lineage["moving_averages"] = {
+        "atr_5m": None,
+        "status": "warming",
+        "reasons": ["atr_5m_unavailable"],
+    }
+    lineage["rolling_path_percentiles"] = {"atr_5m": 4.196429, "status": "provisional"}
+
+    facts = build_market_fact_pack(payload, _state(now), now)
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert facts["path"]["atr_5m"] == pytest.approx(4.196429)
+    assert facts["capabilities"]["path"]["atr_ready"] is True
+    assert facts["capabilities"]["vertical"]["ready"] is True
+    assert "vertical_path_inputs_unavailable" not in (
+        facts["capabilities"]["vertical"]["reasons"]
+    )
+    assert "pricing_not_authorized" not in decision["why_not"]["reasons"]
+    assert decision["decision_type"] != "NO_TRADE" or (
+        "vertical_path_inputs_unavailable" not in decision["why_not"]["reasons"]
+        and "spx_price_unavailable" not in decision["why_not"]["reasons"]
+    )
+
+
+def test_option_frame_not_ready_does_not_emit_pricing_not_authorized() -> None:
+    now = datetime(2026, 8, 12, 16, 19, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["pricing_allowed"] = False
+    payload["option_structure_frame"]["quality"] = "degraded"
+    payload["option_structure_frame"]["l1"] = {"quality": "degraded"}
+
+    facts = build_market_fact_pack(payload, _state(now), now)
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert "pricing_not_authorized" not in facts["quality"]["reasons"]
+    assert "option_frame_not_ready" in facts["quality"]["reasons"]
+    assert facts["capabilities"]["vertical"]["ready"] is True
+    assert "pricing_not_authorized" not in decision["why_not"]["reasons"]
+
+
 def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
@@ -1441,6 +1517,35 @@ def test_gth_diagnostics_distinguish_unconfirmed_level_from_expired_dip_reclaim(
 
     assert decision["decision_type"] == "NO_TRADE"
     assert "gth_level_not_confirmed_or_near" in decision["why_not"]["reasons"]
+    assert "gth_dip_reclaim_signal_expired" in decision["why_not"]["reasons"]
+
+
+def test_expired_gth_source_is_not_the_desk_primary_reason() -> None:
+    now = datetime(2026, 8, 11, 13, 12, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["gth_level_manual_candidate"] = {
+        "status": "blocked",
+        "block_reasons": ["source_signal_expired"],
+        "manual_action_eligible": False,
+        "selector_evidence_eligible": False,
+    }
+    payload["gth_dip_reclaim_evidence"] = {
+        "status": "blocked",
+        "block_reasons": [
+            "strategy_event_expired",
+            "gth_dip_reclaim_signal_expired",
+            "gth_reclaim_too_old",
+        ],
+        "manual_action_eligible": False,
+        "selector_evidence_eligible": False,
+    }
+    payload.pop("call_skew_spread_shadow")
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["desk_view"]["reason"] == "gth_confirmed_level_candidate_unavailable"
+    assert "source_signal_expired" in decision["why_not"]["reasons"]
     assert "gth_dip_reclaim_signal_expired" in decision["why_not"]["reasons"]
 
 

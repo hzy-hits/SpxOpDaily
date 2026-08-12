@@ -22,6 +22,14 @@ from spx_spark.marketdata import InstrumentId, Provider
 from spx_spark.storage import LatestState
 
 WIDTHS: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
+_EXPIRED_GTH_REASONS = {
+    "source_signal_expired",
+    "strategy_event_expired",
+    "gth_dip_reclaim_signal_expired",
+    "gth_reclaim_too_old",
+    "gth_manual_candidate_ttl_elapsed",
+    "spread_exit_at_elapsed",
+}
 
 
 def enumerate_candidates(
@@ -417,7 +425,19 @@ def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
             or evidence.get("selector_evidence_eligible") is True
         )
         if evidence.get("status") not in {"manual_ready", "selector_candidate"} or not eligible:
-            reasons.extend(evidence_reasons or [unavailable_reason])
+            live_reasons = [
+                reason
+                for reason in evidence_reasons
+                if reason not in _EXPIRED_GTH_REASONS
+            ]
+            if live_reasons:
+                reasons.extend(live_reasons)
+            else:
+                # An expired leftover is not a live setup. Keep expiry codes
+                # for audit, but do not let them starve the whole GTH session
+                # as the desk primary reason.
+                reasons.append(unavailable_reason)
+                reasons.extend(evidence_reasons)
             continue
         path_kind = str(evidence.get("path_kind") or "")
         if path_kind.startswith("trend_transition_"):
