@@ -22,6 +22,8 @@ from spx_spark.marketdata import InstrumentId, Provider
 from spx_spark.storage import LatestState
 
 WIDTHS: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
+EVENT_SETTLEMENT_WIDTH = 5.0
+EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
 
 
 def enumerate_candidates(
@@ -39,6 +41,9 @@ def enumerate_candidates(
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in (
+        *_event_settlement_vertical_candidates(
+            payload, facts, latest, now=now, policy=policy
+        ),
         *_vertical_candidates(payload, facts, regime, latest, now=now, policy=policy),
         *_butterfly_candidates(payload, facts, regime, latest, now=now, policy=policy),
     ):
@@ -61,6 +66,10 @@ def candidate_generation_reasons(
 ) -> list[str]:
     """Return legacy-compatible reasons when enumeration yields no rows."""
 
+    frame = _map(payload.get("option_structure_frame"))
+    expiry = str(frame.get("front_expiry") or payload.get("expiry") or "")
+    if _event_settlement_context(payload, expiry=expiry, now=_utc(now)):
+        return ["event_settlement_exact_two_leg_quote_unavailable"]
     if DEFAULT_MARKET_CALENDAR.is_rth_open(_utc(now)):
         capability_reasons = _capability_reasons(facts, "vertical")
         if capability_reasons:
@@ -68,7 +77,6 @@ def candidate_generation_reasons(
         _, reasons = _rth_evidences(payload, facts, regime, latest)
         if reasons:
             return reasons
-        frame = _map(payload.get("option_structure_frame"))
         if not frame.get("front_expiry"):
             return ["vertical_expiry_unavailable"]
         return ["vertical_exact_two_leg_quote_unavailable"]
@@ -102,6 +110,197 @@ def resolve_geometry(
         stop if stop is not None else fallback_stop,
         "confirmation_geometry" if target is not None else "facts_wall_ladder_fallback",
     )
+
+
+def _event_settlement_vertical_candidates(
+    payload: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    latest: LatestState,
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    frame = _map(payload.get("option_structure_frame"))
+    expiry = str(frame.get("front_expiry") or payload.get("expiry") or "")
+    context = _event_settlement_context(payload, expiry=expiry, now=now)
+    if not context:
+        return []
+    threshold = float(context["threshold_level"])
+    anchor = _round_to_strike(threshold)
+    if anchor is None:
+        return []
+    specifications = (
+        ("UP", "C", anchor - EVENT_SETTLEMENT_WIDTH, anchor),
+        ("UP", "C", anchor, anchor + EVENT_SETTLEMENT_WIDTH),
+        ("DOWN", "P", anchor + EVENT_SETTLEMENT_WIDTH, anchor),
+        ("DOWN", "P", anchor, anchor - EVENT_SETTLEMENT_WIDTH),
+    )
+    rows: list[dict[str, Any]] = []
+    for direction, right, long_strike, short_strike in specifications:
+        legs = _rth_option_legs(
+            latest,
+            expiry,
+            ((long_strike, right), (short_strike, right)),
+            now=now,
+            policy=policy,
+        )
+        if not legs:
+            continue
+        long, short = legs
+        event_kind = "terminal_above" if direction == "UP" else "terminal_below"
+        probability_event = {
+            "event_id": (
+                "event-threshold:"
+                + _hash(
+                    (
+                        context.get("event_id"),
+                        expiry,
+                        event_kind,
+                        round(threshold, 4),
+                    )
+                )[:24]
+            ),
+            "kind": event_kind,
+            "target_at": context["target_at"],
+            "lower_level": round(threshold, 4) if direction == "UP" else None,
+            "upper_level": round(threshold, 4) if direction == "DOWN" else None,
+        }
+        row = _vertical_candidate_from_evidence(
+            {
+                "setup_kind": EVENT_SETTLEMENT_SETUP,
+                "setup_variant": (
+                    "CLOSE_ABOVE_PRIOR_CLOSE"
+                    if direction == "UP"
+                    else "CLOSE_BELOW_PRIOR_CLOSE"
+                ),
+                "setup_state": "ENTRY_WINDOW_OPEN",
+                "direction": direction,
+                "trigger_level": threshold,
+                "target_spx": threshold,
+                "invalidation_spx": None,
+                "long": long,
+                "short": short,
+                "valid_until": context["release_at"],
+                "source": "prior_close_event_view",
+                "geometry_source": "event_settlement_threshold",
+            },
+            facts,
+            now=now,
+            policy=policy,
+        )
+        if not row:
+            continue
+        economics = _map(row.get("economics"))
+        breakeven = _number(economics.get("breakeven_spx"))
+        debit_fraction = _number(economics.get("debit_fraction_of_width"))
+        breakeven_gap = (
+            breakeven - threshold
+            if direction == "UP" and breakeven is not None
+            else threshold - breakeven
+            if direction == "DOWN" and breakeven is not None
+            else None
+        )
+        candidate_id = _hash(
+            (
+                facts.get("session_date"),
+                EVENT_SETTLEMENT_SETUP,
+                context.get("event_id"),
+                expiry,
+                direction,
+                long_strike,
+                short_strike,
+                round(threshold, 4),
+            )
+        )[:16]
+        identity = {
+            "candidate_id": candidate_id,
+            "event_id": context.get("event_id"),
+            "long_contract_id": long.get("contract_id"),
+            "short_contract_id": short.get("contract_id"),
+        }
+        row.update(
+            {
+                "candidate_id": candidate_id,
+                "opportunity_id": f"strategy-opportunity:{_hash(identity)[:24]}",
+                "manual_authority_eligible": True,
+                "event_spans_release": True,
+                "probability_event": probability_event,
+                "view": {
+                    "source": "PRIOR_CLOSE",
+                    "statement": (
+                        "SPX settlement above prior close"
+                        if direction == "UP"
+                        else "SPX settlement below prior close"
+                    ),
+                    "threshold_level": round(threshold, 4),
+                    "target_at": context["target_at"],
+                    "macro_event_id": context.get("event_id"),
+                    "macro_event_name": context.get("event_name"),
+                    "release_at": context["release_at"],
+                    "market_odds_proxy": (
+                        round(debit_fraction, 6)
+                        if debit_fraction is not None
+                        else None
+                    ),
+                    "breakeven_gap_points": (
+                        round(breakeven_gap, 4)
+                        if breakeven_gap is not None
+                        else None
+                    ),
+                    "evidence_status": "thesis_driven_unvalidated",
+                },
+                "edge": {
+                    "edge_status": "thesis_driven_unvalidated",
+                    "required_p_breakeven": (
+                        round(debit_fraction, 6)
+                        if debit_fraction is not None
+                        else None
+                    ),
+                    "model_p": None,
+                    "advisories": ["physical_probability_not_estimated"],
+                },
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _event_settlement_context(
+    payload: Mapping[str, Any],
+    *,
+    expiry: str,
+    now: datetime,
+) -> dict[str, Any]:
+    threshold = _number(_map(payload.get("day_move")).get("prior_close"))
+    if threshold is None or threshold <= 0.0 or not expiry:
+        return {}
+    macro = _map(payload.get("macro_event"))
+    active = _map(macro.get("active_event"))
+    upcoming = _map(macro.get("next_event"))
+    event = active if active else upcoming
+    release_at = _time(event.get("release_at"))
+    if release_at is None or release_at <= now:
+        event = upcoming
+        release_at = _time(event.get("release_at"))
+    if release_at is None or release_at <= now:
+        return {}
+    if str(event.get("impact") or "").lower() not in {"high", "critical"}:
+        return {}
+    try:
+        session_date = datetime.strptime(expiry, "%Y%m%d").date()
+    except ValueError:
+        return {}
+    session = DEFAULT_MARKET_CALENDAR.session(session_date)
+    target_at = session.close_at if session is not None else None
+    if target_at is None or release_at > target_at:
+        return {}
+    return {
+        "threshold_level": threshold,
+        "event_id": event.get("id"),
+        "event_name": event.get("name"),
+        "release_at": release_at.isoformat(),
+        "target_at": target_at.isoformat(),
+    }
 
 
 def _vertical_candidates(
