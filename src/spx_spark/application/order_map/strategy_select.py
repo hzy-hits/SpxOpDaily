@@ -96,21 +96,23 @@ def build_strategy_decision(
             event_reason = event_settlement_generation_reason(
                 payload, now=_utc(now)
             )
-            generation_reasons = (
-                [event_reason]
-                if event_reason
-                else candidate_generation_reasons(
-                    payload,
-                    facts,
-                    regime,
-                    latest,
-                    now=_utc(now),
-                    policy=DEFAULT_STRATEGY_POLICY,
+            generation_reasons = list(
+                dict.fromkeys(
+                    [
+                        *candidate_generation_reasons(
+                            payload,
+                            facts,
+                            regime,
+                            latest,
+                            now=_utc(now),
+                            policy=DEFAULT_STRATEGY_POLICY,
+                        ),
+                        *([event_reason] if event_reason else ()),
+                    ]
                 )
             )
             reasons = generation_reasons
-    if "direction_valid_but_entry_too_late" in reasons:
-        regime = {**regime, "entry_state": "LATE_CHASE"}
+    regime = {**regime, "entry_state": _entry_state(facts, reasons, rows, rank)}
     return _no_trade_decision(
         facts,
         regime,
@@ -223,6 +225,7 @@ def _no_trade_decision(
 ) -> dict[str, Any]:
     reasons = list(dict.fromkeys(reasons or ["no_supported_strategy_candidate"]))
     surface_shape = _surface_shape_summary(facts)
+    primary = _primary_blocker(reasons)
     reasons = list(
         dict.fromkeys([*reasons, *(str(reason) for reason in surface_shape["why_reasons"])])
     )
@@ -266,11 +269,12 @@ def _no_trade_decision(
         "shadow_candidates_skipped": [],
         "rejection_funnel": dict(rejection_funnel),
         "desk_view": {"state": regime["path_state"], "direction": regime.get("path_direction"),
-                      "conclusion": "NO TRADE", "reason": reasons[0],
+                      "conclusion": "NO TRADE", "reason": primary,
                       "shape": surface_shape["desk_line"],
                       "surface_shape": surface_shape},
         "why_not": {"nearest_candidate": shadow or None, "nearest_candidates": shadows,
-                    "reasons": reasons, "reauthorize_on": refresh,
+                    "reasons": reasons, "primary_blocker": primary,
+                    "reauthorize_on": refresh,
                     "surface_shape": surface_shape},
         "execution": {"action": "WAIT", "order_type": None, "limit": None,
                       "automatic_ordering": False, "manual_action_only": True},
@@ -290,6 +294,40 @@ def _rank_reasons(rank: RankResult) -> list[str]:
                 reasons.insert(0, "quote_refresh_required")
             return list(dict.fromkeys(reasons))
     return ["no_supported_strategy_candidate"]
+
+
+def _primary_blocker(reasons: Sequence[str]) -> str:
+    gate_reasons = [
+        str(reason)
+        for reason in reasons
+        if str(reason).strip() and not str(reason).startswith("surface_shape_")
+    ]
+    return gate_reasons[0] if gate_reasons else "no_supported_strategy_candidate"
+
+
+def _entry_state(
+    facts: Mapping[str, Any],
+    reasons: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
+    rank: RankResult,
+) -> str:
+    reason_set = {str(reason) for reason in reasons}
+    if "direction_valid_but_entry_too_late" in reason_set:
+        return "LATE_CHASE"
+    if rows and not rank.passed:
+        return "POOR_ASYMMETRY"
+    missing = {
+        "spx_price_unavailable",
+        "vertical_path_inputs_unavailable",
+        "trend_pullback_path_unevaluable",
+        "path_inputs_unavailable",
+        "market_frame_not_ready",
+    }
+    if reason_set & missing:
+        return "INSUFFICIENT_DATA"
+    if _map(_map(facts.get("capabilities")).get("path")).get("ready") is not True:
+        return "INSUFFICIENT_DATA"
+    return "INSUFFICIENT_DATA"
 
 
 def _rejection_funnel(
@@ -317,19 +355,25 @@ def _rejection_funnel(
         "rth_entry_window_too_late",
         "rth_setup_invalidated",
         "trend_pullback_path_not_confirmed",
+        "trend_pullback_path_unevaluable",
+        "event_settlement_exact_two_leg_quote_unavailable",
     }
-    rth_setup_states = {
-        str(_map(row).get("state") or "") for row in facts.get("rth_setups") or ()
+    rth_setups = [_map(row) for row in facts.get("rth_setups") or ()]
+    live_states = {
+        str(row.get("state") or "")
+        for row in rth_setups
+        if str(row.get("state") or "") in {"SETUP_DETECTED", "ENTRY_WINDOW_OPEN", "ENTRY_TOO_LATE"}
     }
-    setup_detected = bool(rows) or bool(rth_setup_states) or bool(
+    setup_detected = bool(rows) or bool(live_states) or bool(
         generation_reasons
         and not any(str(reason) in setup_absence_reasons for reason in generation_reasons)
     )
     entry_window_open = (
-        bool(rows) or "ENTRY_WINDOW_OPEN" in rth_setup_states
+        bool(rows) or "ENTRY_WINDOW_OPEN" in live_states
     ) and not {
         "direction_valid_but_entry_too_late",
         "trend_pullback_path_not_confirmed",
+        "trend_pullback_path_unevaluable",
     }.intersection(map(str, reasons))
     exact_quote_ready = sum(
         _map(row.get("quote")).get("status") == "ready" for row in rows
@@ -370,6 +414,16 @@ def _rejection_funnel(
         "manual_card_delivered": 0,
         "manual_card_delivery_status": delivery_status,
         "current_stage": stage,
+        "pending_confirmation": int("SETUP_DETECTED" in live_states),
+        "primary_blocker": _primary_blocker(reasons),
+        "event_settlement_considered": int(
+            any(
+                _map(row).get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD"
+                for row in rows
+            )
+            or "event_settlement_exact_two_leg_quote_unavailable" in map(str, reasons)
+            or "event_settlement_exact_two_leg_quote_unavailable" in map(str, generation_reasons)
+        ),
     }
 
 

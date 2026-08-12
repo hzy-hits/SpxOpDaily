@@ -104,14 +104,14 @@ def assess_regime(
     )
     if not path_capability_ready:
         state, reasons = "UNCERTAIN", ["strategy_facts_degraded"]
+    elif any(value is None for value in inputs):
+        state, reasons = "UNCERTAIN", ["path_inputs_unavailable"]
     elif trend:
         state, reasons = "TREND", ["direction_score_confirmed", "path_efficiency_confirmed"]
     elif balanced:
         state, direction, reasons = "BALANCED", None, ["low_path_efficiency", "multiple_vwap_crosses"]
-    elif any(value is not None for value in (score, efficiency, crosses)):
-        state, reasons = "TRANSITION", ["path_inputs_not_aligned"]
     else:
-        state, reasons = "UNCERTAIN", ["path_inputs_unavailable"]
+        state, reasons = "TRANSITION", ["path_inputs_not_aligned"]
     event_state = {
         "pre_event": "SCHEDULED_EVENT_RISK", "post_event": "POST_EVENT_DISCOVERY",
         "normal": "NORMAL",

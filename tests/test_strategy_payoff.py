@@ -678,6 +678,124 @@ def test_vwap_trend_pullback_opens_call_vertical_before_prior_high_break() -> No
     assert decision["rejection_funnel"]["entry_window_open"] == 1
 
 
+def test_pending_5m_confirmation_is_the_desk_primary_blocker() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _vwap_pullback_payload(now)
+    bars = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["diagnostics"]["rth_bar_path"]
+    _attach_rth_setup_path(payload, bars[:1], "HL_ONLY")
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="C"), now
+    )
+    setups = decision["market_facts"]["rth_setups"]
+    pullback = next(row for row in setups if row["setup_kind"] == "TREND_PULLBACK")
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert pullback["state"] == "SETUP_DETECTED"
+    assert pullback["blocked_by"] == "next_5m_confirmation_pending"
+    assert pullback["detected_at"]
+    assert pullback["window_opens_at"] is None
+    assert decision["desk_view"]["reason"] == "rth_entry_window_not_open"
+    assert decision["why_not"]["primary_blocker"] == "rth_entry_window_not_open"
+    assert not str(decision["desk_view"]["reason"]).startswith("surface_shape_")
+    assert decision["rejection_funnel"]["setup_detected"] == 1
+    assert decision["rejection_funnel"]["entry_window_open"] == 0
+    assert decision["rejection_funnel"]["pending_confirmation"] == 1
+    assert decision["rejection_funnel"]["candidate_enumerated"] == 0
+
+
+def test_incomplete_trend_vector_is_unevaluable_not_transition() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _vwap_pullback_payload(now)
+    lineage = payload["minute_market_frame"]["diagnostics"]["rth_market_state"]
+    lineage["D"] = None
+    lineage["input_lineage"]["values"]["vwap_cross_count"] = None
+
+    facts = build_market_fact_pack(payload, _two_sided_vertical_chain(now, right="C"), now)
+    regime = assess_regime(facts)
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="C"), now
+    )
+
+    assert facts["capabilities"]["path"]["ready"] is True
+    assert facts["capabilities"]["path"]["trend_evaluable"] is False
+    assert facts["capabilities"]["vertical"]["ready"] is True
+    assert regime["path_state"] == "UNCERTAIN"
+    assert "path_inputs_unavailable" in regime["reasons"]
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["desk_view"]["reason"] == "trend_pullback_path_unevaluable"
+    assert decision["regime"]["entry_state"] == "INSUFFICIENT_DATA"
+    assert "vertical_path_inputs_unavailable" not in decision["why_not"]["reasons"]
+
+
+def test_invalidated_only_setups_are_not_counted_as_detected() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    closes = (7735.0, 7736.0, 7742.0, 7743.0, 7739.0, 7742.0)
+    bars = [
+        {
+            "bar_start": (now - timedelta(minutes=5 * (len(closes) - index))).isoformat(),
+            "open": close - 0.5,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "quality": "ok",
+        }
+        for index, close in enumerate(closes)
+    ]
+    _attach_rth_setup_path(payload, bars, "LH_LL")
+    payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["diagnostics"]["rth_bar_vwaps"] = {}
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="P"), now
+    )
+    setups = decision["market_facts"]["rth_setups"]
+    failed_break = next(
+        row for row in setups if row["setup_variant"] == "OR_FAILED_BREAK"
+    )
+
+    assert failed_break["state"] == "INVALIDATED"
+    assert failed_break["blocked_by"] == "next_5m_reaccepted_breakout"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["desk_view"]["reason"] == "rth_setup_invalidated"
+    assert decision["rejection_funnel"]["setup_detected"] == 0
+    assert decision["rejection_funnel"]["pending_confirmation"] == 0
+
+
+def test_event_settlement_reason_is_trace_not_exclusive_rth_blocker() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _vwap_pullback_payload(now)
+    bars = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["diagnostics"]["rth_bar_path"]
+    _attach_rth_setup_path(payload, bars[:1], "HL_ONLY")
+    payload["day_move"] = {"prior_close": 7728.2}
+    payload["macro_event"] = {
+        "mode": "pre_event",
+        "entry_allowed": False,
+        "next_event": {
+            "id": "cpi",
+            "name": "CPI",
+            "impact": "high",
+            "release_at": (now + timedelta(hours=1)).isoformat(),
+        },
+    }
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == "rth_entry_window_not_open"
+    assert "event_settlement_exact_two_leg_quote_unavailable" in decision["why_not"]["reasons"]
+    assert decision["rejection_funnel"]["event_settlement_considered"] == 1
+
+
 def test_active_shock_blocks_butterfly_but_keeps_open_vertical_setup() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _vwap_pullback_payload(now)

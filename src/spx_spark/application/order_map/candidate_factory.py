@@ -297,12 +297,14 @@ def _rth_evidences(
             continue
         direction = _direction(setup.get("direction"))
         setup_kind = str(setup.get("setup_kind") or "")
-        if setup_kind == "TREND_PULLBACK" and (path_state, path_direction) != (
-            "TREND",
-            direction,
-        ):
-            reasons.append("trend_pullback_path_not_confirmed")
-            continue
+        if setup_kind == "TREND_PULLBACK":
+            path_capability = _map(_map(facts.get("capabilities")).get("path"))
+            if path_capability.get("trend_evaluable") is not True:
+                reasons.append("trend_pullback_path_unevaluable")
+                continue
+            if (path_state, path_direction) != ("TREND", direction):
+                reasons.append("trend_pullback_path_not_confirmed")
+                continue
         if direction and setup_kind in {"FAILED_BREAK_RECLAIM", "TREND_PULLBACK"}:
             bases.append(
                 {
@@ -345,16 +347,23 @@ def _rth_evidences(
                 }
             )
     elif not bases:
-        states = {str(row.get("state") or "") for row in setup_facts}
-        reasons.append(
-            "rth_entry_window_too_late"
-            if "ENTRY_TOO_LATE" in states
-            else "rth_setup_invalidated"
-            if states == {"INVALIDATED"}
-            else "rth_entry_window_not_open"
-            if states
-            else "confirmed_price_trigger_unavailable"
-        )
+        specific = {
+            "trend_pullback_path_not_confirmed",
+            "trend_pullback_path_unevaluable",
+            "price_trigger_conflicts_with_established_path",
+            "price_trigger_not_aligned_with_supported_setup",
+        }.intersection(reasons)
+        if not specific:
+            states = {str(row.get("state") or "") for row in setup_facts}
+            reasons.append(
+                "rth_entry_window_too_late"
+                if "ENTRY_TOO_LATE" in states
+                else "rth_setup_invalidated"
+                if states == {"INVALIDATED"}
+                else "rth_entry_window_not_open"
+                if states
+                else "confirmed_price_trigger_unavailable"
+            )
     evidences: list[dict[str, Any]] = []
     for base in bases:
         direction = str(base["direction"])

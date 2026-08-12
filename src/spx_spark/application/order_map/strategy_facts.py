@@ -108,6 +108,16 @@ def build_market_fact_pack(
         )
     )
     path_ready = market_ready and atr_ready and vwap_ready
+    trend_evaluable = all(
+        value is not None
+        for value in (
+            _number(rth.get("D")),
+            _first(values.get("efficiency_ratio"), es.get("trend_efficiency_30m")),
+            _number(values.get("vwap_cross_count")),
+            _number(values.get("breadth_above_vwap")),
+            _first(values.get("vwap_slope"), es.get("vwap_slope_15m_points")),
+        )
+    )
     structure_ready = (
         option.get("quality") == "ready"
         and l1.get("quality") == "ready"
@@ -190,7 +200,9 @@ def build_market_fact_pack(
         episode_direction=episode_setup_direction,
         episode_level=_number(episode.get("break_level")),
         episode_id=episode.get("episode_id"),
+        episode_phase_at=episode.get("phase_at"),
     )
+    failed_break_evaluable = opening_range_ready and bool(rth_bars)
     shock = _shock_fact(
         shock_state,
         atr=atr,
@@ -317,6 +329,8 @@ def build_market_fact_pack(
                 "vwap_ready": vwap_ready,
                 "opening_range_ready": opening_range_ready,
                 "atr_ready": atr_ready,
+                "trend_evaluable": trend_evaluable,
+                "failed_break_evaluable": failed_break_evaluable,
             },
             "vertical": {
                 "ready": coordinate_ready and path_ready,
@@ -365,19 +379,25 @@ def _rth_setup_facts(
     episode_direction: str | None,
     episode_level: float | None,
     episode_id: object,
+    episode_phase_at: object = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if episode_phase in {"v_reversal_confirmed", "recovery"} and episode_direction:
         rows.append(
-            {
-                "setup_kind": "FAILED_BREAK_RECLAIM",
-                "setup_variant": "SESSION_EPISODE",
-                "state": "ENTRY_WINDOW_OPEN",
-                "direction": episode_direction,
-                "trigger_level": episode_level,
-                "source": "session_episode_failed_break_reclaim",
-                "event_id": episode_id,
-            }
+            _with_setup_window(
+                {
+                    "setup_kind": "FAILED_BREAK_RECLAIM",
+                    "setup_variant": "SESSION_EPISODE",
+                    "state": "ENTRY_WINDOW_OPEN",
+                    "direction": episode_direction,
+                    "trigger_level": episode_level,
+                    "source": "session_episode_failed_break_reclaim",
+                    "event_id": episode_id,
+                    "reason": "session_episode_reclaim_confirmed",
+                },
+                detected_at=episode_phase_at,
+                window_opens_at=episode_phase_at,
+            )
         )
     for level, break_side in ((opening_high, "UP"), (opening_low, "DOWN")):
         if level is not None and (row := _or_failed_break(bars, level, break_side, market_structure)):
@@ -438,18 +458,32 @@ def _or_failed_break(
         state, reason = "INVALIDATED", "market_structure_opposes_failed_break"
     else:
         state, reason = "SETUP_DETECTED", "market_structure_confirmation_pending"
-    return {
-        "setup_kind": "FAILED_BREAK_RECLAIM",
-        "setup_variant": "OR_FAILED_BREAK",
-        "state": state,
-        "direction": direction,
-        "trigger_level": level,
-        "source": "rth_opening_range_failed_break",
-        "reason": reason,
-        "accepted_at": bars[accepted_at].get("bar_start"),
-        "reclaimed_at": bars[reclaimed].get("bar_start"),
-        "validated_at": bars[validation].get("bar_start") if validation < len(bars) else None,
-    }
+    detected_at = bars[reclaimed].get("bar_start")
+    validated_at = bars[validation].get("bar_start") if validation < len(bars) else None
+    window_opens_at = validated_at if state in {"ENTRY_WINDOW_OPEN", "ENTRY_TOO_LATE"} else None
+    window_expires_at = (
+        bars[validation + 1].get("bar_start")
+        if state == "ENTRY_TOO_LATE" and validation + 1 < len(bars)
+        else None
+    )
+    return _with_setup_window(
+        {
+            "setup_kind": "FAILED_BREAK_RECLAIM",
+            "setup_variant": "OR_FAILED_BREAK",
+            "state": state,
+            "direction": direction,
+            "trigger_level": level,
+            "source": "rth_opening_range_failed_break",
+            "reason": reason,
+            "accepted_at": bars[accepted_at].get("bar_start"),
+            "reclaimed_at": detected_at,
+            "validated_at": validated_at,
+        },
+        detected_at=detected_at,
+        window_opens_at=window_opens_at,
+        window_expires_at=window_expires_at,
+        blocked_by=None if state == "ENTRY_WINDOW_OPEN" else reason,
+    )
 
 
 def _vwap_pullbacks(
@@ -486,17 +520,31 @@ def _vwap_pullbacks(
                     validated_at = bars[validation].get("bar_start")
                 if _map(found.get(direction)).get("state") == "ENTRY_WINDOW_OPEN":
                     break
-                found[direction] = {
-                    "setup_kind": "TREND_PULLBACK",
-                    "setup_variant": f"{zone_kind}_PULLBACK",
-                    "state": state,
-                    "direction": direction,
-                    "trigger_level": zone,
-                    "source": "rth_vwap_trend_pullback",
-                    "reason": reason,
-                    "rejection_at": at,
-                    "validated_at": validated_at,
-                }
+                found[direction] = _with_setup_window(
+                    {
+                        "setup_kind": "TREND_PULLBACK",
+                        "setup_variant": f"{zone_kind}_PULLBACK",
+                        "state": state,
+                        "direction": direction,
+                        "trigger_level": zone,
+                        "source": "rth_vwap_trend_pullback",
+                        "reason": reason,
+                        "rejection_at": at,
+                        "validated_at": validated_at,
+                    },
+                    detected_at=at,
+                    window_opens_at=(
+                        validated_at
+                        if state in {"ENTRY_WINDOW_OPEN", "ENTRY_TOO_LATE"}
+                        else None
+                    ),
+                    window_expires_at=(
+                        bars[validation + 1].get("bar_start")
+                        if state == "ENTRY_TOO_LATE" and validation + 1 < len(bars)
+                        else None
+                    ),
+                    blocked_by=None if state == "ENTRY_WINDOW_OPEN" else reason,
+                )
                 break
     return list(found.values())
 
@@ -654,6 +702,25 @@ def _minutes_to_close(trading_date: str, now: datetime) -> int | None:
     except ValueError:
         return None
     return max(int((session.close_at - now).total_seconds() // 60), 0) if session else None
+
+
+def _with_setup_window(
+    row: dict[str, Any],
+    *,
+    detected_at: object = None,
+    window_opens_at: object = None,
+    window_expires_at: object = None,
+    blocked_by: object = None,
+) -> dict[str, Any]:
+    row.update(
+        {
+            "detected_at": detected_at,
+            "window_opens_at": window_opens_at,
+            "window_expires_at": window_expires_at,
+            "blocked_by": blocked_by,
+        }
+    )
+    return row
 
 
 def _map(value: object) -> Mapping[str, Any]:
