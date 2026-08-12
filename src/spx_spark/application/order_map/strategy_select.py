@@ -357,6 +357,12 @@ def _rejection_funnel(
         "trend_pullback_path_not_confirmed",
         "trend_pullback_path_unevaluable",
         "event_settlement_exact_two_leg_quote_unavailable",
+        "vertical_path_inputs_unavailable",
+        "spx_price_unavailable",
+        "session_not_open_for_spxw_strategy",
+        "market_frame_not_ready",
+        "vertical_expiry_unavailable",
+        "vertical_exact_two_leg_quote_unavailable",
     }
     rth_setups = [_map(row) for row in facts.get("rth_setups") or ()]
     live_states = {

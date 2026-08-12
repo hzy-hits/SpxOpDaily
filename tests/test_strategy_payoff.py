@@ -1040,6 +1040,27 @@ def test_rolling_path_atr_keeps_vertical_capability_when_sma_atr_is_missing() ->
     )
 
 
+def test_missing_path_inputs_do_not_count_as_setup_detected() -> None:
+    now = datetime(2026, 8, 12, 16, 19, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["level_decision"] = {"phase": "far"}
+    lineage = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["diagnostics"]
+    lineage["moving_averages"] = {"atr_5m": None}
+    lineage["rolling_path_percentiles"] = {}
+    lineage["atr"] = {}
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == "vertical_path_inputs_unavailable"
+    assert decision["rejection_funnel"]["setup_detected"] == 0
+    assert decision["rejection_funnel"]["pending_confirmation"] == 0
+    assert decision["rejection_funnel"]["current_stage"] == "facts_ready"
+    assert decision["regime"]["entry_state"] == "INSUFFICIENT_DATA"
+
+
 def test_option_frame_not_ready_does_not_emit_pricing_not_authorized() -> None:
     now = datetime(2026, 8, 12, 16, 19, tzinfo=timezone.utc)
     payload = _decision_payload(now)
