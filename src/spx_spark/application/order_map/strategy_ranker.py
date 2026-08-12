@@ -178,7 +178,7 @@ def _macro_hard_gates(
     facts: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     event = _map(facts.get("event"))
-    if event.get("entry_allowed") is True:
+    if not event or event.get("entry_allowed") is not False:
         return []
     if (
         candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP
