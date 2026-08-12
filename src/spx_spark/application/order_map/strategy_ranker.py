@@ -20,6 +20,7 @@ from spx_spark.settings.strategy_distribution import StrategyDistributionSetting
 
 _POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
 _POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
+_EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +72,22 @@ def rank_candidates(
                 **scored,
                 "edge": {
                     **dict(_map(scored.get("edge"))),
-                    "advisories": [
-                        str(gate.get("gate")) for gate in utility_gates if gate.get("gate")
-                    ],
+                    "advisories": list(
+                        dict.fromkeys(
+                            [
+                                *(
+                                    str(item)
+                                    for item in _map(scored.get("edge")).get("advisories")
+                                    or ()
+                                ),
+                                *(
+                                    str(gate.get("gate"))
+                                    for gate in utility_gates
+                                    if gate.get("gate")
+                                ),
+                            ]
+                        )
+                    ),
                 },
             }
         scored = _attach_policy_ev(
@@ -139,6 +153,7 @@ def _hard_gate_candidate(
             gates.append({"gate": f"{key}_missing", "actual": None, "threshold": "present"})
         elif valid_until <= now:
             gates.append({"gate": f"{key}_expired", "actual": valid_until.isoformat(), "threshold": now.isoformat()})
+    gates.extend(_macro_hard_gates(candidate, facts))
     strategy_type = str(candidate.get("strategy_type") or "")
     if strategy_type.endswith("_DEBIT_VERTICAL"):
         gates.extend(_vertical_hard_gates(candidate, facts, policy=policy))
@@ -157,12 +172,35 @@ def _hard_gate_candidate(
     return gates
 
 
+def _macro_hard_gates(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    event = _map(facts.get("event"))
+    if event.get("entry_allowed") is True:
+        return []
+    if (
+        candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP
+        and candidate.get("event_spans_release") is True
+    ):
+        return []
+    return [
+        {
+            "gate": "macro_entry_not_authorized",
+            "actual": event.get("state"),
+            "threshold": "entry_allowed_or_explicit_event_settlement_view",
+        }
+    ]
+
+
 def _vertical_hard_gates(
     candidate: dict[str, Any],
     facts: Mapping[str, Any],
     *,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
+    if candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP:
+        return _event_settlement_vertical_hard_gates(candidate)
     long, short = _map(candidate.get("long")), _map(candidate.get("short"))
     if not long or not short:
         return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
@@ -191,6 +229,73 @@ def _vertical_hard_gates(
     if "direction_valid_but_entry_too_late" in reasons:
         candidate["setup_state"] = "ENTRY_TOO_LATE"
     return [_gate_from_entry_reason(reason, entry_quality, policy) for reason in reasons]
+
+
+def _event_settlement_vertical_hard_gates(
+    candidate: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    gates: list[dict[str, Any]] = []
+    long, short = _map(candidate.get("long")), _map(candidate.get("short"))
+    if not long or not short:
+        gates.append(
+            {
+                "gate": "vertical_legs_unavailable",
+                "actual": None,
+                "threshold": "long_and_short",
+            }
+        )
+    economics = _map(candidate.get("economics"))
+    width = _number(economics.get("width_points"))
+    debit_fraction = _number(economics.get("debit_fraction_of_width"))
+    breakeven = _number(economics.get("breakeven_spx"))
+    if width is None or width <= 0.0 or debit_fraction is None or breakeven is None:
+        gates.append(
+            {
+                "gate": "event_settlement_payoff_unavailable",
+                "actual": dict(economics),
+                "threshold": "valid_vertical_economics",
+            }
+        )
+    elif not 0.0 < debit_fraction < 1.0:
+        gates.append(
+            {
+                "gate": "event_settlement_odds_invalid",
+                "actual": debit_fraction,
+                "threshold": "0<debit_fraction<1",
+            }
+        )
+    view = _map(candidate.get("view"))
+    event = _map(candidate.get("probability_event"))
+    direction = str(candidate.get("direction") or "")
+    threshold = _number(view.get("threshold_level"))
+    expected_kind = "terminal_above" if direction == "UP" else "terminal_below" if direction == "DOWN" else None
+    event_threshold = _number(
+        event.get("lower_level") if direction == "UP" else event.get("upper_level")
+    )
+    if (
+        expected_kind is None
+        or event.get("kind") != expected_kind
+        or threshold is None
+        or event_threshold is None
+        or abs(threshold - event_threshold) > 1e-9
+        or _time(event.get("target_at")) is None
+    ):
+        gates.append(
+            {
+                "gate": "event_settlement_proposition_invalid",
+                "actual": dict(event),
+                "threshold": expected_kind,
+            }
+        )
+    if candidate.get("event_spans_release") is not True:
+        gates.append(
+            {
+                "gate": "event_settlement_release_identity_missing",
+                "actual": candidate.get("event_spans_release"),
+                "threshold": True,
+            }
+        )
+    return gates
 
 
 def _butterfly_hard_gates(
@@ -335,6 +440,9 @@ def _candidate_probability_evidence(
     settings: StrategyDistributionSettings | None,
     now: datetime,
 ) -> tuple[dict[str, Any], Mapping[str, Any], list[str]]:
+    candidate_event = _map(candidate.get("probability_event"))
+    if candidate_event.get("kind") == expected_kind:
+        return {}, candidate_event, ["candidate_probability_unavailable"]
     probability = _map(facts.get("probability"))
     event = _map(probability.get("event"))
     if event.get("kind") == expected_kind:
