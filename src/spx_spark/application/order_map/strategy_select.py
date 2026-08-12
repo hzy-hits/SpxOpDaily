@@ -101,8 +101,12 @@ def build_strategy_decision(
 def _gate_reasons(facts: Mapping[str, Any], regime: Mapping[str, Any]) -> list[str]:
     del regime
     global_capability = _map(_map(facts.get("capabilities")).get("global"))
-    reasons = list(global_capability.get("reasons") or ())
-    return list(dict.fromkeys(map(str, reasons)))
+    reasons = [
+        str(reason)
+        for reason in global_capability.get("reasons") or ()
+        if str(reason) != "macro_entry_not_authorized"
+    ]
+    return list(dict.fromkeys(reasons))
 
 
 def _base_decision(facts: Mapping[str, Any], regime: Mapping[str, Any], identity: object) -> dict[str, Any]:
