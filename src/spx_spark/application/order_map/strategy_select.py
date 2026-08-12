@@ -14,6 +14,10 @@ from spx_spark.application.order_map.candidate_factory import (
     candidate_generation_reasons,
     enumerate_candidates,
 )
+from spx_spark.application.order_map.event_settlement_vertical import (
+    enumerate_event_settlement_candidates,
+    event_settlement_generation_reason,
+)
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
@@ -39,9 +43,23 @@ def build_strategy_decision(
     rows: list[dict[str, Any]] = []
     rank = RankResult(passed=[], near_misses=[], gate_audit=[])
     if not reasons:
-        rows = enumerate_candidates(
-            payload, facts, regime, latest, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
-        )
+        rows = [
+            *enumerate_event_settlement_candidates(
+                payload,
+                facts,
+                latest,
+                now=_utc(now),
+                policy=DEFAULT_STRATEGY_POLICY,
+            ),
+            *enumerate_candidates(
+                payload,
+                facts,
+                regime,
+                latest,
+                now=_utc(now),
+                policy=DEFAULT_STRATEGY_POLICY,
+            ),
+        ]
         if rows:
             rank = rank_candidates(
                 rows,
@@ -75,8 +93,20 @@ def build_strategy_decision(
                 )
             reasons = _rank_reasons(rank)
         else:
-            generation_reasons = candidate_generation_reasons(
-                payload, facts, regime, latest, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY
+            event_reason = event_settlement_generation_reason(
+                payload, now=_utc(now)
+            )
+            generation_reasons = (
+                [event_reason]
+                if event_reason
+                else candidate_generation_reasons(
+                    payload,
+                    facts,
+                    regime,
+                    latest,
+                    now=_utc(now),
+                    policy=DEFAULT_STRATEGY_POLICY,
+                )
             )
             reasons = generation_reasons
     if "direction_valid_but_entry_too_late" in reasons:
@@ -101,8 +131,12 @@ def build_strategy_decision(
 def _gate_reasons(facts: Mapping[str, Any], regime: Mapping[str, Any]) -> list[str]:
     del regime
     global_capability = _map(_map(facts.get("capabilities")).get("global"))
-    reasons = list(global_capability.get("reasons") or ())
-    return list(dict.fromkeys(map(str, reasons)))
+    reasons = [
+        str(reason)
+        for reason in global_capability.get("reasons") or ()
+        if str(reason) != "macro_entry_not_authorized"
+    ]
+    return list(dict.fromkeys(reasons))
 
 
 def _base_decision(facts: Mapping[str, Any], regime: Mapping[str, Any], identity: object) -> dict[str, Any]:
