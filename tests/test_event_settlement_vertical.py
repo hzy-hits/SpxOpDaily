@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from spx_spark.application.order_map.candidate_factory import enumerate_candidates
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
-from spx_spark.application.order_map.strategy_select import _gate_reasons
+from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
 from spx_spark.storage import LatestState
 
@@ -76,6 +76,61 @@ def _payload() -> dict[str, object]:
     }
 
 
+def _facts(now: datetime) -> dict[str, object]:
+    return {
+        "schema_version": "market_fact_pack.v1",
+        "decision_at": now.isoformat(),
+        "available_at": now.isoformat(),
+        "session_date": "2026-08-12",
+        "minutes_to_close": 930,
+        "session": {"mode": "gth", "legal": True},
+        "spot": {"spx": 7727.0},
+        "path": {},
+        "value_center": {},
+        "volatility": {},
+        "structure": {"strike_differential_context": {}},
+        "event": {"state": "pre_event", "entry_allowed": False},
+        "trigger": {},
+        "session_episode": {},
+        "rth_setups": [],
+        "shock": {"state": "NONE"},
+        "gth_evidence": {},
+        "gth_dip_reclaim_evidence": {},
+        "probability": {},
+        "capabilities": {
+            "global": {
+                "ready": False,
+                "session_legal": True,
+                "coordinate_ready": True,
+                "market_frame_ready": True,
+                "macro_entry_allowed": False,
+                "provider_advice_allowed": True,
+                "reasons": ["macro_entry_not_authorized"],
+            },
+            "vertical": {"ready": True, "reasons": []},
+            "butterfly": {"ready": False, "reasons": []},
+            "path": {"ready": False},
+        },
+        "quality": {"status": "ready", "reasons": []},
+    }
+
+
+def _regime() -> dict[str, object]:
+    return {
+        "schema_version": "regime_assessment.v1",
+        "policy_version": StrategyPolicy().policy_version,
+        "path_state": "UNCERTAIN",
+        "path_direction": None,
+        "terminal_state": "NONE",
+        "event_state": "SCHEDULED_EVENT_RISK",
+        "entry_state": "INSUFFICIENT_DATA",
+        "confidence": 0.0,
+        "reasons": [],
+        "contradictions": [],
+        "pin": {},
+    }
+
+
 def test_prior_close_event_view_enumerates_adjacent_call_and_put_verticals() -> None:
     now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
     policy = StrategyPolicy()
@@ -135,16 +190,8 @@ def test_event_view_can_pass_pre_event_macro_gate_without_path_geometry() -> Non
     event_rows = [
         row for row in rows if row.get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD"
     ]
-    facts = {
-        "session_date": "2026-08-12",
-        "event": {"state": "pre_event", "entry_allowed": False},
-        "spot": {"spx": 7727.0},
-        "path": {},
-        "structure": {"strike_differential_context": {}},
-        "shock": {"state": "NONE"},
-        "probability": {},
-    }
-    regime = {"path_state": "UNCERTAIN", "terminal_state": "NONE", "pin": {}}
+    facts = _facts(now)
+    regime = _regime()
 
     ranked = rank_candidates(
         event_rows,
@@ -189,22 +236,37 @@ def test_event_view_can_pass_pre_event_macro_gate_without_path_geometry() -> Non
     assert "macro_entry_not_authorized" in blocked.near_misses[0]["rejection_reasons"]
 
 
-def test_macro_reason_is_no_longer_a_global_enumeration_veto() -> None:
-    reasons = _gate_reasons(
-        {
-            "capabilities": {
-                "global": {
-                    "reasons": [
-                        "macro_entry_not_authorized",
-                        "market_frame_not_ready",
-                    ]
-                }
-            }
-        },
-        {},
+def test_build_strategy_decision_promotes_event_view_to_manual_candidate(
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
+    facts = _facts(now)
+    regime = _regime()
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+        lambda payload, latest, at: facts,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.assess_regime",
+        lambda supplied: regime,
     )
 
-    assert reasons == ["market_frame_not_ready"]
+    decision = build_strategy_decision(
+        _payload(),
+        _state(now),
+        now,
+        data_root=None,
+        probability_settings=None,
+    )
+
+    assert decision["action_authority"] == "manual"
+    assert decision["execution"]["action"] == "MANUAL_LIMIT"
+    assert decision["candidate"]["setup_kind"] == "EVENT_SETTLEMENT_THRESHOLD"
+    assert decision["candidate"]["edge"]["edge_status"] == "thesis_driven_unvalidated"
+    assert decision["candidate"]["probability_event"]["kind"] in {
+        "terminal_above",
+        "terminal_below",
+    }
 
 
 def test_event_view_expires_after_the_release() -> None:
