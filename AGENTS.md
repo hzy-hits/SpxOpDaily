@@ -66,7 +66,8 @@ git@github-spxopdaily:hzy-hits/SpxOpDaily.git
 - `docs/market-data-capability-matrix.md`：数据源能力和 readiness 语义。
 - `docs/architecture-simplification-blueprint-v1.md`：架构简化与第三方能力替代总方案（上位约束）。
 - `docs/architecture-simplification-execution-plan-v1.md`：简化重构的事实基线、偏差澄清与逐阶段任务卡（执行基线）。
-- `docs/strategy-signal-engine-v2.md`：0DTE 统一策略信号引擎实施合同（S-track；排期与边界裁决见执行方案第 2 节 11–16 条）。
+- `docs/strategy-signal-engine-v2.md`：0DTE 统一策略信号引擎实施合同（S-track 基线；排期与边界裁决见执行方案第 2 节 11–16 条）。
+- `docs/strategy-signal-engine-v4.md`：**已合入**的 reuse-first 事件结算观点扩展（`EVENT_SETTLEMENT_THRESHOLD`）；在高影响宏观事件发布前，把“昨收上方/下方结算”映射为 5 点 Debit Vertical，仍走 `build_strategy_decision`。
 - `docs/refactor-architecture-acceptance-plan.md`：架构目标与验收门槛；与简化方案冲突的章节以简化方案为准。
 - `systemd/`：服务与 timer 定义。
 - `scripts/install-spx-spark-services.sh`：正式部署入口及分支、工作树和 unit drift 防护。

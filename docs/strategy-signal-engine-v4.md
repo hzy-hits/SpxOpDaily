@@ -1,6 +1,6 @@
 # SPX Spark 策略信号引擎 v4.0：观点到事件结算价差
 
-状态：**已实现于 Draft PR，尚未合并或部署。**  
+状态：**已合入 `master`（PR #8 / `306cf581`）并进入生产部署路径。**  
 适用仓库：`hzy-hits/SpxOpDaily`  
 基线：`e279ba6029ccba2dbbe4d2b98ceb0f688f43b487`  
 自动下单：**继续禁止**
