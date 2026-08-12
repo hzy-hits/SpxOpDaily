@@ -452,6 +452,7 @@ def test_repeated_competing_sessions_use_bounded_exponential_cooldown(
     runtime.runtime_policy = SimpleNamespace(
         ibkr_conflict_probe_seconds=5.0,
         ibkr_conflict_probe_max_seconds=20.0,
+        ibkr_conflict_recovery_seconds=60.0,
     )
     runtime.__post_init__()
 
@@ -463,6 +464,7 @@ def test_repeated_competing_sessions_use_bounded_exponential_cooldown(
     conflicts = [event for event in events if event.get("event") == "competing_session"]
     assert [event["conflict_count"] for event in conflicts] == [1, 2, 3, 4]
     assert [event["probe_in_seconds"] for event in conflicts] == deferred
+    assert runtime.competing_session_circuit.recovery_seconds == 60.0
     assert runtime.competing_session_circuit.state(now_monotonic=54.0) == "open"
     assert runtime.competing_session_circuit.state(now_monotonic=55.0) == "half_open"
 
@@ -612,6 +614,12 @@ def test_competing_session_standby_heartbeats_keep_retry_visible(
         collector,
         policy_check_seconds=30.0,
     )
+    runtime.runtime_policy = SimpleNamespace(
+        ibkr_conflict_probe_seconds=5.0,
+        ibkr_conflict_probe_max_seconds=300.0,
+        ibkr_conflict_recovery_seconds=60.0,
+    )
+    runtime.__post_init__()
     runtime.storage_settings = SimpleNamespace(data_root="/tmp")  # type: ignore[assignment]
     for _ in range(7):
         runtime.competing_session_circuit.open(now_monotonic=clock.now)
@@ -631,3 +639,4 @@ def test_competing_session_standby_heartbeats_keep_retry_visible(
     assert heartbeat["circuit_state"] == "open"
     assert heartbeat["retry_in_seconds"] == pytest.approx(270.0)
     assert heartbeat["reason"] == "competing live session cooldown (IBKR 10197)"
+    assert runtime.competing_session_circuit.recovery_seconds == 60.0

@@ -43,7 +43,7 @@ class CompetingSessionCircuit:
 
     min_seconds: float
     max_seconds: float
-    recovery_seconds: float = 300.0
+    recovery_seconds: float = 60.0
     failures: int = 0
     retry_not_before: float = 0.0
     recovery_started_at: float | None = None

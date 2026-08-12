@@ -69,15 +69,28 @@ class StreamRuntime:
                 getattr(
                     self.runtime_policy,
                     "ibkr_conflict_probe_max_seconds",
-                    300.0,
+                    15.0,
                 )
             ),
             conflict_min,
         )
+        # Stability window is independent of probe cadence: probe interval
+        # controls how fast we reclaim after release; recovery_seconds only
+        # decides when a healthy flush is trusted enough to close the circuit.
+        recovery_seconds = max(
+            float(
+                getattr(
+                    self.runtime_policy,
+                    "ibkr_conflict_recovery_seconds",
+                    60.0,
+                )
+            ),
+            0.1,
+        )
         self.competing_session_circuit = CompetingSessionCircuit(
             min_seconds=conflict_min,
             max_seconds=conflict_max,
-            recovery_seconds=conflict_max,
+            recovery_seconds=recovery_seconds,
         )
 
     def expired(self) -> bool:

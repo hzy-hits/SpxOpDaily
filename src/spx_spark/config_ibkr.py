@@ -378,6 +378,7 @@ class RuntimePolicySettings:
     runtime_mode_path: str
     agent_override_default_ttl_minutes: int
     ibkr_conflict_probe_max_seconds: int = 15
+    ibkr_conflict_recovery_seconds: int = 60
 
     def __post_init__(self) -> None:
         if self.ibkr_conflict_probe_seconds <= 0:
@@ -389,6 +390,8 @@ class RuntimePolicySettings:
             raise ValueError(
                 "IBKR_CONFLICT_PROBE_MAX_SECONDS cannot be below the probe interval"
             )
+        if self.ibkr_conflict_recovery_seconds <= 0:
+            raise ValueError("IBKR_CONFLICT_RECOVERY_SECONDS must be positive")
 
     @classmethod
     def from_env(cls) -> "RuntimePolicySettings":
@@ -444,6 +447,10 @@ class RuntimePolicySettings:
             ibkr_conflict_probe_max_seconds=env_int(
                 "IBKR_CONFLICT_PROBE_MAX_SECONDS",
                 int(settings_value("runtime_policy.ibkr_conflict_probe_max_seconds")),
+            ),
+            ibkr_conflict_recovery_seconds=env_int(
+                "IBKR_CONFLICT_RECOVERY_SECONDS",
+                int(settings_value("runtime_policy.ibkr_conflict_recovery_seconds")),
             ),
         )
 

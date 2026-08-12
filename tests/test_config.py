@@ -113,11 +113,33 @@ def test_runtime_policy_uses_beijing_window():
 def test_runtime_policy_loads_bounded_competing_session_cooldown(monkeypatch) -> None:
     monkeypatch.setenv("IBKR_CONFLICT_PROBE_SECONDS", "7")
     monkeypatch.setenv("IBKR_CONFLICT_PROBE_MAX_SECONDS", "120")
+    monkeypatch.setenv("IBKR_CONFLICT_RECOVERY_SECONDS", "60")
 
     policy = RuntimePolicySettings.from_env()
 
     assert policy.ibkr_conflict_probe_seconds == 7
     assert policy.ibkr_conflict_probe_max_seconds == 120
+    assert policy.ibkr_conflict_recovery_seconds == 60
+
+
+def test_runtime_policy_rejects_non_positive_conflict_recovery() -> None:
+    with pytest.raises(ValueError, match="RECOVERY_SECONDS"):
+        RuntimePolicySettings(
+            ibkr_schedule_enabled=True,
+            ibkr_schedule_timezone="Asia/Shanghai",
+            ibkr_schedule_start=time(0, 0),
+            ibkr_schedule_stop=time(0, 0),
+            ibkr_connect_retry_seconds=60,
+            ibkr_conflict_retry_minutes=1,
+            ibkr_conflict_probe_seconds=15,
+            ibkr_fallback_provider="schwab",
+            strict_no_session_fight=False,
+            weekend_maintenance_mode=True,
+            runtime_mode_path="runtime/mode.json",
+            agent_override_default_ttl_minutes=120,
+            ibkr_conflict_probe_max_seconds=15,
+            ibkr_conflict_recovery_seconds=0,
+        )
 
 
 def test_runtime_policy_rejects_competing_session_max_below_initial() -> None:
