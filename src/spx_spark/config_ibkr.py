@@ -377,7 +377,7 @@ class RuntimePolicySettings:
     weekend_maintenance_mode: bool
     runtime_mode_path: str
     agent_override_default_ttl_minutes: int
-    ibkr_conflict_probe_max_seconds: int = 300
+    ibkr_conflict_probe_max_seconds: int = 15
 
     def __post_init__(self) -> None:
         if self.ibkr_conflict_probe_seconds <= 0:

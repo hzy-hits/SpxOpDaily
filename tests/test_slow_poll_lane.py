@@ -185,6 +185,7 @@ def make_stream_collector(
         ibkr_connect_retry_seconds=60,
         ibkr_conflict_retry_minutes=0,
         ibkr_conflict_probe_seconds=60,
+        ibkr_conflict_probe_max_seconds=60,
         ibkr_fallback_provider="schwab",
         strict_no_session_fight=True,
         weekend_maintenance_mode=True,

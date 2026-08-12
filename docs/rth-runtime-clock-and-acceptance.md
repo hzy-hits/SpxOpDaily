@@ -96,11 +96,13 @@ fail-closed guard. That policy must not be mistaken for a collection outage.
 
 ## IBKR competing sessions
 
-IBKR error 10197 opens a non-invasive circuit breaker. Probe delays grow
-exponentially from the configured initial delay to a 300-second ceiling. The
-circuit closes only after a flush contains genuinely fresh LIVE data; a TCP
-reconnect or stale cached quote is insufficient. The collector never
-disconnects or takes over a phone, desktop or other live session.
+IBKR error 10197 opens a non-invasive circuit breaker. Production probe delay
+is capped at 15 seconds (initial and maximum equal), so the collector rechecks
+quickly after an external Live session releases entitlement instead of backing
+off toward multi-minute waits. The circuit closes only after a flush contains
+genuinely fresh LIVE data for the recovery window; a TCP reconnect or stale
+cached quote is insufficient. The collector never disconnects or takes over a
+phone, desktop or other live session.
 
 `latest/ibkr_stream_health.json` separates process state from data-plane
 health and publishes `policy_blocked`, reason, retry time, circuit state and

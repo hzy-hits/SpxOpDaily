@@ -274,7 +274,7 @@ alert_interval_seconds = { value = 30, description = "Cadence for running the fu
 heartbeat_seconds = { value = 60, description = "Cadence for service-loop health telemetry." }
 ibkr_skip_options = { value = false, description = "Skips IBKR option snapshots while retaining non-option references when enabled." }
 ibkr_connect_retry_seconds = { value = 60, description = "Delay before retrying an unavailable IBKR snapshot connection." }
-ibkr_conflict_probe_seconds = { value = 60, description = "Delay before the first read-only collection attempt after an IBKR live/paper market-data conflict; repeated attempts rebuild subscriptions and back off to the configured maximum." }
+ibkr_conflict_probe_seconds = { value = 15, description = "Delay before the first read-only collection attempt after an IBKR live/paper market-data conflict; repeated attempts rebuild subscriptions and back off to the configured maximum." }
 max_concurrent_tasks = { value = 4, description = "Maximum child tasks executed concurrently by the service loop." }
 greek_shadow_enabled = { value = false, description = "Enables high-order Greeks shadow telemetry without affecting live decisions." }
 greek_shadow_interval_seconds = { value = 60, description = "Cadence for high-order Greeks shadow telemetry." }
@@ -340,8 +340,8 @@ ibkr_schedule_start = { value = "00:00", description = "Daily local start time f
 ibkr_schedule_stop = { value = "00:00", description = "Daily local stop time for the IBKR collection window; matching start means always open." }
 ibkr_connect_retry_seconds = { value = 60, description = "Seconds to wait before retrying an unavailable IBKR connection." }
 ibkr_conflict_retry_minutes = { value = 1, description = "Minutes before an active reclaim attempt after an IBKR live/paper conflict." }
-ibkr_conflict_probe_seconds = { value = 60, description = "Initial seconds before rebuilding read-only market-data subscriptions after an IBKR live/paper conflict." }
-ibkr_conflict_probe_max_seconds = { value = 300, description = "Maximum exponential cooldown between full market-data recovery attempts after repeated IBKR 10197 conflicts." }
+ibkr_conflict_probe_seconds = { value = 15, description = "Initial seconds before rebuilding read-only market-data subscriptions after an IBKR live/paper conflict." }
+ibkr_conflict_probe_max_seconds = { value = 15, description = "Maximum exponential cooldown between full market-data recovery attempts after repeated IBKR 10197 conflicts. Cap equals the initial delay so probes stay at 15s instead of stretching to minutes." }
 ibkr_fallback_provider = { value = "schwab", description = "Provider name used when IBKR is unavailable or intentionally disabled." }
 strict_no_session_fight = { value = false, description = "Allows the paper collector to reclaim market data promptly after a live session releases it; live still has IBKR-enforced priority while connected." }
 weekend_maintenance_mode = { value = true, description = "Reserves non-trading weekends for maintenance unless futures have reopened." }

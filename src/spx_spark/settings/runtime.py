@@ -44,7 +44,7 @@ class RuntimeSettingsSlice:
     heartbeat_seconds: int = 60
     ibkr_skip_options: bool = False
     ibkr_connect_retry_seconds: int = 60
-    ibkr_conflict_probe_seconds: int = 60
+    ibkr_conflict_probe_seconds: int = 15
     max_concurrent_tasks: int = 4
     greek_shadow_enabled: bool = False
     greek_shadow_interval_seconds: int = 60
