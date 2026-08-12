@@ -115,6 +115,37 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
     edge = candidate.get("edge") if isinstance(candidate.get("edge"), dict) else {}
     edge_status = edge.get("edge_status") or "research_unvalidated"
     policy_ev = _policy_ev_text(edge)
+    if candidate.get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD":
+        view = candidate.get("view") if isinstance(candidate.get("view"), dict) else {}
+        probability_event = (
+            candidate.get("probability_event")
+            if isinstance(candidate.get("probability_event"), dict)
+            else {}
+        )
+        direction = str(candidate.get("direction") or "")
+        relation = "高于" if direction == "UP" else "低于"
+        threshold = view.get("threshold_level")
+        odds = view.get("market_odds_proxy")
+        gap = view.get("breakeven_gap_points")
+        breakeven = economics.get("breakeven_spx")
+        gap_text = (
+            f"需比观点阈值额外走 {float(gap):+.2f}pt"
+            if isinstance(gap, int | float)
+            else "观点与结构阈值差 unavailable"
+        )
+        return "\n".join((
+            "SPX STRATEGY DECISION · MANUAL CANDIDATE",
+            f"观点  SPX 到期结算{relation}前收 {threshold} · {view.get('macro_event_name') or '事件'}",
+            f"命题  {probability_event.get('kind')} · target_at={probability_event.get('target_at')}",
+            f"Execution  {contracts} · synthetic BBO {quote.get('bid')}/{quote.get('ask')} · 净借记 ≤ {quote.get('ask')}",
+            f"赔率  Debit/Width={_percent(odds)} · BE={breakeven} · {gap_text}",
+            f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · 事件跳空时普通止损不保证成交",
+            f"有效期  {candidate.get('opportunity_valid_until')} · 事件发布后原观点过期 · 禁止市价",
+            f"Edge  status={edge_status} · P=未估计 · required≈{_percent(edge.get('required_p_breakeven'))} · {policy_ev}",
+            "Data Quality  conservative BBO · thesis-driven/unvalidated · automatic_ordering=false",
+            f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因=EVENT_SETTLEMENT_THRESHOLD "
+            f"版本 policy={policy} git={git_sha}",
+        ))
     return "\n".join((
         "SPX STRATEGY DECISION · MANUAL CANDIDATE",
         f"Desk View  {candidate.get('setup_kind')} · {candidate.get('direction')} · 仅人工限价",
@@ -131,6 +162,12 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因={candidate.get('setup_kind') or '-'} "
         f"版本 policy={policy} git={git_sha}",
     ))
+
+
+def _percent(value: object) -> str:
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return f"{float(value):.1%}"
+    return "n/a"
 
 
 def _policy_ev_text(edge: dict[str, Any]) -> str:
