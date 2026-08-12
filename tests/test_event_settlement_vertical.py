@@ -203,14 +203,16 @@ def test_event_view_can_pass_pre_event_macro_gate_without_path_geometry() -> Non
         now=now,
     )
 
-    assert len(ranked.passed) == 4
-    assert all(
-        row["edge"]["edge_status"] == "thesis_driven_unvalidated"
-        for row in ranked.passed
-    )
-    assert all(
-        "candidate_probability_unavailable" in row["edge"]["advisories"]
-        for row in ranked.passed
+    assert len(ranked.passed) == 1
+    selected = ranked.passed[0]
+    assert selected["strategy_type"] == "CALL_DEBIT_VERTICAL"
+    assert selected["long"]["strike"] == 7730.0
+    assert selected["short"]["strike"] == 7735.0
+    assert selected["edge"]["edge_status"] == "thesis_driven_unvalidated"
+    assert "candidate_probability_unavailable" in selected["edge"]["advisories"]
+    assert any(
+        "event_settlement_debit_fraction_exceeded" in row["rejection_reasons"]
+        for row in ranked.near_misses
     )
 
     regular = deepcopy(event_rows[0])
@@ -262,11 +264,11 @@ def test_build_strategy_decision_promotes_event_view_to_manual_candidate(
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["action"] == "MANUAL_LIMIT"
     assert decision["candidate"]["setup_kind"] == "EVENT_SETTLEMENT_THRESHOLD"
+    assert decision["candidate"]["strategy_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["candidate"]["long"]["strike"] == 7730.0
+    assert decision["candidate"]["short"]["strike"] == 7735.0
     assert decision["candidate"]["edge"]["edge_status"] == "thesis_driven_unvalidated"
-    assert decision["candidate"]["probability_event"]["kind"] in {
-        "terminal_above",
-        "terminal_below",
-    }
+    assert decision["candidate"]["probability_event"]["kind"] == "terminal_above"
 
 
 def test_event_view_expires_after_the_release() -> None:
