@@ -198,14 +198,16 @@ A change that increases process count, active languages, mutable stores or owner
 
 ### Strategy engine (S-track) constraints
 
-策略信号引擎 v2 的实施合同是 `docs/strategy-signal-engine-v2.md`；排期与边界裁决见
+策略信号引擎基线合同是 `docs/strategy-signal-engine-v2.md`；事件结算观点扩展见
+`docs/strategy-signal-engine-v4.md`（`EVENT_SETTLEMENT_THRESHOLD`）。排期与边界裁决见
 `docs/architecture-simplification-execution-plan-v1.md` 第 2 节第 11–16 条与 S1–S6 任务卡。要点：
 
 1. 人类可见交易候选只能来自 `payload["strategy_decision"]`（`build_strategy_decision` 唯一出口）；旧 candidates、GTH direct green-card、radar lane 排名在对应 S 卡落地后必须删除或降级，不得双写两套“最终候选”。
-2. 策略候选第一版固定五类（NO_TRADE、Call/Put Debit Vertical、Call/Put Butterfly）；扩大候选空间需用户批准。
+2. 策略候选第一版固定五类（NO_TRADE、Call/Put Debit Vertical、Call/Put Butterfly）；v4 仅新增 setup `EVENT_SETTLEMENT_THRESHOLD`，仍复用 Call/Put Debit Vertical，不新增 payoff 类型。扩大候选空间需用户批准。
 3. bootstrap 阈值是带 `policy_version` 的冻结代码常量，不进 `runtime.yaml`、不进 AppSettings；改阈值 = 改代码 + 版本递增 + replay 对照。
 4. `strategy_decision` 不得进入 `contracts/golden/` 或任何 Rust 消费的投影；候选卡走现有 Python `trade_ready` lane。
-5. 不为策略新增 service、timer、数据库、队列、状态机或 Rust；新文件以 v2 §18.1 的 5 个为上限；预算按 v2 §21.3（生产 ≤1,200 行、测试 ≤600 行）。
+5. 不为策略新增 service、timer、数据库、队列、状态机或 Rust；v4 新增生产文件上限为 `event_settlement_vertical.py` 一个组合模块。
 6. 所有判断在 SPX 坐标完成；conservative synthetic BBO 不得用 mid 代替；回放必须满足 `available_at <= decision_at`，冻结验收案例为 2026-08-05 与 2026-08-06。
 7. LLM 只做 bounded idea/critic（结构化假设 + 反证），不计算价格/概率/payoff、不覆盖 hard gate、不直接创建 Trade Ready；不引入 LangChain/LangGraph。
 8. `automatic_ordering=false` 不变；回放通过 v2 §19.5 门后直接进入人工候选卡，不得以“继续 Shadow N 天”代替工程接入。
+9. **v4 触发条件（运维）**：`config/macro_events.toml` 中存在尚未发布、`impact∈{high,critical}`、且 `release_at` 不晚于当日 front expiry 收盘的事件；同时 `day_move.prior_close`、front expiry、两腿 exact BBO 就绪。事件发布后停止生成。入口：`enumerate_event_settlement_candidates` → `rank_candidates` → `strategy_decision`；Codex/Agent 以本文件与 v4 文档为准，勿把 Draft PR 状态当作现行事实。
