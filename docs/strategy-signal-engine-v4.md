@@ -1,1051 +1,981 @@
-# SPX Spark 策略信号引擎 v4：账户无关的命题与赔率引擎
+# SPX Spark 策略信号引擎 v4：复用优先的事件结算价差扩展
 
 状态：**设计草案，等待批准；本文不授权实现或部署。**  
 适用仓库：`hzy-hits/SpxOpDaily`  
 基线：`e279ba6029ccba2dbbe4d2b98ceb0f688f43b487`  
 自动下单：**继续禁止**
 
-本文是 v2/v3 策略合同的增量修订。v4 只解决一个问题：
+本文是 v2/v3 策略合同的最小增量修订。它不重建一套新的“命题引擎”、
+“赔率引擎”或“账户引擎”，只补上当前系统已经暴露出的一个具体能力缺口：
 
-> 给定当前 SPX/SPXW 市场事实，是否存在一笔单位化、可解释、可证伪的交易候选？
+> 系统能够解释别人给出的 `7730/7735 Call Debit Spread`，但不能在事件前主动从
+> 昨日收盘等现有参考位中枚举出这种窄幅结算价差，并展示其可执行赔率。
 
-v4 **完全账户无关**。它不读取账户净值、Buying Power、持仓、盈亏或资金规模；不决定买几组；不设置日、周、月亏损锁。它只输出每一策略单位的市场逻辑、可执行赔率、最大收益、最大损失和证据状态。
+v4.0 只解决这一件事：
+
+```text
+现有市场事实
+  → 现有参考位
+  → 现有 Debit Vertical 枚举器
+  → 事件结算候选
+  → 现有 Ranker / NO_TRADE / nearest-candidate
+  → 现有持久化与回填
+```
+
+第一版**不增加 Credit Vertical、Iron Condor、First-Touch 模型、账户风控、
+新决策状态或新生产模块**。这些能力只有在当前垂直切片验证完成、且已有 owner
+确实无法承载时，才另行提交 Change Brief。
 
 ---
 
 ## 0. Change Brief
 
-### 用户可见目标
+### 0.1 用户可见目标
 
-将现有流程：
-
-```text
-市场状态 → Call / Put / Butterfly / NoTrade
-```
-
-改为：
+在 CPI、FOMC、NFP 等已登记高影响事件前，系统应能主动发现并展示类似：
 
 ```text
-市场事实
-  → 可证伪命题
-  → 可执行赔率
-  → 路径/终值证据
-  → 候选结构
-  → MANUAL_CANDIDATE / RESEARCH_CANDIDATE / NO_TRADE
+参考位：昨日 SPX 收盘 7728.20
+候选：Aug-12 7730/7735 Call Debit Vertical
+可执行 Debit：2.40
+宽度：5.00
+Debit / Width：48.0%
+到期盈亏平衡：7732.40
+含开仓费用的近似保本概率：约49%–50%
+证据状态：research_unvalidated
+权限：NO_TRADE，最近研究候选可见
 ```
 
-系统必须回答：
+系统必须明确区分：
 
-1. 这笔交易押注的事件是什么；
-2. 市场要求多高概率才能保本；
-3. 我们是否有独立证据优于市场赔率；
-4. 结构是否因报价、路径、事件或成本而失效；
-5. 该候选是已验证还是仅供研究。
+- `Debit / Width` 是市场赔率代理，不是现实胜率；
+- 候选被发现，不等于已经证明有 Edge；
+- 研究候选可见，不等于自动升为人工交易授权。
 
-### 明确不做
+### 0.2 明确不做
 
-v4 不包含：
+v4.0 不包含：
 
-- Account Risk Gate；
-- 账户净值或 Buying Power；
-- 推荐合约数量；
-- 当前持仓与重复因子暴露；
-- SPY、TLT 等非 SPXW 执行候选；
-- 裸 Call、裸 Put；
-- 自动下单、自动滚仓、自动加仓。
+- Account Risk Gate、账户净值、Buying Power、仓位数量；
+- `RESEARCH_CANDIDATE` 新决策状态；
+- `strategy_decision.v4` 新 schema；
+- Credit Vertical、Iron Condor、Short Premium ManagementPolicy；
+- 新的 `PricingEdge`、`PathRegime` 或 `StrategyProposition` 类型层；
+- 新生产文件；
+- 新 service、timer、queue、数据库、表或 Rust contract；
+- SPY、TLT 等非 SPXW 合约；
+- 自动下单、自动滚仓或自动加仓；
+- Twitter、LLM 或自然语言直接提供数值概率。
 
-### 现有 owner
-
-继续复用：
+### 0.3 复杂度边界
 
 ```text
-macro_event_clock.py
-application/market_features/strategy_distribution_forecast.py
-application/market_features/physical_followthrough.py
-application/order_map/strategy_facts.py
-application/order_map/strategy_regime.py
-application/order_map/candidate_factory.py
-application/order_map/strategy_ranker.py
-application/order_map/strategy_select.py
-application/order_map/strategy_outcomes.py
-application/order_map/delivery.py
-analytics/options/strategy_payoff.py
-infrastructure/operational_db.py
+新生产文件          0
+新研究脚本          0
+新依赖              0
+新配置系统          0
+新 service/timer     0
+新数据库/表          0
+新 Rust contract     0
+新 decision schema   0
+账户读取              0
+自动下单变化          0
 ```
 
-最多新增一个生产文件：
-
-```text
-application/market_features/strategy_propositions.py
-```
-
-### 复杂度边界
-
-- 新依赖：0；
-- 新 service/timer/queue：0；
-- 新数据库/表：0；
-- 新 Rust contract：0；
-- 新账户读取：0；
-- `strategy_decision` 仍是唯一人工候选出口；
-- `automatic_ordering=false` 不变。
+实现只扩展现有 owner。任何阶段若发现必须新增文件，先停止实现并提交新的
+Change Brief；不得以“未来还要做 Iron Condor”为理由预先搭建抽象。
 
 ---
 
-## 1. 当前缺口
+## 1. 复用审计
 
-### 1.1 缺少命题层
+本节是 v4 的核心。实现前必须逐项证明现有能力不足；没有证明不足，就不得新增。
 
-系统目前从 Failed Break、Trend Pullback、Confirmed Level、Stable Pin 等路径事件开始。
+### 1.1 参考位已经存在：不新增行情或参考位服务
 
-但很多交易首先是一个终值命题，例如：
-
-```text
-SPX 今日是否收在昨日收盘上方？
-CPI 后是否结算在事件前价格上方？
-到期是否越过某个结构阈值？
-到期是否留在某个区间？
-```
-
-`7730/7735 Call Spread < 2.50` 的本质不是“买一个价差”，而是：
+`application/order_map/service.py` 已经在 Order Map payload 中保存：
 
 ```text
-H: SPX settlement > approximately 7732.5
+day_move.prior_close
+macro_event.active_event
+macro_event.next_event
+trigger_coordinate
+underlier / spot
+rn_density
+zero_gamma
+flip_zone
+wall_ladder
+front expiry
 ```
 
-没有命题层，系统只能在外部给出 strike 后解释，不能主动发现。
-
-### 1.2 缺少赔率层
-
-窄幅 Debit Vertical 的：
+v4.0 只使用其中的：
 
 ```text
-Debit / Width
+day_move.prior_close
+macro_event.next_event / active_event
+trigger_coordinate
+front expiry
 ```
 
-可以近似表示市场对局部终值事件的风险中性定价，但不是现实胜率。
+第一版不把 Q mode、Wall、Flip 等全部引入事件候选，避免候选膨胀。它们继续服务
+现有路径策略；是否加入事件阈值必须以后用真实样本证明增量价值。
 
-当前代码已计算 `debit_fraction_of_width`，却没有把它作为核心赔率字段展示和扫描。
+结论：**不新增 reference-level collector 或 proposition service。**
 
-### 1.3 路径状态不等于价格优势
+### 1.2 宏观事件时钟已经存在：不新增 Permission Matrix
 
-- `TREND` 不代表 Debit 仍便宜；
-- `CONVERGENCE` 不代表卖方仍有足够 Credit；
-- `PIN_STABLE` 不代表 Butterfly 定价合理。
-
-需要把“市场如何走”与“期权是否贵/便宜”分开。
-
-### 1.4 卖方缺少正确语义
-
-现有系统以 Debit 为中心。直接加入 Credit Spread 或 Iron Condor 会错误处理：
-
-- 开仓 Credit；
-- Buyback Ask；
-- Short Premium 止盈止损；
-- first-touch；
-- 最大风险；
-- 费用后的真实期望。
-
----
-
-## 2. 最小架构
-
-v4 只增加三层，不再扩张为账户或组合管理系统。
+`macro_event_clock.py` 已经返回：
 
 ```text
-MarketFactPack
-  → StrategyPropositionSet
-  → PathRegime + PricingEdge
-  → Candidate Factory
-  → Hard Gates + Ranker
-  → strategy_decision
+mode = normal | pre_event | post_event
+entry_allowed
+active_event
+next_event
+release_at
+minutes_to_release
+impact
 ```
 
-### 2.1 PathRegime
+v4.0 直接复用：
+
+- `normal` 且下一高影响事件在冻结窗口内：可以枚举研究候选；
+- `pre_event`：沿用现有全局冻结，不生成新的人工建议；
+- `post_event`：事件前结算候选过期，不再追原命题。
+
+不新增策略家族权限矩阵。若以后加入卖方策略，届时再评估单一布尔权限是否不足。
+
+结论：**`macro_event_clock.py` 第一阶段无需修改。**
+
+### 1.3 事件类型已经存在：不新增 StrategyProposition schema
+
+`domain/strategy_distribution_forecast.py` 已有：
 
 ```text
-TREND
-CONVERGENCE
-PIN
-SHOCK
-TRANSITION
-UNCERTAIN
+ProbabilityEventDefinition
+ProbabilityEventKind.TERMINAL_ABOVE
+ProbabilityEventKind.TERMINAL_BELOW
+ProbabilityEventKind.TERMINAL_BETWEEN
+ProbabilityEventKind.UPPER_FIRST_TOUCH
+ProbabilityEventKind.LOWER_FIRST_TOUCH
 ```
 
-回答：市场正在怎么走。
-
-### 2.2 StrategyProposition
-
-```text
-TERMINAL_ABOVE
-TERMINAL_BELOW
-TERMINAL_BETWEEN
-FIRST_TOUCH_UPPER
-FIRST_TOUCH_LOWER
-```
-
-回答：候选押注什么事件。
-
-### 2.3 PricingEdge
-
-```text
-RICH
-FAIR
-CHEAP
-UNAVAILABLE
-```
-
-回答：可执行价格是否相对现实风险有优势。
-
-三层不得互相替代：
-
-- 横盘但 Credit 太少 → 不卖；
-- 趋势正确但 Debit 已追贵 → 不买；
-- 命题合理但概率证据不足 → 研究候选；
-- Delta 很远但 first-touch 风险未知 → 不生成卖方候选。
-
----
-
-## 3. Strategy Proposition
-
-### 3.1 Schema
-
-Python-only，不进入 Rust：
+v4.0 不再定义 `strategy_proposition.v1`。候选内部只附着现有语义兼容的普通字典：
 
 ```yaml
-schema_version: strategy_proposition.v1
-proposition_id: proposition:<stable-hash>
-source_kind: PRIOR_CLOSE | EVENT_PRE_CLOSE | OVERNIGHT_SYNTHETIC |
-             Q_MEDIAN | Q_MODE | ZERO_GAMMA | FLIP_ZONE |
-             PUT_WALL | CALL_WALL | CONFIRMED_LEVEL
-expiry: YYYYMMDD
-target_at: iso8601
-kind: TERMINAL_ABOVE | TERMINAL_BELOW | TERMINAL_BETWEEN |
-      FIRST_TOUCH_UPPER | FIRST_TOUCH_LOWER
-lower_level: float | null
-upper_level: float | null
-reference_level: float | null
-thesis_direction: UP | DOWN | NEUTRAL
-macro_event_id: string | null
-spans_event: bool
-available_at: iso8601
-valid_until: iso8601
-research_status: UNVALIDATED | CALIBRATING | VALIDATED
+probability_event:
+  event_id: event-threshold:<stable-hash>
+  kind: terminal_above | terminal_below
+  target_at: expiry settlement time
+  lower_level: ...
+  upper_level: ...
 ```
 
-### 3.2 初始来源
+不修改 Rust 消费的 forecast contract，也不新增 Python schema。
 
-第一版只允许确定性来源：
+结论：**复用现有 ProbabilityEventDefinition 语义，不创建新 domain 类型。**
 
-1. prior close；
-2. 事件前最后一个官方 SPX close；
-3. 合格的 overnight synthetic SPX；
-4. Q median / mode；
-5. Zero Gamma / Flip；
-6. Put Wall / Call Wall；
-7. confirmed level。
+### 1.4 Vertical 枚举器已经存在：不新增候选工厂
 
-Twitter、新闻和 LLM 可以提供解释，但不得直接提供阈值、概率或候选权限。
+`candidate_factory.py` 已经具备：
 
-### 3.3 命题不是策略
+- 5/10/15/20 点 Debit Vertical 枚举；
+- 稳定 `candidate_id` / `opportunity_id`；
+- exact-leg 查找；
+- Schwab 优先、IBKR fallback；
+- 同 provider、quote freshness、cross-leg skew；
+- conservative synthetic BBO；
+- `vertical_economics`；
+- 候选去重与排序入口。
 
-同一命题可以由多个结构表达。
+v4.0 只新增一种 evidence：
+
+```text
+setup_kind = EVENT_SETTLEMENT_THRESHOLD
+```
+
+并把昨日收盘附近的两个相邻 5 点价差交给现有 Vertical 构造函数。
+
+当前 `_rth_option_legs` 实际已具备 provider fallback 和新鲜度检查。若 GTH 复用时
+名称不准确，可以在同一文件内重命名为 `_exact_option_legs`，并同步现有调用；不另写
+第二套 GTH exact-leg 逻辑。
+
+结论：**不新增 `strategy_propositions.py` 或第二个 candidate factory。**
+
+### 1.5 Payoff 与赔率已经存在：不新增 Unit Economics schema
+
+`analytics/options/strategy_payoff.py` 已有：
+
+```text
+conservative_vertical_bbo
+vertical_economics
+vertical_payoff
+```
+
+`vertical_economics` 已输出：
+
+```text
+width_points
+max_loss_points
+max_gain_points
+breakeven_spx
+debit_fraction_of_width
+```
+
+这已经足够表达 5 点窄幅价差。v4.0 不新增 `strategy_unit_economics.v1`，也不先做
+Debit/Credit 有符号现金流重构。
+
+事件候选只额外计算两个展示字段：
+
+```text
+market_odds_proxy = executable_debit / width
+required_probability_after_open_cost
+```
+
+其中：
+
+```text
+required_probability_after_open_cost
+  = (executable_debit + opening_fees_points) / width
+```
+
+第一版明确是“持有至结算”的概率门槛；主动提前退出属于不同 ManagementPolicy，
+不得混在同一个数字里。
+
+结论：**复用现有 Vertical economics，只增加字段，不新增经济学对象。**
+
+### 1.6 Ranker 已有概率、Edge 与研究状态：不新增 PricingEdge
+
+`strategy_ranker.py` 已经支持：
+
+- 通用 quote/TTL hard gates；
+- 结构专属 hard gates；
+- `probability_evidence`；
+- `required_p_breakeven`；
+- `model_p`；
+- `edge_status=research_unvalidated`；
+- `advisories`；
+- `policy_ev`；
+- passed / near-miss / gate audit。
+
+v4.0 不新增：
+
+```text
+PricingEdge schema
+RICH / FAIR / CHEAP 状态机
+新的 Ranker
+```
+
+事件候选增加一个专属 hard-gate 分支，避免错误套用盘中方向价差的 ATR、target-room
+和 late-chase 规则。其 Edge 字段继续使用现有 `candidate.edge`。
+
+结论：**扩展 `_vertical_hard_gates` 与 `_score_candidate`，不新增层。**
+
+### 1.7 研究候选已经有表达方式：不新增 RESEARCH_CANDIDATE
+
+现有系统已有：
+
+```text
+manual_authority_eligible = false
+research_alternative_only
+NO_TRADE + why_not.nearest_candidate
+shadow candidate / nearest candidate persistence
+```
+
+v4.0 的事件候选固定：
+
+```text
+manual_authority_eligible = false
+```
+
+因此第一阶段仍输出：
+
+```text
+Decision: NO_TRADE
+Nearest candidate: EVENT_SETTLEMENT_THRESHOLD ...
+Primary blocker: research_alternative_only
+```
+
+Desk View 只需要把该 blocker 人类化为：
+
+```text
+研究候选已发现，但事件结算优势尚未完成前向验证
+```
+
+不创建第三种决策状态，不修改 `strategy_decision.v2`。
+
+结论：**复用 NO_TRADE + nearest candidate。**
+
+### 1.8 持久化与回填已经覆盖 nearest candidate：不新增表
+
+`operational_db._decision_rows()` 在没有正式 candidate 时，会冻结
+`why_not.nearest_candidate` 的腿；`strategy_policy_backfill.py` 也会读取：
+
+```text
+decision.candidate
+or
+why_not.nearest_candidate
+```
+
+因此研究候选已经能够使用现有 `decisions`、`decision_legs`、`outcomes` 和 quote lake。
+
+v4.0 只在现有 backfill 中增加事件候选的终值标签，不新增表或脚本。
+
+结论：**复用现有 immutable decision、legs、outcome 与 backfill。**
+
+---
+
+## 2. v4.0 唯一新增能力
+
+### 2.1 Setup Kind
+
+```text
+EVENT_SETTLEMENT_THRESHOLD
+```
+
+它仍然生成现有策略类型：
+
+```text
+CALL_DEBIT_VERTICAL
+PUT_DEBIT_VERTICAL
+```
+
+不新增 payoff 类型。
+
+### 2.2 命题
+
+第一版只使用一个阈值来源：
+
+```text
+PRIOR_CLOSE
+```
+
+理由：
+
+- 它已经存在于 payload；
+- 语义清楚；
+- 与“今天是否收涨/收跌”直接对应；
+- 能覆盖 `7730/7735` 这一真实缺口；
+- 不会一次引入 Wall、Q mode、Flip、Expected Move 等大量相关候选。
+
+候选附着：
+
+```yaml
+threshold:
+  source: PRIOR_CLOSE
+  level: 7728.20
+
+probability_event:
+  kind: terminal_above
+  target_at: 2026-08-12T16:00:00-04:00
+  lower_level: 7732.40
+```
+
+注意：真正的事件阈值是候选的到期盈亏平衡点，而 `prior_close` 是候选生成参考位。
+两者不得混写。
+
+### 2.3 双向扫描
+
+系统不能因为外部叙事偏多就只生成 Call。
+
+对同一个 prior close，同时扫描：
+
+```text
+CALL_DEBIT_VERTICAL：押注结算高于某个 breakeven
+PUT_DEBIT_VERTICAL：押注结算低于某个 breakeven
+```
+
+后续由市场赔率和物理证据分别评估。Twitter 或 LLM 不得直接决定方向。
+
+---
+
+## 3. 候选生成
+
+### 3.1 事件定位窗口
+
+完全复用 `macro_event.next_event` 与现有 `pre_event` 冻结。
+
+冻结研究常量放入现有 `StrategyPolicy`：
+
+```python
+event_positioning_max_minutes = 18 * 60
+event_positioning_min_minutes = 30
+event_settlement_widths = (5.0,)
+```
+
+只有同时满足才枚举：
+
+1. 当前处于 SPXW 合法 GTH 或 RTH；
+2. `next_event.impact == "high"`；
+3. `30 < minutes_to_release <= 1080`；
+4. front expiry 日期等于事件发布日期；
+5. `day_move.prior_close` 可用；
+6. 当前宏观模式不是 `pre_event` 或 `post_event`；
+7. exact two-leg quote 能从现有 LatestState 找到。
+
+这里没有新增 event state machine。30 分钟内继续由现有 `pre_event` 全局 Gate 关闭。
+
+### 3.2 Strike 枚举
+
+令：
+
+```text
+L = prior_close
+K_floor = floor_to_5(L)
+K_ceil  = ceil_to_5(L)
+```
+
+Call 只枚举两个相邻候选：
+
+```text
+K_floor / (K_floor + 5)
+K_ceil  / (K_ceil  + 5)
+```
+
+Put 对称枚举：
+
+```text
+K_ceil  / (K_ceil  - 5)
+K_floor / (K_floor - 5)
+```
+
+若 floor 与 ceil 相同，去重。候选仍通过现有稳定 `candidate_id` 去重。
+
+以 `prior_close=7728.20` 为例，Call 候选会包含：
+
+```text
+7725/7730
+7730/7735
+```
+
+因此系统能够主动看到 `7730/7735`，但不会预设它一定优于 `7725/7730`。
+
+### 3.3 Exact Quote
+
+复用现有 exact-leg 路径：
+
+```text
+same provider
+fresh bid/ask
+cross-leg source skew within policy
+Schwab first during RTH
+IBKR fallback / GTH fresh quote
+```
+
+不为事件候选新增订阅服务，不突破当前 ticker-line 预算。没有现成 fresh quote 就输出
+明确的 near-miss，而不是主动扩张数据服务。
+
+### 3.4 候选字段
+
+复用现有 CandidateRow，只增加：
+
+```yaml
+setup_kind: EVENT_SETTLEMENT_THRESHOLD
+setup_variant: PRIOR_CLOSE
+manual_authority_eligible: false
+threshold_source: PRIOR_CLOSE
+threshold_level: 7728.20
+probability_event:
+  event_id: event-threshold:<hash>
+  kind: terminal_above | terminal_below
+  target_at: ...
+  lower_level: ...
+  upper_level: ...
+market_odds_proxy: 0.48
+required_probability_after_open_cost: 0.49
+```
+
+不新增 proposition_id、pricing_edge schema 或 decision schema。
+
+---
+
+## 4. 赔率语义
+
+### 4.1 市场赔率代理
+
+对于 5 点 Call Debit Vertical：
+
+```text
+market_odds_proxy = executable_debit / 5
+```
 
 例如：
 
 ```text
-H: settlement > 7732.5
+Debit = 2.40
+Width = 5.00
+market_odds_proxy = 48.0%
 ```
 
-可以比较：
+它只能解释为窄幅价差在风险中性定价下的局部概率代理，不是现实世界胜率。
 
-- 7730/7735 Call Debit Vertical；
-- 7725/7735 Call Debit Vertical；
-- 更宽 Vertical；
-- NoTrade。
+### 4.2 保本概率
 
-命题层不选 strike，不创建 Trade Ready。
+持有至结算、忽略折现：
 
-### 3.4 去重
+```text
+required_p_before_cost = debit / width
+required_p_after_open_cost = (debit + opening_fees_points) / width
+```
 
-同一 expiry、kind 且阈值相距不超过 2.5 点的命题合并。
+保守开仓价已经使用：
 
-每轮最多保留：
+```text
+long ask - short bid
+```
 
-- 3 个上方终值命题；
-- 3 个下方终值命题；
-- 2 个区间命题；
-- 2 个 first-touch 命题。
+因此不再重复加入 bid/ask spread；费用单独报告。
+
+### 4.3 不复用错误公式
+
+当前 Ranker 针对盘中 ManagementPolicy 的 `required_p_breakeven` 语义不能直接套到
+事件结算候选。事件候选必须分支计算上述 settlement 公式，并在字段中写明：
+
+```text
+basis = hold_to_settlement_binary_approximation
+```
+
+不修改现有方向性候选的公式，避免语义回归。
+
+### 4.4 研究状态
+
+v4.0 不构建新的事件 Physical 模型。第一阶段固定：
+
+```text
+edge_status = research_unvalidated
+model_p = null
+p_interval_low = null
+manual_authority_eligible = false
+```
+
+理由：现有 `physical_followthrough` 面向已确认价格路径和短 horizon；直接拿它给 CPI
+隔夜结算命题赋概率会制造错误精度。
+
+系统第一步先把命题、赔率、报价和终值结果完整记录下来。达到足够样本后，才在现有
+`physical_followthrough.py` 内增加事件专属估计；没有证据前不新增模型。
 
 ---
 
-## 4. PathRegime
+## 5. Hard Gates
 
-### TREND
+事件候选不使用盘中方向价差的：
 
-使用现有方向分数、效率、VWAP 斜率、穿越次数、Breadth 与价格位置。
+```text
+ATR stop band
+target room
+VWAP distance
+15m impulse
+late chase
+```
 
-用途：方向性 Debit Vertical。
+因为这些变量不对应“事件后到结算是否超过 breakeven”的命题。
 
-### CONVERGENCE
+事件候选使用独立、最小的确定性 Gate：
+
+1. event window 合法；
+2. front expiry 与事件日期一致；
+3. prior close 来源可用；
+4. probability event target_at 晚于 decision_at；
+5. exact quote ready；
+6. quote TTL 与 source skew 合格；
+7. `0 < executable_debit < width`；
+8. `market_odds_proxy` 可计算；
+9. macro mode 不是 `pre_event` / `post_event`；
+10. `automatic_ordering=false`；
+11. `manual_authority_eligible=false`。
+
+最后一项不是市场质量失败，而是第一阶段的研究权限边界。Ranker 应把它放入
+near-miss，保留完整候选和赔率字段。
+
+---
+
+## 6. strategy_decision 与展示
+
+### 6.1 不升级 schema
+
+继续使用：
+
+```text
+strategy_decision.v2
+```
+
+事件候选第一阶段的输出：
+
+```yaml
+decision_type: NO_TRADE
+candidate: null
+action_authority: none
+why_not:
+  nearest_candidate:
+    strategy_type: CALL_DEBIT_VERTICAL
+    setup_kind: EVENT_SETTLEMENT_THRESHOLD
+    ...
+  reasons:
+    - research_alternative_only
+```
+
+### 6.2 Desk View
+
+复用 `desk_strategy_view.py` 的 nearest-candidate 路径，只增加人类化文案和赔率摘要：
+
+```text
+结论  不做
+主因  研究候选已发现，但事件结算优势尚未完成前向验证
+最近候选  Call 价差 7730/7735 · Debit/Width=48% · BE=7732.4
+下一步  保留研究样本，不把外部叙事当作已验证胜率
+```
+
+不新增通知 lane，不发送 Trade Ready 卡。
+
+### 6.3 为什么不用 RESEARCH_CANDIDATE
+
+现有 NO_TRADE + nearest candidate 已经同时满足：
+
+- 研究机会可见；
+- 不产生人工下单权限；
+- 候选腿可持久化；
+- 能进入现有回填；
+- 不扩大 decision state machine。
+
+因此新增 `RESEARCH_CANDIDATE` 没有必要。
+
+---
+
+## 7. 持久化与结果标签
+
+### 7.1 在线持久化无需改表
+
+现有 `_decision_rows()` 已会在 NO_TRADE 时冻结 nearest candidate 的腿。
+
+事件候选继续写入：
+
+```text
+decisions
+decision_legs
+```
+
+现有 1/2/3/4/5/7/10/15/20 分钟 outcomes 仍可作为事件前短路径诊断，但不得冒充
+最终结算标签。
+
+### 7.2 终值标签复用现有 backfill
+
+扩展现有：
+
+```text
+src/spx_spark/data_platform/research/strategy_policy_backfill.py
+```
+
+当：
+
+```text
+setup_kind == EVENT_SETTLEMENT_THRESHOLD
+```
+
+时，不调用现有 20 分钟 Long Premium ManagementPolicy 作为官方标签，而是：
+
+1. 从候选 `probability_event.target_at` 读取结算目标时点；
+2. 从现有标准化 SPX session 数据取得当日最后合格价格；
+3. 使用现有 `vertical_payoff()` 计算 terminal payoff；
+4. 扣除记录的开仓费用；
+5. 输出：
+
+```text
+terminal_event_success
+terminal_spx
+terminal_payoff_points
+terminal_net_pnl_points
+market_odds_proxy
+required_probability_after_open_cost
+censor_kind
+```
+
+若目标时点或最终 SPX 缺失，显式删失，不补陈旧值。
+
+不新增表；输出继续进入现有 `strategy_policy_labels` 数据集。
+
+### 7.3 样本单位
+
+一个稳定 `opportunity_id` = 一个事件候选样本。
+
+同一结构跨 tick 重复出现时，继续使用现有 opportunity 去重；不能把每个 tick 当作
+独立预测。
+
+---
+
+## 8. 实现文件与修改范围
+
+第一阶段只允许修改以下现有文件：
+
+```text
+src/spx_spark/application/order_map/strategy_facts.py
+src/spx_spark/application/order_map/candidate_factory.py
+src/spx_spark/application/order_map/strategy_ranker.py
+src/spx_spark/application/order_map/desk_strategy_view.py
+src/spx_spark/data_platform/research/strategy_policy_backfill.py
+相关现有测试文件
+```
+
+### 8.1 `strategy_facts.py`
+
+从已经存在的 payload 复制：
+
+```text
+references.prior_close
+```
+
+`event.next_event` 已经存在，不重复存储第二份。
+
+### 8.2 `candidate_factory.py`
+
+- 新增 `EVENT_SETTLEMENT_THRESHOLD` evidence；
+- 复用 Vertical candidate constructor；
+- 将 `_rth_option_legs` 在需要时重命名为通用 exact-leg helper；
+- 只枚举 5 点相邻价差；
+- 固定 research-only。
+
+### 8.3 `strategy_ranker.py`
+
+- 对 event setup 使用独立最小 Gate；
+- 计算 odds proxy 与 settlement required probability；
+- 不调用 ATR/target-room/late-chase；
+- 保持 `research_alternative_only`。
+
+### 8.4 `desk_strategy_view.py`
+
+- humanize `event_threshold_research_only`；
+- nearest candidate 行展示 Debit/Width 与 breakeven。
+
+### 8.5 `strategy_policy_backfill.py`
+
+- 增加 terminal-event label 分支；
+- 复用现有 standardized SPX、quote lake、vertical payoff 与输出数据集。
+
+### 8.6 明确不修改
+
+第一阶段不修改：
+
+```text
+macro_event_clock.py
+strategy_distribution_forecast.py
+physical_followthrough.py
+strategy_select.py
+strategy_outcomes.py
+operational_db.py
+delivery.py
+Rust workspace
+```
+
+如果实现过程中发现必须修改这些文件，先停止并更新设计，不得扩大范围后再补文档。
+
+---
+
+## 9. 冻结常量
+
+只在现有 `StrategyPolicy` 中增加：
+
+```python
+event_positioning_max_minutes: float = 1080.0
+event_positioning_min_minutes: float = 30.0
+event_settlement_widths: tuple[float, ...] = (5.0,)
+```
+
+候选数量由确定性几何自然限制，不增加新的 runtime config。
+
+修改这些值必须：
+
+- 提升 `policy_version`；
+- 运行冻结回放；
+- 说明为什么不是对已有少量样本过拟合。
+
+---
+
+## 10. 验收案例
+
+### 10.1 主案例：主动发现 7730/7735
+
+输入：
+
+```text
+prior_close = 7728.20
+next_event = high-impact CPI, next morning 08:30 ET
+front_expiry = CPI date
+session = GTH
+7730C / 7735C fresh IBKR BBO available
+combo executable ask = 2.40
+```
 
 要求：
 
-- 低路径效率；
-- 多次 VWAP 穿越；
-- 区间收缩；
-- Breadth 接近中性；
-- 没有 active shock；
-- 没有持续的一侧接受。
+- 枚举 7725/7730 与 7730/7735 Call Vertical；
+- `7730/7735` 显示 `market_odds_proxy=0.48`；
+- breakeven 为 7732.40；
+- 决策仍为 NO_TRADE；
+- nearest candidate 带完整两腿；
+- blocker 为 research-only，而不是“没有候选”。
 
-用途：允许评估 Credit Vertical / Iron Condor；不自动授权。
+### 10.2 双向性
 
-### PIN
+同一输入必须同时有 Put 方向研究候选；不得因外部宏观叙事只扫描 Call。
 
-继续使用 Value Center、Q mode、local mass、return-to-center、de-pin risk、VIX/Breadth、recent extreme 与 shock veto。
+### 10.3 事件缺失
 
-用途：Butterfly。
+`next_event` 不存在、不是 high impact 或时间超出窗口：不得生成 event candidate。
 
-### SHOCK
+### 10.4 Expiry 不匹配
 
-现有 intraday shock ACTIVE、事件后发现期或异常价格/IV 扩张均属于 SHOCK。
+front expiry 不等于事件日期：不得用错误到期日表达事件命题。
 
-用途：禁止新 Short Premium 与 Pin Butterfly。
+### 10.5 冻结窗口
 
----
+进入现有 `pre_event` 后：不得再产生新的事件定位建议。
 
-## 5. PricingEdge
+### 10.6 数据后
 
-### 5.1 Schema
+`post_event`：原事件候选过期，不得继续以事件前赔率追价。
 
-```yaml
-schema_version: pricing_edge.v1
-state: RICH | FAIR | CHEAP | UNAVAILABLE
-basis: TERMINAL_PNL | MANAGEMENT_PNL | FIRST_TOUCH
-q_probability: float | null
-p_probability: float | null
-p_interval_low: float | null
-required_probability: float | null
-expected_pnl_points: float | null
-conservative_pnl_points: float | null
-expected_shortfall_points: float | null
-sample_count: int
-session_count: int
-model_status: UNAVAILABLE | UNCALIBRATED | CALIBRATING | VALIDATED
-reason_codes: []
-```
+### 10.7 报价失败
 
-### 5.2 定义
+任一腿陈旧、provider 不一致或 cross-leg skew 超限：候选只能作为明确报价 near-miss，
+不能使用 Mid 补齐。
 
-对具体候选：
+### 10.8 因果性
 
-```text
-EV_net = E_P[payoff or management PnL]
-         - executable premium
-         - fees
-         - slippage
-```
+- prior close 的 source time 必须早于 decision；
+- next event 信息必须在 decision 时已可用；
+- 不读取 CPI 实际值；
+- 不读取当前事件日未来价格；
+- `available_at <= decision_at`。
 
-不是只比较“上涨概率”。
+### 10.9 非事件回归
 
-### 5.3 状态
+既有 2026-08-05、08-06、08-07、08-08 冻结回放在无匹配 next event 时，现有
+Directional Vertical / Butterfly / NO_TRADE 决策必须不变。
 
-- `CHEAP`：对买方有利；
-- `RICH`：对卖方有利；
-- `FAIR`：优势不足以覆盖成本和误差；
-- `UNAVAILABLE`：报价或概率数据不足。
+### 10.10 结果回填
 
-### 5.4 权限
-
-在达到统计 promotion 前，PricingEdge 只排序和展示：
-
-- 硬门通过但 Edge 未验证 → `RESEARCH_CANDIDATE`；
-- 已验证策略族才可输出 `MANUAL_CANDIDATE`；
-- 模型不能绕过报价、事件或路径硬门。
+盘后 backfill 必须为 event candidate 生成 terminal label；缺价格时显式 censored，
+不能被静默排除。
 
 ---
 
-## 6. Debit/Credit 通用经济学
+## 11. 统计与升门
 
-### 6.1 有符号现金流
+v4.0 只收集研究样本，不设日历等待承诺，也不因少数成功案例升门。
 
-统一约定：
+事件候选转为 `manual_authority_eligible=true` 至少需要：
 
-```text
-收到现金为正；支付现金为负。
-```
+1. 总机会样本 ≥100；
+2. 独立事件日 ≥40；
+3. 时间顺序 OOS 样本 ≥30；
+4. OOS 平均 terminal net PnL > 0；
+5. OOS Profit Factor ≥1.10；
+6. 双倍费用压力下不显著为负；
+7. required probability 与实际频率校准误差明确报告；
+8. CPI、FOMC、NFP 分开报告，不用混合结果掩盖单类无效；
+9. 删除最好三笔后，总期望仍不为负；
+10. 参数在 OOS 开始前冻结。
 
-```text
-PnL_points = entry_cashflow + exit_cashflow - fees - slippage
-```
-
-示例：
-
-- Debit Vertical：开仓 `-2.40`，平仓 `+4.50`；
-- Credit Spread：开仓 `+1.20`，平仓 `-0.50`。
-
-### 6.2 Unit Economics
-
-```yaml
-schema_version: strategy_unit_economics.v1
-quantity_basis: ONE_STRATEGY_UNIT
-entry_kind: DEBIT | CREDIT
-entry_price_points: float
-width_points: float | null
-max_gain_points: float
-max_loss_points: float
-breakeven_levels: []
-fees_points_round_trip: float
-slippage_stress_points: float
-max_gain_usd_per_unit: float
-max_loss_usd_per_unit: float
-```
-
-USD 只表示 SPXW 乘数 100 下的一组结构，不表示推荐仓位。
-
-### 6.3 Conservative BBO
-
-Debit 开仓：买腿 Ask、卖腿 Bid。  
-Credit 开仓：卖腿 Bid、买腿 Ask。  
-平仓方向相反。
-
-禁止使用多腿 Mid 冒充可执行价格。
-
-### 6.4 费用压力
-
-每个候选必须报告：
-
-- gross payoff；
-- round-trip commission；
-- one-tick adverse slippage；
-- two-tick stress；
-- net payoff。
+未达到时，系统继续输出 NO_TRADE + nearest research candidate。
 
 ---
 
-## 7. 策略候选
+## 12. 实施顺序
 
-v4 固定为：
+### Phase A：候选发现
+
+修改 facts、factory、ranker、desk view：
 
 ```text
-NO_TRADE
-CALL_DEBIT_VERTICAL
-PUT_DEBIT_VERTICAL
-CALL_BUTTERFLY
-PUT_BUTTERFLY
-CALL_CREDIT_VERTICAL
-PUT_CREDIT_VERTICAL
-IRON_CONDOR
+prior close
+→ 相邻 5 点 Vertical
+→ exact quote
+→ odds proxy
+→ NO_TRADE nearest research candidate
 ```
 
-`EVENT_SETTLEMENT_THRESHOLD` 是 Debit Vertical 的 setup kind，不是新的 payoff 类型。
+这是第一个完整垂直切片。
+
+### Phase B：终值回填
+
+扩展现有 backfill：
+
+```text
+research candidate
+→ terminal SPX
+→ vertical payoff
+→ terminal net PnL
+→ censored audit
+```
+
+### Phase C：研究报告
+
+复用现有 policy/replay 报告路径，按 event type、direction 和 price bucket 输出结果。
+
+只有 Phase A/B 验收通过后，才讨论 Physical 模型。
 
 ---
 
-## 8. Directional Debit Vertical
+## 13. 后续能力的边界
 
-继续使用现有：
+### 13.1 Physical Event Model
 
-```text
-FAILED_BREAK_RECLAIM
-TREND_PULLBACK
-BREAKOUT_ACCEPTANCE
-```
+不在 v4.0 内实现。
 
-硬门保持：
+未来若样本足够，优先在现有 `physical_followthrough.py` 中复用 session-weighted、
+Beta shrinkage 和 causal cutoff，再增加事件专属 terminal-above/below 估计。只有现有
+owner 无法保持清晰时，才讨论新文件。
 
-- 方向与路径一致；
-- target / invalidation 完整；
-- target room 足够；
-- stop ATR 合理；
-- no late chase；
-- Debit/Width 合格；
-- exact quote ready。
+### 13.2 Credit Vertical 与 Iron Condor
 
-候选卡增加：
+不在 v4.0 内设计或实现。
 
-```text
-Debit / Width
-Max Gain / Max Loss
-Breakeven
-Required probability proxy
-Management-policy EV
-```
+原因不是永远不做，而是当前系统仍是 Debit 开仓、Debit outcome 和 Long Premium
+ManagementPolicy。为了事件阈值发现而提前重构全套 Credit 会扩大风险和验证面。
 
----
+卖方策略需要单独回答：
 
-## 9. Event Settlement Vertical
+- conservative entry credit；
+- conservative buyback ask；
+- first-touch；
+- touch recovery / continuation；
+- short-premium management；
+- settlement 与真实管理规则差异。
 
-这是 v4 第一优先级，用于主动发现类似 `7730/7735 < 2.50` 的机会。
-
-### 9.1 命题
-
-```text
-H: settlement > L
-```
-
-或：
-
-```text
-H: settlement < L
-```
-
-### 9.2 枚举
-
-对每个阈值 `L`：
-
-- 枚举 5 点和 10 点宽；
-- 使 `L` 落在两个 strike 之间或靠近价差中部；
-- expiry 与 target_at 一致；
-- exact two-leg quote ready。
-
-### 9.3 字段
-
-```yaml
-setup_kind: EVENT_SETTLEMENT_THRESHOLD
-threshold_level: L
-threshold_source: PRIOR_CLOSE | EVENT_PRE_CLOSE | ...
-width: W
-executable_debit: D
-odds_proxy: D / W
-breakeven: ...
-required_probability_after_costs: (D + costs) / W
-```
-
-### 9.4 语义
-
-```text
-D / W = 48%
-```
-
-只能称为市场赔率代理，不能称为 52% 现实胜率。
-
-只有：
-
-```text
-P_conservative > required_probability + model_buffer
-```
-
-才可能存在正优势。
-
-### 9.5 宏观事件权限
-
-将全局 `entry_allowed` 改成策略家族权限：
-
-```yaml
-pre_event:
-  EVENT_SETTLEMENT_VERTICAL: RESEARCH_ALLOWED
-  DIRECTIONAL_DEBIT: BLOCKED
-  BUTTERFLY: BLOCKED
-  CREDIT_VERTICAL: BLOCKED
-  IRON_CONDOR: BLOCKED
-
-post_event_discovery:
-  EVENT_SETTLEMENT_VERTICAL: MANAGE_EXISTING_ONLY
-  DIRECTIONAL_DEBIT: WAIT_CONFIRMATION
-  BUTTERFLY: BLOCKED
-  CREDIT_VERTICAL: BLOCKED
-  IRON_CONDOR: BLOCKED
-
-normal:
-  supported_families: EVALUATE
-```
-
-Event Settlement 第一阶段只输出 Research Candidate。
+等 v4.0 证明“命题发现 → 报价 → 持久化 → 回填”链路可靠后，再提交独立 Change
+Brief。届时仍先扩展现有 payoff、ranker、outcome 与 backfill；不会默认新增新模块。
 
 ---
 
-## 10. Credit Vertical
-
-先单侧，后 Iron Condor。
-
-### Put Credit
-
-命题：管理窗口内不会有效跌破下方边界。
-
-```text
-short Put K
-long Put K-width
-```
-
-### Call Credit
-
-命题对称。
-
-### 初始条件
-
-- 仅 RTH；
-- 仅 0DTE；
-- 固定 5 点宽；
-- short Delta 目标 0.10–0.18，仅用于 strike 定位；
-- short strike 在 Opening Range 和 invalidation 外；
-- no active shock；
-- exact credit BBO ready；
-- Credit 足以覆盖费用和滑点；
-- first-touch evidence available；
-- PricingEdge 对卖方不是 CHEAP。
-
-第一阶段仅 Shadow / Research Candidate。
-
----
-
-## 11. Iron Condor
-
-### 11.1 生成规则
-
-禁止直接用“两侧各 12 Delta”构造。
-
-只有：
-
-```text
-passed Put Credit Vertical
-AND
-passed Call Credit Vertical
-```
-
-才组合 Iron Condor。
-
-### 11.2 必要条件
-
-- PathRegime = CONVERGENCE；
-- no active shock；
-- 两侧 short strike 均在结构边界外；
-- 两侧 first-touch 风险可估计；
-- 四腿同 provider、同 expiry、报价新鲜；
-- combined Credit 覆盖四腿费用；
-- conservative expected PnL 为正或至少进入研究阈值。
-
-### 11.3 输出
-
-```text
-P(touch short put)
-P(touch short call)
-P(touch either)
-P(recover after touch)
-P(reach long wing)
-P(finish between breakevens)
-```
-
-POP 单独出现不合格。
-
-第一阶段始终为 Research Candidate。
-
----
-
-## 12. Butterfly
-
-保持现有严格 Pin Gate：
-
-- PIN_STABLE；
-- body 对齐 Value Center 与 Q mode；
-- body 距 spot 合理；
-- no active shock；
-- recent extreme=false；
-- de-pin risk 低；
-- Debit/Width 合格；
-- 三腿 BBO ready。
-
-v4 只增加：
-
-```text
-Q mass under tent
-P terminal mass under tent
-Management-policy EV
-```
-
-不放宽生成条件。
-
----
-
-## 13. First-Touch 标签
-
-卖方不能只看到期 ITM。
-
-对每个 Credit/IC 候选记录：
-
-```yaml
-short_put_touched: bool | null
-short_call_touched: bool | null
-first_touch_at: iso8601 | null
-first_touch_side: PUT | CALL | null
-touch_recovered: bool | null
-accepted_beyond_short: bool | null
-long_wing_reached: bool | null
-finish_between_breakevens: bool | null
-max_adverse_excursion_points: float | null
-```
-
-Bootstrap 定义：
-
-```text
-TOUCH:
-  minute high/low crosses short strike
-
-RECOVERED:
-  10 分钟内回到 short strike 内侧，并连续 2 根 5m 收盘保持
-
-ACCEPTED_BEYOND:
-  touch 后连续 2 根 5m 收盘仍在外侧
-
-LONG_WING_REACHED:
-  minute high/low reaches protective wing
-```
-
-第一版模型保持透明：
-
-- same-clock samples；
-- session weighting；
-- event/non-event 分桶；
-- PathRegime 分桶；
-- Beta shrinkage；
-- day-block bootstrap。
-
-不先引入复杂 ML。
-
----
-
-## 14. ManagementPolicy
-
-### Long Premium
-
-继续使用现有版本化规则：
-
-```text
-conservative ask entry
-conservative bid valuation
-profit arm
-trail
-premium stop
-time stop
-hard close
-```
-
-### Event Debit
-
-事件前普通 Stop 无法约束跳空：
-
-- 最大风险始终是全部 Debit + 费用；
-- 不把 Stop 价格表述为最大损失；
-- 持有到结算与事件后主动退出分别统计。
-
-### Short Premium
-
-```yaml
-policy_version: management_policy.short_premium.v1
-entry_basis: conservative_combo_bid
-valuation_basis: conservative_buyback_ask
-profit_take_fraction_of_credit: 0.50
-premium_stop_multiple: 2.00
-path_invalidation_enabled: true
-hard_exit_et: "15:15"
-hold_to_settlement: false
-```
-
-这些是冻结研究参数，不是已验证最优值。
-
----
-
-## 15. Hard Gates 与权限
-
-### 通用 Gate
-
-- session legal；
-- SPX coordinate ready；
-- proposition 未过期；
-- expiry/target_at 一致；
-- exact legs complete；
-- same provider；
-- quote fresh；
-- cross-leg skew 合格；
-- executable BBO 有效；
-- fees 后 payoff 合法；
-- event permission 允许；
-- automatic ordering=false。
-
-### Debit Gate
-
-- target/stop geometry；
-- target room；
-- no late chase；
-- Debit/Width；
-- proposition 与方向一致。
-
-### Credit Gate
-
-- defined risk；
-- short strike 在 invalidation 外；
-- Credit 显著高于成本；
-- buyback ask 可计算；
-- no shock；
-- first-touch evidence available。
-
-### 权限
-
-```text
-MANUAL_CANDIDATE:
-  结构族已经通过独立 promotion，且本次硬门通过。
-
-RESEARCH_CANDIDATE:
-  结构与报价完整，但 Edge 或策略族尚未验证。
-
-NO_TRADE:
-  无完整候选，或硬门失败。
-```
-
----
-
-## 16. Ranker
-
-`NO_TRADE` 与候选一起比较。
-
-```text
-Score = conservative_expected_pnl / max_loss
-        - tail_loss_penalty
-        - liquidity_penalty
-        - model_uncertainty_penalty
-```
-
-校准不足时：
-
-- Score 只排序；
-- 不能单独升门；
-- Edge 未验证的通过候选仍是 Research；
-- NoTrade 必须保留为正式候选。
-
----
-
-## 17. strategy_decision.v4
-
-Python-only：
-
-```yaml
-schema_version: strategy_decision.v4
-decision_type: MANUAL_CANDIDATE | RESEARCH_CANDIDATE | NO_TRADE
-policy_version: strategy_policy.v4
-runtime_git_sha: ...
-decision_at: ...
-available_at: ...
-
-path_regime: {...}
-proposition: {...}
-pricing_edge: {...}
-
-candidate:
-  candidate_id: ...
-  strategy_type: ...
-  setup_kind: ...
-  expiry: ...
-  legs: [...]
-  quote: {...}
-  economics: {...}
-  management_policy_version: ...
-
-unit_risk:
-  quantity_basis: ONE_STRATEGY_UNIT
-  max_loss_points: ...
-  max_loss_usd: ...
-  max_gain_points: ...
-  max_gain_usd: ...
-  breakevens: [...]
-
-why_not:
-  reasons: [...]
-  nearest_candidates: [...]
-  reauthorize_on: ...
-
-automatic_ordering: false
-manual_action_only: true
-```
-
-明确禁止字段：
-
-```text
-account_nlv
-buying_power
-recommended_contracts
-risk_fraction_of_account
-daily_loss_limit
-```
-
----
-
-## 18. Outcome 与验证
-
-### 18.1 样本单位
-
-一个完整策略机会 = 一个样本。
-
-不是：
-
-- 每条腿；
-- 每个 tick；
-- 同一 opportunity 的重复 decision；
-- 同日多次重建的相同候选。
-
-继续使用 `opportunity_id` 去重。
-
-### 18.2 保存字段
-
-```text
-proposition
-path regime
-pricing edge
-entry executable BBO
-fees/slippage assumptions
-multi-horizon marks
-management-policy exit
-terminal payoff
-first-touch labels
-invalidation breach
-censor kind
-policy versions
-```
-
-### 18.3 成交语义
-
-核心引擎只使用市场数据：
-
-- conservative BBO；
-- quote reached；
-- one/two-tick slippage stress。
-
-不得把 `quote_reached` 称为真实 fill probability。
-
----
-
-## 19. Promotion
-
-每个策略家族独立验证。
-
-最低门槛：
-
-- 总样本 ≥100；
-- 独立交易日 ≥40；
-- OOS 样本 ≥30；
-- OOS 平均净 PnL > 0；
-- OOS Profit Factor ≥1.10；
-- Full Sample PF ≥1.20；
-- 双倍成本下不显著为负；
-- 参数在 OOS 前冻结；
-- day-block bootstrap 置信区间明确报告。
-
-Event Debit 额外要求：
-
-- required probability 校准；
-- Brier Score 优于无条件基线；
-- CPI/FOMC/NFP 分开；
-- 删除最好三笔后期望仍不为负。
-
-Credit/IC 额外要求：
-
-- first-touch 校准；
-- touch 后恢复/继续有区分能力；
-- 每 25 笔插入一次 max-loss 的压力测试；
-- settlement 与真实 ManagementPolicy 分开报告；
-- 不以胜率或 POP 单独 promotion。
-
----
-
-## 20. 实施顺序
-
-### Phase A：通用 Debit/Credit 经济学
-
-修改现有 payoff、outcome、select、ranker。
-
-完成：
-
-- signed cashflow；
-- unit economics；
-- Credit BBO；
-- Short Premium policy；
-- Credit outcome。
-
-不增加策略类型。
-
-### Phase B：Event Proposition
-
-新增最多一个文件 `strategy_propositions.py`。
-
-完成：
-
-- prior close / event pre-close / synthetic / structure propositions；
-- 5/10 点 Event Settlement Vertical；
-- Debit/Width 与 required probability；
-- Research Candidate。
-
-### Phase C：First-Touch
-
-扩展现有 physical/outcome 管道，完成 touch/recovery/wing 标签。
-
-### Phase D：Credit Vertical Shadow
-
-增加 Call/Put Credit Vertical，只输出 Research。
-
-### Phase E：Iron Condor Shadow
-
-仅从两侧 passed Credit Vertical 组合，只输出 Research。
-
-### Phase F：Promotion
-
-按 §19 分策略族升门。
-
----
-
-## 21. 测试与验收
-
-### 数学不变量
-
-- Debit/Credit payoff 上下界；
-- max gain/max loss；
-- breakeven；
-- signed cashflow；
-- Credit buyback 方向；
-- IC 非对称翼；
-- 费用增加不能改善净 PnL。
-
-### 因果不变量
-
-- `available_at <= decision_at`；
-- proposition source 不晚于 decision；
-- P 模型不读取当前会话未来；
-- event 结果不泄漏到 pre-event；
-- opportunity 去重。
-
-### 冻结案例
-
-1. 昨收附近窄 Vertical 被主动枚举；
-2. Debit/Width < 0.5，但 P 下界不足 → Research；
-3. 横盘但 Credit 太低 → NoTrade；
-4. 两侧 12 Delta、touch unavailable → 不生成 IC；
-5. CONVERGENCE + Rich + 两侧通过 → IC Research；
-6. 趋势正确但 late chase → NoTrade。
-
----
-
-## 22. 复杂度预算
+## 14. 复杂度预算
 
 | 项 | 上限 |
 |---|---:|
-| 新生产文件 | 1 |
-| 新研究脚本 | 0，扩展现有 replay/backfill |
+| 新生产文件 | 0 |
+| 修改生产文件 | 4 |
+| 修改研究文件 | 1 |
+| 新研究脚本 | 0 |
 | 新依赖 | 0 |
+| 新配置键 | 0（冻结代码常量） |
 | 新 service/timer/queue | 0 |
 | 新数据库/表 | 0 |
 | 新 Rust contract | 0 |
-| 账户读取 | 0 |
-| 自动下单变化 | 0 |
+| 新 decision schema | 0 |
+| 预计净生产 LOC | ≤250 |
+| 预计测试 LOC | ≤250 |
 
-每个 Phase 独立 PR，不一次性实现全部策略族。
+超过预算必须重新评审，不允许“顺手”扩张。
 
 ---
 
-## 23. 需要批准的决策
+## 15. 需要批准的事项
 
-1. v4 保持完全账户无关；
-2. 新增 `RESEARCH_CANDIDATE`；
-3. Event Settlement Vertical 优先；
-4. Credit Vertical 与 Iron Condor 初期仅 Research；
-5. 最多新增一个生产文件；
-6. `strategy_decision.v4` 继续 Python-only；
-7. 自动下单继续禁止。
+1. v4.0 只增加 `EVENT_SETTLEMENT_THRESHOLD`；
+2. 第一版阈值来源只用 `PRIOR_CLOSE`；
+3. 只枚举相邻 5 点 Debit Vertical；
+4. 双向扫描，不接受外部叙事直接选方向；
+5. 固定 `manual_authority_eligible=false`；
+6. 继续使用 NO_TRADE + nearest candidate，不新增决策状态；
+7. 0 新生产文件、0 新 schema、0 新存储；
+8. Credit Vertical 与 Iron Condor 延后到独立 Change Brief；
+9. 自动下单继续禁止。
 
-批准后按 Phase A → B → C → D → E 实施。
+批准后只实施 Phase A，再提交验收结果；Phase B 不与 Phase A 混在同一提交。
