@@ -380,7 +380,7 @@ def run(
         session_episode,
         now=evaluation_now,
     )
-    macro_event = macro_event_state(evaluation_now)
+    macro_event = macro_event_state(evaluation_now, data_root=storage.data_root)
     context = build_decision_context(
         market_frame,
         option_frame,
@@ -525,7 +525,7 @@ def run(
             "observed": 0,
             "error": f"{type(exc).__name__}:{exc}",
         }
-    action_macro_event = macro_event_state(action_now)
+    action_macro_event = macro_event_state(action_now, data_root=storage.data_root)
     action_provider_entry_control = _provider_entry_control(
         failover_settings,
         now=action_now,

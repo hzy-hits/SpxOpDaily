@@ -512,7 +512,7 @@ def _run_gth_dip_reclaim(
                 expected_move = float(raw_expected_move)
     except Exception:  # ES-led detection must survive a missing GTH chain.
         options_map = None
-    macro = macro_event_state(sample_at)
+    macro = macro_event_state(sample_at, data_root=storage_settings.data_root)
     virtual_strategy_blocks_gth = _virtual_strategy_blocks_gth(virtual_active)
     level_shadow = read_json_object(
         Path(storage_settings.data_root) / "latest" / "level_decision_shadow_state.json"

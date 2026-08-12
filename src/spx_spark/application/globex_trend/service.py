@@ -335,7 +335,7 @@ def run(
             output["skipped_reason"] = "no_fresh_direct_es"
         else:
             path = trend_state_path(storage.data_root)
-            macro_state = macro_event_state(evaluation_now)
+            macro_state = macro_event_state(evaluation_now, data_root=storage.data_root)
             continuation_allowed = gth_advisory_allowed(evaluation_now, macro_state)
             with locked_trend_state(path):
                 state = load_trend_state(path)

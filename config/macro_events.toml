@@ -13,3 +13,12 @@ impact = "high"
 pre_window_minutes = 30
 post_window_minutes = 90
 description = "Scheduled US CPI release; the explicit timestamp is authoritative and must be updated from a trusted calendar before future sessions."
+
+[[events]]
+id = "us-ppi-2026-08-13"
+name = "US PPI"
+release_at = "2026-08-13T08:30:00-04:00"
+impact = "high"
+pre_window_minutes = 30
+post_window_minutes = 90
+description = "BLS Producer Price Index seed row; runtime auto-refresh may replace/extend the calendar from live sources."

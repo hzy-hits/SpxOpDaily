@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
+from spx_spark.macro_event_calendar import (
+    load_merged_macro_calendar,
+    refresh_macro_events_if_due,
+)
+
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "macro_events.toml"
 
 
@@ -15,19 +20,28 @@ def macro_event_state(
     now: datetime,
     *,
     path: str | Path | None = None,
+    data_root: str | Path | None = None,
+    refresh: bool = True,
 ) -> dict[str, object]:
     now = _utc(now)
     resolved = Path(
         path or os.getenv("SPX_SPARK_MACRO_EVENTS_CONFIG") or DEFAULT_PATH
     )
+    refresh_status: dict[str, object] | None = None
+    if refresh and data_root is not None:
+        refresh_status = refresh_macro_events_if_due(data_root, now=now)
     try:
-        payload = tomllib.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        if data_root is not None:
+            payload = load_merged_macro_calendar(resolved, data_root)
+        else:
+            payload = tomllib.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
         return {
             "mode": "unavailable",
             "entry_allowed": False,
             "reason": f"macro_calendar_unavailable:{type(exc).__name__}",
             "as_of": now.isoformat(),
+            "refresh": refresh_status,
         }
     defaults = payload.get("defaults") if isinstance(payload, Mapping) else {}
     defaults = defaults if isinstance(defaults, Mapping) else {}
@@ -64,6 +78,10 @@ def macro_event_state(
             "active_event": selected,
             "as_of": now.isoformat(),
             "calendar_path": str(resolved),
+            "overlay_refreshed_at": payload.get("overlay_refreshed_at")
+            if isinstance(payload, Mapping)
+            else None,
+            "refresh": refresh_status,
         }
     next_event = min(upcoming, key=lambda pair: pair[0])[1] if upcoming else None
     return {
@@ -73,6 +91,10 @@ def macro_event_state(
         "next_event": next_event,
         "as_of": now.isoformat(),
         "calendar_path": str(resolved),
+        "overlay_refreshed_at": payload.get("overlay_refreshed_at")
+        if isinstance(payload, Mapping)
+        else None,
+        "refresh": refresh_status,
     }
 
 

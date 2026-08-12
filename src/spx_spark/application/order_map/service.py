@@ -166,7 +166,7 @@ def build_order_payload(
         policy=policy,
     )
     candidate_rows = [asdict(candidate) for candidate in candidates]
-    macro_event = macro_event_state(now)
+    macro_event = macro_event_state(now, data_root=StorageSettings.from_env().data_root)
     greeks_audit_reference = build_zero_dte_greeks_reference(
         replace(state, as_of=now),
         options_map=options_map,
