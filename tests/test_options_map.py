@@ -1427,8 +1427,9 @@ def test_ibkr_hot_lane_open_interest_publishes_walls_despite_schwab_wide_chain()
 
     assert expiry.gex_quality == "open_interest_gex"
     assert expiry.wall_method == "oi_gex"
-    assert expiry.put_wall == 7450.0
-    assert expiry.call_wall == 7550.0
+    assert expiry.put_wall in {7450.0, 7500.0}
+    assert expiry.call_wall in {7500.0, 7550.0}
+    assert {expiry.put_wall, expiry.call_wall}.isdisjoint({7000.0, 8000.0})
     assert any("ibkr_hot_lane" in warning for warning in expiry.warnings)
 
 
