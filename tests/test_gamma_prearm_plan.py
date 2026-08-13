@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import spx_spark.application.market_features.service as market_feature_service
 from spx_spark.application.market_features.gamma_prearm_plan import (
+    _human_notification_eligible,
     _notification_intent,
     _notification_event_id,
     evaluate_gamma_prearm_plan,
+    process_gamma_prearm_plan,
 )
 from spx_spark.application.order_map.level_trigger_repricing import REPRICING_PHASES
 
@@ -62,6 +66,93 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
     assert "PUT 同向极值追单需等待墙位接受" in card["text"]
     assert "只观察结构，不展示合约" in card["text"]
     assert "结构观察不是交易信号" in card["text"]
+
+
+def test_approaching_and_gth_plans_are_not_human_notifiable() -> None:
+    rth = datetime(2026, 7, 30, 15, 30, tzinfo=timezone.utc)
+    gth = datetime(2026, 8, 13, 3, 15, tzinfo=timezone.utc)
+    approaching = evaluate_gamma_prearm_plan(_repricing(), _level_decision(), now=NOW)
+    repricing, level = _break_pending_inputs(as_of=rth)
+    pending = evaluate_gamma_prearm_plan(repricing, level, now=rth)
+
+    assert approaching["notification_stage"] == "approaching"
+    assert _human_notification_eligible(approaching, now=rth) is False
+    assert _human_notification_eligible(approaching, now=gth) is False
+    assert pending["status"] == "prearm_ready"
+    assert pending["notification_stage"] == "break_pending"
+    assert _human_notification_eligible(pending, now=rth) is True
+    assert _human_notification_eligible(pending, now=gth) is False
+
+
+def test_process_does_not_enqueue_approaching_observation_cards(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    flushed: list[str | None] = []
+
+    def fake_flush(*_args, **kwargs):
+        flushed.append(kwargs.get("only_event_id"))
+        return {"attempted": True, "accepted": True, "outcome": "delivered"}
+
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.gamma_prearm_plan.flush_pending_notifications",
+        fake_flush,
+    )
+    plan = evaluate_gamma_prearm_plan(_repricing(), _level_decision(), now=NOW)
+    leftover_id = _notification_event_id(plan)
+    (tmp_path / "latest").mkdir()
+    (tmp_path / "latest" / "gamma_prearm_plan_state.json").write_text(
+        json.dumps(
+            {
+                "pending_notifications": [
+                    {"event_id": leftover_id, "lane": "gamma_prearm_plan"}
+                ]
+            }
+        )
+    )
+
+    result = process_gamma_prearm_plan(
+        SimpleNamespace(data_root=str(tmp_path)),
+        _repricing(),
+        _level_decision(),
+        now=NOW,
+        notification=SimpleNamespace(),
+    )
+    state = json.loads((tmp_path / "latest" / "gamma_prearm_plan_state.json").read_text())
+
+    assert leftover_id
+    assert leftover_id.endswith(":approaching")
+    assert result["status"] == "prearm_ready"
+    assert result["notification_attempted"] is False
+    assert flushed == []
+    assert state["pending_notifications"] == []
+
+
+def test_process_enqueues_rth_break_pending_card(tmp_path, monkeypatch) -> None:
+    flushed: list[str | None] = []
+
+    def fake_flush(*_args, **kwargs):
+        flushed.append(kwargs.get("only_event_id"))
+        return {"attempted": True, "accepted": True, "outcome": "delivered"}
+
+    monkeypatch.setattr(
+        "spx_spark.application.market_features.gamma_prearm_plan.flush_pending_notifications",
+        fake_flush,
+    )
+    rth = datetime(2026, 7, 30, 15, 30, tzinfo=timezone.utc)
+    repricing, level = _break_pending_inputs(as_of=rth)
+    result = process_gamma_prearm_plan(
+        SimpleNamespace(data_root=str(tmp_path)),
+        repricing,
+        level,
+        now=rth,
+        notification=SimpleNamespace(),
+    )
+
+    assert result["status"] == "prearm_ready"
+    assert result["notification_stage"] == "break_pending"
+    assert result["notification_attempted"] is True
+    assert flushed == [_notification_event_id(result)]
 
 
 def test_prearm_plan_identity_is_semantic_across_rearmed_events() -> None:
@@ -159,6 +250,28 @@ def test_pending_card_explicitly_blocks_a_quote_above_touch_reference() -> None:
 
     assert "当前 ask 高于触位参考上限" in card["text"]
     assert "不得按现价追入" in card["text"]
+
+
+def _break_pending_inputs(*, as_of: datetime) -> tuple[dict[str, object], dict[str, object]]:
+    level = {
+        **_level_decision(),
+        "phase": "break_pending",
+        "thesis": "breakout",
+        "direction": "down",
+    }
+    repricing = {
+        **_repricing(as_of=as_of),
+        "phase": "break_pending",
+        "path_geometries": {
+            "level_breakout_put": {
+                "target_spx": 7365.0,
+                "feasible": True,
+            }
+        },
+    }
+    repricing["candidates"][0]["execution_bid"] = 12.1
+    repricing["candidates"][0]["execution_ask"] = 12.3
+    return repricing, level
 
 
 def _level_decision(event_id: str = "level:flip-low-approach") -> dict[str, object]:

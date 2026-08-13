@@ -20,6 +20,7 @@ from spx_spark.application.market_features.virtual_strategy_state import (
     flush_pending_notifications,
 )
 from spx_spark.config import NotificationSettings, StorageSettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.operator_cards import (
     option_contract_label,
     render_operator_card,
@@ -216,6 +217,7 @@ def process_gamma_prearm_plan(
     state_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan.json"
     event_id = _notification_event_id(plan)
+    human_eligible = _human_notification_eligible(plan, now=now)
     settings = notification or NotificationSettings.from_env()
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
@@ -234,9 +236,20 @@ def process_gamma_prearm_plan(
             for item in state.get("pending_notifications") or []
             if isinstance(item, Mapping)
         ]
+        if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
+            pending = []
+        else:
+            pending = [
+                item
+                for item in pending
+                if str(item.get("event_id") or "").endswith(
+                    (":break_pending", ":reject_pending")
+                )
+            ]
         pending_ids = {str(item.get("event_id") or "") for item in pending}
         if (
             event_id
+            and human_eligible
             and event_id not in accepted
             and event_id not in settled
             and event_id not in pending_ids
@@ -255,7 +268,7 @@ def process_gamma_prearm_plan(
         atomic_write_json_secure(state_path, state)
         atomic_write_json_secure(projection_path, plan)
     result = {"attempted": False, "accepted": False}
-    if event_id:
+    if event_id and human_eligible:
         result = flush_pending_notifications(
             state_path,
             settings=settings,
@@ -453,6 +466,23 @@ def _notification_event_id(plan: Mapping[str, object]) -> str | None:
         return None
     lifecycle = hashlib.sha256(source_event_id.encode()).hexdigest()[:12]
     return f"{plan_id}:{lifecycle}:{stage}"
+
+
+def _human_notification_eligible(plan: Mapping[str, object], *, now: datetime) -> bool:
+    """Page a person only after price has picked one side during RTH.
+
+    Approaching is two-sided wait-and-see and does not change an action.
+    GTH already has a separate human path (session-advance / aged dip).
+    """
+
+    if plan.get("status") != "prearm_ready":
+        return False
+    if str(plan.get("notification_stage") or "") not in {
+        "break_pending",
+        "reject_pending",
+    }:
+        return False
+    return DEFAULT_MARKET_CALENDAR.is_rth_open(now)
 
 
 def _generation(value: Mapping[str, object]) -> int:
