@@ -583,6 +583,37 @@ def test_rth_desk_map_still_flags_analytical_only_legs_as_degraded() -> None:
     assert "结构腿仅分析用、不可当作执行报价" in sections.data_quality
 
 
+def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
+    gth_now = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    payload = _payload()
+    payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}
+    payload["strategy_decision"] = {
+        "decision_type": "NO_TRADE",
+        "candidate": None,
+        "action_authority": "none",
+        "execution": {"action": "WAIT"},
+        "why_not": {
+            "reasons": ["confirmed_price_trigger_unavailable"],
+            "nearest_candidate": {
+                "strategy_type": "PUT_DEBIT_VERTICAL",
+                "long": {"strike": 7730.0},
+                "short": {"strike": 7725.0},
+                "failed_gates": [
+                    {"gate": "confirmed_price_trigger_unavailable"},
+                ],
+            },
+        },
+    }
+
+    sections = build_desk_message_sections(payload, gth_now)
+
+    assert "结论  不做" in sections.desk_view
+    assert "最近候选  无" in sections.desk_view
+    assert "7730/7725" not in sections.desk_view
+    assert "Put 价差" not in sections.desk_view
+    assert "待评估" not in sections.desk_view
+
+
 @pytest.mark.parametrize(
     "frame_update",
     (

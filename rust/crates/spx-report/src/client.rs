@@ -39,7 +39,8 @@ When typed direction is none, title, desk_view, and execution must not say LONG,
 Preserve READY, HOLD, PAUSED, WAIT, and CLOSED from source execution in output execution. Shorten source fields aggressively when doing so does not remove an active trigger, invalidation, target, exact-leg limit, TTL or R/R.
 Lead with the human decision and its reason. Translate lifecycle and quality into plain language; do not expose schema names, raw field names, hashes, internal identifiers, action_authority, automatic_ordering, or raw enum dumps unless they change what the operator may safely do.
 In data_quality, state the single most important human impact first. Never expose raw audit codes or reason-code lists in any visible field; they remain in the source artifact for audit.
-Keep one useful sentence in each section and enough concrete evidence to support the Base Case. Do not invent orders, fills, positions, probabilities, or market-maker behavior.";
+Keep one useful sentence in each section and enough concrete evidence to support the Base Case. Do not invent orders, fills, positions, probabilities, or market-maker behavior.
+A Flip zone is structure, not a debit vertical. If 最近候选 is 无, do not mention a retained Put/Call spread, 待评估 candidate, or parked opportunity ID.";
 
 const EXECUTION_STATE_MARKERS: [&str; 5] = ["READY", "HOLD", "PAUSED", "WAIT", "CLOSED"];
 

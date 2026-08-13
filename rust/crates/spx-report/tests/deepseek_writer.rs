@@ -210,6 +210,7 @@ fn assert_compact_prompt_contract(system_prompt: &str) {
         "Do not require Gamma",
         "GTH and RTH desk maps are different products",
         "gth_not_applicable",
+        "Flip zone is structure",
     ] {
         assert!(system_prompt.contains(required), "missing {required}");
     }

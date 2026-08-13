@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.state import current_session_is_gth
 
 
 def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
@@ -33,7 +34,15 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     else:
         conclusion = "不做"
     primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
-    nearest_line = _nearest_candidate_line(nearest, failed_gates)
+    gth_no_trade = (
+        not manual
+        and current_session_is_gth(payload, _mapping(payload.get("level_decision")))
+    )
+    nearest_line = (
+        "无"
+        if gth_no_trade
+        else _nearest_candidate_line(nearest, failed_gates)
+    )
     reauthorize = str(why_not.get("reauthorize_on") or "").strip()
     if not reauthorize or _looks_like_machine_token(reauthorize):
         reauthorize = "等待价格触发、精确报价与赔率同时通过后再评估"
