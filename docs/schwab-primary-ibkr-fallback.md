@@ -172,6 +172,10 @@ contract is:
 - IBKR SPXW: live GTH bid/ask, mid, IV inputs, and trigger repricing;
 - Schwab SPXW during GTH: frozen structure only, never an executable price;
 - Schwab wide chain during RTH: primary breadth, OI, Greeks, and structure;
+  OI-GEX walls still require IBKR hot-lane overnight OI around ATM (about 84
+  option lines), not 80% coverage of the Schwab wide chain. The published
+  walls are hot-zone overnight OI, not full-chain OI. Schwab-only OI remains
+  unverified and cannot publish `oi_gex` walls;
 - provider mode: `ibkr_fallback` during GTH when IBKR option coverage passes,
   with `new_entries_allowed=true`; otherwise fail closed.
 

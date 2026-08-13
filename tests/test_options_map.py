@@ -1370,9 +1370,66 @@ def test_schwab_open_interest_cannot_publish_oi_walls() -> None:
     assert expiry.gex_quality == "no_open_interest_gex"
     assert expiry.wall_method != "oi_gex"
     assert any(
-        "oi_contract_coverage_below_threshold" in warning
+        "ibkr_hot_lane_missing" in warning
         for warning in expiry.warnings
     )
+
+
+def test_ibkr_hot_lane_open_interest_publishes_walls_despite_schwab_wide_chain() -> None:
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    underlier = Quote(
+        instrument=InstrumentId.index("SPX"),
+        provider=Provider.SCHWAB,
+        received_at=now,
+        quote_time=now,
+        quality=MarketDataQuality.LIVE,
+        last=7500.0,
+    )
+    schwab_rows = [
+        replace(
+            make_option(
+                expiry="20260706",
+                strike=strike,
+                right=right,
+                mark=10.0,
+                iv=0.20,
+                gamma=0.003,
+                open_interest=10_000.0,
+                now=now,
+            ),
+            provider=Provider.SCHWAB,
+        )
+        for strike in (7000.0, 7050.0, 7100.0, 7900.0, 7950.0, 8000.0)
+        for right in ("C", "P")
+    ]
+    ibkr_rows = [
+        make_option(
+            expiry="20260706",
+            strike=strike,
+            right=right,
+            mark=10.0,
+            iv=0.20,
+            gamma=0.003,
+            open_interest=100.0,
+            now=now,
+        )
+        for strike, right in (
+            (7450.0, "P"),
+            (7450.0, "C"),
+            (7500.0, "P"),
+            (7500.0, "C"),
+            (7550.0, "P"),
+            (7550.0, "C"),
+        )
+    ]
+
+    expiry = build_options_map(make_state(underlier, *schwab_rows, *ibkr_rows, now=now)).expiries[0]
+
+    assert expiry.gex_quality == "open_interest_gex"
+    assert expiry.wall_method == "oi_gex"
+    assert expiry.put_wall == 7450.0
+    assert expiry.call_wall == 7550.0
+    assert any("ibkr_hot_lane" in warning for warning in expiry.warnings)
 
 
 def test_minority_untrusted_open_interest_is_removed_after_coverage_passes() -> None:

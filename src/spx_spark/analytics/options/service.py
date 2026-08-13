@@ -70,7 +70,13 @@ def oi_wall_coverage(
     *,
     underlier: float,
 ) -> tuple[bool, str, float]:
-    """Require broad, two-wing, provider-verified OI before publishing walls."""
+    """Require IBKR hot-lane two-wing OI before publishing walls.
+
+    Coverage is scored against IBKR OI observations only. Schwab wide-chain
+    legs must not dilute the ratio: they are a different breadth product, and
+    IBKR's option lane is about 84 concurrent lines around ATM. Passing this
+    gate yields hot-zone overnight OI walls, not full-chain OI.
+    """
 
     legs = [
         quote
@@ -80,13 +86,20 @@ def oi_wall_coverage(
     if not legs:
         return False, "oi_coverage_missing", 0.0
 
+    def is_ibkr_oi(quote: Quote) -> bool:
+        return _open_interest_provider(quote) == "ibkr"
+
     def trusted_positive(quote: Quote) -> bool:
         if finite_float(quote.open_interest) is None or float(quote.open_interest) <= 0:
             return False
-        return _open_interest_provider(quote) == "ibkr"
+        return is_ibkr_oi(quote)
 
-    trusted = [quote for quote in legs if trusted_positive(quote)]
-    ratio = len(trusted) / len(legs)
+    ibkr_legs = [quote for quote in legs if is_ibkr_oi(quote)]
+    if not ibkr_legs:
+        return False, "ibkr_hot_lane_missing", 0.0
+
+    trusted = [quote for quote in ibkr_legs if trusted_positive(quote)]
+    ratio = len(trusted) / len(ibkr_legs)
     if ratio < MIN_OI_CONTRACT_COVERAGE_RATIO:
         return False, "oi_contract_coverage_below_threshold", ratio
     if len({float(quote.instrument.strike or 0.0) for quote in trusted}) < MIN_OI_DISTINCT_STRIKES:
@@ -103,7 +116,7 @@ def oi_wall_coverage(
     )
     if not put_wing or not call_wing:
         return False, "oi_two_wing_coverage_missing", ratio
-    return True, "verified_two_wing_coverage", ratio
+    return True, "verified_hot_lane_two_wing_coverage", ratio
 
 
 def build_expiry_map(
@@ -296,6 +309,8 @@ def build_expiry_map(
             f"open interest wall coverage rejected:{oi_coverage_reason}:"
             f"{oi_coverage_ratio:.3f}"
         )
+    elif any(_open_interest_provider(quote) != "ibkr" for quote in quotes):
+        warnings.append("open interest wall scope:ibkr_hot_lane")
     if underlier_mismatch:
         warnings.append("underlier mismatch; wall distance and gamma alerts suppressed")
 
