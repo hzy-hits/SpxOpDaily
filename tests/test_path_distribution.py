@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import json
+from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from spx_spark.application.market_features.physical_followthrough import (
+    load_physical_spot_paths,
+)
+from spx_spark.application.order_map.path_distribution import (
+    estimate_path_distribution,
+    path_distribution_desk_text,
+)
+from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
+
+NEW_YORK = ZoneInfo("America/New_York")
+RTH_NOW = datetime(2026, 8, 6, 14, 30, tzinfo=timezone.utc)
+GTH_NOW = datetime(2026, 8, 6, 4, 30, tzinfo=timezone.utc)
+EXPIRY = "20260806"
+
+
+def _write_session(root: Path, day: str, *, start_et: time, prices: list[float]) -> None:
+    path = root / "features" / "spx_standardized_samples" / f"date={day}" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[str] = []
+    start = datetime.combine(date.fromisoformat(day), start_et, tzinfo=NEW_YORK)
+    for offset, price in enumerate(prices):
+        minute = start + timedelta(minutes=offset)
+        rows.append(
+            json.dumps(
+                {
+                    "status": "selected",
+                    "minute": minute.isoformat(),
+                    "selected": {"price": price},
+                }
+            )
+        )
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _facts(*, now: datetime, spot: float = 7750.0, session_date: str = "2026-08-06") -> dict[str, object]:
+    close = datetime.combine(date.fromisoformat(session_date), time(16, 0), tzinfo=NEW_YORK)
+    minutes = max(int((close - now.astimezone(NEW_YORK)).total_seconds() // 60), 1)
+    return {
+        "session_date": session_date,
+        "minutes_to_close": minutes,
+        "spot": {"spx": spot},
+        "volatility": {"expected_move_points": 18.0},
+    }
+
+
+def _leg(strike: float, right: str, bid: float, ask: float) -> dict[str, object]:
+    return {
+        "contract_id": f"option:SPX:SPXW:{EXPIRY}:{strike:g}:{right}",
+        "strike": strike,
+        "right": right,
+        "bid": bid,
+        "ask": ask,
+        "implied_vol": 0.16,
+        "source_at": RTH_NOW.isoformat(),
+    }
+
+
+def _call_vertical() -> dict[str, object]:
+    long_leg = _leg(7750.0, "C", 1.4, 1.6)
+    short_leg = _leg(7760.0, "C", 0.9, 1.1)
+    return {
+        "strategy_type": "CALL_DEBIT_VERTICAL",
+        "setup_kind": "GTH_WIDTH_SCAN",
+        "right": "C",
+        "direction": "UP",
+        "long": long_leg,
+        "short": short_leg,
+        "quote": {"status": "ready", "bid": 0.3, "ask": 0.7},
+        "economics": {
+            "width_points": 10.0,
+            "max_loss_points": 0.7,
+            "max_gain_points": 9.3,
+        },
+        "invalidation_spx": 7735.0,
+        "selection_score": 1.25,
+    }
+
+
+def test_same_clock_paths_exclude_current_session_and_are_stable(tmp_path: Path) -> None:
+    prices = [7700.0 + offset * 0.2 for offset in range(80)]
+    _write_session(tmp_path, "2026-08-04", start_et=time(10, 0), prices=prices)
+    _write_session(tmp_path, "2026-08-05", start_et=time(10, 0), prices=[value + 5 for value in prices])
+    _write_session(tmp_path, "2026-08-06", start_et=time(10, 0), prices=[value + 50 for value in prices])
+
+    first, mode = load_physical_spot_paths(
+        tmp_path / "features",
+        now=RTH_NOW,
+        trading_date=date(2026, 8, 6),
+        window_days=35,
+        horizon_minutes=20,
+        minimum_same_clock=30,
+    )
+    second, _ = load_physical_spot_paths(
+        tmp_path / "features",
+        now=RTH_NOW,
+        trading_date=date(2026, 8, 6),
+        window_days=35,
+        horizon_minutes=20,
+        minimum_same_clock=30,
+    )
+
+    assert mode == "same_clock"
+    assert first
+    assert {row.session_date for row in first} == {date(2026, 8, 4), date(2026, 8, 5)}
+    assert [row.prices for row in first] == [row.prices for row in second]
+    assert all(len(row.prices) == 21 for row in first)
+
+
+def test_gth_falls_back_to_rth_session_shapes(tmp_path: Path) -> None:
+    prices = [7700.0 + offset * 0.15 for offset in range(80)]
+    _write_session(tmp_path, "2026-08-05", start_et=time(10, 0), prices=prices)
+
+    rows, mode = load_physical_spot_paths(
+        tmp_path / "features",
+        now=GTH_NOW,
+        trading_date=date(2026, 8, 6),
+        window_days=35,
+        horizon_minutes=20,
+        minimum_same_clock=30,
+    )
+
+    assert mode == "session_shape_fallback"
+    assert len(rows) >= 50
+    assert all(row.session_date == date(2026, 8, 5) for row in rows)
+
+
+def test_winner_path_distribution_is_ordered_and_does_not_change_score(tmp_path: Path) -> None:
+    up = [7750.0 + offset * 0.8 for offset in range(50)]
+    down = [7750.0 - offset * 0.8 for offset in range(50)]
+    _write_session(tmp_path, "2026-08-04", start_et=time(10, 0), prices=up)
+    _write_session(tmp_path, "2026-08-05", start_et=time(10, 0), prices=down)
+
+    candidate = _call_vertical()
+    distribution = estimate_path_distribution(
+        candidate,
+        _facts(now=RTH_NOW),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=RTH_NOW,
+    )
+
+    assert distribution["status"] == "estimated_uncalibrated"
+    assert distribution["evidence_status"] == "research_unvalidated"
+    assert distribution["n_sessions"] == 2
+    assert distribution["n_paths"] >= 30
+    assert distribution["p10_pnl_points"] <= distribution["p50_pnl_points"] <= distribution["p90_pnl_points"]
+    assert candidate["selection_score"] == 1.25
+    assert "invalidation_not_protective" not in distribution["reason_codes"]
+    text = path_distribution_desk_text(distribution)
+    assert text is not None
+    assert text.startswith("路径 P10/P50/P90 $")
+
+
+def test_trigger_level_is_not_counted_as_a_protective_stop(tmp_path: Path) -> None:
+    prices = [7750.0 + offset * 0.1 for offset in range(50)]
+    _write_session(tmp_path, "2026-08-05", start_et=time(10, 0), prices=prices)
+    candidate = _call_vertical()
+    candidate["invalidation_spx"] = 7800.0
+    distribution = estimate_path_distribution(
+        candidate,
+        _facts(now=RTH_NOW, spot=7750.0),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=RTH_NOW,
+    )
+    assert distribution["hit_invalidation_rate"] is None
+    assert "invalidation_not_protective" in distribution["reason_codes"]
+
+
+def test_butterfly_is_skipped_in_first_slice() -> None:
+    distribution = estimate_path_distribution(
+        {"strategy_type": "CALL_BUTTERFLY", "quote": {"ask": 1.0}, "legs": []},
+        _facts(now=RTH_NOW),
+        data_root=None,
+        probability_settings=None,
+        now=RTH_NOW,
+    )
+    assert distribution["status"] == "unavailable"
+    assert "butterfly_path_not_in_v1" in distribution["reason_codes"]
+
+
+def test_missing_data_root_returns_unavailable_without_raising() -> None:
+    distribution = estimate_path_distribution(
+        _call_vertical(),
+        _facts(now=RTH_NOW),
+        data_root=None,
+        probability_settings=None,
+        now=RTH_NOW,
+    )
+    assert distribution["status"] == "unavailable"
+    assert "physical_spot_paths_unavailable" in distribution["reason_codes"]

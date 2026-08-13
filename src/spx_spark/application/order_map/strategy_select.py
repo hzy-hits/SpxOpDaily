@@ -22,6 +22,11 @@ from spx_spark.application.order_map.iron_condor import (
     build_iron_condor_map,
     enumerate_iron_condor_candidates,
 )
+from spx_spark.application.order_map.path_distribution import (
+    attach_iron_condor_path_distribution,
+    attach_path_distribution,
+    load_decision_spot_paths,
+)
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
@@ -89,8 +94,16 @@ def build_strategy_decision(
                 now=_utc(now),
             )
             if rank.passed:
+                winner, shadows, iron_condor_map = _attach_winner_path_distributions(
+                    facts,
+                    rank.passed,
+                    iron_condor_map,
+                    data_root=data_root,
+                    probability_settings=probability_settings,
+                    now=_utc(now),
+                )
                 shadow_candidates, shadow_candidates_skipped = _shadow_candidates(
-                    rank.passed[1:3]
+                    shadows
                 )
                 funnel = _rejection_funnel(
                     facts,
@@ -104,7 +117,7 @@ def build_strategy_decision(
                     _candidate_decision(
                         facts,
                         {**regime, "entry_state": "GOOD_LOCATION"},
-                        rank.passed[0],
+                        winner,
                         candidates_considered=_candidate_summaries(rank),
                         shadow_candidates=shadow_candidates,
                         shadow_candidates_skipped=shadow_candidates_skipped,
@@ -134,6 +147,13 @@ def build_strategy_decision(
             )
             reasons = generation_reasons
     regime = {**regime, "entry_state": _entry_state(facts, reasons, rows, rank)}
+    iron_condor_map = _attach_iron_condor_only_paths(
+        facts,
+        iron_condor_map,
+        data_root=data_root,
+        probability_settings=probability_settings,
+        now=_utc(now),
+    )
     return _with_iron_condor_map(
         _no_trade_decision(
             facts,
@@ -555,6 +575,72 @@ def _shadow_candidate_skip_reason(candidate: Mapping[str, Any]) -> str | None:
 def _hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _attach_winner_path_distributions(
+    facts: Mapping[str, Any],
+    passed: Sequence[Mapping[str, Any]],
+    iron_condor_map: Mapping[str, Any],
+    *,
+    data_root: str | Path | None,
+    probability_settings: StrategyDistributionSettings | None,
+    now: datetime,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    paths, clock_mode = load_decision_spot_paths(
+        facts,
+        data_root=data_root,
+        probability_settings=probability_settings,
+        now=now,
+    )
+    winner = attach_path_distribution(
+        passed[0],
+        facts,
+        data_root=data_root,
+        probability_settings=probability_settings,
+        now=now,
+        paths=paths,
+        clock_mode=clock_mode,
+    )
+    # First slice: winner + iron-condor map only. Shadow cards stay rank-only.
+    shadows = [dict(row) for row in passed[1:3]]
+    return (
+        winner,
+        shadows,
+        attach_iron_condor_path_distribution(
+            iron_condor_map,
+            facts,
+            data_root=data_root,
+            probability_settings=probability_settings,
+            now=now,
+            paths=paths,
+            clock_mode=clock_mode,
+        ),
+    )
+
+
+def _attach_iron_condor_only_paths(
+    facts: Mapping[str, Any],
+    iron_condor_map: Mapping[str, Any],
+    *,
+    data_root: str | Path | None,
+    probability_settings: StrategyDistributionSettings | None,
+    now: datetime,
+) -> dict[str, Any]:
+    paths, clock_mode = load_decision_spot_paths(
+        facts,
+        data_root=data_root,
+        probability_settings=probability_settings,
+        now=now,
+    )
+    return attach_iron_condor_path_distribution(
+        iron_condor_map,
+        facts,
+        data_root=data_root,
+        probability_settings=probability_settings,
+        now=now,
+        paths=paths,
+        clock_mode=clock_mode,
+    )
 
 
 def _with_iron_condor_map(

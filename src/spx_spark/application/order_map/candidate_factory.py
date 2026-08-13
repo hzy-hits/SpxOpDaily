@@ -915,8 +915,10 @@ def _option_leg(
     if quote is None:
         return {}
     delta = None
+    implied_vol = None
     if quote.greeks is not None:
         delta = quote.greeks.delta
+        implied_vol = quote.greeks.implied_vol
     return {
         "contract_id": contract_id,
         "strike": strike,
@@ -925,6 +927,7 @@ def _option_leg(
         "bid": quote.bid,
         "ask": quote.ask,
         "delta": delta,
+        "implied_vol": implied_vol,
         "source_at": quote_source_at(quote).isoformat(),
     }
 

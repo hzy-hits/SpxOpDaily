@@ -71,6 +71,16 @@ class PhysicalFollowThroughEstimate:
 
 
 @dataclass(frozen=True, slots=True)
+class PhysicalSpotPath:
+    """One completed prior-session 1-minute price window in SPX points."""
+
+    session_date: date
+    start_minute: int
+    prices: tuple[float, ...]
+    same_clock: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _Outcome:
     event_id: str
     partition_date: date
@@ -292,6 +302,83 @@ def estimate_physical_terminal_range(
     )
 
 
+def load_physical_spot_paths(
+    features_root: Path,
+    *,
+    now: datetime,
+    trading_date: date,
+    window_days: int,
+    horizon_minutes: int,
+    clock_window_minutes: int = PIN_CLOCK_WINDOW_MINUTES,
+    minimum_same_clock: int = 30,
+    max_paths: int = 4000,
+) -> tuple[tuple[PhysicalSpotPath, ...], str]:
+    """Return causal 1-minute SPX windows from completed prior sessions.
+
+    Same-clock paths (within ``clock_window_minutes`` of the decision minute)
+    are preferred. If that cohort is too small — typical in GTH, where cash
+    SPX samples only cover RTH — fall back to every contiguous window so the
+    physical move library still has thousands of shapes. The current session
+    is excluded.
+    """
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("physical spot-path now must be timezone-aware")
+    if horizon_minutes <= 0 or window_days <= 0 or max_paths <= 0:
+        raise ValueError("physical spot-path settings must be positive")
+
+    query_minute = _new_york_minute(now)
+    earliest = trading_date - timedelta(days=window_days)
+    same_clock: list[PhysicalSpotPath] = []
+    all_paths: list[PhysicalSpotPath] = []
+    root = Path(features_root) / "spx_standardized_samples"
+    for path in sorted(root.glob("date=*/events.jsonl")):
+        partition = _partition_date(path)
+        if partition is None or partition < earliest or partition >= trading_date:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        prices = dict(_load_standardized_session(str(path), stat.st_mtime_ns, stat.st_size))
+        if not prices:
+            continue
+        for start in prices:
+            window = tuple(prices.get(start + offset) for offset in range(horizon_minutes + 1))
+            if any(value is None for value in window):
+                continue
+            aligned = abs(start - query_minute) <= clock_window_minutes
+            row = PhysicalSpotPath(
+                session_date=partition,
+                start_minute=start,
+                prices=tuple(float(value) for value in window if value is not None),
+                same_clock=aligned,
+            )
+            if len(row.prices) != horizon_minutes + 1:
+                continue
+            all_paths.append(row)
+            if aligned:
+                same_clock.append(row)
+
+    if len(same_clock) >= minimum_same_clock:
+        return _cap_paths(same_clock, max_paths), "same_clock"
+    if all_paths:
+        return _cap_paths(all_paths, max_paths), "session_shape_fallback"
+    return (), "unavailable"
+
+
+def _cap_paths(rows: list[PhysicalSpotPath], max_paths: int) -> tuple[PhysicalSpotPath, ...]:
+    if len(rows) <= max_paths:
+        return tuple(rows)
+    step = len(rows) / float(max_paths)
+    return tuple(rows[min(len(rows) - 1, int(index * step))] for index in range(max_paths))
+
+
+def _new_york_minute(value: datetime) -> int:
+    local = value.astimezone(NEW_YORK)
+    return local.hour * 60 + local.minute
+
+
 @lru_cache(maxsize=64)
 def _load_standardized_session(
     path_text: str, _mtime_ns: int, _size: int
@@ -417,5 +504,8 @@ __all__ = [
     "FEATURE_SET_VERSION",
     "MODEL_VERSION",
     "PhysicalFollowThroughEstimate",
+    "PhysicalSpotPath",
     "estimate_physical_followthrough",
+    "estimate_physical_terminal_range",
+    "load_physical_spot_paths",
 ]

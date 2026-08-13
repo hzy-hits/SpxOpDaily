@@ -18,6 +18,7 @@ from spx_spark.application.order_map.prompts import (
 from spx_spark.application.order_map.desk_projection_export import (
     rust_report_owner_enabled,
 )
+from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.render import render_template
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import (
@@ -115,6 +116,8 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
     edge = candidate.get("edge") if isinstance(candidate.get("edge"), dict) else {}
     edge_status = edge.get("edge_status") or "research_unvalidated"
     policy_ev = _policy_ev_text(edge)
+    path_text = path_distribution_desk_text(edge.get("path_distribution") if isinstance(edge.get("path_distribution"), dict) else None)
+    path_line = f" · {path_text}" if path_text else ""
     if candidate.get("setup_kind") == "IRON_CONDOR_DELTA":
         return "\n".join((
             "SPX STRATEGY DECISION · MANUAL CANDIDATE",
@@ -123,6 +126,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             f"有效期  {candidate.get('opportunity_valid_until')} · 提交前必须刷新报价 · 禁止市价",
             f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · 短腿失效 {invalidation}",
             f"Targets  短腿中点 {candidate.get('target_spx')}",
+            f"Edge  status={edge_status} · 研究未校准{path_line} · {policy_ev}",
             "Data Quality  conservative credit BBO · automatic_ordering=false",
             f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因=IRON_CONDOR_DELTA "
             f"版本 policy={policy} git={git_sha}",
@@ -167,7 +171,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         f"Targets  SPX {candidate.get('target_spx')}",
         f"Edge  status={edge_status} · P={utility.get('event_probability')} · Q={evidence.get('q')} "
         f"· Utility={utility.get('utility')} "
-        f"· lower=${utility.get('conservative_lower_bound')} · {policy_ev}",
+        f"· lower=${utility.get('conservative_lower_bound')} · {policy_ev}{path_line}",
         f"样本  n={evidence.get('n_raw')} · n_eff={evidence.get('n_effective')} "
         f"· shrink={evidence.get('shrinkage_weight')}",
         "Data Quality  conservative BBO · uncalibrated bootstrap · automatic_ordering=false",

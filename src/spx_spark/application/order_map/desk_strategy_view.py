@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.state import current_session_is_gth
 
 
@@ -97,6 +98,11 @@ def _gth_scan_desk_view(
     }
     if gth_scan_winner:
         conclusion = f"扫描赢家已推送 · {strategy_candidate_label(candidate)}"
+        path_text = path_distribution_desk_text(
+            _mapping(_mapping(candidate.get("edge")).get("path_distribution"))
+        )
+        if path_text:
+            conclusion = f"{conclusion} · {path_text}"
     else:
         conclusion = f"无过门赢家 · {scan_text}"
     quality = _mapping(decision.get("data_quality"))
@@ -430,7 +436,11 @@ def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
     quote = _mapping(structure.get("quote"))
     credit = finite_float(quote.get("credit")) or finite_float(economics.get("max_gain_points"))
     credit_text = f"{credit:g}" if credit is not None else "—"
-    return f"25Δ/5Δ {strike_text} 贷记 {credit_text}"
+    line = f"25Δ/5Δ {strike_text} 贷记 {credit_text}"
+    path_text = path_distribution_desk_text(_mapping(structure.get("path_distribution")))
+    if path_text:
+        return f"{line} · {path_text}"
+    return line
 
 
 def _looks_like_machine_token(value: str) -> bool:
