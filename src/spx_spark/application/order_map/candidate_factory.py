@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -23,6 +24,8 @@ from spx_spark.marketdata import InstrumentId, Provider
 from spx_spark.storage import LatestState
 
 WIDTHS: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
+GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
+GTH_ATM_PIN = "GTH_ATM_PIN"
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
     "strategy_event_expired",
@@ -82,11 +85,14 @@ def candidate_generation_reasons(
             return ["vertical_expiry_unavailable"]
         return ["vertical_exact_two_leg_quote_unavailable"]
     if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(_utc(now)):
-        capability_reasons = _capability_reasons(facts, "vertical")
-        if capability_reasons:
-            return capability_reasons
-        _, reasons = _gth_evidence(facts)
-        return reasons or ["gth_confirmed_level_candidate_unavailable"]
+        _, evidence_reasons = _gth_evidence(facts)
+        reasons = list(evidence_reasons)
+        if not _number(_map(facts.get("spot")).get("spx")):
+            reasons.append("spx_price_unavailable")
+        frame = _map(payload.get("option_structure_frame"))
+        if not (frame.get("front_expiry") or payload.get("expiry")):
+            reasons.append("vertical_expiry_unavailable")
+        return list(dict.fromkeys(reasons or ["gth_width_scan_no_fresh_quote"]))
     return ["session_not_open_for_spxw_strategy"]
 
 
@@ -143,11 +149,18 @@ def _vertical_candidates(
             )
         return [row for row in rows if row]
     if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
-        if _capability_reasons(facts, "vertical"):
-            return []
+        rows: list[dict[str, Any]] = []
         evidence, _ = _gth_evidence(facts)
-        row = _vertical_candidate_from_evidence(evidence, facts, now=now, policy=policy) if evidence else {}
-        return [row] if row else []
+        if evidence:
+            row = _vertical_candidate_from_evidence(
+                evidence, facts, now=now, policy=_gth_quote_policy(policy)
+            )
+            if row:
+                rows.append(row)
+        rows.extend(
+            _gth_width_verticals(payload, facts, latest, now=now, policy=policy)
+        )
+        return [row for row in rows if row]
     return []
 
 
@@ -205,6 +218,69 @@ def _rth_width_verticals(
                 facts,
                 now=now,
                 policy=policy,
+            )
+            if row:
+                rows.append(row)
+    return rows
+
+
+def _gth_width_verticals(
+    payload: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    latest: LatestState,
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    frame = _map(payload.get("option_structure_frame"))
+    expiry = str(frame.get("front_expiry") or payload.get("expiry") or "")
+    spot = _round_to_strike(_number(_map(facts.get("spot")).get("spx")))
+    if not expiry or spot is None:
+        return []
+    quote_policy = _gth_quote_policy(policy)
+    remaining = _number(_map(facts.get("volatility")).get("expected_move_points"))
+    rows: list[dict[str, Any]] = []
+    for direction, right in (("UP", "C"), ("DOWN", "P")):
+        target, stop = _facts_wall_ladder_geometry(facts, direction, spot)
+        if target is None or stop is None:
+            continue
+        for width in policy.gth_widths:
+            short_strike = spot + width if right == "C" else spot - width
+            if vertical_width_path_reasons(
+                long_strike=spot,
+                short_strike=short_strike,
+                right=right,
+                target=target,
+                remaining_expected_move=remaining,
+            ):
+                continue
+            legs = _session_option_legs(
+                latest,
+                expiry,
+                ((spot, right), (short_strike, right)),
+                now=now,
+                policy=quote_policy,
+                providers=(Provider.IBKR, Provider.SCHWAB),
+            )
+            if not legs:
+                continue
+            long, short = legs
+            row = _vertical_candidate_from_evidence(
+                {
+                    "setup_kind": GTH_WIDTH_SCAN,
+                    "setup_state": "ENTRY_WINDOW_OPEN",
+                    "direction": direction,
+                    "trigger_level": spot,
+                    "target_spx": target,
+                    "invalidation_spx": stop,
+                    "long": long,
+                    "short": short,
+                    "source": f"gth_{long.get('provider')}_width_enumeration",
+                    "geometry_source": "facts_wall_ladder_fallback",
+                },
+                facts,
+                now=now,
+                policy=quote_policy,
             )
             if row:
                 rows.append(row)
@@ -507,6 +583,8 @@ def _butterfly_candidates(
     now: datetime,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        return _gth_butterfly_candidates(payload, facts, latest, now=now, policy=policy)
     if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         return []
     if _capability_reasons(facts, "butterfly"):
@@ -582,6 +660,52 @@ def _butterfly_candidates(
     return rows
 
 
+def _gth_butterfly_candidates(
+    payload: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    latest: LatestState,
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    frame = _map(payload.get("option_structure_frame"))
+    expiry = str(frame.get("front_expiry") or payload.get("expiry") or "")
+    centers = {
+        _round_to_strike(_number(_map(facts.get("spot")).get("spx"))),
+        _round_to_strike(_number(_map(facts.get("structure")).get("q_mode"))),
+    }
+    if not expiry:
+        return []
+    quote_policy = _gth_quote_policy(policy)
+    rows: list[dict[str, Any]] = []
+    for center in sorted(value for value in centers if value is not None):
+        for width in policy.gth_widths:
+            for right in ("C", "P"):
+                row = _butterfly_candidate(
+                    facts,
+                    latest,
+                    expiry,
+                    center=center,
+                    width=width,
+                    right=right,
+                    now=now,
+                    policy=quote_policy,
+                    source="gth_width_butterfly",
+                    setup_kind=GTH_ATM_PIN,
+                    direction="NEUTRAL",
+                    thesis_direction="NEUTRAL",
+                    payoff_shape="PIN_CONCENTRATED",
+                    manual_authority_eligible=True,
+                    selection_prior=0.0,
+                    pin={},
+                    geometry_source="gth_atm_pin",
+                    providers=(Provider.IBKR, Provider.SCHWAB),
+                )
+                if row:
+                    rows.append(row)
+    return rows
+
+
 def _butterfly_candidate(
     facts: Mapping[str, Any],
     latest: LatestState,
@@ -603,13 +727,15 @@ def _butterfly_candidate(
     geometry_source: str | None,
     target_spx: float | None = None,
     invalidation_spx: float | list[float] | None = None,
+    providers: Sequence[Provider] = (Provider.SCHWAB, Provider.IBKR),
 ) -> dict[str, Any]:
-    legs = _rth_option_legs(
+    legs = _session_option_legs(
         latest,
         expiry,
         tuple((strike, right) for strike in (center - width, center, center + width)),
         now=now,
         policy=policy,
+        providers=providers,
     )
     if not legs:
         return {}
@@ -757,7 +883,26 @@ def _rth_option_legs(
     now: datetime,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
-    for provider in (Provider.SCHWAB, Provider.IBKR):
+    return _session_option_legs(
+        latest,
+        expiry,
+        contracts,
+        now=now,
+        policy=policy,
+        providers=(Provider.SCHWAB, Provider.IBKR),
+    )
+
+
+def _session_option_legs(
+    latest: LatestState,
+    expiry: str,
+    contracts: tuple[tuple[float, str], ...],
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+    providers: Sequence[Provider],
+) -> list[dict[str, Any]]:
+    for provider in providers:
         legs = [
             _option_leg(
                 latest,
@@ -788,6 +933,14 @@ def _rth_option_legs(
         ):
             return legs
     return []
+
+
+def _gth_quote_policy(policy: StrategyPolicy) -> StrategyPolicy:
+    return replace(
+        policy,
+        quote_max_age_seconds=policy.gth_quote_max_age_seconds,
+        quote_max_skew_seconds=policy.gth_quote_max_skew_seconds,
+    )
 
 
 def _gth_leg(value: object, contract_id: object) -> dict[str, Any]:

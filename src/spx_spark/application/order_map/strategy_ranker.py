@@ -24,6 +24,7 @@ from spx_spark.settings.strategy_distribution import StrategyDistributionSetting
 _POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
 _POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
 _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
+_GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _EVENT_SETTLEMENT_MAX_DEBIT_FRACTION = 0.50
 
 
@@ -205,6 +206,8 @@ def _vertical_hard_gates(
 ) -> list[dict[str, Any]]:
     if candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP:
         return _event_settlement_vertical_hard_gates(candidate)
+    if candidate.get("setup_kind") == _GTH_WIDTH_SCAN:
+        return _gth_scan_vertical_hard_gates(candidate, facts, policy=policy)
     long, short = _map(candidate.get("long")), _map(candidate.get("short"))
     if not long or not short:
         return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
@@ -257,6 +260,53 @@ def _vertical_hard_gates(
     if "direction_valid_but_entry_too_late" in reasons:
         candidate["setup_state"] = "ENTRY_TOO_LATE"
     return [_gate_from_entry_reason(reason, entry_quality, policy) for reason in reasons]
+
+
+def _gth_scan_vertical_hard_gates(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    long, short = _map(candidate.get("long")), _map(candidate.get("short"))
+    if not long or not short:
+        return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
+    economics = _map(candidate.get("economics"))
+    target = _number(candidate.get("target_spx"))
+    stop = _number(candidate.get("invalidation_spx"))
+    debit_fraction = _number(economics.get("debit_fraction_of_width"))
+    long_strike = _number(long.get("strike"))
+    short_strike = _number(short.get("strike"))
+    if None in (target, stop, debit_fraction, long_strike, short_strike):
+        return [{"gate": "gth_scan_geometry_or_payoff_unavailable", "actual": None, "threshold": "present"}]
+    right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
+    remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
+    path_reasons = vertical_width_path_reasons(
+        long_strike=float(long_strike),
+        short_strike=float(short_strike),
+        right=right,
+        target=target,
+        remaining_expected_move=remaining_move,
+    )
+    gates = [
+        _width_path_gate(
+            reason,
+            long_strike=float(long_strike),
+            short_strike=float(short_strike),
+            target=target,
+            remaining_expected_move=remaining_move,
+        )
+        for reason in path_reasons
+    ]
+    if float(debit_fraction) > policy.max_debit_fraction:
+        gates.append(
+            {
+                "gate": "max_debit_fraction_exceeded",
+                "actual": debit_fraction,
+                "threshold": policy.max_debit_fraction,
+            }
+        )
+    return gates
 
 
 def _event_settlement_vertical_hard_gates(

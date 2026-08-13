@@ -892,6 +892,8 @@ def _execution_line(
                 "Execution  可看 · 人工限价候选 · "
                 f"机会 {short_opportunity}"
             )
+        if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
+            return "Execution  心跳 · 非交易卡 · 过门赢家会单独推送"
         reasons = list(_mapping(strategy_decision.get("why_not")).get("reasons") or ())
         blocker = humanize_strategy_reason(
             str(reasons[0]) if reasons else "no_supported_strategy_candidate"

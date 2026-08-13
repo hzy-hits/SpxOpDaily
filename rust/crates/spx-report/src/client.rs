@@ -31,6 +31,7 @@ When research is present, keep at most one short research-background line. Label
 research_context_status=embedded_contract_valid means only that the wire contract passed; nested availability remains authoritative. Summarize the one most useful available research result instead of dumping every posterior, quantile, state ID, model version, or reason code.
 GTH and RTH desk maps are different products. When session is gth, do not mention cash SPX/NDX/DJI/RUT, RTH close or high/low forecasts, close-location, HMM/bootstrap research, or ES/SPY cash confirmation. GTH facts are the chain-implied or ES coordinate, live option walls, ES 15m/60m flow, and whether price has accepted or rejected a level. Expected overnight N/A is not a data outage.
 When research_context_status is gth_not_applicable, omit research entirely; data_quality must not say research is unavailable.
+When session is gth, this card is a 15-minute health heartbeat, not a trade recommendation. desk_view and execution must not say 可看, READY, or name a Call/Put debit spread as the action. Preserve 心跳 / NO TRADE. Winners are delivered on a separate trade_ready card. data_quality is the primary purpose of the GTH card.
 When research_context_status is unavailable, data_quality must explicitly say research is unavailable and must make no HMM, range, or close-location claim.
 Direction may come only from an explicit price trigger confirmed by ES flow in the source projection. Gamma describes only the feedback mechanism that may suppress or amplify an already observed move; Gamma must never be presented as the source of an up or down direction.
 Dealer sign is unknown. Do not claim that market makers are buying, selling, forced to hedge, or causing a directional move.
@@ -447,7 +448,7 @@ impl<T: Transport> ReportWriterClient<T> {
             (Some(_), _) => "research_context_status=embedded_contract_valid\nThe complete research_context.v2 appears once inside desk_map_projection.v1; do not duplicate it in the report."
                 .to_owned(),
             (None, MarketSession::Gth) => {
-                "research_context_status=gth_not_applicable\nGTH desk maps do not include RTH research_context. Do not mention HMM, cash index, close-location, session high/low, bootstrap research, or that research is unavailable."
+                "research_context_status=gth_not_applicable\nGTH desk maps are a 15-minute health heartbeat, not a trade card. Do not mention HMM, cash index, close-location, session high/low, bootstrap research, that research is unavailable, 可看, or a Call/Put debit spread as the action."
                     .to_owned()
             }
             (None, _) => format!(

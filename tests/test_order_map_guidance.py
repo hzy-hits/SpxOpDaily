@@ -607,11 +607,12 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
 
     sections = build_desk_message_sections(payload, gth_now)
 
-    assert "结论  不做" in sections.desk_view
+    assert "结论  心跳 · 健康检查" in sections.desk_view
     assert "最近候选  无" in sections.desk_view
     assert "7730/7725" not in sections.desk_view
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
+    assert "可看 ·" not in sections.desk_view
 
 
 def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
@@ -635,12 +636,12 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
 
     sections = build_desk_message_sections(payload, gth_now)
 
-    assert "结论  不做" in sections.desk_view
+    assert "结论  心跳 · 健康检查" in sections.desk_view
     assert "最近候选  无" in sections.desk_view
-    assert "夜盘不把收盘事件价差当作交易候选" in sections.desk_view
     assert "7750/7745" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
+    assert "心跳 · 非交易卡" in sections.execution
 
 
 @pytest.mark.parametrize(

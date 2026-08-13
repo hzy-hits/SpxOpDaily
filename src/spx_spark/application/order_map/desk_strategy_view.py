@@ -7,15 +7,16 @@ from typing import Any, Mapping
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.state import current_session_is_gth
 
-_GTH_RESEARCH_ONLY_SETUPS = frozenset({"EVENT_SETTLEMENT_THRESHOLD"})
-_GTH_RESEARCH_ONLY_SOURCES = frozenset({"prior_close_event_view"})
-
 
 def strategy_candidate_is_watchable(
     payload: Mapping[str, Any],
     decision: Mapping[str, Any] | None = None,
 ) -> bool:
-    """True when strategy_decision may be shown as a human GTH/RTH watch card."""
+    """True when strategy_decision may be shown as a human RTH watch card.
+
+    GTH desk maps are health heartbeats. Winners go through trade_ready, not
+    this 15-minute card.
+    """
 
     decision = _mapping(decision or payload.get("strategy_decision"))
     candidate = _mapping(decision.get("candidate"))
@@ -25,14 +26,9 @@ def strategy_candidate_is_watchable(
         or str(decision.get("decision_type") or "NO_TRADE") == "NO_TRADE"
     ):
         return False
-    if not current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-        return True
-    setup = str(candidate.get("setup_kind") or "")
-    source = str(candidate.get("source") or "")
-    return (
-        setup not in _GTH_RESEARCH_ONLY_SETUPS
-        and source not in _GTH_RESEARCH_ONLY_SOURCES
-    )
+    if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
+        return False
+    return True
 
 
 def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
@@ -54,17 +50,8 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     gth_session = current_session_is_gth(
         payload, _mapping(payload.get("level_decision"))
     )
-    if (
-        not watchable
-        and gth_session
-        and candidate
-        and (
-            str(candidate.get("setup_kind") or "") in _GTH_RESEARCH_ONLY_SETUPS
-            or str(candidate.get("source") or "") in _GTH_RESEARCH_ONLY_SOURCES
-        )
-        and "gth_event_settlement_not_actionable" not in reasons
-    ):
-        reasons = ["gth_event_settlement_not_actionable", *reasons]
+    if gth_session:
+        return _gth_health_desk_view(payload, decision, reasons)
     if watchable:
         conclusion = f"可看 · {strategy_candidate_label(candidate)}"
     else:
@@ -89,6 +76,36 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     )
 
 
+def _gth_health_desk_view(
+    payload: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    reasons: list[str],
+) -> str:
+    del payload
+    quality = _mapping(decision.get("data_quality"))
+    quality_reasons = [
+        str(reason)
+        for reason in quality.get("reasons") or ()
+        if str(reason).strip()
+    ]
+    if str(quality.get("status") or "").lower() == "ready" and not quality_reasons:
+        primary = "夜盘数据心跳正常"
+    elif quality_reasons:
+        primary = quality_reason_text(quality_reasons[0])
+    elif reasons:
+        primary = humanize_strategy_reason(reasons[0])
+    else:
+        primary = "夜盘结构与报价仍在刷新"
+    return "\n".join(
+        (
+            "结论  心跳 · 健康检查",
+            f"主因  {primary}",
+            "最近候选  无",
+            "下一步  过门赢家会单独推送交易卡；本卡不做交易建议",
+        )
+    )
+
+
 def strategy_candidate_label(candidate: Mapping[str, Any]) -> str:
     if not candidate:
         return "无"
@@ -108,6 +125,8 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
     if not decision:
         return None
     candidate = _mapping(decision.get("candidate"))
+    if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
+        return "原因  夜盘 Desk Map 是健康心跳，交易卡只推过门赢家"
     if strategy_candidate_is_watchable(payload, decision):
         return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
     reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]
@@ -153,7 +172,8 @@ def humanize_strategy_reason(reason: str) -> str:
         "path_inputs_not_aligned": "路径输入齐全，但尚未形成趋势或平衡",
         "gth_dip_reclaim_evidence_unavailable": "夜盘回踩收复证据不足",
         "gth_confirmed_level_candidate_unavailable": "夜盘确认墙位候选暂不可用",
-        "gth_event_settlement_not_actionable": "夜盘不把收盘事件价差当作交易候选",
+        "gth_width_scan_no_fresh_quote": "夜盘没有 1 分钟内的两腿新鲜报价",
+        "gth_scan_geometry_or_payoff_unavailable": "夜盘扫描缺少目标、失效位或权利金",
         "strategy_event_expired": "旧策略事件已过期",
         "gth_dip_reclaim_signal_expired": "夜盘回踩收复信号已过期",
         "source_entry_quality_blocked": "来源入场质量未过门",
