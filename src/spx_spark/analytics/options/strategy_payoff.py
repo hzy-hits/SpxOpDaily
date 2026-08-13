@@ -13,16 +13,22 @@ NEW_YORK = ZoneInfo("America/New_York")
 
 @dataclass(frozen=True, slots=True)
 class ManagementPolicy:
-    """Real exit rules for candidate evaluation (v3); not settlement binary payoff."""
+    """Real exit rules for candidate evaluation (v3); not settlement binary payoff.
 
-    policy_version: str = "management_policy.v1"
+    v2 drops the v1 premium stop (50% of debit) and 20-minute time stop.
+    Remaining exits: +50% profit arm then trail, and 15:45 ET hard close.
+    ``premium_stop_fraction`` / ``time_stop_minutes`` of None or <= 0 disable
+    that exit. Changing these constants requires a version bump.
+    """
+
+    policy_version: str = "management_policy.v2"
     entry_basis: str = "conservative_combo_ask"
     valuation_basis: str = "conservative_combo_bid"
     profit_arm_return_on_debit: float = 0.50
     trail_after_arm_fraction: float = 0.75
     trail_floor_is_entry_debit: bool = True
-    premium_stop_fraction: float = 0.50
-    time_stop_minutes: int = 20
+    premium_stop_fraction: float | None = None
+    time_stop_minutes: int | None = None
     hard_exit_et: str = "15:45"
     fees_per_leg_per_side: float = 1.32
 
@@ -229,9 +235,17 @@ def simulate_management_policy(
     fees_dollars = policy.fees_per_leg_per_side * float(leg_count) * 2.0
     fees_points = fees_dollars / 100.0
     arm_level = entry_ask * (1.0 + policy.profit_arm_return_on_debit)
-    stop_level = entry_ask * policy.premium_stop_fraction
+    stop_level = (
+        entry_ask * policy.premium_stop_fraction
+        if policy.premium_stop_fraction is not None and policy.premium_stop_fraction > 0
+        else None
+    )
     hard_exit = _hard_exit_at(start, policy.hard_exit_et, session_date=session_date)
-    time_stop_at = start + timedelta(minutes=policy.time_stop_minutes)
+    time_stop_at = (
+        start + timedelta(minutes=policy.time_stop_minutes)
+        if policy.time_stop_minutes is not None and policy.time_stop_minutes > 0
+        else None
+    )
 
     peak = entry_ask
     armed = False
@@ -254,10 +268,10 @@ def simulate_management_policy(
         if mark.at >= hard_exit:
             exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "hard_close"
             break
-        if mark.at >= time_stop_at:
+        if time_stop_at is not None and mark.at >= time_stop_at:
             exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "time_stop"
             break
-        if mark.combo_bid <= stop_level:
+        if stop_level is not None and mark.combo_bid <= stop_level:
             exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "premium_stop"
             break
         if not armed and mark.combo_bid >= arm_level:
@@ -307,6 +321,25 @@ def _coerce_mark(value: PolicyMark | Mapping[str, Any]) -> PolicyMark:
     if not isinstance(bid, (int, float)):
         raise ValueError("policy mark requires numeric combo_bid")
     return PolicyMark(at=_utc(at), combo_bid=float(bid))
+
+
+def policy_mark_horizon_end(
+    entry_at: datetime,
+    policy: ManagementPolicy = DEFAULT_MANAGEMENT_POLICY,
+    *,
+    session_date: date | None = None,
+    lookforward_minutes: int | None = None,
+) -> datetime:
+    """Last instant the policy may still hold: time-stop or 15:45 ET hard close."""
+
+    start = _utc(entry_at)
+    hard = _hard_exit_at(start, policy.hard_exit_et, session_date=session_date)
+    end = hard
+    if policy.time_stop_minutes is not None and policy.time_stop_minutes > 0:
+        end = min(end, start + timedelta(minutes=policy.time_stop_minutes))
+    if lookforward_minutes is not None:
+        end = min(end, start + timedelta(minutes=lookforward_minutes))
+    return end
 
 
 def _hard_exit_at(

@@ -96,25 +96,26 @@ MARK_HORIZONS_MINUTES = (1, 2, 3, 4, 5, 7, 10, 15, 20)
 - 写入量评估：每决策 ≤ 9 行 outcomes，RTH 约每分钟 1 个决策 → 每会话
   数千行量级，SQLite 无压力。
 
-### 2.3 ManagementPolicy v1（冻结常量，`management_policy.v1`）
+### 2.3 ManagementPolicy v2（冻结常量，`management_policy.v2`）
 
 ```python
 @dataclass(frozen=True)
 class ManagementPolicy:
-    policy_version: str = "management_policy.v1"
+    policy_version: str = "management_policy.v2"
     entry_basis: str = "conservative_combo_ask"
     valuation_basis: str = "conservative_combo_bid"
     profit_arm_return_on_debit: float = 0.50    # bid >= 1.5x debit 视为 arm
     trail_after_arm_fraction: float = 0.75      # arm 后 bid 跌破 peak_bid*0.75 离场
     trail_floor_is_entry_debit: bool = True     # trail 线不低于成本价
-    premium_stop_fraction: float = 0.50         # bid <= 0.5x debit 止损
-    time_stop_minutes: int = 20
+    premium_stop_fraction: float | None = None  # 取消 50% 权利金止损
+    time_stop_minutes: int | None = None        # 取消 20 分钟时间止损
     hard_exit_et: str = "15:45"
     fees_per_leg_per_side: float = 1.32         # 与既有 replay 口径一致
 ```
 
-出厂值是待校准的初始冻结值；回填校准报告可提议 `management_policy.v2`，
-改参数 = 改代码 + 版本递增 + 回放对照（沿用 S-track 阈值规则）。
+v1 含 `premium_stop_fraction=0.50` 与 `time_stop_minutes=20`。v2 取消这两项：
+未 arm 时继续持有，直到 trail（若已 arm）或 15:45 ET 硬退出。改参数 = 改代码
++ 版本递增 + 回放对照（沿用 S-track 阈值规则）。
 
 ### 2.4 标签模拟器（放入现有 owner `analytics/options/strategy_payoff.py`，不新增文件）
 
@@ -135,8 +136,8 @@ time_stop, hard_close, marks_exhausted}`、`quote_gap_seconds_max`。
 两个 pass，均为一次性离线脚本，不进 systemd：
 
 - **Pass A（V3-1 即可跑）**：对 `spx.sqlite` 已记录的每个 decision（含
-  nearest_candidate），从 `raw/provider=schwab`（2026-07-16 起）抽取决策时刻后
-  20 分钟的逐腿 NBBO，重建 conservative combo bid 序列，跑
+  nearest_candidate），从 `raw/provider=schwab`（2026-07-16 起）抽取决策时刻到
+  政策持有终点（v2：15:45 ET 硬退出）的逐腿 NBBO，重建 conservative combo bid 序列，跑
   `simulate_management_policy` 产出标签。
 - **Pass B（V3-2 之后）**：对 v2 §19.1 的固定决策时点 + confirmed trigger 时点，
   用 candidate factory 的同一枚举代码重建"当时应有的候选表"，全部打标。
@@ -399,7 +400,7 @@ V3-3b 全程 **只排序**。NO_TRADE 只能由确定性硬门产生。
 1. 新增 2 个生产文件 + 1 个研究脚本（v2 §18.1 五文件上限由本合同接管并重设）。
 2. schema bump：`strategy_decision.v2`、`strategy_outcome_mark.v2`。
 3. `strategy_policy.bootstrap.v2`（含防洪水常量：冷却 300s、每方向每会话 6 张卡）。
-4. `management_policy.v1` 出厂值（§2.3，尤其 +50% arm、trail 0.75、premium stop 0.5、20 分钟 time stop、15:45 ET 硬退出）。
+4. `management_policy.v2` 出厂值（§2.3：+50% arm、trail 0.75、无 premium stop、无 20 分钟 time stop、15:45 ET 硬退出）。
 5. 新增 `features/strategy_policy_labels/` parquet 数据集。
 6. V3-3b 升门证据条件（§7.4）作为未来再批准的固定门槛。
 

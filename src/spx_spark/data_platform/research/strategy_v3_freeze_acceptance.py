@@ -18,6 +18,7 @@ from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    policy_mark_horizon_end,
     simulate_management_policy,
 )
 from spx_spark.application.order_map.candidate_factory import enumerate_candidates
@@ -51,7 +52,7 @@ def run_acceptance(
     database_path: Path,
     data_root: Path,
     output_root: Path | None = None,
-    lookforward_minutes: int = 20,
+    lookforward_minutes: int | None = None,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "schema_version": "strategy_v3_freeze_acceptance.v1",
@@ -264,7 +265,7 @@ def _pass_b_session(
     database_path: Path,
     data_root: Path,
     session_date: str,
-    lookforward_minutes: int,
+    lookforward_minutes: int | None,
     sample_limit: int = 40,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     decisions = _load_decisions(database_path, session_date)
@@ -344,7 +345,7 @@ def _rebuild_one(
     *,
     store: QuoteStore,
     data_root: Path,
-    lookforward_minutes: int,
+    lookforward_minutes: int | None,
 ) -> dict[str, Any] | None:
     decision_at = _time(row.get("decision_at"))
     if decision_at is None:
@@ -660,7 +661,7 @@ def _label_candidate(
     decision_at: datetime,
     session_date: str,
     decision_id: str,
-    lookforward_minutes: int,
+    lookforward_minutes: int | None,
     regime: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     from spx_spark.data_platform.research.strategy_policy_backfill import (
@@ -681,7 +682,12 @@ def _label_candidate(
         legs=legs,
         provider=provider,
         start=decision_at,
-        end=decision_at + timedelta(minutes=lookforward_minutes),
+        end=policy_mark_horizon_end(
+            decision_at,
+            DEFAULT_MANAGEMENT_POLICY,
+            session_date=date.fromisoformat(session_date),
+            lookforward_minutes=lookforward_minutes,
+        ),
     )
     if not marks:
         return None
@@ -904,7 +910,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--report-md", type=Path, default=None)
     parser.add_argument("--report-json", type=Path, default=None)
-    parser.add_argument("--lookforward-minutes", type=int, default=20)
+    parser.add_argument("--lookforward-minutes", type=int, default=None)
     args = parser.parse_args(argv)
     report = run_acceptance(
         database_path=args.database,

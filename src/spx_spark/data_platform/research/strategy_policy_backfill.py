@@ -11,15 +11,17 @@ import json
 import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
     PolicyMark,
+    policy_mark_horizon_end,
     simulate_management_policy,
 )
+from spx_spark.application.order_map.strategy_regime import MARK_HORIZONS_MINUTES
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
 
 
@@ -28,7 +30,7 @@ def backfill_policy_labels(
     database_path: Path,
     data_root: Path,
     session_date: str | None = None,
-    lookforward_minutes: int = 20,
+    lookforward_minutes: int | None = None,
 ) -> list[dict[str, Any]]:
     """Label each persisted decision (selected or nearest shadow) with policy PnL."""
 
@@ -59,7 +61,7 @@ def _label_decision(
     decision: Mapping[str, Any],
     *,
     store: QuoteStore,
-    lookforward_minutes: int,
+    lookforward_minutes: int | None,
 ) -> dict[str, Any] | None:
     decision_at = _time(decision.get("decision_at"))
     if decision_at is None:
@@ -76,7 +78,13 @@ def _label_decision(
     if entry_ask is None:
         return None
     provider = str(legs[0].get("provider") or "schwab")
-    end = decision_at + timedelta(minutes=lookforward_minutes)
+    session = _session_date(decision.get("session_date"))
+    end = policy_mark_horizon_end(
+        decision_at,
+        DEFAULT_MANAGEMENT_POLICY,
+        session_date=session,
+        lookforward_minutes=lookforward_minutes,
+    )
     marks = _combo_bid_marks(
         store,
         legs=legs,
@@ -86,7 +94,6 @@ def _label_decision(
     )
     if not marks:
         return None
-    session = _session_date(decision.get("session_date"))
     label = simulate_management_policy(
         marks,
         entry_ask=entry_ask,
@@ -469,7 +476,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--session-date", type=str, default=None)
     parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--emit-ev-table", type=Path, default=None)
-    parser.add_argument("--lookforward-minutes", type=int, default=20)
+    parser.add_argument("--lookforward-minutes", type=int, default=None)
     args = parser.parse_args(argv)
     rows = backfill_policy_labels(
         database_path=args.database,
@@ -588,7 +595,7 @@ def _censored_decision_ids(
     database_path: Path,
     session_date: str | None,
 ) -> set[str]:
-    """Decisions censored at the ManagementPolicy time-stop horizon (20m).
+    """Decisions censored at the longest v3 mark horizon.
 
     Shorter-horizon transient quote gaps do not count toward n_censored.
     """
@@ -603,7 +610,7 @@ def _censored_decision_ids(
             WHERE o.horizon_minutes = ?
               AND (? IS NULL OR d.session_date = ?)
             """,
-            (DEFAULT_MANAGEMENT_POLICY.time_stop_minutes, session_date, session_date),
+            (MARK_HORIZONS_MINUTES[-1], session_date, session_date),
         ).fetchall()
     finally:
         connection.close()

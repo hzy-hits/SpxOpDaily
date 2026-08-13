@@ -8,6 +8,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from spx_spark.analytics.options.strategy_payoff import (
+    DEFAULT_MANAGEMENT_POLICY,
+    ManagementPolicy,
     PolicyMark,
     butterfly_economics,
     butterfly_payoff,
@@ -1434,7 +1436,7 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
         json.dumps(
             {
                 "schema_version": "policy_ev_table.v1",
-                "management_policy_version": "management_policy.v1",
+                "management_policy_version": "management_policy.v2",
                 "generated_at": now.isoformat(),
                 "source_sessions": ["2026-08-05", "2026-08-06"],
                 "buckets": {
@@ -1474,7 +1476,7 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
     assert without_table.passed[0]["edge"]["policy_ev_reason"] == "table_unavailable"
     assert with_table.passed[0]["edge"]["policy_ev"] == pytest.approx(0.35)
     assert with_table.passed[0]["edge"]["policy_ev_n"] == 24
-    assert with_table.passed[0]["edge"]["policy_ev_version"] == "management_policy.v1"
+    assert with_table.passed[0]["edge"]["policy_ev_version"] == "management_policy.v2"
     assert with_table.passed[0]["edge"]["policy_ev_reason"] is None
 
 
@@ -2185,6 +2187,51 @@ def test_management_policy_arms_then_trails() -> None:
     assert label.policy_pnl_points < 0.8  # fees deducted
 
 
+def test_management_policy_v2_does_not_premium_stop_or_time_stop() -> None:
+    start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=1), combo_bid=0.8),
+        PolicyMark(at=start + timedelta(minutes=2), combo_bid=0.4),
+        PolicyMark(at=start + timedelta(minutes=25), combo_bid=0.3),
+    ]
+    label = simulate_management_policy(
+        marks, entry_ask=1.0, leg_count=2, entry_at=start
+    )
+    assert DEFAULT_MANAGEMENT_POLICY.policy_version == "management_policy.v2"
+    assert DEFAULT_MANAGEMENT_POLICY.premium_stop_fraction is None
+    assert DEFAULT_MANAGEMENT_POLICY.time_stop_minutes is None
+    assert label.tp_armed is False
+    assert label.exit_reason == "marks_exhausted"
+    assert label.exit_bid == pytest.approx(0.3)
+    assert label.mae_points == pytest.approx(-0.7)
+
+
+def test_management_policy_v2_hard_closes_at_1545_et() -> None:
+    start = datetime(2026, 8, 7, 19, 40, tzinfo=timezone.utc)
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=1), combo_bid=0.9),
+        PolicyMark(at=start + timedelta(minutes=6), combo_bid=0.8),
+    ]
+    label = simulate_management_policy(
+        marks, entry_ask=1.0, leg_count=2, entry_at=start
+    )
+    assert label.exit_reason == "hard_close"
+    assert label.exit_bid == pytest.approx(0.8)
+
+
+def test_management_policy_v2_hard_closes_at_1545_et() -> None:
+    start = datetime(2026, 8, 7, 19, 40, tzinfo=timezone.utc)
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=1), combo_bid=0.9),
+        PolicyMark(at=start + timedelta(minutes=6), combo_bid=0.8),
+    ]
+    label = simulate_management_policy(
+        marks, entry_ask=1.0, leg_count=2, entry_at=start
+    )
+    assert label.exit_reason == "hard_close"
+    assert label.exit_bid == pytest.approx(0.8)
+
+
 def test_management_policy_premium_stop_before_arm() -> None:
     start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
     marks = [
@@ -2192,7 +2239,15 @@ def test_management_policy_premium_stop_before_arm() -> None:
         PolicyMark(at=start + timedelta(minutes=2), combo_bid=0.4),
     ]
     label = simulate_management_policy(
-        marks, entry_ask=1.0, leg_count=2, entry_at=start
+        marks,
+        entry_ask=1.0,
+        leg_count=2,
+        entry_at=start,
+        policy=ManagementPolicy(
+            policy_version="management_policy.v1",
+            premium_stop_fraction=0.50,
+            time_stop_minutes=20,
+        ),
     )
     assert label.tp_armed is False
     assert label.exit_reason == "premium_stop"
