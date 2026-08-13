@@ -181,6 +181,40 @@ def vertical_entry_quality(
     return result, []
 
 
+def vertical_width_path_reasons(
+    *,
+    long_strike: float,
+    short_strike: float,
+    right: str,
+    target: float | None,
+    remaining_expected_move: float | None,
+) -> list[str]:
+    """Reject debit verticals whose width is a directional lever past the thesis.
+
+    v2 §9.5: short strike must not go beyond the target, and the wing must fit
+    inside the remaining 0DTE expected move. Missing EM fails closed.
+    """
+
+    code = right.upper()
+    reasons: list[str] = []
+    if target is None:
+        reasons.append("vertical_target_or_invalidation_unavailable")
+    elif code == "C":
+        if short_strike > target:
+            reasons.append("vertical_short_beyond_target")
+    elif code == "P":
+        if short_strike < target:
+            reasons.append("vertical_short_beyond_target")
+    else:
+        reasons.append("vertical_right_invalid")
+    width = abs(short_strike - long_strike)
+    if remaining_expected_move is None or remaining_expected_move <= 0:
+        reasons.append("vertical_remaining_move_unavailable")
+    elif width > remaining_expected_move:
+        reasons.append("vertical_width_exceeds_remaining_move")
+    return reasons
+
+
 def _positive(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) and value > 0 else None
 

@@ -27,7 +27,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v4"
+    policy_version: str = "strategy_policy.bootstrap.v5"
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
     trend_max_vwap_crosses: float = 2.0
@@ -51,6 +51,8 @@ class StrategyPolicy:
     pin_body_max_spot_distance_points: float = 15.0
     butterfly_max_debit_fraction: float = 0.35
     butterfly_max_risk_usd: float = 1000.0
+    # v5: debit vertical short strike may not pass the target, and width may
+    # not exceed remaining 0DTE expected move. Missing EM fails closed.
     # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
     candidate_cooldown_seconds: float = 300.0
     max_cards_per_direction_per_session: int = 6

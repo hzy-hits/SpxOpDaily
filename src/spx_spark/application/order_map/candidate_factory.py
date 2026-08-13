@@ -13,6 +13,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
     vertical_economics,
+    vertical_width_path_reasons,
 )
 from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.application.market_features.session_quote_selection import provider_quote
@@ -173,6 +174,16 @@ def _rth_width_verticals(
     for long_strike in sorted(value for value in anchors if value is not None):
         for width in WIDTHS:
             short_strike = long_strike + width if right == "C" else long_strike - width
+            if vertical_width_path_reasons(
+                long_strike=long_strike,
+                short_strike=short_strike,
+                right=right,
+                target=_number(evidence.get("target_spx")),
+                remaining_expected_move=_number(
+                    _map(facts.get("volatility")).get("expected_move_points")
+                ),
+            ):
+                continue
             legs = _rth_option_legs(
                 latest,
                 expiry,

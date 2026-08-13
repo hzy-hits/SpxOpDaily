@@ -16,6 +16,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     simulate_management_policy,
     vertical_economics,
     vertical_payoff,
+    vertical_width_path_reasons,
 )
 from spx_spark.application.order_map.candidate_factory import enumerate_candidates
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
@@ -373,7 +374,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v4"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v5"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -600,6 +601,109 @@ def test_confirmed_setup_directly_enumerates_without_legacy_spread() -> None:
     assert decision["rejection_funnel"]["setup_detected"] == 1
     assert decision["rejection_funnel"]["candidate_enumerated"] > 0
     assert decision["rejection_funnel"]["exact_quote_ready"] > 0
+
+
+def test_vertical_width_path_reasons_bind_short_to_target_and_remaining_move() -> None:
+    assert vertical_width_path_reasons(
+        long_strike=7755.0,
+        short_strike=7775.0,
+        right="C",
+        target=7760.0,
+        remaining_expected_move=8.7,
+    ) == [
+        "vertical_short_beyond_target",
+        "vertical_width_exceeds_remaining_move",
+    ]
+    assert vertical_width_path_reasons(
+        long_strike=7755.0,
+        short_strike=7760.0,
+        right="C",
+        target=7760.0,
+        remaining_expected_move=8.7,
+    ) == []
+    assert vertical_width_path_reasons(
+        long_strike=7755.0,
+        short_strike=7765.0,
+        right="C",
+        target=7770.0,
+        remaining_expected_move=8.7,
+    ) == ["vertical_width_exceeds_remaining_move"]
+    assert vertical_width_path_reasons(
+        long_strike=7755.0,
+        short_strike=7745.0,
+        right="P",
+        target=7750.0,
+        remaining_expected_move=10.0,
+    ) == ["vertical_short_beyond_target"]
+    assert vertical_width_path_reasons(
+        long_strike=7755.0,
+        short_strike=7750.0,
+        right="P",
+        target=7750.0,
+        remaining_expected_move=10.0,
+    ) == []
+    assert vertical_width_path_reasons(
+        long_strike=7755.0,
+        short_strike=7760.0,
+        right="C",
+        target=7760.0,
+        remaining_expected_move=None,
+    ) == ["vertical_remaining_move_unavailable"]
+
+
+def test_failed_break_does_not_select_call_vertical_past_target_or_remaining_move() -> None:
+    now = datetime(2026, 8, 12, 14, 26, 35, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["trading_date"] = "2026-08-12"
+    payload["underlier"] = {"price": 7752.955, "source": "index:SPX"}
+    payload["expected_move_points"] = 8.7
+    payload["option_structure_frame"]["front_expiry"] = "20260812"
+    payload["option_structure_frame"]["structure"]["call_wall"] = 7760.0
+    payload["level_decision"] = {
+        "phase": "confirmed",
+        "thesis": "fade",
+        "direction": "up",
+        "level_kind": "orh",
+        "level": 7750.0,
+        "event_id": "level:7750:up",
+    }
+    payload["trade_intent"] = {
+        "invalidation_spx": 7750.0,
+        "confirmation_geometry": {"target_spx": 7760.0},
+    }
+    latest = _failed_break_20260812_chain(now)
+
+    decision = build_strategy_decision(payload, latest, now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    candidate = decision["candidate"]
+    assert candidate["setup_kind"] == "FAILED_BREAK_RECLAIM"
+    assert candidate["long"]["strike"] == 7755.0
+    assert candidate["short"]["strike"] == 7760.0
+    assert candidate["economics"]["width_points"] == 5.0
+    considered = [
+        tuple(row.get("strikes") or ())
+        for row in decision.get("candidates_considered") or ()
+        if str(row.get("strategy_type") or "").endswith("_DEBIT_VERTICAL")
+    ]
+    assert (7755.0, 7775.0) not in considered
+    near_miss_strikes = [
+        tuple(row.get("strikes") or ())
+        for row in decision.get("why_not", {}).get("nearest_candidates") or ()
+    ]
+    assert (7755.0, 7775.0) not in near_miss_strikes
+
+
+def test_missing_expected_move_fails_closed_for_debit_vertical() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("expected_move_points")
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert "vertical_remaining_move_unavailable" in decision["why_not"]["reasons"]
 
 
 def test_confirmed_session_episode_maps_to_failed_break_reclaim_vertical() -> None:
@@ -1921,6 +2025,33 @@ def _vertical_chain_state(now: datetime) -> LatestState:
     return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
 
 
+def _failed_break_20260812_chain(now: datetime) -> LatestState:
+    observed = now - timedelta(seconds=1)
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.option(
+                "SPX",
+                expiry="20260812",
+                strike=strike,
+                right="C",
+                trading_class="SPXW",
+            ),
+            provider=Provider.SCHWAB,
+            received_at=observed,
+            quote_time=observed,
+            quality=MarketDataQuality.LIVE,
+            bid=bid,
+            ask=ask,
+        )
+        for strike, bid, ask in (
+            (7755, 3.0, 3.2),
+            (7760, 2.0, 2.2),
+            (7775, 0.4, 0.5),
+        )
+    )
+    return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
+
+
 def _decision_payload(now: datetime) -> dict[str, object]:
     observed = now - timedelta(seconds=1)
     long_leg = {
@@ -1983,6 +2114,7 @@ def _decision_payload(now: datetime) -> dict[str, object]:
             },
         },
         "macro_event": {"mode": "normal", "entry_allowed": True},
+        "expected_move_points": 40.0,
         "level_decision": {
             "phase": "confirmed",
             "thesis": "breakout",
@@ -2096,7 +2228,7 @@ def _pin_payload(now: datetime) -> dict[str, object]:
             "as_of": observed, "quality": "ready", "front_expiry": "20260806",
             "l1": {"quality": "ready"}, "structure": facts["structure"],
             "density": {"mode": 7710.0, "local_mass_5pt": facts["structure"]["q_local_mass_5pt"]},
-            "volatility": {"atm_straddle_decay_15m": 0.0448},
+            "volatility": {"atm_straddle_decay_15m": 0.0448, "expected_move_points_0dte": 25.0},
         },
         "macro_event": {"mode": "normal", "entry_allowed": True},
         "strategy_distribution_forecast": _probability_forecast(now, "terminal_between"),

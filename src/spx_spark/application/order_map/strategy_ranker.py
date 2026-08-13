@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.density import summarize_strike_surface_shape
-from spx_spark.analytics.options.strategy_payoff import vertical_entry_quality
+from spx_spark.analytics.options.strategy_payoff import (
+    vertical_entry_quality,
+    vertical_width_path_reasons,
+)
 from spx_spark.application.market_features.physical_followthrough import (
     estimate_physical_terminal_range,
 )
@@ -213,6 +216,30 @@ def _vertical_hard_gates(
     debit_fraction = _number(economics.get("debit_fraction_of_width"))
     if None in (spot, atr, target, stop, debit_fraction):
         return [{"gate": "entry_quality_atr_or_geometry_unavailable", "actual": None, "threshold": "present"}]
+    long_strike = _number(long.get("strike"))
+    short_strike = _number(short.get("strike"))
+    right = str(candidate.get("right") or long.get("right") or "").upper()
+    remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
+    if long_strike is None or short_strike is None:
+        return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
+    path_reasons = vertical_width_path_reasons(
+        long_strike=long_strike,
+        short_strike=short_strike,
+        right=right,
+        target=target,
+        remaining_expected_move=remaining_move,
+    )
+    if path_reasons:
+        return [
+            _width_path_gate(
+                reason,
+                long_strike=long_strike,
+                short_strike=short_strike,
+                target=target,
+                remaining_expected_move=remaining_move,
+            )
+            for reason in path_reasons
+        ]
     entry_quality, reasons = vertical_entry_quality(
         spot=float(spot),
         atr=float(atr),
@@ -656,6 +683,24 @@ def _gate_from_entry_reason(
             "actual": entry_quality.get("stop_distance_atr"),
             "threshold": [policy.min_stop_atr, policy.max_stop_atr],
         }
+    return _reason_gate(reason)
+
+
+def _width_path_gate(
+    reason: str,
+    *,
+    long_strike: float,
+    short_strike: float,
+    target: float | None,
+    remaining_expected_move: float | None,
+) -> dict[str, Any]:
+    width = abs(short_strike - long_strike)
+    if reason == "vertical_short_beyond_target":
+        return {"gate": reason, "actual": short_strike, "threshold": target}
+    if reason == "vertical_width_exceeds_remaining_move":
+        return {"gate": reason, "actual": width, "threshold": remaining_expected_move}
+    if reason == "vertical_remaining_move_unavailable":
+        return {"gate": reason, "actual": remaining_expected_move, "threshold": ">0"}
     return _reason_gate(reason)
 
 
