@@ -7,6 +7,33 @@ from typing import Any, Mapping
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.state import current_session_is_gth
 
+_GTH_RESEARCH_ONLY_SETUPS = frozenset({"EVENT_SETTLEMENT_THRESHOLD"})
+_GTH_RESEARCH_ONLY_SOURCES = frozenset({"prior_close_event_view"})
+
+
+def strategy_candidate_is_watchable(
+    payload: Mapping[str, Any],
+    decision: Mapping[str, Any] | None = None,
+) -> bool:
+    """True when strategy_decision may be shown as a human GTH/RTH watch card."""
+
+    decision = _mapping(decision or payload.get("strategy_decision"))
+    candidate = _mapping(decision.get("candidate"))
+    if (
+        decision.get("action_authority") != "manual"
+        or not candidate
+        or str(decision.get("decision_type") or "NO_TRADE") == "NO_TRADE"
+    ):
+        return False
+    if not current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
+        return True
+    setup = str(candidate.get("setup_kind") or "")
+    source = str(candidate.get("source") or "")
+    return (
+        setup not in _GTH_RESEARCH_ONLY_SETUPS
+        and source not in _GTH_RESEARCH_ONLY_SOURCES
+    )
+
 
 def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     """Render the human Base Case owned by strategy_decision.
@@ -23,21 +50,27 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     nearest = candidate or _mapping(why_not.get("nearest_candidate"))
     reasons = [str(reason) for reason in why_not.get("reasons") or () if str(reason).strip()]
     failed_gates = _failed_gate_codes(nearest, reasons)
-    decision_type = str(decision.get("decision_type") or "NO_TRADE")
-    manual = (
-        decision.get("action_authority") == "manual"
-        and bool(candidate)
-        and decision_type != "NO_TRADE"
+    watchable = strategy_candidate_is_watchable(payload, decision)
+    gth_session = current_session_is_gth(
+        payload, _mapping(payload.get("level_decision"))
     )
-    if manual:
+    if (
+        not watchable
+        and gth_session
+        and candidate
+        and (
+            str(candidate.get("setup_kind") or "") in _GTH_RESEARCH_ONLY_SETUPS
+            or str(candidate.get("source") or "") in _GTH_RESEARCH_ONLY_SOURCES
+        )
+        and "gth_event_settlement_not_actionable" not in reasons
+    ):
+        reasons = ["gth_event_settlement_not_actionable", *reasons]
+    if watchable:
         conclusion = f"可看 · {strategy_candidate_label(candidate)}"
     else:
         conclusion = "不做"
     primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
-    gth_no_trade = (
-        not manual
-        and current_session_is_gth(payload, _mapping(payload.get("level_decision")))
-    )
+    gth_no_trade = not watchable and gth_session
     nearest_line = (
         "无"
         if gth_no_trade
@@ -75,7 +108,7 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
     if not decision:
         return None
     candidate = _mapping(decision.get("candidate"))
-    if decision.get("action_authority") == "manual" and candidate:
+    if strategy_candidate_is_watchable(payload, decision):
         return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
     reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]
     primary = humanize_strategy_reason(reasons[0]) if reasons else "尚无支持交易的候选"
@@ -120,6 +153,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "path_inputs_not_aligned": "路径输入齐全，但尚未形成趋势或平衡",
         "gth_dip_reclaim_evidence_unavailable": "夜盘回踩收复证据不足",
         "gth_confirmed_level_candidate_unavailable": "夜盘确认墙位候选暂不可用",
+        "gth_event_settlement_not_actionable": "夜盘不把收盘事件价差当作交易候选",
         "strategy_event_expired": "旧策略事件已过期",
         "gth_dip_reclaim_signal_expired": "夜盘回踩收复信号已过期",
         "source_entry_quality_blocked": "来源入场质量未过门",

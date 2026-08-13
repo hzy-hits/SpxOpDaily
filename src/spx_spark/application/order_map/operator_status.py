@@ -28,6 +28,7 @@ from spx_spark.application.order_map.desk_strategy_view import (
     phase_label,
     quality_reason_text,
     stage_label,
+    strategy_candidate_is_watchable,
     strategy_decision_desk_view,
     strategy_reason_line,
     thesis_label,
@@ -880,8 +881,7 @@ def _execution_line(
         candidate = _mapping(strategy_decision.get("candidate"))
         execution = _mapping(strategy_decision.get("execution"))
         if (
-            strategy_decision.get("action_authority") == "manual"
-            and candidate
+            strategy_candidate_is_watchable(payload, strategy_decision)
             and execution.get("action") == "MANUAL_LIMIT"
         ):
             opportunity = str(candidate.get("opportunity_id") or "-")

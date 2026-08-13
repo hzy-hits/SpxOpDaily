@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.application.order_map.candidate_factory import (
@@ -151,6 +151,12 @@ def event_settlement_generation_reason(
 def event_settlement_context(
     payload: Mapping[str, Any], *, now: datetime
 ) -> dict[str, Any]:
+    now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    # GTH human cards only authorize session-advance / aged dip-reclaim.
+    # Prior-close PPI/CPI 5-point verticals are RTH event research and must
+    # not appear as watchable GTH debit spreads.
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+        return {}
     frame = _map(payload.get("option_structure_frame"))
     expiry = str(frame.get("front_expiry") or payload.get("expiry") or "")
     threshold = _number(_map(payload.get("day_move")).get("prior_close"))

@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 
+import pytest
+
 from spx_spark.application.order_map.event_settlement_vertical import (
     enumerate_event_settlement_candidates,
 )
@@ -143,7 +145,44 @@ def _event_rows(now: datetime) -> list[dict[str, object]]:
     )
 
 
-def test_prior_close_event_view_enumerates_adjacent_call_and_put_verticals() -> None:
+@pytest.fixture
+def allow_event_settlement_outside_gth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.event_settlement_vertical.DEFAULT_MARKET_CALENDAR.is_spx_gth_open",
+        lambda now: False,
+    )
+
+
+def test_gth_does_not_enumerate_prior_close_event_verticals(monkeypatch) -> None:
+    now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
+    facts = _facts(now)
+    regime = _regime()
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+        lambda payload, latest, at: facts,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.assess_regime",
+        lambda supplied: regime,
+    )
+
+    assert _event_rows(now) == []
+    decision = build_strategy_decision(
+        _payload(),
+        _state(now),
+        now,
+        data_root=None,
+        probability_settings=None,
+    )
+    assert decision["action_authority"] == "none"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision.get("candidate") in (None, {})
+    assert decision["rejection_funnel"]["event_settlement_considered"] == 0
+
+
+def test_prior_close_event_view_enumerates_adjacent_call_and_put_verticals(
+    allow_event_settlement_outside_gth: None,
+) -> None:
     now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
     event_rows = _event_rows(now)
 
@@ -176,7 +215,9 @@ def test_prior_close_event_view_enumerates_adjacent_call_and_put_verticals() -> 
     assert call_7730_7735["probability_event"]["kind"] == "terminal_above"
 
 
-def test_event_view_can_pass_pre_event_macro_gate_without_path_geometry() -> None:
+def test_event_view_can_pass_pre_event_macro_gate_without_path_geometry(
+    allow_event_settlement_outside_gth: None,
+) -> None:
     now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
     policy = StrategyPolicy()
     event_rows = _event_rows(now)
@@ -230,6 +271,7 @@ def test_event_view_can_pass_pre_event_macro_gate_without_path_geometry() -> Non
 
 def test_build_strategy_decision_promotes_event_view_to_manual_candidate(
     monkeypatch,
+    allow_event_settlement_outside_gth: None,
 ) -> None:
     now = datetime(2026, 8, 12, 4, 30, tzinfo=timezone.utc)
     facts = _facts(now)

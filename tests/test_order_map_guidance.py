@@ -614,6 +614,35 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
     assert "待评估" not in sections.desk_view
 
 
+def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
+    gth_now = datetime(2026, 8, 13, 4, 22, tzinfo=timezone.utc)
+    payload = _payload()
+    payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}
+    payload["strategy_decision"] = {
+        "decision_type": "PUT_DEBIT_VERTICAL",
+        "action_authority": "manual",
+        "candidate": {
+            "strategy_type": "PUT_DEBIT_VERTICAL",
+            "setup_kind": "EVENT_SETTLEMENT_THRESHOLD",
+            "source": "prior_close_event_view",
+            "long": {"strike": 7750.0},
+            "short": {"strike": 7745.0},
+            "opportunity_id": "strategy-opportunity:d95b5599b6bb81771e",
+        },
+        "execution": {"action": "MANUAL_LIMIT"},
+        "why_not": {"reasons": []},
+    }
+
+    sections = build_desk_message_sections(payload, gth_now)
+
+    assert "结论  不做" in sections.desk_view
+    assert "最近候选  无" in sections.desk_view
+    assert "夜盘不把收盘事件价差当作交易候选" in sections.desk_view
+    assert "7750/7745" not in sections.desk_view
+    assert "可看 ·" not in sections.desk_view
+    assert "可看 ·" not in sections.execution
+
+
 @pytest.mark.parametrize(
     "frame_update",
     (
