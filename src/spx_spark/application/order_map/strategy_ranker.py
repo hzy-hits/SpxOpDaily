@@ -12,6 +12,7 @@ from typing import Any
 
 from spx_spark.analytics.options.density import summarize_strike_surface_shape
 from spx_spark.analytics.options.strategy_payoff import (
+    debit_vertical_reach_reasons,
     vertical_entry_quality,
     vertical_width_path_reasons,
 )
@@ -287,9 +288,30 @@ def _gth_scan_vertical_hard_gates(
     if None in (target, stop, debit_fraction, long_strike, short_strike):
         return [{"gate": "gth_scan_geometry_or_payoff_unavailable", "actual": None, "threshold": "present"}]
     gates: list[dict[str, Any]] = []
-    if candidate.get("setup_kind") != _GTH_DELTA_SCAN:
-        right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
-        remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
+    remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
+    right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
+    if candidate.get("setup_kind") == _GTH_DELTA_SCAN:
+        spot = _number(_map(facts.get("spot")).get("spx"))
+        if spot is None:
+            return [{"gate": "spx_price_unavailable", "actual": None, "threshold": "present"}]
+        reach_reasons = debit_vertical_reach_reasons(
+            spot=float(spot),
+            long_strike=float(long_strike),
+            short_strike=float(short_strike),
+            right=right,
+            remaining_expected_move=remaining_move,
+        )
+        gates.extend(
+            _width_path_gate(
+                reason,
+                long_strike=float(long_strike),
+                short_strike=float(short_strike),
+                target=target,
+                remaining_expected_move=remaining_move,
+            )
+            for reason in reach_reasons
+        )
+    else:
         path_reasons = vertical_width_path_reasons(
             long_strike=float(long_strike),
             short_strike=float(short_strike),
@@ -297,7 +319,7 @@ def _gth_scan_vertical_hard_gates(
             target=target,
             remaining_expected_move=remaining_move,
         )
-        gates = [
+        gates.extend(
             _width_path_gate(
                 reason,
                 long_strike=float(long_strike),
@@ -306,7 +328,7 @@ def _gth_scan_vertical_hard_gates(
                 remaining_expected_move=remaining_move,
             )
             for reason in path_reasons
-        ]
+        )
     if float(debit_fraction) > policy.max_debit_fraction:
         gates.append(
             {
@@ -496,6 +518,9 @@ def _iron_condor_hard_gates(
     from spx_spark.application.order_map.iron_condor import (
         MAX_CREDIT_FRACTION,
         MIN_CREDIT_FRACTION,
+        SHORT_DELTA_MAX,
+        SHORT_DELTA_MIN,
+        WING_WIDTH,
     )
 
     gates: list[dict[str, Any]] = []
@@ -544,28 +569,22 @@ def _iron_condor_hard_gates(
         )
         if delta is not None
     ]
-    if len(deltas) != 2 or any(not 0.15 <= value <= 0.35 for value in deltas):
+    if len(deltas) != 2 or any(not SHORT_DELTA_MIN <= value <= SHORT_DELTA_MAX for value in deltas):
         gates.append(
             {
                 "gate": "iron_condor_short_delta_band",
                 "actual": deltas,
-                "threshold": "0.15-0.35",
+                "threshold": f"{SHORT_DELTA_MIN}-{SHORT_DELTA_MAX}",
             }
         )
-    wing_deltas = [
-        abs(delta)
-        for delta in (
-            _number(_map(candidate.get("put_long")).get("delta")),
-            _number(_map(candidate.get("call_long")).get("delta")),
-        )
-        if delta is not None
-    ]
-    if len(wing_deltas) != 2 or any(not 0.02 <= value <= 0.12 for value in wing_deltas):
+    put_width = _number(economics.get("put_width_points"))
+    call_width = _number(economics.get("call_width_points"))
+    if put_width != WING_WIDTH or call_width != WING_WIDTH:
         gates.append(
             {
-                "gate": "iron_condor_long_delta_band",
-                "actual": wing_deltas,
-                "threshold": "0.02-0.12",
+                "gate": "iron_condor_wing_too_wide",
+                "actual": [put_width, call_width],
+                "threshold": WING_WIDTH,
             }
         )
     return gates
@@ -880,6 +899,8 @@ def _width_path_gate(
         return {"gate": reason, "actual": short_strike, "threshold": target}
     if reason == "vertical_width_exceeds_remaining_move":
         return {"gate": reason, "actual": width, "threshold": remaining_expected_move}
+    if reason == "debit_long_beyond_remaining_move":
+        return {"gate": reason, "actual": long_strike, "threshold": remaining_expected_move}
     if reason == "vertical_remaining_move_unavailable":
         return {"gate": reason, "actual": remaining_expected_move, "threshold": ">0"}
     return _reason_gate(reason)

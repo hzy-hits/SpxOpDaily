@@ -13,6 +13,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     butterfly_payoff,
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
+    debit_vertical_reach_reasons,
     simulate_management_policy,
     vertical_economics,
     vertical_payoff,
@@ -374,7 +375,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v9"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v10"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -649,6 +650,26 @@ def test_vertical_width_path_reasons_bind_short_to_target_and_remaining_move() -
         target=7760.0,
         remaining_expected_move=None,
     ) == ["vertical_remaining_move_unavailable"]
+
+
+def test_debit_long_beyond_remaining_move_rejects_unreachable_10_delta_calls() -> None:
+    assert debit_vertical_reach_reasons(
+        spot=7753.0,
+        long_strike=7800.0,
+        short_strike=7850.0,
+        right="C",
+        remaining_expected_move=25.0,
+    ) == [
+        "vertical_width_exceeds_remaining_move",
+        "debit_long_beyond_remaining_move",
+    ]
+    assert debit_vertical_reach_reasons(
+        spot=7753.0,
+        long_strike=7760.0,
+        short_strike=7770.0,
+        right="C",
+        remaining_expected_move=25.0,
+    ) == []
 
 
 def test_failed_break_does_not_select_call_vertical_past_target_or_remaining_move() -> None:

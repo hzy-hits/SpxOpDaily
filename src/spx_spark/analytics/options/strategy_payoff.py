@@ -304,6 +304,38 @@ def vertical_width_path_reasons(
     return reasons
 
 
+def debit_vertical_reach_reasons(
+    *,
+    spot: float,
+    long_strike: float,
+    short_strike: float,
+    right: str,
+    remaining_expected_move: float | None,
+) -> list[str]:
+    """Reject debit verticals the remaining expected move cannot reach.
+
+    GTH 10Δ/25Δ anchors can sit tens of points beyond the remaining 0DTE move.
+    Width fitting inside EM is not enough if the long strike itself is unreachable.
+    """
+
+    reasons: list[str] = []
+    if remaining_expected_move is None or remaining_expected_move <= 0:
+        return ["vertical_remaining_move_unavailable"]
+    width = abs(short_strike - long_strike)
+    if width > remaining_expected_move:
+        reasons.append("vertical_width_exceeds_remaining_move")
+    code = right.upper()
+    if code == "C":
+        distance = long_strike - spot
+    elif code == "P":
+        distance = spot - long_strike
+    else:
+        return ["vertical_right_invalid"]
+    if distance > remaining_expected_move:
+        reasons.append("debit_long_beyond_remaining_move")
+    return reasons
+
+
 def _positive(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) and value > 0 else None
 

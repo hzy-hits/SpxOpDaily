@@ -224,7 +224,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v9"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v10"
     assert ranked.passed
     assert decision["action_authority"] == "manual"
     assert decision["decision_type"] in {
@@ -253,9 +253,11 @@ def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> N
         "execution": {"action": "MANUAL_LIMIT"},
         "iron_condor_map": {
             "status": "ready",
-            "strikes": [7650.0, 7700.0, 7800.0, 7840.0],
+            "short_abs_delta": 0.25,
+            "wing_width": 10.0,
+            "strikes": [7690.0, 7700.0, 7800.0, 7810.0],
             "quote": {"credit": 8.0},
-            "economics": {"max_gain_points": 8.0},
+            "economics": {"max_gain_points": 8.0, "max_loss_points": 2.0, "width_points": 10.0},
         },
         "rejection_funnel": {"candidate_enumerated": 40, "hard_gate_pass": 1},
         "data_quality": {"status": "ready", "reasons": []},
@@ -267,5 +269,5 @@ def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> N
     assert "心跳 · 健康检查" not in sections.desk_view
     assert "最近候选  无" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "25Δ/5Δ 7650/7700/7800/7840 贷记 8" in sections.desk_view
+    assert "卖25Δ 10宽 7690/7700/7800/7810 贷记 8 最大亏损 2" in sections.desk_view
     assert "扫描中 · 铁鹰已标位" in sections.execution

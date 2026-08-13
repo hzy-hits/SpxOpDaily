@@ -116,7 +116,7 @@ def _gth_scan_desk_view(
     elif reasons:
         primary = humanize_strategy_reason(reasons[0])
     else:
-        primary = "1 分钟报价持续重算 5–50 点价差、蝶式与 25Δ/5Δ 铁鹰"
+        primary = "1 分钟报价持续重算 5–50 点价差、蝶式与 5–25Δ 10 点翼宽铁鹰"
     return "\n".join(
         (
             f"结论  {conclusion}",
@@ -147,7 +147,7 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
         return None
     candidate = _mapping(decision.get("candidate"))
     if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-        return "原因  夜盘 Desk Map 展示 25Δ/5Δ 铁鹰与宽度扫描；交易卡只推过门赢家"
+        return "原因  夜盘 Desk Map 展示 5–25Δ 卖权 10 点翼宽铁鹰与宽度扫描；交易卡只推过门赢家"
     if strategy_candidate_is_watchable(payload, decision):
         return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
     reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]
@@ -196,13 +196,14 @@ def humanize_strategy_reason(reason: str) -> str:
         "gth_confirmed_level_candidate_unavailable": "夜盘确认墙位候选暂不可用",
         "gth_width_scan_no_fresh_quote": "夜盘没有 1 分钟内的两腿新鲜报价",
         "gth_scan_geometry_or_payoff_unavailable": "夜盘扫描缺少目标、失效位或权利金",
-        "iron_condor_delta_quotes_unavailable": "25Δ/5Δ 铁鹰缺少带 delta 的新鲜报价",
+        "debit_long_beyond_remaining_move": "长腿超出剩余期望波动，20 分钟/到期都很难碰到",
+        "iron_condor_delta_quotes_unavailable": "5–25Δ 卖权铁鹰缺少带 delta 的新鲜报价",
         "iron_condor_four_leg_quote_unavailable": "铁鹰四腿报价不齐",
         "iron_condor_credit_unavailable": "铁鹰保守贷记尚未形成",
         "iron_condor_credit_fraction": "铁鹰贷记相对翼宽不在可接受区间",
         "iron_condor_spot_outside_shorts": "现价已离开铁鹰短腿区间",
-        "iron_condor_short_delta_band": "铁鹰短腿不在 15–35Δ",
-        "iron_condor_long_delta_band": "铁鹰长腿不在 2–12Δ",
+        "iron_condor_short_delta_band": "铁鹰短腿不在 5–25Δ",
+        "iron_condor_wing_too_wide": "铁鹰翼宽不是 10 点定义风险",
         "strategy_event_expired": "旧策略事件已过期",
         "gth_dip_reclaim_signal_expired": "夜盘回踩收复信号已过期",
         "source_entry_quality_blocked": "来源入场质量未过门",
@@ -422,7 +423,7 @@ def _nearest_candidate_line(nearest: Mapping[str, Any], failed_gates: list[str])
 
 def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
     if not structure:
-        return "25Δ/5Δ 尚未计算"
+        return "5–25Δ 10宽 尚未计算"
     strikes = [
         f"{float(strike):g}"
         for strike in structure.get("strikes") or ()
@@ -431,16 +432,45 @@ def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
     strike_text = "/".join(strikes) if strikes else "—"
     if str(structure.get("status") or "") != "ready":
         reason = humanize_strategy_reason(str(structure.get("reason") or "iron_condor_credit_unavailable"))
-        return f"25Δ/5Δ {strike_text} · {reason}"
+        return f"卖{_short_delta_label(structure)} {_wing_width_label(structure)} {strike_text} · {reason}"
     economics = _mapping(structure.get("economics"))
     quote = _mapping(structure.get("quote"))
     credit = finite_float(quote.get("credit")) or finite_float(economics.get("max_gain_points"))
     credit_text = f"{credit:g}" if credit is not None else "—"
-    line = f"25Δ/5Δ {strike_text} 贷记 {credit_text}"
+    loss = finite_float(economics.get("max_loss_points"))
+    line = (
+        f"卖{_short_delta_label(structure)} {_wing_width_label(structure)} "
+        f"{strike_text} 贷记 {credit_text}"
+    )
+    if loss is not None:
+        line += f" 最大亏损 {loss:g}"
     path_text = path_distribution_desk_text(_mapping(structure.get("path_distribution")))
     if path_text:
         return f"{line} · {path_text}"
     return line
+
+
+def _short_delta_label(structure: Mapping[str, Any]) -> str:
+    delta = finite_float(structure.get("short_abs_delta"))
+    if delta is None:
+        return "5–25Δ"
+    return f"{int(round(delta * 100))}Δ"
+
+
+def _wing_width_label(structure: Mapping[str, Any]) -> str:
+    width = finite_float(structure.get("wing_width"))
+    if width is None:
+        economics = _mapping(structure.get("economics"))
+        width = finite_float(economics.get("width_points"))
+    if width is None:
+        strikes = [
+            finite_float(strike) for strike in structure.get("strikes") or ()
+        ]
+        if len(strikes) >= 2 and strikes[0] is not None and strikes[1] is not None:
+            width = abs(strikes[1] - strikes[0])
+    if width is None:
+        return "10宽"
+    return f"{width:g}宽"
 
 
 def _looks_like_machine_token(value: str) -> bool:

@@ -14,6 +14,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     butterfly_economics,
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
+    debit_vertical_reach_reasons,
     vertical_economics,
     vertical_width_path_reasons,
 )
@@ -273,6 +274,14 @@ def _gth_width_verticals(
                     setup_kind = GTH_DELTA_SCAN
                     row_target, row_stop = short_strike, long_strike
                     geometry_source = "gth_delta_anchor"
+                    if debit_vertical_reach_reasons(
+                        spot=spot,
+                        long_strike=long_strike,
+                        short_strike=short_strike,
+                        right=right,
+                        remaining_expected_move=remaining,
+                    ):
+                        continue
                 legs = _session_option_legs(
                     latest,
                     expiry,

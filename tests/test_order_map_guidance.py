@@ -594,9 +594,11 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
         "execution": {"action": "WAIT"},
         "iron_condor_map": {
             "status": "ready",
-            "strikes": [7650.0, 7700.0, 7800.0, 7840.0],
+            "short_abs_delta": 0.25,
+            "wing_width": 10.0,
+            "strikes": [7690.0, 7700.0, 7800.0, 7810.0],
             "quote": {"credit": 9.0},
-            "economics": {"max_gain_points": 9.0},
+            "economics": {"max_gain_points": 9.0, "max_loss_points": 1.0, "width_points": 10.0},
         },
         "rejection_funnel": {"candidate_enumerated": 30, "hard_gate_pass": 0},
         "why_not": {
@@ -619,7 +621,7 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "25Δ/5Δ 7650/7700/7800/7840 贷记 9" in sections.desk_view
+    assert "卖25Δ 10宽 7690/7700/7800/7810 贷记 9 最大亏损 1" in sections.desk_view
 
 
 def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
