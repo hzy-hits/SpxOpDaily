@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from collections.abc import Mapping
 from typing import Any
 
 from spx_spark.application.notifications.report_enqueue import (
@@ -371,6 +372,7 @@ def _flood_control_block(
     session_date = str(decision.get("session_date") or "")
     setup_kind = str(candidate.get("setup_kind") or "")
     direction = str(candidate.get("direction") or "")
+    session_mode = _decision_session_mode(decision, candidate)
     if not session_date or not setup_kind or not direction:
         return None
     trigger = candidate.get("trigger_level")
@@ -400,6 +402,8 @@ def _flood_control_block(
     for row in accepted.values():
         if str(row.get("direction") or "").upper() != direction.upper():
             continue
+        if str(row.get("session_mode") or session_mode) != session_mode:
+            continue
         session_direction += 1
         if str(row.get("setup_kind") or "") != setup_kind:
             continue
@@ -424,6 +428,18 @@ def _flood_control_block(
             "counts": counts,
         }
     return None
+
+
+def _decision_session_mode(decision: Mapping[str, Any], candidate: Mapping[str, Any]) -> str:
+    facts = decision.get("market_facts") if isinstance(decision.get("market_facts"), dict) else {}
+    session = facts.get("session") if isinstance(facts, dict) and isinstance(facts.get("session"), dict) else {}
+    mode = str(session.get("mode") or "").strip().lower()
+    if mode in {"gth", "rth"}:
+        return mode
+    setup = str(candidate.get("setup_kind") or "")
+    if setup.startswith("GTH_"):
+        return "gth"
+    return "rth"
 
 
 def send_order_map(

@@ -294,9 +294,24 @@ def recent_selected_strategy_cards(
                 "direction": str(candidate.get("direction") or ""),
                 "setup_kind": str(candidate.get("setup_kind") or ""),
                 "trigger_level": float(trigger) if isinstance(trigger, (int, float)) else None,
+                "session_mode": _strategy_card_session_mode(payload, candidate),
             }
         )
     return tuple(cards)
+
+
+def _strategy_card_session_mode(
+    payload: Mapping[str, object], candidate: Mapping[str, object]
+) -> str:
+    facts = payload.get("market_facts") if isinstance(payload.get("market_facts"), dict) else {}
+    session = facts.get("session") if isinstance(facts, dict) and isinstance(facts.get("session"), dict) else {}
+    mode = str(session.get("mode") or "").strip().lower()
+    if mode in {"gth", "rth"}:
+        return mode
+    setup = str(candidate.get("setup_kind") or "")
+    if setup.startswith("GTH_"):
+        return "gth"
+    return "rth"
 
 
 def read_due_strategy_observations(

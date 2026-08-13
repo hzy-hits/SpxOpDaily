@@ -375,7 +375,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v12"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v13"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -751,6 +751,129 @@ def test_confirmed_session_episode_maps_to_failed_break_reclaim_vertical() -> No
     assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
     assert decision["candidate"]["direction"] == "UP"
     assert decision["rejection_funnel"]["setup_detected"] == 1
+
+
+def test_session_episode_reclaim_expires_after_chase_progress() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["underlier"] = {"price": 7724.0, "source": "index:SPX"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    payload["level_decision"] = {"phase": "far"}
+    payload["session_episode"] = {
+        "phase": "V_REVERSAL_CONFIRMED",
+        "break_direction": "down",
+        "break_level": 7705.0,
+        "break_level_kind": "flip_high",
+        "episode_id": "episode:failed-down-break",
+    }
+
+    decision = build_strategy_decision(payload, _vertical_chain_state(now), now)
+    episode = next(
+        row
+        for row in decision["market_facts"]["rth_setups"]
+        if row["setup_variant"] == "SESSION_EPISODE"
+    )
+
+    assert episode["state"] == "ENTRY_TOO_LATE"
+    assert episode["blocked_by"] == "session_episode_reclaim_progress_too_late"
+    assert episode["trigger_target_progress"] >= 0.60
+    assert decision["decision_type"] == "NO_TRADE"
+
+
+def test_vwap_pullback_stays_open_for_two_bars_after_confirmation() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _vwap_pullback_payload(now)
+    bars = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["diagnostics"]["rth_bar_path"]
+    extra = [
+        {
+            "bar_start": now.isoformat(),
+            "open": 7735.0,
+            "high": 7736.5,
+            "low": 7733.0,
+            "close": 7735.5,
+            "quality": "ok",
+        }
+    ]
+    _attach_rth_setup_path(payload, [*bars, *extra], "HL_ONLY")
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="C"), now
+    )
+    pullback = next(
+        row
+        for row in decision["market_facts"]["rth_setups"]
+        if row["setup_kind"] == "TREND_PULLBACK"
+    )
+
+    assert pullback["state"] == "ENTRY_WINDOW_OPEN"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
+
+
+def test_vwap_pullback_closes_after_hold_bars_elapse() -> None:
+    now = datetime(2026, 8, 7, 15, 10, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    bars = [
+        {
+            "bar_start": (now - timedelta(minutes=20)).isoformat(),
+            "open": 7735.0,
+            "high": 7736.0,
+            "low": 7731.5,
+            "close": 7734.0,
+            "quality": "ok",
+        },
+        {
+            "bar_start": (now - timedelta(minutes=15)).isoformat(),
+            "open": 7734.0,
+            "high": 7736.0,
+            "low": 7733.0,
+            "close": 7735.0,
+            "quality": "ok",
+        },
+        {
+            "bar_start": (now - timedelta(minutes=10)).isoformat(),
+            "open": 7735.0,
+            "high": 7736.5,
+            "low": 7733.0,
+            "close": 7735.5,
+            "quality": "ok",
+        },
+        {
+            "bar_start": (now - timedelta(minutes=5)).isoformat(),
+            "open": 7735.0,
+            "high": 7736.5,
+            "low": 7733.0,
+            "close": 7735.5,
+            "quality": "ok",
+        },
+        {
+            "bar_start": now.isoformat(),
+            "open": 7735.0,
+            "high": 7736.5,
+            "low": 7733.0,
+            "close": 7735.5,
+            "quality": "ok",
+        },
+    ]
+    _attach_rth_setup_path(payload, bars, "HL_ONLY")
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="C"), now
+    )
+    pullback = next(
+        row
+        for row in decision["market_facts"]["rth_setups"]
+        if row["setup_kind"] == "TREND_PULLBACK"
+    )
+
+    assert pullback["state"] == "ENTRY_TOO_LATE"
+    assert decision["decision_type"] == "NO_TRADE"
 
 
 @pytest.mark.parametrize(

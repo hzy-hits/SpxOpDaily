@@ -27,7 +27,11 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v12"
+    policy_version: str = "strategy_policy.bootstrap.v13"
+    # v13: RTH confirmation stays open for two extra 5m bars so a human card
+    # can still print; session-episode reclaim expires at the same 60%
+    # progress cap as debit chase; flood caps are per session_mode so GTH
+    # scans cannot silence RTH.
     # v12: "20Δ 以下" means at-or-below 20, never the richer nearest strike.
     # GTH debit longs use the same 5–20Δ ladder, not 25Δ.
     # v11: short-leg band is 5–20Δ (naked short delta, not 25). GTH iron
@@ -77,6 +81,9 @@ class StrategyPolicy:
     # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
     candidate_cooldown_seconds: float = 300.0
     max_cards_per_direction_per_session: int = 6
+    # Confirmation bar plus this many subsequent 5m bars remain ENTRY_WINDOW_OPEN.
+    rth_setup_hold_bars: int = 2
+    max_trigger_target_progress: float = 0.60
 
     def entry_quality_kwargs(self) -> dict[str, float]:
         names = (

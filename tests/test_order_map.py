@@ -4977,6 +4977,80 @@ def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
         app_get_settings.cache_clear()
 
 
+def test_strategy_flood_control_session_cap_is_per_session_mode(monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    from spx_spark.application.order_map.delivery import _flood_control_block
+    from spx_spark.config import NotificationSettings
+
+    now = datetime(2026, 8, 13, 15, 0, tzinfo=timezone.utc)
+    gth_cards = tuple(
+        {
+            "decision_id": f"strategy:gth{index}",
+            "decision_at": now,
+            "opportunity_id": f"strategy-opportunity:gth{index}",
+            "direction": "UP",
+            "setup_kind": "GTH_WIDTH_SCAN",
+            "trigger_level": 7760.0 + index,
+            "session_mode": "gth",
+        }
+        for index in range(6)
+    )
+    monkeypatch.setattr(
+        "spx_spark.infrastructure.operational_db.recent_selected_strategy_cards",
+        lambda **_kwargs: gth_cards,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.delivery.notification_event_exists",
+        lambda _settings, _event_id: True,
+    )
+    rth_decision = {
+        "session_date": "2026-08-13",
+        "decision_id": "strategy:rth1",
+        "market_facts": {"session": {"mode": "rth"}},
+        "candidate": {
+            "opportunity_id": "strategy-opportunity:rth-new",
+            "setup_kind": "TREND_PULLBACK",
+            "direction": "UP",
+            "trigger_level": 7790.0,
+        },
+    }
+    assert (
+        _flood_control_block(
+            rth_decision,
+            rth_decision["candidate"],
+            NotificationSettings.from_env(),
+            now=now,
+        )
+        is None
+    )
+
+    rth_cards = tuple(
+        {
+            **card,
+            "decision_at": now,
+            "opportunity_id": f"strategy-opportunity:rth{index}",
+            "setup_kind": "TREND_PULLBACK",
+            "session_mode": "rth",
+            "trigger_level": 7780.0 + index,
+        }
+        for index, card in enumerate(gth_cards)
+    )
+    monkeypatch.setattr(
+        "spx_spark.infrastructure.operational_db.recent_selected_strategy_cards",
+        lambda **_kwargs: rth_cards,
+    )
+    blocked = _flood_control_block(
+        rth_decision,
+        rth_decision["candidate"],
+        NotificationSettings.from_env(),
+        now=now,
+    )
+    assert blocked is not None
+    assert blocked["outcome"] == "flood_control_session_cap"
+    assert blocked["counts"]["session_direction"] == 6
+
+
 def test_order_map_refresh_same_slot_replay_and_material_change_have_stable_ids(
     tmp_path: Path, monkeypatch
 ) -> None:
