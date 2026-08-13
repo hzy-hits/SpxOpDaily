@@ -6,9 +6,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from spx_spark.application.market_features.physical_followthrough import (
+    load_iron_condor_clearing_paths,
     load_physical_spot_paths,
 )
 from spx_spark.application.order_map.path_distribution import (
+    estimate_iron_condor_clearing_distribution,
     estimate_path_distribution,
     path_distribution_desk_text,
 )
@@ -196,3 +198,65 @@ def test_missing_data_root_returns_unavailable_without_raising() -> None:
     )
     assert distribution["status"] == "unavailable"
     assert "physical_spot_paths_unavailable" in distribution["reason_codes"]
+
+
+def _write_open_to_clear(root: Path, day: str, *, open_px: float, clear_px: float) -> None:
+    n = 181
+    prices = [open_px + (clear_px - open_px) * index / (n - 1) for index in range(n)]
+    _write_session(root, day, start_et=time(9, 30), prices=prices)
+
+
+def _iron_condor() -> dict[str, object]:
+    put_long = _leg(7680.0, "P", 1.1, 1.3)
+    put_short = _leg(7690.0, "P", 1.6, 1.8)
+    call_short = _leg(7810.0, "C", 1.6, 1.8)
+    call_long = _leg(7820.0, "C", 1.1, 1.3)
+    return {
+        "strategy_type": "IRON_CONDOR",
+        "setup_kind": "IRON_CONDOR_DELTA",
+        "legs": [put_long, put_short, call_short, call_long],
+        "put_short": {"strike": 7690.0, "delta": -0.20},
+        "call_short": {"strike": 7810.0, "delta": 0.20},
+        "quote": {"status": "ready", "bid": 0.6, "ask": 1.0, "credit": 0.8},
+        "invalidation_spx": [7690.0, 7810.0],
+    }
+
+
+def test_gth_iron_condor_clearing_paths_are_one_overnight_session(tmp_path: Path) -> None:
+    _write_open_to_clear(tmp_path, "2026-08-04", open_px=7700.0, clear_px=7702.0)
+    _write_open_to_clear(tmp_path, "2026-08-05", open_px=7703.0, clear_px=7705.0)
+
+    rows, mode = load_iron_condor_clearing_paths(
+        tmp_path / "features",
+        now=GTH_NOW,
+        trading_date=date(2026, 8, 6),
+        window_days=35,
+    )
+
+    assert mode == "overnight_gap_and_rth_to_clear"
+    assert len(rows) == 1
+    assert rows[0].session_date == date(2026, 8, 5)
+    assert rows[0].overnight_gap == 1.0
+    assert len(rows[0].prices) == 181
+
+
+def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) -> None:
+    _write_open_to_clear(tmp_path, "2026-08-04", open_px=7750.0, clear_px=7751.0)
+    _write_open_to_clear(tmp_path, "2026-08-05", open_px=7751.0, clear_px=7752.0)
+
+    distribution = estimate_iron_condor_clearing_distribution(
+        _iron_condor(),
+        _facts(now=GTH_NOW, spot=7750.0),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=GTH_NOW,
+    )
+
+    assert distribution["method"] == "physical_path_iron_condor_clear_1230.v1"
+    assert distribution["hard_exit_et"] == "12:30"
+    assert distribution["time_stop_rate"] == 0.0
+    assert distribution["median_hold_minutes"] > 20
+    assert distribution["p10_pnl_points"] <= distribution["p50_pnl_points"] <= distribution["p90_pnl_points"]
+    text = path_distribution_desk_text(distribution)
+    assert text is not None
+    assert text.startswith("持有至12:30ET 路径 P10/P50/P90 $")

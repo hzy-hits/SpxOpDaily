@@ -612,8 +612,6 @@ def _attach_winner_path_distributions(
             data_root=data_root,
             probability_settings=probability_settings,
             now=now,
-            paths=paths,
-            clock_mode=clock_mode,
         ),
     )
 
@@ -626,20 +624,12 @@ def _attach_iron_condor_only_paths(
     probability_settings: StrategyDistributionSettings | None,
     now: datetime,
 ) -> dict[str, Any]:
-    paths, clock_mode = load_decision_spot_paths(
-        facts,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=now,
-    )
     return attach_iron_condor_path_distribution(
         iron_condor_map,
         facts,
         data_root=data_root,
         probability_settings=probability_settings,
         now=now,
-        paths=paths,
-        clock_mode=clock_mode,
     )
 
 

@@ -27,7 +27,9 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v10"
+    policy_version: str = "strategy_policy.bootstrap.v11"
+    # v11: short-leg band is 5–20Δ (naked short delta, not 25). GTH iron
+    # condors are path-forwarded to the 12:00–13:00 ET clearing window.
     # v10: sell 5–25Δ short legs with a 10-point defined-risk wing; do not pair
     # 25Δ shorts with 5Δ longs. GTH debit longs must sit inside remaining EM.
     # v9: GTH desk map is a live structure scan, not an empty health heartbeat.
@@ -52,7 +54,7 @@ class StrategyPolicy:
     gth_widths: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0)
     gth_long_offsets: tuple[float, ...] = (-5.0, 0.0, 5.0)
     gth_delta_targets: tuple[float, ...] = (0.25, 0.10)
-    iron_condor_short_deltas: tuple[float, ...] = (0.25, 0.15, 0.10, 0.05)
+    iron_condor_short_deltas: tuple[float, ...] = (0.20, 0.15, 0.10, 0.05)
     iron_condor_wing_width: float = 10.0
     opportunity_ttl_seconds: float = 300.0
     min_target_room_ratio: float = 1.5

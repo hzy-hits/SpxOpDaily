@@ -28,6 +28,13 @@ class ManagementPolicy:
 
 
 DEFAULT_MANAGEMENT_POLICY = ManagementPolicy()
+# GTH iron condors are held into RTH and unwound in the 12:00–13:00 ET
+# clearing window. Do not flatten them on the 20-minute debit time stop.
+IRON_CONDOR_MANAGEMENT_POLICY = ManagementPolicy(
+    policy_version="management_policy.iron_condor.clear_1230.v1",
+    time_stop_minutes=24 * 60,
+    hard_exit_et="12:30",
+)
 
 
 @dataclass(frozen=True, slots=True)

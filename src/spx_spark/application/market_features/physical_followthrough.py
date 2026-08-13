@@ -80,6 +80,20 @@ class PhysicalSpotPath:
     same_clock: bool
 
 
+RTH_OPEN_MINUTE = 9 * 60 + 30
+IRON_CONDOR_CLEAR_MINUTE = 12 * 60 + 30
+
+
+@dataclass(frozen=True, slots=True)
+class ClearingSpotPath:
+    """One prior session from RTH open (or current clock) to the 12:30 ET clear."""
+
+    session_date: date
+    overnight_gap: float
+    start_minute: int
+    prices: tuple[float, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     event_id: str
@@ -367,6 +381,85 @@ def load_physical_spot_paths(
     return (), "unavailable"
 
 
+def load_iron_condor_clearing_paths(
+    features_root: Path,
+    *,
+    now: datetime,
+    trading_date: date,
+    window_days: int,
+    open_minute: int = RTH_OPEN_MINUTE,
+    clear_minute: int = IRON_CONDOR_CLEAR_MINUTE,
+) -> tuple[tuple[ClearingSpotPath, ...], str]:
+    """Return one overnight-gap + RTH-to-12:30 path per completed session.
+
+    GTH iron condors are not a 20-minute product. Each historical day contributes
+    one path: prior close → RTH open gap, then 1-minute prints through 12:30 ET.
+    During RTH before the clearing window, the overnight gap is omitted and the
+    path starts at the current New York minute.
+    """
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("iron-condor clearing now must be timezone-aware")
+    if window_days <= 0:
+        raise ValueError("iron-condor clearing window_days must be positive")
+    if not open_minute < clear_minute:
+        raise ValueError("iron-condor clearing clock must be after the RTH open")
+
+    query_minute = _new_york_minute(now)
+    if query_minute >= clear_minute and open_minute <= query_minute <= 16 * 60:
+        return (), "past_clearing_window"
+    earliest = trading_date - timedelta(days=window_days)
+    sessions: list[tuple[date, dict[int, float]]] = []
+    root = Path(features_root) / "spx_standardized_samples"
+    for path in sorted(root.glob("date=*/events.jsonl")):
+        partition = _partition_date(path)
+        if partition is None or partition < earliest or partition >= trading_date:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        loaded = dict(_load_standardized_session(str(path), stat.st_mtime_ns, stat.st_size))
+        if loaded:
+            sessions.append((partition, loaded))
+    if not sessions:
+        return (), "unavailable"
+
+    in_rth_to_clear = open_minute <= query_minute < clear_minute
+    rows: list[ClearingSpotPath] = []
+    for index, (partition, prices) in enumerate(sessions):
+        if in_rth_to_clear:
+            start = query_minute
+            gap = 0.0
+        else:
+            start = open_minute
+            if index == 0:
+                continue
+            prior = sessions[index - 1][1]
+            prior_close = prior.get(max(prior))
+            open_price = prices.get(open_minute)
+            if prior_close is None or open_price is None:
+                continue
+            gap = open_price - prior_close
+        window = tuple(
+            prices.get(start + offset) for offset in range(clear_minute - start + 1)
+        )
+        if any(value is None for value in window):
+            continue
+        rows.append(
+            ClearingSpotPath(
+                session_date=partition,
+                overnight_gap=float(gap),
+                start_minute=start,
+                prices=tuple(float(value) for value in window if value is not None),
+            )
+        )
+    if not rows:
+        return (), "unavailable"
+    mode = "rth_to_clear" if in_rth_to_clear else "overnight_gap_and_rth_to_clear"
+    return tuple(rows), mode
+
+
 def _cap_paths(rows: list[PhysicalSpotPath], max_paths: int) -> tuple[PhysicalSpotPath, ...]:
     if len(rows) <= max_paths:
         return tuple(rows)
@@ -504,8 +597,10 @@ __all__ = [
     "FEATURE_SET_VERSION",
     "MODEL_VERSION",
     "PhysicalFollowThroughEstimate",
+    "ClearingSpotPath",
     "PhysicalSpotPath",
     "estimate_physical_followthrough",
     "estimate_physical_terminal_range",
+    "load_iron_condor_clearing_paths",
     "load_physical_spot_paths",
 ]

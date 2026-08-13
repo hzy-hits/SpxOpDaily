@@ -121,7 +121,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
     if candidate.get("setup_kind") == "IRON_CONDOR_DELTA":
         return "\n".join((
             "SPX STRATEGY DECISION · MANUAL CANDIDATE",
-            "Desk View  铁鹰 卖5–25Δ 10点翼宽 · 仅人工限价",
+            "Desk View  铁鹰 卖5–20Δ 10点翼宽 · 仅人工限价",
             f"Execution  {contracts} · conservative credit {quote.get('credit')} · 净贷记 ≥ {quote.get('credit')}",
             f"有效期  {candidate.get('opportunity_valid_until')} · 提交前必须刷新报价 · 禁止市价",
             f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · 短腿失效 {invalidation}",

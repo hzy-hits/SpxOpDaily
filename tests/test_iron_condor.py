@@ -173,7 +173,7 @@ def test_iron_condor_credit_is_shorts_bid_minus_longs_ask() -> None:
     assert 0.15 <= economics["credit_fraction_of_width"] <= 0.55
 
 
-def test_gth_always_computes_ten_wide_5_25_delta_iron_condor_from_one_minute_quotes() -> None:
+def test_gth_always_computes_ten_wide_5_20_delta_iron_condor_from_one_minute_quotes() -> None:
     structure = build_iron_condor_map(
         _payload(),
         _facts(),
@@ -190,13 +190,15 @@ def test_gth_always_computes_ten_wide_5_25_delta_iron_condor_from_one_minute_quo
     )
 
     assert structure["status"] == "ready"
+    assert structure["short_abs_delta"] == 0.20
     assert structure["spot_inside_shorts"] is True
     assert structure["wing_width"] == 10.0
     assert structure["economics"]["put_width_points"] == 10.0
     assert structure["economics"]["call_width_points"] == 10.0
     assert structure["economics"]["max_loss_points"] <= 10.0
-    assert structure["strikes"][0] < structure["strikes"][1] < structure["strikes"][2] < structure["strikes"][3]
-    assert abs(structure["strikes"][1] - structure["strikes"][0] - 10.0) < 0.01
+    assert structure["strikes"] == [7680.0, 7690.0, 7810.0, 7820.0]
+    assert abs(structure["put_short"]["delta"]) <= 0.20
+    assert abs(structure["call_short"]["delta"]) <= 0.20
     assert rows
     assert rows[0]["setup_kind"] == IRON_CONDOR_DELTA
     assert rows[0]["strategy_type"] == "IRON_CONDOR"
@@ -248,7 +250,7 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v10"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v11"
     assert decision["iron_condor_map"]["status"] == "ready"
     assert decision["iron_condor_map"]["setup_kind"] == IRON_CONDOR_DELTA
 
@@ -262,9 +264,9 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
         "execution": {"action": "WAIT"},
         "iron_condor_map": {
             "status": "ready",
-            "short_abs_delta": 0.25,
+            "short_abs_delta": 0.20,
             "wing_width": 10.0,
-            "strikes": [7690.0, 7700.0, 7800.0, 7810.0],
+            "strikes": [7680.0, 7690.0, 7810.0, 7820.0],
             "quote": {"credit": 2.4},
             "economics": {"max_gain_points": 2.4, "max_loss_points": 7.6, "width_points": 10.0},
             "reason": None,
@@ -287,8 +289,8 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
     assert "心跳 · 非交易卡" not in sections.execution
     assert "可看 ·" not in sections.desk_view
     assert "7730/7725" not in sections.desk_view
-    assert "卖25Δ 10宽 7690/7700/7800/7810 贷记 2.4 最大亏损 7.6" in sections.desk_view
-    assert "卖25Δ 10宽 7690/7700/7800/7810 贷记 2.4 最大亏损 7.6" in sections.structure
+    assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 2.4 最大亏损 7.6" in sections.desk_view
+    assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 2.4 最大亏损 7.6" in sections.structure
     assert "扫描中 · 铁鹰已标位" in sections.execution
 
 

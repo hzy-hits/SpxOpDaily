@@ -1,4 +1,4 @@
-"""Always-on 5–25Δ short-leg iron condor map with a 10-point defined-risk wing."""
+"""Always-on 5–20Δ short-leg iron condor map with a 10-point defined-risk wing."""
 
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ from spx_spark.storage import LatestState
 
 IRON_CONDOR_DELTA = "IRON_CONDOR_DELTA"
 IRON_CONDOR_TYPE = "IRON_CONDOR"
-PREFERRED_SHORT_DELTAS: tuple[float, ...] = (0.25, 0.15, 0.10, 0.05)
+PREFERRED_SHORT_DELTAS: tuple[float, ...] = (0.20, 0.15, 0.10, 0.05)
 SHORT_DELTA_MIN = 0.05
-SHORT_DELTA_MAX = 0.25
+SHORT_DELTA_MAX = 0.20
 SHORT_DELTA_TOLERANCE = 0.05
 WING_WIDTH = 10.0
 MIN_CREDIT_FRACTION = 0.15
@@ -45,7 +45,7 @@ def build_iron_condor_map(
     now: datetime,
     policy: StrategyPolicy,
 ) -> dict[str, Any]:
-    """Return the current 5–25Δ short / 10-wide iron condor, even when not tradable."""
+    """Return the current 5–20Δ short / 10-wide iron condor, even when not tradable."""
 
     now = _utc(now)
     session_policy, providers, session_reason = _session_quote_policy(now, policy)
@@ -177,7 +177,7 @@ def enumerate_iron_condor_candidates(
             "source": f"gth_{quote.get('provider')}_iron_condor"
             if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now)
             else f"rth_{quote.get('provider')}_iron_condor",
-            "geometry_source": "delta_5_25_ten_wide_iron_condor",
+            "geometry_source": "delta_5_20_ten_wide_iron_condor",
             "automatic_ordering": False,
             "manual_action_only": True,
         }
@@ -228,6 +228,13 @@ def _structure_for_short_delta(
     if len(legs) != 4:
         return None
     put_long, put_short, call_short, call_long = legs
+    put_delta = abs(_number(put_short.get("delta")) or 99.0)
+    call_delta = abs(_number(call_short.get("delta")) or 99.0)
+    if not (
+        SHORT_DELTA_MIN <= put_delta <= SHORT_DELTA_MAX
+        and SHORT_DELTA_MIN <= call_delta <= SHORT_DELTA_MAX
+    ):
+        return None
     quote = conservative_iron_condor_bbo(
         put_long,
         put_short,

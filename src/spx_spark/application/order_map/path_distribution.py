@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import median
 from time import perf_counter
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from scipy.special import ndtr
@@ -22,20 +23,26 @@ from spx_spark.analytics.greeks.black_scholes import bs_price, intrinsic_value
 from spx_spark.analytics.options.pricing import time_to_expiry_years
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    IRON_CONDOR_MANAGEMENT_POLICY,
     PolicyMark,
     simulate_management_policy,
 )
 from spx_spark.application.market_features.physical_followthrough import (
+    ClearingSpotPath,
     PhysicalSpotPath,
+    RTH_OPEN_MINUTE,
+    load_iron_condor_clearing_paths,
     load_physical_spot_paths,
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 METHOD = "physical_path_management_policy.v1"
+IRON_CONDOR_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v1"
 SUPPORTED_VERTICALS = {"CALL_DEBIT_VERTICAL", "PUT_DEBIT_VERTICAL"}
 IRON_CONDOR_TYPE = "IRON_CONDOR"
 MAX_PATHS = 4000
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 def attach_path_distribution(
@@ -77,21 +84,19 @@ def attach_iron_condor_path_distribution(
     paths: tuple[PhysicalSpotPath, ...] | None = None,
     clock_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Hang the same advisory distribution on the always-on iron-condor map."""
+    """Hang the 12:30 ET clearing-window distribution on the iron-condor map."""
 
+    del policy, paths, clock_mode
     result = dict(structure)
     if str(structure.get("status") or "") != "ready":
         result["path_distribution"] = _unavailable("iron_condor_not_ready")
         return result
-    result["path_distribution"] = estimate_path_distribution(
+    result["path_distribution"] = estimate_iron_condor_clearing_distribution(
         _iron_condor_as_candidate(structure),
         facts,
         data_root=data_root,
         probability_settings=probability_settings,
         now=now,
-        policy=policy,
-        paths=paths,
-        clock_mode=clock_mode,
     )
     return result
 
@@ -292,6 +297,238 @@ def estimate_path_distribution(
     }
 
 
+def estimate_iron_condor_clearing_distribution(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    data_root: str | Path | None,
+    probability_settings: StrategyDistributionSettings | None,
+    now: datetime,
+) -> dict[str, Any]:
+    """Hold a GTH/RTH iron condor to the 12:00–13:00 ET clearing window."""
+
+    started = perf_counter()
+    if str(candidate.get("strategy_type") or "") != IRON_CONDOR_TYPE:
+        return _unavailable("unsupported_strategy_type")
+    spot = _number(_map(facts.get("spot")).get("spx"))
+    if spot is None or spot <= 0:
+        return _unavailable("spx_price_unavailable")
+    legs = _structure_legs(candidate)
+    if not legs:
+        return _unavailable("path_legs_unavailable")
+    quote = _map(candidate.get("quote"))
+    entry = _entry_level(candidate, quote)
+    if entry is None or entry <= 0:
+        return _unavailable("path_entry_unavailable")
+    expiry = _expiry_from_legs(legs)
+    if not expiry:
+        return _unavailable("vertical_expiry_unavailable")
+    session_date = _session_date(facts.get("session_date"))
+    if session_date is None:
+        return _unavailable("session_date_unavailable")
+    if data_root is None:
+        return _unavailable("physical_spot_paths_unavailable")
+
+    now_utc = _utc(now)
+    tau0 = time_to_expiry_years(expiry, as_of=now_utc)
+    priced_legs = _sticky_legs(legs, spot=spot, tau_years=tau0)
+    if priced_legs is None:
+        return _unavailable("path_iv_unavailable")
+    close_seed = _number(quote.get("ask"))
+    if close_seed is None:
+        return _unavailable("path_mark_seed_unavailable")
+
+    settings = probability_settings or StrategyDistributionSettings()
+    try:
+        paths, loaded_mode = load_iron_condor_clearing_paths(
+            Path(data_root).expanduser() / "features",
+            now=now_utc,
+            trading_date=session_date,
+            window_days=settings.window_days,
+        )
+    except ValueError:
+        return _unavailable("physical_spot_paths_unavailable")
+    if loaded_mode == "past_clearing_window":
+        return _unavailable("past_iron_condor_clearing_window")
+    if not paths:
+        return _unavailable("physical_spot_paths_unavailable")
+
+    clocks, combo_bids = _clearing_combo_bids(
+        paths,
+        legs=priced_legs,
+        expiry=expiry,
+        now=now_utc,
+        spot=spot,
+        session_date=session_date,
+        close_seed=close_seed,
+        entry_credit=entry,
+    )
+    invalidation, invalidation_reason = _invalidation_touch(
+        candidate, credit=True, spot=spot
+    )
+    pnls: list[float] = []
+    hold_minutes: list[float] = []
+    hit_invalidation = 0
+    tp_before_stop = 0
+    premium_stops = 0
+    hard_closes = 0
+    time_stops = 0
+    for index in range(len(paths)):
+        projected = tuple(float(value) for value in combo_bids["spots"][index])
+        if invalidation is not None and invalidation(projected):
+            hit_invalidation += 1
+        marks = [
+            PolicyMark(at=clock, combo_bid=float(bid))
+            for clock, bid in zip(clocks, combo_bids["bids"][index], strict=True)
+        ]
+        label = simulate_management_policy(
+            marks,
+            entry_ask=entry,
+            leg_count=len(priced_legs),
+            entry_at=now_utc,
+            policy=IRON_CONDOR_MANAGEMENT_POLICY,
+            session_date=session_date,
+        )
+        pnls.append(label.policy_pnl_points)
+        if label.exit_at is not None:
+            hold_minutes.append((label.exit_at - now_utc).total_seconds() / 60.0)
+        if label.tp_before_stop:
+            tp_before_stop += 1
+        if label.exit_reason == "premium_stop":
+            premium_stops += 1
+        elif label.exit_reason == "hard_close":
+            hard_closes += 1
+        elif label.exit_reason == "time_stop":
+            time_stops += 1
+
+    count = len(pnls)
+    p10, p50, p90 = _percentiles(pnls, (10.0, 50.0, 90.0))
+    sessions = sorted({row.session_date.isoformat() for row in paths})
+    status = (
+        "estimated_uncalibrated"
+        if count >= settings.minimum_physical_samples
+        else "insufficient_sample"
+    )
+    reasons = [
+        "research_unvalidated",
+        "not_fill_probability",
+        "sticky_iv_conservative_mark",
+        IRON_CONDOR_CLEARING_METHOD,
+        "unscaled_clearing_session_paths",
+        loaded_mode,
+    ]
+    if invalidation_reason:
+        reasons.append(invalidation_reason)
+    if status == "insufficient_sample":
+        reasons.append("physical_sample_below_minimum")
+    hit_rate = None if invalidation is None else round(hit_invalidation / count, 4)
+    return {
+        "status": status,
+        "method": IRON_CONDOR_CLEARING_METHOD,
+        "evidence_status": "research_unvalidated",
+        "p10_pnl_points": p10,
+        "p50_pnl_points": p50,
+        "p90_pnl_points": p90,
+        "p10_net_pnl": _dollars(p10),
+        "p50_net_pnl": _dollars(p50),
+        "p90_net_pnl": _dollars(p90),
+        "hit_invalidation_rate": hit_rate,
+        "tp_before_stop_rate": round(tp_before_stop / count, 4),
+        "premium_stop_rate": round(premium_stops / count, 4),
+        "hard_close_rate": round(hard_closes / count, 4),
+        "time_stop_rate": round(time_stops / count, 4),
+        "median_hold_minutes": round(median(hold_minutes), 3) if hold_minutes else None,
+        "n_paths": count,
+        "n_sessions": len(sessions),
+        "n_same_clock": 0,
+        "historical_sessions": sessions,
+        "clock_mode": loaded_mode,
+        "horizon_minutes": max(int((clocks[-1] - now_utc).total_seconds() / 60.0), 0),
+        "scale": 1.0,
+        "remaining_expected_move": _number(_map(facts.get("volatility")).get("expected_move_points")),
+        "compute_ms": round((perf_counter() - started) * 1000.0, 1),
+        "reason_codes": reasons,
+        "management_policy_version": IRON_CONDOR_MANAGEMENT_POLICY.policy_version,
+        "hard_exit_et": IRON_CONDOR_MANAGEMENT_POLICY.hard_exit_et,
+    }
+
+
+def _clearing_combo_bids(
+    paths: Sequence[ClearingSpotPath],
+    *,
+    legs: Sequence[Mapping[str, Any]],
+    expiry: str,
+    now: datetime,
+    spot: float,
+    session_date: date,
+    close_seed: float,
+    entry_credit: float,
+) -> tuple[list[datetime], dict[str, np.ndarray]]:
+    morning = np.asarray([path.prices for path in paths], dtype=float)
+    gaps = np.asarray([path.overnight_gap for path in paths], dtype=float)
+    start_minute = paths[0].start_minute
+    include_gth = start_minute <= RTH_OPEN_MINUTE and now.astimezone(NEW_YORK).date() <= session_date
+    clocks = _clearing_clocks(
+        now,
+        session_date,
+        start_minute=start_minute,
+        n_prices=morning.shape[1],
+        include_gth_now=include_gth,
+    )
+    relative = morning - morning[:, :1]
+    open_spots = spot + gaps
+    if len(clocks) == morning.shape[1] + 1:
+        spots = np.concatenate(
+            (
+                np.full((len(paths), 1), spot, dtype=float),
+                open_spots[:, None] + relative,
+            ),
+            axis=1,
+        )
+    else:
+        spots = open_spots[:, None] + relative
+    tau0 = time_to_expiry_years(expiry, as_of=now)
+    model0 = _model_mid(legs, spot=spot, tau_years=tau0)
+    model = np.zeros((len(paths), len(clocks)), dtype=float)
+    for offset, clock in enumerate(clocks):
+        tau = time_to_expiry_years(expiry, as_of=clock)
+        column = spots[:, offset]
+        for leg in legs:
+            model[:, offset] += float(leg["quantity"]) * _bs_price_np(
+                column,
+                float(leg["strike"]),
+                float(leg["implied_vol"]),
+                tau,
+                str(leg["right"]),
+            )
+    close_mark = np.maximum(close_seed + (model - model0), 0.0)
+    bids = np.maximum(2.0 * entry_credit - close_mark, 0.0)
+    return clocks, {"spots": spots, "bids": bids}
+
+
+def _clearing_clocks(
+    now: datetime,
+    session_date: date,
+    *,
+    start_minute: int,
+    n_prices: int,
+    include_gth_now: bool,
+) -> list[datetime]:
+    start_local = datetime.combine(
+        session_date,
+        time(hour=start_minute // 60, minute=start_minute % 60),
+        tzinfo=NEW_YORK,
+    )
+    morning = [
+        (start_local + timedelta(minutes=offset)).astimezone(timezone.utc)
+        for offset in range(n_prices)
+    ]
+    now_utc = _utc(now)
+    if include_gth_now and now_utc < morning[0]:
+        return [now_utc, *morning]
+    return morning
+
+
 def path_distribution_desk_text(distribution: Mapping[str, Any] | None) -> str | None:
     """Compact P10/P50/P90 line for Desk Map and trade cards."""
 
@@ -304,7 +541,12 @@ def path_distribution_desk_text(distribution: Mapping[str, Any] | None) -> str |
         return None
     n_paths = distribution.get("n_paths")
     sample = f" n={int(n_paths)}" if isinstance(n_paths, int | float) else ""
-    return f"路径 P10/P50/P90 ${float(p10):.0f}/${float(p50):.0f}/${float(p90):.0f}{sample}"
+    prefix = (
+        "持有至12:30ET "
+        if distribution.get("method") == IRON_CONDOR_CLEARING_METHOD
+        else ""
+    )
+    return f"{prefix}路径 P10/P50/P90 ${float(p10):.0f}/${float(p50):.0f}/${float(p90):.0f}{sample}"
 
 
 def _structure_legs(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -593,9 +835,11 @@ def _utc(value: datetime) -> datetime:
 
 
 __all__ = [
+    "IRON_CONDOR_CLEARING_METHOD",
     "METHOD",
     "attach_iron_condor_path_distribution",
     "attach_path_distribution",
+    "estimate_iron_condor_clearing_distribution",
     "estimate_path_distribution",
     "load_decision_spot_paths",
     "path_distribution_desk_text",
