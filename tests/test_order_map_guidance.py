@@ -815,7 +815,7 @@ def test_expected_move_usage_requires_matching_horizon_contract() -> None:
     }
 
     mismatched = build_desk_message_sections(payload, NOW)
-    assert "EM ±8.16pt" in mismatched.location
+    assert "EM ±8.2pt" in mismatched.location
     assert "1705%" not in mismatched.location
 
     payload["day_move"] = {
@@ -825,7 +825,7 @@ def test_expected_move_usage_requires_matching_horizon_contract() -> None:
         "em_usage_label": "GTH",
     }
     aligned = build_desk_message_sections(payload, NOW)
-    assert "EM ±8.16pt · GTH 已用 64%" in aligned.location
+    assert "EM ±8.2pt · GTH 已用 64%" in aligned.location
 
 
 def test_market_bias_never_becomes_a_typed_direction_without_a_price_path() -> None:

@@ -18,6 +18,7 @@ from spx_spark.application.order_map.prompts import (
 from spx_spark.application.order_map.desk_projection_export import (
     rust_report_owner_enabled,
 )
+from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.render import render_template
 from spx_spark.config import NotificationSettings
@@ -80,7 +81,7 @@ def enqueue_strategy_decision(
             expires_at=expires_at,
             operator_opportunity_id=opportunity_id,
         ),
-        title="SPX STRATEGY DECISION",
+        title=_strategy_card_title(candidate),
         text=text,
         feishu_text=text,
         friend=True,
@@ -101,111 +102,243 @@ def enqueue_strategy_decision(
 
 def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, Any]) -> str:
     quote, economics = candidate.get("quote") or {}, candidate.get("economics") or {}
-    utility = candidate.get("utility") or {}
-    evidence = decision.get("probability_evidence") or {}
-    legs = candidate.get("legs") or [candidate.get("long"), candidate.get("short")]
-    contracts = " / ".join(
-        str(leg.get("contract_id") or "-")
-        for leg in legs
-        if isinstance(leg, dict)
-    )
-    invalidation = candidate.get("invalidation_spx")
-    decision_id = str(decision.get("decision_id") or "-")
-    policy = str(decision.get("policy_version") or "-")
-    git_sha = str(decision.get("runtime_git_sha") or "-")
+    setup = str(candidate.get("setup_kind") or "")
     edge = candidate.get("edge") if isinstance(candidate.get("edge"), dict) else {}
-    edge_status = edge.get("edge_status") or "research_unvalidated"
-    policy_ev = _policy_ev_text(edge)
-    path_text = path_distribution_desk_text(edge.get("path_distribution") if isinstance(edge.get("path_distribution"), dict) else None)
-    path_line = f" · {path_text}" if path_text else ""
-    if candidate.get("setup_kind") == "IRON_CONDOR_DELTA":
-        return "\n".join((
-            "SPX STRATEGY DECISION · MANUAL CANDIDATE",
-            "Desk View  铁鹰 卖5–20Δ 10点翼宽 · 仅人工限价",
-            f"Execution  {contracts} · conservative credit {quote.get('credit')} · 净贷记 ≥ {quote.get('credit')}",
-            f"有效期  {candidate.get('opportunity_valid_until')} · 提交前必须刷新报价 · 禁止市价",
-            f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · 短腿失效 {invalidation}",
-            f"Targets  短腿中点 {candidate.get('target_spx')}",
-            f"Edge  status={edge_status} · 研究未校准{path_line} · {policy_ev}",
-            "Data Quality  conservative credit BBO · automatic_ordering=false",
-            f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因=IRON_CONDOR_DELTA "
-            f"版本 policy={policy} git={git_sha}",
-        ))
-    if candidate.get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD":
+    path_text = path_distribution_desk_text(
+        edge.get("path_distribution") if isinstance(edge.get("path_distribution"), dict) else None
+    )
+    title = _strategy_card_title(candidate)
+    until = _beijing_clock(candidate.get("opportunity_valid_until"))
+    loss = _usd_loss(economics.get("max_loss_points"))
+    if setup == "IRON_CONDOR_DELTA":
+        credit = quote.get("credit")
+        strikes = _iron_condor_strike_text(candidate)
+        invalidation = _strike_pair(candidate.get("invalidation_spx")) or "-"
+        target = _fmt_strike(candidate.get("target_spx"))
+        lines = [
+            f"【{title}】",
+            "",
+            "## 结论",
+            f"铁鹰 卖5–20Δ 10点翼宽 {strikes} · 只许限价",
+            "",
+            "## 执行",
+            f"四腿 {strikes}",
+            f"净贷记 ≥ {_fmt_premium(credit)} · 提交前刷新报价 · 禁止市价",
+            f"有效至 {until}（北京）",
+            "",
+            "## 风险",
+            f"最大亏损 {loss} · 短腿 {invalidation} 被打穿即失效",
+            "",
+            "## 目标",
+            f"短腿中点 {target} · 收到权利金即最大收益",
+        ]
+    elif setup == "EVENT_SETTLEMENT_THRESHOLD":
         view = candidate.get("view") if isinstance(candidate.get("view"), dict) else {}
-        probability_event = (
-            candidate.get("probability_event")
-            if isinstance(candidate.get("probability_event"), dict)
-            else {}
-        )
         direction = str(candidate.get("direction") or "")
         relation = "高于" if direction == "UP" else "低于"
-        threshold = view.get("threshold_level")
-        odds = view.get("market_odds_proxy")
+        legs = _vertical_leg_text(candidate)
+        ask = quote.get("ask")
         gap = view.get("breakeven_gap_points")
-        breakeven = economics.get("breakeven_spx")
         gap_text = (
-            f"需比观点阈值额外走 {float(gap):+.2f}pt"
+            f"要比观点阈值再走 {float(gap):+.1f} 点才到盈亏平衡"
             if isinstance(gap, int | float)
-            else "观点与结构阈值差 unavailable"
+            else "观点与结构阈值差暂缺"
         )
-        return "\n".join((
-            "SPX STRATEGY DECISION · MANUAL CANDIDATE",
-            f"观点  SPX 到期结算{relation}前收 {threshold} · {view.get('macro_event_name') or '事件'}",
-            f"命题  {probability_event.get('kind')} · target_at={probability_event.get('target_at')}",
-            f"Execution  {contracts} · synthetic BBO {quote.get('bid')}/{quote.get('ask')} · 净借记 ≤ {quote.get('ask')}",
-            f"赔率  Debit/Width={_percent(odds)} · BE={breakeven} · {gap_text}",
-            f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · 事件跳空时普通止损不保证成交",
-            f"有效期  {candidate.get('opportunity_valid_until')} · 事件发布后原观点过期 · 禁止市价",
-            f"Edge  status={edge_status} · P=未估计 · required≈{_percent(edge.get('required_p_breakeven'))} · {policy_ev}",
-            "Data Quality  conservative BBO · thesis-driven/unvalidated · automatic_ordering=false",
-            f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因=EVENT_SETTLEMENT_THRESHOLD "
-            f"版本 policy={policy} git={git_sha}",
-        ))
-    return "\n".join((
-        "SPX STRATEGY DECISION · MANUAL CANDIDATE",
-        f"Desk View  {candidate.get('setup_kind')} · {candidate.get('direction')} · 仅人工限价",
-        f"Execution  {contracts} · synthetic BBO {quote.get('bid')}/{quote.get('ask')} · 净借记 ≤ {quote.get('ask')}",
-        f"有效期  {candidate.get('opportunity_valid_until')} · 提交前必须刷新报价 · 禁止市价",
-        f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · SPX失效 {invalidation}",
-        f"Targets  SPX {candidate.get('target_spx')}",
-        f"Edge  status={edge_status} · P={utility.get('event_probability')} · Q={evidence.get('q')} "
-        f"· Utility={utility.get('utility')} "
-        f"· lower=${utility.get('conservative_lower_bound')} · {policy_ev}{path_line}",
-        f"样本  n={evidence.get('n_raw')} · n_eff={evidence.get('n_effective')} "
-        f"· shrink={evidence.get('shrinkage_weight')}",
-        "Data Quality  conservative BBO · uncalibrated bootstrap · automatic_ordering=false",
-        f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因={candidate.get('setup_kind') or '-'} "
-        f"版本 policy={policy} git={git_sha}",
-    ))
+        lines = [
+            f"【{title}】",
+            "",
+            "## 结论",
+            f"事件结算观点 · SPX 到期结算{relation}前收 {_fmt_strike(view.get('threshold_level'))}",
+            str(view.get("macro_event_name") or "宏观事件"),
+            "",
+            "## 执行",
+            f"{legs} · 净借记 ≤ {_fmt_premium(ask)} · 禁止市价",
+            f"有效至 {until}（北京）· 事件发布后原观点过期",
+            "",
+            "## 风险",
+            f"最大亏损 {loss} · 跳空时普通止损不保证成交",
+            "",
+            "## 目标",
+            f"盈亏平衡 {_fmt_strike(economics.get('breakeven_spx'))} · {gap_text}",
+        ]
+    else:
+        legs = _vertical_leg_text(candidate)
+        ask = quote.get("ask")
+        invalidation = _fmt_strike(candidate.get("invalidation_spx"))
+        target = _fmt_strike(candidate.get("target_spx"))
+        width = economics.get("width_points")
+        debit_frac = economics.get("debit_fraction_of_width")
+        payoff = ""
+        if isinstance(width, int | float) and isinstance(debit_frac, int | float):
+            payoff = f" · 翼宽 {_fmt_strike(width)} 点 · 借记占 {_percent(debit_frac)}"
+        lines = [
+            f"【{title}】",
+            "",
+            "## 结论",
+            f"{_setup_cn(setup)} · {_direction_cn(candidate.get('direction'))} · 只许限价",
+            "",
+            "## 执行",
+            f"{legs}",
+            f"净借记 ≤ {_fmt_premium(ask)} · 提交前刷新报价 · 禁止市价",
+            f"有效至 {until}（北京）",
+            "",
+            "## 风险",
+            f"最大亏损 {loss} · SPX 跌破 {invalidation} 失效"
+            if str(candidate.get("direction") or "") == "UP"
+            else f"最大亏损 {loss} · SPX 升破 {invalidation} 失效",
+            "",
+            "## 目标",
+            f"SPX {target}{payoff}",
+        ]
+    lines.extend(
+        (
+            "",
+            "## 数据",
+            "不下自动单 · 人工限价",
+        )
+    )
+    if path_text:
+        lines.append(f"{path_text}（未校准，不改结论）")
+    del decision
+    return "\n".join(lines)
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def _percent(value: object) -> str:
-    if isinstance(value, int | float) and not isinstance(value, bool):
-        return f"{float(value):.1%}"
-    return "n/a"
+    number = _finite_number(value)
+    if number is None:
+        return "暂缺"
+    return f"{number:.0%}"
 
 
-def _policy_ev_text(edge: dict[str, Any]) -> str:
-    value = edge.get("policy_ev")
-    n = edge.get("policy_ev_n")
+def _fmt_premium(value: object) -> str:
+    number = _finite_number(value)
+    if number is None:
+        return "暂缺"
+    return f"{number:.2f}"
+
+
+def _fmt_strike(value: object) -> str:
+    number = _finite_number(value)
+    if number is None:
+        return "-"
+    return f"{number:.0f}" if number.is_integer() else f"{number:.1f}"
+
+
+def _usd_loss(points: object) -> str:
+    number = _finite_number(points)
+    if number is None:
+        return "暂缺"
+    return f"${number * 100:.0f}"
+
+
+def _setup_cn(setup: object) -> str:
+    return {
+        "GTH_DELTA_SCAN": "夜盘 delta 扫描",
+        "GTH_WIDTH_SCAN": "夜盘宽度扫描",
+        "GTH_ATM_PIN": "夜盘钉住",
+        "IRON_CONDOR_DELTA": "铁鹰",
+        "EVENT_SETTLEMENT_THRESHOLD": "事件结算观点",
+        "TREND_PULLBACK": "趋势回踩",
+    }.get(str(setup or ""), "结构扫描")
+
+
+def _direction_cn(direction: object) -> str:
+    return {"UP": "看涨", "DOWN": "看跌", "NEUTRAL": "中性"}.get(str(direction or ""), "方向未定")
+
+
+def _strategy_type_cn(candidate: dict[str, Any]) -> str:
+    raw = str(candidate.get("strategy_type") or "")
+    return {
+        "CALL_DEBIT_VERTICAL": "Call 价差",
+        "PUT_DEBIT_VERTICAL": "Put 价差",
+        "CALL_BUTTERFLY": "Call 蝶式",
+        "PUT_BUTTERFLY": "Put 蝶式",
+        "IRON_CONDOR": "铁鹰",
+    }.get(raw, _setup_cn(candidate.get("setup_kind")))
+
+
+def _leg_token(leg: object) -> str:
+    if not isinstance(leg, dict):
+        return "-"
+    strike = leg.get("strike")
+    right = str(leg.get("right") or "").upper()
+    if strike is None:
+        parts = str(leg.get("contract_id") or "").split(":")
+        if len(parts) >= 2:
+            strike, right = parts[-2], parts[-1].upper()
+    if strike is None:
+        return "-"
+    return f"{_fmt_strike(strike)}{right}"
+
+
+def _vertical_leg_text(candidate: dict[str, Any]) -> str:
+    return f"买 {_leg_token(candidate.get('long'))} / 卖 {_leg_token(candidate.get('short'))}"
+
+
+def _iron_condor_strike_text(candidate: dict[str, Any]) -> str:
+    strikes = candidate.get("strikes")
+    if isinstance(strikes, list) and len(strikes) == 4:
+        return "/".join(_fmt_strike(value) for value in strikes)
+    legs = [
+        candidate.get("put_long"),
+        candidate.get("put_short"),
+        candidate.get("call_short"),
+        candidate.get("call_long"),
+    ]
+    tokens = [_leg_token(leg) for leg in legs if isinstance(leg, dict)]
+    return "/".join(tokens) if tokens else "-"
+
+
+def _strike_pair(value: object) -> str | None:
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return "/".join(_fmt_strike(item) for item in value)
     if isinstance(value, int | float) and not isinstance(value, bool):
-        if isinstance(n, int | float) and not isinstance(n, bool):
-            return f"policyEV={float(value):g}({int(n)})"
-        return f"policyEV={float(value):g}"
-    return "policyEV=n/a"
+        return _fmt_strike(value)
+    return None
+
+
+def _beijing_clock(value: object) -> str:
+    parsed = _timestamp(value)
+    if parsed is None:
+        return "刷新前"
+    return parsed.astimezone(SHANGHAI_TZ).strftime("%H:%M")
+
+
+def _strategy_card_title(candidate: dict[str, Any]) -> str:
+    kind = _strategy_type_cn(candidate)
+    if candidate.get("setup_kind") == "IRON_CONDOR_DELTA":
+        return f"SPX 人工候选 · {kind} {_iron_condor_strike_text(candidate)}"
+    long_token = _leg_token(candidate.get("long"))
+    short_token = _leg_token(candidate.get("short"))
+    if long_token != "-" and short_token != "-":
+        return f"SPX 人工候选 · {kind} {long_token}/{short_token}"
+    return f"SPX 人工候选 · {kind}"
 
 
 def _render_strategy_idea_memo(memo: dict[str, Any]) -> str:
-    watch_levels = ", ".join(str(level) for level in memo.get("watch_levels") or ()) or "-"
-    falsification = " | ".join(str(item) for item in memo.get("falsification") or ()) or "-"
-    risks = " | ".join(str(item) for item in memo.get("risks") or ()) or "-"
+    watch_levels = "、".join(_fmt_strike(level) for level in memo.get("watch_levels") or ()) or "-"
+    falsification = "；".join(str(item) for item in memo.get("falsification") or ()) or "-"
+    risks = "；".join(str(item) for item in memo.get("risks") or ()) or "-"
     return "\n".join((
-        "Idea Memo (research)",
-        f"thesis  {memo.get('thesis') or '-'}",
-        f"falsification  {falsification}",
-        f"watch_levels  {watch_levels}",
-        f"risks  {risks}",
+        "## 研究备忘",
+        f"看法  {memo.get('thesis') or '-'}",
+        f"证伪  {falsification}",
+        f"盯盘  {watch_levels}",
+        f"风险  {risks}",
+        "以上只解释结构，不授权下单",
     ))
 
 

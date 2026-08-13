@@ -375,9 +375,9 @@ def expected_move_text(payload: Mapping[str, Any]) -> str:
     # matching numerator/denominator horizon, never an earlier session range.
     usage = aligned_expected_move_usage(payload)
     if usage is None:
-        return f"EM ±{expected_move:g}pt"
+        return f"EM ±{expected_move:.1f}pt"
     label, fraction = usage
-    return f"EM ±{expected_move:g}pt · {label} 已用 {fraction:.0%}"
+    return f"EM ±{expected_move:.1f}pt · {label} 已用 {fraction:.0%}"
 
 
 def aligned_expected_move_usage(payload: Mapping[str, Any]) -> tuple[str, float] | None:

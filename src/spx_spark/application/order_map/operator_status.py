@@ -440,9 +440,9 @@ def _location_line(payload: Mapping[str, Any], projection: DeskMapProjection) ->
     vwap_distance = finite_float(es.get("vwap_distance_points"))
     vwap_text = "ES VWAP unavailable"
     if vwap is not None:
-        vwap_text = f"ES VWAP {vwap:g}"
+        vwap_text = f"ES VWAP {_dash(vwap)}"
     if vwap_distance is not None:
-        vwap_text += f"（偏离 {vwap_distance:+g}pt）"
+        vwap_text += f"（偏离 {_dash(vwap_distance)}pt）"
     elif vwap is not None:
         vwap_text += "（偏离 unavailable）"
     return (
@@ -761,7 +761,7 @@ def _gamma_location_text(payload: Mapping[str, Any], spot: float | None) -> str:
         parts.append("Flip 位置 unavailable")
     if spot is not None and zero is not None:
         relation = "上方" if spot >= zero else "下方"
-        parts.append(f"ZG {zero:g} {relation} {abs(spot - zero):.1f}pt")
+        parts.append(f"ZG {_dash(zero)} {relation} {abs(spot - zero):.1f}pt")
     else:
         parts.append("ZG unavailable")
     return "Gamma位置 " + " · ".join(parts)

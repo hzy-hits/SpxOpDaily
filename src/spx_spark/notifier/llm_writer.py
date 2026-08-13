@@ -448,16 +448,16 @@ def call_strategy_idea_memo(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Return a bounded research memo that only reuses decision facts."""
 
-    memo_settings = replace(settings or LlmWriterSettings.from_env(), timeout_seconds=6.0)
+    memo_settings = replace(settings or LlmWriterSettings.from_env(), timeout_seconds=12.0)
     system = (
-        "You are a strategy idea memo writer. Output json only: "
-        '{"thesis":"...","falsification":["..."],"watch_levels":[0.0],"risks":["..."]}. '
-        "Only use prices, probabilities, watch levels, and contract codes already present in the "
-        "input decision. Never create execution instructions, position sizing, market orders, "
-        "urgency, or authority. Never invent contracts, prices, or probabilities."
+        "你是策略研究备忘作者，只输出 JSON："
+        '{"thesis":"...","falsification":["..."],"watch_levels":[0.0],"risks":["..."]}。'
+        "用简体中文。thesis 必须是一句带「所以」的判断，不要复述输入。"
+        "只使用输入里已有的价格、行权、方向；watch_levels 必须是输入里出现过的数字。"
+        "不得给出下单指令、仓位、市价、紧迫感或授权。不得编造合约、价格或概率。"
     )
     text, error = call_llm_writer(
-        json.dumps(decision, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(_strategy_idea_memo_facts(decision), ensure_ascii=False, separators=(",", ":")),
         system=system,
         settings=memo_settings,
         json_mode=True,
@@ -471,6 +471,42 @@ def call_strategy_idea_memo(
     if not idea_memo_output_valid(memo, decision):
         return None, "strategy_idea_memo_validation_failed"
     return memo, None
+
+
+def _compact_leg(leg: object) -> dict[str, Any] | None:
+    if not isinstance(leg, dict):
+        return None
+    row = {
+        "strike": leg.get("strike"),
+        "right": leg.get("right"),
+        "delta": leg.get("delta"),
+    }
+    return {key: value for key, value in row.items() if value is not None} or None
+
+
+def _strategy_idea_memo_facts(decision: dict[str, Any]) -> dict[str, Any]:
+    """Send DeepSeek a short fact card, not the whole decision JSON dump."""
+
+    candidate = decision.get("candidate") if isinstance(decision.get("candidate"), dict) else {}
+    economics = candidate.get("economics") if isinstance(candidate.get("economics"), dict) else {}
+    quote = candidate.get("quote") if isinstance(candidate.get("quote"), dict) else {}
+    facts: dict[str, Any] = {
+        "setup": candidate.get("setup_kind"),
+        "direction": candidate.get("direction"),
+        "strategy_type": candidate.get("strategy_type"),
+        "long": _compact_leg(candidate.get("long")),
+        "short": _compact_leg(candidate.get("short")),
+        "strikes": candidate.get("strikes"),
+        "target_spx": candidate.get("target_spx"),
+        "invalidation_spx": candidate.get("invalidation_spx"),
+        "ask": quote.get("ask"),
+        "credit": quote.get("credit"),
+        "max_loss_points": economics.get("max_loss_points"),
+        "max_gain_points": economics.get("max_gain_points"),
+        "width_points": economics.get("width_points"),
+        "breakeven_spx": economics.get("breakeven_spx"),
+    }
+    return {key: value for key, value in facts.items() if value not in (None, {}, [])}
 
 
 # --- push continuity: remember the last push so the next writer can say

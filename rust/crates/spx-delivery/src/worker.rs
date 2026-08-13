@@ -749,29 +749,19 @@ mod tests {
         };
         assert_eq!(request.event_id, "report-event-1000-et");
         assert_eq!(request.message.title, "SPX RTH Desk Map · 10:00 ET");
-        assert!(
-            request
-                .message
-                .body
-                .contains("Base Case\nBullish  above VWAP")
-        );
-        assert!(
-            request
-                .message
-                .body
-                .contains("Why\nLocation · SPX 7568 | OR15 7565")
-        );
-        assert!(request.message.body.contains("Structure · Put 7525"));
-        assert!(request.message.body.contains("Trigger\nHold 7565\n"));
+        assert!(request.message.body.contains("Bullish  above VWAP"));
+        assert!(request.message.body.contains("位置  SPX 7568 | OR15 7565"));
+        assert!(request.message.body.contains("结构  Put 7525"));
+        assert!(request.message.body.contains("触发  Hold 7565\n"));
         assert!(request.message.body.contains(&"x".repeat(3_500)));
-        assert!(request.message.body.contains("Invalidation\nLose VWAP"));
-        assert!(request.message.body.contains("Targets\n7580 / 7595"));
-        assert!(request.message.body.contains("Execution\nWait for retest"));
+        assert!(request.message.body.contains("失效  Lose VWAP"));
+        assert!(request.message.body.contains("目标  7580 / 7595"));
+        assert!(request.message.body.contains("执行  Wait for retest"));
         assert!(
             request
                 .message
                 .body
-                .ends_with("Primary Data Impact\nDEGRADED: clipped mass 28.4%")
+                .ends_with("数据  DEGRADED: clipped mass 28.4%")
         );
     }
 

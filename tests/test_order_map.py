@@ -4759,9 +4759,9 @@ def test_strategy_decision_renders_idea_memo_when_valid(tmp_path: Path, monkeypa
     assert result["accepted"] is True
     assert "idea_memo" not in result
     assert str(captured["text"]).startswith(base_text)
-    assert "\n\nIdea Memo (research)\n" in str(captured["text"])
-    assert "thesis  Wait for 7705.0 to hold before leaning toward 7730.0." in str(captured["text"])
-    assert "watch_levels  7705.0, 7730.0" in str(captured["text"])
+    assert "\n\n## 研究备忘\n" in str(captured["text"])
+    assert "看法  Wait for 7705.0 to hold before leaning toward 7730.0." in str(captured["text"])
+    assert "盯盘  7705、7730" in str(captured["text"])
     assert captured["text"] == captured["feishu_text"]
 
 
@@ -4804,24 +4804,7 @@ def test_strategy_decision_omits_failed_idea_memo_without_changing_body(
     assert captured["text"] == base_text
 
 
-@pytest.mark.parametrize(
-    ("edge", "expected"),
-    [
-        (
-            {
-                "edge_status": "research_unvalidated",
-                "policy_ev": 0.35,
-                "policy_ev_n": 24,
-            },
-            "policyEV=0.35(24)",
-        ),
-        (
-            {"edge_status": "research_unvalidated"},
-            "policyEV=n/a",
-        ),
-    ],
-)
-def test_render_strategy_candidate_shows_policy_ev(edge: dict[str, object], expected: str) -> None:
+def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> None:
     from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
@@ -4836,19 +4819,28 @@ def test_render_strategy_candidate_shows_policy_ev(edge: dict[str, object], expe
         {
             "setup_kind": "TREND_PULLBACK",
             "direction": "UP",
+            "strategy_type": "CALL_DEBIT_VERTICAL",
             "target_spx": 7730.0,
             "invalidation_spx": 7705.0,
             "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
             "long": {"contract_id": "option:SPX:SPXW:20260807:7710:C"},
             "short": {"contract_id": "option:SPX:SPXW:20260807:7720:C"},
             "quote": {"bid": 2.8, "ask": 3.0},
-            "economics": {"max_loss_points": 3.0},
+            "economics": {"max_loss_points": 3.0, "width_points": 10.0, "debit_fraction_of_width": 0.30},
             "utility": {"event_probability": 0.61, "utility": 0.12, "conservative_lower_bound": 40.0},
-            "edge": edge,
+            "edge": {"edge_status": "research_unvalidated", "policy_ev": 0.35, "policy_ev_n": 24},
         },
     )
 
-    assert expected in text
+    assert "【SPX 人工候选 · Call 价差 7710C/7720C】" in text
+    assert "## 执行" in text
+    assert "买 7710C / 卖 7720C" in text
+    assert "净借记 ≤ 3.00" in text
+    assert "最大亏损 $300" in text
+    assert "option:SPX:SPXW" not in text
+    assert "policyEV" not in text
+    assert "deadbeef" not in text
+    assert "automatic_ordering" not in text
 
 
 def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(

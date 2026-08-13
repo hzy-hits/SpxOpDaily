@@ -176,9 +176,10 @@ def test_strategy_idea_memo_accepts_payload_fact_references_only(monkeypatch) ->
     result, error = llm_writer.call_strategy_idea_memo(_strategy_decision(), settings=settings)
 
     assert error is None and result == memo
-    assert calls["timeout_seconds"] == 6.0
+    assert calls["timeout_seconds"] == 12.0
     assert calls["json_mode"] is True
-    assert "Never invent contracts, prices, or probabilities." in str(calls["system"])
+    assert "不得编造合约、价格或概率" in str(calls["system"])
+    assert "market_facts" not in str(calls["prompt"])
 
 
 def test_strategy_idea_memo_rejects_watch_levels_outside_payload(monkeypatch) -> None:
