@@ -311,6 +311,17 @@ def _gth_scan_vertical_hard_gates(
             )
             for reason in reach_reasons
         )
+        delta_cap = max(policy.gth_delta_targets) if policy.gth_delta_targets else 0.20
+        long_delta = _number(long.get("delta"))
+        abs_long_delta = None if long_delta is None else abs(long_delta)
+        if abs_long_delta is None or abs_long_delta > delta_cap:
+            gates.append(
+                {
+                    "gate": "gth_delta_scan_long_above_cap",
+                    "actual": abs_long_delta,
+                    "threshold": delta_cap,
+                }
+            )
     else:
         path_reasons = vertical_width_path_reasons(
             long_strike=float(long_strike),

@@ -197,6 +197,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "gth_width_scan_no_fresh_quote": "夜盘没有 1 分钟内的两腿新鲜报价",
         "gth_scan_geometry_or_payoff_unavailable": "夜盘扫描缺少目标、失效位或权利金",
         "debit_long_beyond_remaining_move": "长腿超出剩余期望波动，20 分钟/到期都很难碰到",
+        "gth_delta_scan_long_above_cap": "夜盘 delta 扫描长腿超过 20Δ",
         "iron_condor_delta_quotes_unavailable": "5–20Δ 卖权铁鹰缺少带 delta 的新鲜报价",
         "iron_condor_four_leg_quote_unavailable": "铁鹰四腿报价不齐",
         "iron_condor_credit_unavailable": "铁鹰保守贷记尚未形成",

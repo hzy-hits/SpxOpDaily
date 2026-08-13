@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.analytics.options.strategy_payoff import (
@@ -205,6 +206,42 @@ def test_gth_always_computes_ten_wide_5_20_delta_iron_condor_from_one_minute_quo
     assert len(rows[0]["legs"]) == 4
 
 
+def _state_with_richer_20d(now: datetime) -> LatestState:
+    quotes = []
+    for quote in _quotes(now, with_greeks=True):
+        right = str(getattr(quote.instrument.right, "value", quote.instrument.right) or "").upper()
+        if right == "C" and quote.instrument.strike == 7810.0:
+            quotes.append(
+                replace(quote, greeks=OptionGreeks(delta=0.22, implied_vol=0.18, gamma=0.01))
+            )
+        elif right == "P" and quote.instrument.strike == 7690.0:
+            quotes.append(
+                replace(quote, greeks=OptionGreeks(delta=-0.22, implied_vol=0.18, gamma=0.01))
+            )
+        else:
+            quotes.append(quote)
+    packed = tuple(quotes)
+    return LatestState(created_at=now, as_of=now, quotes=packed, best_quotes=packed)
+
+
+def test_iron_condor_20d_picks_at_or_below_not_richer_nearest() -> None:
+    structure = build_iron_condor_map(
+        _payload(),
+        _facts(),
+        _state_with_richer_20d(NOW),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+
+    assert max(StrategyPolicy().gth_delta_targets) == 0.20
+    assert 0.25 not in StrategyPolicy().gth_delta_targets
+    assert structure["status"] == "ready"
+    assert structure["short_abs_delta"] == 0.20
+    assert structure["strikes"] == [7675.0, 7685.0, 7815.0, 7825.0]
+    assert abs(structure["put_short"]["delta"]) <= 0.20
+    assert abs(structure["call_short"]["delta"]) <= 0.20
+
+
 def test_stale_quotes_do_not_build_an_iron_condor() -> None:
     stale = NOW - timedelta(seconds=90)
     structure = build_iron_condor_map(
@@ -250,7 +287,7 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v11"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v12"
     assert decision["iron_condor_map"]["status"] == "ready"
     assert decision["iron_condor_map"]["setup_kind"] == IRON_CONDOR_DELTA
 
@@ -314,7 +351,13 @@ def test_gth_width_scan_adds_delta_anchors_when_greeks_exist() -> None:
         for row in rows
         if row.get("setup_kind") in {GTH_WIDTH_SCAN, "GTH_DELTA_SCAN"}
     }
+    delta_scan_longs = [
+        row for row in rows if row.get("setup_kind") == "GTH_DELTA_SCAN"
+    ]
 
     assert {7700.0, 7800.0}.isdisjoint(longs)
     assert {7745.0, 7750.0, 7755.0} <= longs
     assert len(rows) > 30
+    assert all(
+        abs(float(row["long"]["delta"])) <= 0.20 + 1e-12 for row in delta_scan_longs
+    )

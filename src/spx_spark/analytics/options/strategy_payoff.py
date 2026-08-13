@@ -321,7 +321,7 @@ def debit_vertical_reach_reasons(
 ) -> list[str]:
     """Reject debit verticals the remaining expected move cannot reach.
 
-    GTH 10Δ/25Δ anchors can sit tens of points beyond the remaining 0DTE move.
+    GTH 5–20Δ anchors can sit tens of points beyond the remaining 0DTE move.
     Width fitting inside EM is not enough if the long strike itself is unreachable.
     """
 

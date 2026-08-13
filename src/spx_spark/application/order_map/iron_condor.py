@@ -300,6 +300,8 @@ def _ten_wide_from_short_delta(
         policy=policy,
         providers=providers,
         max_distance=SHORT_DELTA_TOLERANCE,
+        min_abs_delta=SHORT_DELTA_MIN,
+        max_abs_delta=min(short_abs_delta, SHORT_DELTA_MAX),
     )
     call_short = nearest_abs_delta_strike(
         latest,
@@ -310,6 +312,8 @@ def _ten_wide_from_short_delta(
         policy=policy,
         providers=providers,
         max_distance=SHORT_DELTA_TOLERANCE,
+        min_abs_delta=SHORT_DELTA_MIN,
+        max_abs_delta=min(short_abs_delta, SHORT_DELTA_MAX),
     )
     if put_short is None or call_short is None:
         return None

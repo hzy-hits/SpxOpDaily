@@ -293,6 +293,10 @@ def _gth_width_verticals(
                 if not legs:
                     continue
                 long, short = legs
+                if setup_kind == GTH_DELTA_SCAN and _long_delta_above_scan_cap(
+                    long, policy
+                ):
+                    continue
                 row = _vertical_candidate_from_evidence(
                     {
                         "setup_kind": setup_kind,
@@ -338,6 +342,7 @@ def _gth_vertical_long_strikes(
             now=now,
             policy=policy,
             providers=(Provider.IBKR, Provider.SCHWAB),
+            max_abs_delta=target_delta,
         )
         if strike is not None:
             anchors.add(strike)
@@ -1011,10 +1016,18 @@ def nearest_abs_delta_strike(
     policy: StrategyPolicy,
     providers: Sequence[Provider],
     max_distance: float = 0.08,
+    min_abs_delta: float | None = None,
+    max_abs_delta: float | None = None,
 ) -> float | None:
-    """Return the strike whose |delta| is closest to target among fresh quotes."""
+    """Return the strike whose |delta| is closest to target among fresh quotes.
+
+    When ``max_abs_delta`` is set, richer strikes above that cap are ignored so
+    a 20Δ target means 20Δ or the next strike below it, never 21–25Δ.
+    """
 
     wanted = str(right or "").upper()
+    floor = 0.0 if min_abs_delta is None else float(min_abs_delta)
+    ceiling = None if max_abs_delta is None else float(max_abs_delta)
     for provider in providers:
         best_strike: float | None = None
         best_distance: float | None = None
@@ -1036,13 +1049,24 @@ def nearest_abs_delta_strike(
             delta = usable_delta(quote)
             if delta is None:
                 continue
-            distance = abs(abs(delta) - target_abs_delta)
+            abs_delta = abs(delta)
+            if abs_delta < floor:
+                continue
+            if ceiling is not None and abs_delta > ceiling:
+                continue
+            distance = abs(abs_delta - target_abs_delta)
             if best_distance is None or distance < best_distance:
                 best_distance = distance
                 best_strike = _round_to_strike(instrument.strike)
         if best_strike is not None and best_distance is not None and best_distance <= max_distance:
             return best_strike
     return None
+
+
+def _long_delta_above_scan_cap(long: Mapping[str, Any], policy: StrategyPolicy) -> bool:
+    cap = max(policy.gth_delta_targets) if policy.gth_delta_targets else 0.20
+    delta = _number(long.get("delta"))
+    return delta is None or abs(delta) > cap
 
 
 def _gth_quote_policy(policy: StrategyPolicy) -> StrategyPolicy:
