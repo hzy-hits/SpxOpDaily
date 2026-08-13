@@ -30,6 +30,9 @@ from spx_spark.application.market_features.gth_level_manual_candidate import (
     evaluate_gth_level_manual_candidate,
     process_gth_level_manual_candidate,
 )
+from spx_spark.application.market_features.gth_trend_entry_source import (
+    current_gth_trend_advance,
+)
 from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
 from spx_spark.application.market_features.trade_intent import (
     live_trade_intent_authority_issues,
@@ -802,6 +805,54 @@ def test_current_gth_trend_advance_builds_bounded_manual_card(
     card = _notification_intent(candidate, event_id="advance-ready", now=NOW)
     assert "ES 顺势推进确认多头" in card["text"]
     assert "趋势已确认切换" not in card["text"]
+
+
+def test_continuation_m1_cannot_authorize_gth_manual_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    trend_state = _trend_transition_state(NOW, direction="up")
+    trend_state["last_continuation"] = {
+        "event_type": "continuation",
+        "event_id": "globex-cont:2026-07-15:gth:3:up:m1",
+        "session_id": "2026-07-15:gth",
+        "sequence": 3,
+        "direction": "up",
+        "milestone_index": 1,
+        "anchor_price": 7388.0,
+        "extension_points": 10.0,
+        "threshold_points": 10.0,
+        "at": NOW.isoformat(),
+        "source_at": NOW.isoformat(),
+        "price": 7398.0,
+        "provider": "ibkr",
+        "signal_stage": "entry_advisory",
+        "option_right": "C",
+        "operator_action": "evaluate_call_setup",
+        "automatic_ordering": False,
+    }
+
+    source, reasons = current_gth_trend_advance(
+        trend_state,
+        now=NOW,
+        ttl_seconds=300.0,
+        max_source_lag_seconds=90.0,
+    )
+    assert source is None
+    assert reasons == []
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=trend_state,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+    assert candidate["source_kind"] != "gth_es_trend_advance"
+    assert candidate.get("path_kind") != "trend_advance_call"
 
 
 def test_gth_trend_transition_rechecks_and_m1_do_not_rearm_the_same_event(

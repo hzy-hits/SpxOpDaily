@@ -32,7 +32,11 @@ def resolve_gth_manual_source(
     ttl_seconds: float,
     max_source_lag_seconds: float,
 ) -> tuple[str, Mapping[str, object], str, str | None, int, list[str], str | None]:
-    """Prefer a fresh session-advance, then a valid transition, then the confirmed-level path."""
+    """Prefer a fresh NEUTRAL session-advance, then a valid transition, then the confirmed-level path.
+
+    Continuation m1 is observe-only: it is a late 10-point chase after a
+    regime flip and must not share the advance authorizing path.
+    """
 
     advance_event, advance_reasons = current_gth_trend_advance(
         trend_state,
@@ -256,33 +260,24 @@ def current_gth_trend_advance(
     ttl_seconds: float,
     max_source_lag_seconds: float,
 ) -> tuple[dict[str, object] | None, list[str]]:
-    """Return one fresh session-advance or continuation m1, never a regime flip."""
+    """Return one fresh NEUTRAL session-advance. Continuation and flips stay observe-only."""
 
     expected_session = f"{DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()}:gth"
     if str(trend_state.get("session_id") or "") != expected_session:
         return None, []
-    candidates: list[Mapping[str, object]] = []
     raw_advance = trend_state.get("last_advance")
-    if isinstance(raw_advance, Mapping):
-        candidates.append(raw_advance)
-    raw_continuation = trend_state.get("last_continuation")
-    if (
-        isinstance(raw_continuation, Mapping)
-        and raw_continuation.get("event_type") == "continuation"
-        and raw_continuation.get("signal_stage") == "entry_advisory"
-    ):
-        candidates.append(raw_continuation)
-    for raw_event in candidates:
-        source, reasons = _validate_advance_event(
-            raw_event,
-            expected_session=expected_session,
-            now=now,
-            ttl_seconds=ttl_seconds,
-            max_source_lag_seconds=max_source_lag_seconds,
-        )
-        if source is not None and not reasons:
-            return source, []
-    return None, []
+    if not isinstance(raw_advance, Mapping):
+        return None, []
+    source, reasons = _validate_advance_event(
+        raw_advance,
+        expected_session=expected_session,
+        now=now,
+        ttl_seconds=ttl_seconds,
+        max_source_lag_seconds=max_source_lag_seconds,
+    )
+    if source is not None and not reasons:
+        return source, []
+    return source, reasons
 
 
 def _validate_advance_event(
@@ -522,7 +517,7 @@ def _normalize_advance(
     if (
         session_id != expected_session
         or direction not in {"up", "down"}
-        or event_type not in {"advance", "continuation"}
+        or event_type != "advance"
         or event.get("signal_stage") != "entry_advisory"
         or not event_id
         or not provider

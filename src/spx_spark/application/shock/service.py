@@ -28,7 +28,12 @@ from spx_spark.application.shock.evaluator import (
     rth_session_date,
     synchronized_live_sample,
 )
-from spx_spark.application.shock.gth_dip import advance_gth_dip, mark_gth_delivery
+from spx_spark.application.shock.gth_dip import (
+    GTH_DIP_REGIME_MIN_AGE_SECONDS,
+    GTH_TREND_ALIGNMENT_POLICY_VERSION,
+    advance_gth_dip,
+    mark_gth_delivery,
+)
 from spx_spark.application.shock.gth_path_projection import (
     build_gth_path_rank_projection,
 )
@@ -770,10 +775,11 @@ def _gth_trend_entry_quality(
     at: datetime,
     max_age_seconds: float,
 ) -> dict[str, object]:
-    """Freeze the same-session trend gate used by an operator-ready GTH signal."""
+    """Freeze the same-session trend gate used by an operator-ready GTH dip."""
 
     now = _state_time(at)
     updated_at = _state_time(trend_state.get("updated_at"))
+    regime_started_at = _state_time(trend_state.get("regime_started_at"))
     session_id = str(trend_state.get("session_id") or "")
     regime = str(trend_state.get("regime") or "")
     metrics = trend_state.get("metrics")
@@ -789,7 +795,7 @@ def _gth_trend_entry_quality(
     expected_session_id = trend_context_id(at)
     if not expected_session_id.startswith(f"{session_date}:") or session_id != expected_session_id:
         reasons.append("trend_session_mismatch")
-    if regime == "bearish":
+    if regime != "bullish":
         reasons.append("trend_not_bullish")
     if return_180m is not None and return_180m < 0:
         reasons.append("trend_180m_negative")
@@ -798,18 +804,30 @@ def _gth_trend_entry_quality(
             reasons.append("trend_macro_unavailable")
         elif return_60m < 0:
             reasons.append("trend_60m_not_positive")
+    regime_age_seconds: float | None = None
+    if regime == "bullish":
+        if now is None or regime_started_at is None:
+            reasons.append("trend_regime_age_unavailable")
+        else:
+            regime_age_seconds = (now - regime_started_at).total_seconds()
+            if regime_age_seconds < GTH_DIP_REGIME_MIN_AGE_SECONDS:
+                reasons.append("trend_regime_too_fresh")
     features = {
         "session_id": session_id or None,
         "expected_session_id": expected_session_id,
         "trend_updated_at": updated_at.isoformat() if updated_at is not None else None,
         "regime": regime or None,
+        "regime_started_at": (
+            regime_started_at.isoformat() if regime_started_at is not None else None
+        ),
+        "regime_age_seconds": regime_age_seconds,
         "return_15m_points": return_15m,
         "return_60m_points": return_60m,
         "return_180m_points": return_180m,
     }
     return {
         "mode": "decision_grade",
-        "policy_version": "gth_trend_alignment_live_v3",
+        "policy_version": GTH_TREND_ALIGNMENT_POLICY_VERSION,
         "evaluated_at": now.isoformat() if now is not None else None,
         "verdict": "blocked" if reasons else "pass",
         "block_reasons": reasons,

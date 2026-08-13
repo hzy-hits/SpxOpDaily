@@ -24,6 +24,10 @@ from spx_spark.strategy_contract import policy_version, strategy_event_fields
 
 
 GTH_DIP_RECLAIM_CALL_KIND = "gth_dip_reclaim_call"
+# Dip-reclaim needs an established uptrend, not a just-flipped regime.
+# 1800s matches GlobexTrendSettings.continuation_cooldown_seconds.
+GTH_DIP_REGIME_MIN_AGE_SECONDS = 1800.0
+GTH_TREND_ALIGNMENT_POLICY_VERSION = "gth_trend_alignment_live_v4"
 BEIJING = ZoneInfo("Asia/Shanghai")
 PATH_HISTORY_GRACE_SECONDS = 60
 PATH_DECISION_SAMPLE_SECONDS = 300
@@ -521,7 +525,7 @@ def _frozen_entry_quality(value: Mapping[str, object] | None) -> dict[str, objec
         return dict(value)
     return {
         "mode": "decision_grade",
-        "policy_version": "gth_trend_alignment_live_v3",
+        "policy_version": GTH_TREND_ALIGNMENT_POLICY_VERSION,
         "verdict": "blocked",
         "block_reasons": ["trend_context_unavailable"],
         "features": {},
