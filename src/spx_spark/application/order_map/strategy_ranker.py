@@ -25,6 +25,9 @@ _POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
 _POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
 _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
+_GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
+_GTH_ATM_PIN = "GTH_ATM_PIN"
+_IRON_CONDOR_TYPE = "IRON_CONDOR"
 _EVENT_SETTLEMENT_MAX_DEBIT_FRACTION = 0.50
 
 
@@ -126,6 +129,8 @@ def _apply_surface_shape_prior(
     if summary.get("snr_quality") == "high":
         if strategy_type.endswith("_BUTTERFLY"):
             prior = 0.025 if summary.get("d4_shape") == "peaked" else 0.0
+        elif strategy_type == _IRON_CONDOR_TYPE:
+            prior = 0.05 if summary.get("d4_shape") == "peaked" else 0.0
         elif strategy_type.startswith("CALL_") and summary.get("d3_sign") == "up":
             prior = 0.05
         elif strategy_type.startswith("PUT_") and summary.get("d3_sign") == "down":
@@ -164,6 +169,8 @@ def _hard_gate_candidate(
         gates.extend(_vertical_hard_gates(candidate, facts, policy=policy))
     elif strategy_type.endswith("_BUTTERFLY"):
         gates.extend(_butterfly_hard_gates(candidate, facts, regime, policy=policy))
+    elif strategy_type == _IRON_CONDOR_TYPE:
+        gates.extend(_iron_condor_hard_gates(candidate, facts))
     else:
         gates.append({"gate": "unsupported_strategy_type", "actual": strategy_type, "threshold": "approved_strategy"})
     if candidate.get("automatic_ordering") is not False or candidate.get("manual_action_only") is not True:
@@ -206,7 +213,7 @@ def _vertical_hard_gates(
 ) -> list[dict[str, Any]]:
     if candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP:
         return _event_settlement_vertical_hard_gates(candidate)
-    if candidate.get("setup_kind") == _GTH_WIDTH_SCAN:
+    if candidate.get("setup_kind") in {_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN}:
         return _gth_scan_vertical_hard_gates(candidate, facts, policy=policy)
     long, short = _map(candidate.get("long")), _map(candidate.get("short"))
     if not long or not short:
@@ -279,25 +286,27 @@ def _gth_scan_vertical_hard_gates(
     short_strike = _number(short.get("strike"))
     if None in (target, stop, debit_fraction, long_strike, short_strike):
         return [{"gate": "gth_scan_geometry_or_payoff_unavailable", "actual": None, "threshold": "present"}]
-    right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
-    remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
-    path_reasons = vertical_width_path_reasons(
-        long_strike=float(long_strike),
-        short_strike=float(short_strike),
-        right=right,
-        target=target,
-        remaining_expected_move=remaining_move,
-    )
-    gates = [
-        _width_path_gate(
-            reason,
+    gates: list[dict[str, Any]] = []
+    if candidate.get("setup_kind") != _GTH_DELTA_SCAN:
+        right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
+        remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
+        path_reasons = vertical_width_path_reasons(
             long_strike=float(long_strike),
             short_strike=float(short_strike),
+            right=right,
             target=target,
             remaining_expected_move=remaining_move,
         )
-        for reason in path_reasons
-    ]
+        gates = [
+            _width_path_gate(
+                reason,
+                long_strike=float(long_strike),
+                short_strike=float(short_strike),
+                target=target,
+                remaining_expected_move=remaining_move,
+            )
+            for reason in path_reasons
+        ]
     if float(debit_fraction) > policy.max_debit_fraction:
         gates.append(
             {
@@ -391,6 +400,8 @@ def _butterfly_hard_gates(
     *,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
+    if candidate.get("setup_kind") == _GTH_ATM_PIN:
+        return _gth_scan_butterfly_hard_gates(candidate, facts, policy=policy)
     gates: list[dict[str, Any]] = []
     legs = candidate.get("legs")
     economics = _map(candidate.get("economics"))
@@ -437,6 +448,126 @@ def _butterfly_hard_gates(
     risk_usd = debit * 100.0 if debit is not None else None
     if risk_usd is None or risk_usd > policy.butterfly_max_risk_usd:
         gates.append({"gate": "butterfly_risk_budget", "actual": risk_usd, "threshold": policy.butterfly_max_risk_usd})
+    return gates
+
+
+def _gth_scan_butterfly_hard_gates(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    gates: list[dict[str, Any]] = []
+    legs = candidate.get("legs")
+    economics = _map(candidate.get("economics"))
+    if not isinstance(legs, list) or len(legs) != 3 or any(not _map(leg) for leg in legs):
+        gates.append({"gate": "butterfly_three_leg_bbo_unavailable", "actual": None, "threshold": "three_legs"})
+    if _number(economics.get("max_loss_points")) is None or _number(economics.get("max_gain_points")) is None:
+        gates.append({"gate": "butterfly_economics_unavailable", "actual": None, "threshold": "valid_debit"})
+    shock_state = str(_map(facts.get("shock")).get("state") or "NONE")
+    if shock_state not in {"NONE", "RECLAIMED"}:
+        gates.append({"gate": "butterfly_shock_veto", "actual": shock_state, "threshold": ["NONE", "RECLAIMED"]})
+    center = _number(candidate.get("center"))
+    spot = _number(_map(facts.get("spot")).get("spx"))
+    distance = abs(center - spot) if center is not None and spot is not None else None
+    if distance is None or distance > policy.pin_body_max_spot_distance_points:
+        gates.append(
+            {
+                "gate": "butterfly_body_spot_distance",
+                "actual": distance,
+                "threshold": policy.pin_body_max_spot_distance_points,
+            }
+        )
+    width = _number(economics.get("width_points")) or _number(candidate.get("width"))
+    debit = _number(economics.get("max_loss_points"))
+    debit_fraction = debit / width if debit is not None and width is not None and width > 0 else None
+    if debit_fraction is None or debit_fraction > policy.butterfly_max_debit_fraction:
+        gates.append({"gate": "butterfly_debit_fraction", "actual": debit_fraction, "threshold": policy.butterfly_max_debit_fraction})
+    risk_usd = debit * 100.0 if debit is not None else None
+    if risk_usd is None or risk_usd > policy.butterfly_max_risk_usd:
+        gates.append({"gate": "butterfly_risk_budget", "actual": risk_usd, "threshold": policy.butterfly_max_risk_usd})
+    return gates
+
+
+def _iron_condor_hard_gates(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    from spx_spark.application.order_map.iron_condor import (
+        MAX_CREDIT_FRACTION,
+        MIN_CREDIT_FRACTION,
+    )
+
+    gates: list[dict[str, Any]] = []
+    legs = candidate.get("legs")
+    if not isinstance(legs, list) or len(legs) != 4 or any(not _map(leg) for leg in legs):
+        gates.append(
+            {
+                "gate": "iron_condor_four_leg_quote_unavailable",
+                "actual": None,
+                "threshold": "four_legs",
+            }
+        )
+    economics = _map(candidate.get("economics"))
+    credit_fraction = _number(economics.get("credit_fraction_of_width"))
+    gain = _number(economics.get("max_gain_points"))
+    loss = _number(economics.get("max_loss_points"))
+    if gain is None or loss is None or gain <= 0 or loss <= 0 or credit_fraction is None:
+        gates.append(
+            {
+                "gate": "iron_condor_credit_unavailable",
+                "actual": dict(economics),
+                "threshold": "valid_credit",
+            }
+        )
+    elif not MIN_CREDIT_FRACTION <= credit_fraction <= MAX_CREDIT_FRACTION:
+        gates.append(
+            {
+                "gate": "iron_condor_credit_fraction",
+                "actual": credit_fraction,
+                "threshold": f"{MIN_CREDIT_FRACTION}-{MAX_CREDIT_FRACTION}",
+            }
+        )
+    if candidate.get("spot_inside_shorts") is not True:
+        gates.append(
+            {
+                "gate": "iron_condor_spot_outside_shorts",
+                "actual": _number(_map(facts.get("spot")).get("spx")),
+                "threshold": "between_short_strikes",
+            }
+        )
+    deltas = [
+        abs(delta)
+        for delta in (
+            _number(_map(candidate.get("put_short")).get("delta")),
+            _number(_map(candidate.get("call_short")).get("delta")),
+        )
+        if delta is not None
+    ]
+    if len(deltas) != 2 or any(not 0.15 <= value <= 0.35 for value in deltas):
+        gates.append(
+            {
+                "gate": "iron_condor_short_delta_band",
+                "actual": deltas,
+                "threshold": "0.15-0.35",
+            }
+        )
+    wing_deltas = [
+        abs(delta)
+        for delta in (
+            _number(_map(candidate.get("put_long")).get("delta")),
+            _number(_map(candidate.get("call_long")).get("delta")),
+        )
+        if delta is not None
+    ]
+    if len(wing_deltas) != 2 or any(not 0.02 <= value <= 0.12 for value in wing_deltas):
+        gates.append(
+            {
+                "gate": "iron_condor_long_delta_band",
+                "actual": wing_deltas,
+                "threshold": "0.02-0.12",
+            }
+        )
     return gates
 
 

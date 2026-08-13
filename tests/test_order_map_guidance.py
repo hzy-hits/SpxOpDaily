@@ -592,6 +592,13 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
         "candidate": None,
         "action_authority": "none",
         "execution": {"action": "WAIT"},
+        "iron_condor_map": {
+            "status": "ready",
+            "strikes": [7650.0, 7700.0, 7800.0, 7840.0],
+            "quote": {"credit": 9.0},
+            "economics": {"max_gain_points": 9.0},
+        },
+        "rejection_funnel": {"candidate_enumerated": 30, "hard_gate_pass": 0},
         "why_not": {
             "reasons": ["confirmed_price_trigger_unavailable"],
             "nearest_candidate": {
@@ -607,12 +614,12 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
 
     sections = build_desk_message_sections(payload, gth_now)
 
-    assert "结论  心跳 · 健康检查" in sections.desk_view
-    assert "最近候选  无" in sections.desk_view
+    assert "心跳 · 健康检查" not in sections.desk_view
     assert "7730/7725" not in sections.desk_view
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
+    assert "25Δ/5Δ 7650/7700/7800/7840 贷记 9" in sections.desk_view
 
 
 def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
@@ -631,17 +638,23 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
             "opportunity_id": "strategy-opportunity:d95b5599b6bb81771e",
         },
         "execution": {"action": "MANUAL_LIMIT"},
+        "iron_condor_map": {
+            "status": "unavailable",
+            "reason": "iron_condor_delta_quotes_unavailable",
+            "strikes": [],
+        },
+        "rejection_funnel": {"candidate_enumerated": 12, "hard_gate_pass": 0},
         "why_not": {"reasons": []},
     }
 
     sections = build_desk_message_sections(payload, gth_now)
 
-    assert "结论  心跳 · 健康检查" in sections.desk_view
-    assert "最近候选  无" in sections.desk_view
+    assert "心跳 · 健康检查" not in sections.desk_view
+    assert "最近候选  无" not in sections.desk_view
     assert "7750/7745" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
-    assert "心跳 · 非交易卡" in sections.execution
+    assert "扫描中 · 铁鹰已标位" in sections.execution
 
 
 @pytest.mark.parametrize(

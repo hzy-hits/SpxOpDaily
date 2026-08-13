@@ -23,6 +23,7 @@ from spx_spark.application.order_map.desk_strategy_view import (
     cross_asset_confirmation_text,
     expected_move_text,
     humanize_strategy_reason,
+    iron_condor_desk_line,
     level_kind_label,
     opening_range_state_text,
     phase_label,
@@ -603,6 +604,9 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
     if change_line:
         parts.append(change_line)
     parts.append(f"Gamma职责  {_gamma_feedback_text(payload)}")
+    iron_condor = _mapping(_mapping(payload.get("strategy_decision")).get("iron_condor_map"))
+    if iron_condor or current_session_is_gth(payload, decision):
+        parts.append(f"铁鹰  {iron_condor_desk_line(iron_condor)}")
     return "\n".join(parts)
 
 
@@ -893,7 +897,7 @@ def _execution_line(
                 f"机会 {short_opportunity}"
             )
         if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-            return "Execution  心跳 · 非交易卡 · 过门赢家会单独推送"
+            return "Execution  扫描中 · 铁鹰已标位 · 仅过门赢家可推"
         reasons = list(_mapping(strategy_decision.get("why_not")).get("reasons") or ())
         blocker = humanize_strategy_reason(
             str(reasons[0]) if reasons else "no_supported_strategy_candidate"

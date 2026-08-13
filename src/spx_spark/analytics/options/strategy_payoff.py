@@ -69,9 +69,53 @@ def conservative_butterfly_bbo(
                       max_source_skew_seconds, "butterfly_leg", "butterfly")
 
 
-def _combo_bbo(
-    legs: tuple[Mapping[str, Any], ...], quantities: tuple[int, ...], now: datetime,
-    max_age: float, max_skew: float, prefix: str, name: str,
+def conservative_iron_condor_bbo(
+    put_long: Mapping[str, Any],
+    put_short: Mapping[str, Any],
+    call_short: Mapping[str, Any],
+    call_long: Mapping[str, Any],
+    *,
+    now: datetime,
+    max_quote_age_seconds: float = 15.0,
+    max_source_skew_seconds: float = 2.0,
+) -> dict[str, Any]:
+    """Conservative credit: sell shorts at bid, buy longs at ask."""
+
+    legs = (put_long, put_short, call_short, call_long)
+    integrity = _combo_quote_integrity(
+        legs, now, max_quote_age_seconds, max_source_skew_seconds, "iron_condor_leg"
+    )
+    if integrity.get("status") != "ready":
+        return integrity
+    bids = [float(_nonnegative(leg.get("bid")) or 0.0) for leg in legs]
+    asks = [float(_positive(leg.get("ask")) or 0.0) for leg in legs]
+    conservative = bids[1] + bids[2] - asks[0] - asks[3]
+    optimistic = max(asks[1] + asks[2] - bids[0] - bids[3], conservative)
+    if conservative <= 0:
+        return {"status": "unavailable", "reasons": ["synthetic_iron_condor_credit_invalid"]}
+    observed = integrity["times"]
+    return {
+        "status": "ready",
+        "bid": round(conservative, 4),
+        "ask": round(optimistic, 4),
+        "credit": round(conservative, 4),
+        "side": "credit",
+        "provider": integrity["provider"],
+        "source_times": [value.isoformat() for value in observed],
+        "source_skew_seconds": round((max(observed) - min(observed)).total_seconds(), 3),
+        "max_quote_age_seconds": round(
+            max((_utc(now) - value).total_seconds() for value in observed), 3
+        ),
+        "reasons": [],
+    }
+
+
+def _combo_quote_integrity(
+    legs: tuple[Mapping[str, Any], ...],
+    now: datetime,
+    max_age: float,
+    max_skew: float,
+    prefix: str,
 ) -> dict[str, Any]:
     bids, asks = [_nonnegative(leg.get("bid")) for leg in legs], [_positive(leg.get("ask")) for leg in legs]
     times, providers, reasons = [_time(leg.get("source_at")) for leg in legs], {str(leg.get("provider") or "") for leg in legs}, []
@@ -92,13 +136,31 @@ def _combo_bbo(
             reasons.append(f"{prefix}_time_skew_exceeded")
     if reasons:
         return {"status": "unavailable", "reasons": reasons}
+    observed = [value for value in times if value]
+    return {
+        "status": "ready",
+        "times": observed,
+        "provider": next(iter(providers)),
+        "reasons": [],
+    }
+
+
+def _combo_bbo(
+    legs: tuple[Mapping[str, Any], ...], quantities: tuple[int, ...], now: datetime,
+    max_age: float, max_skew: float, prefix: str, name: str,
+) -> dict[str, Any]:
+    integrity = _combo_quote_integrity(legs, now, max_age, max_skew, prefix)
+    if integrity.get("status") != "ready":
+        return {"status": "unavailable", "reasons": list(integrity.get("reasons") or ())}
+    bids = [_nonnegative(leg.get("bid")) for leg in legs]
+    asks = [_positive(leg.get("ask")) for leg in legs]
     net_ask = sum(q * float(ask if q > 0 else bid) for q, bid, ask in zip(quantities, bids, asks))
     net_bid = max(sum(q * float(bid if q > 0 else ask) for q, bid, ask in zip(quantities, bids, asks)), 0.0)
     if net_ask <= 0 or net_bid > net_ask:
         return {"status": "unavailable", "reasons": [f"synthetic_{name}_bbo_invalid"]}
-    observed = [value for value in times if value]
+    observed = integrity["times"]
     return {"status": "ready", "bid": round(net_bid, 4), "ask": round(net_ask, 4),
-            "provider": next(iter(providers)), "source_times": [value.isoformat() for value in observed],
+            "provider": integrity["provider"], "source_times": [value.isoformat() for value in observed],
             "source_skew_seconds": round((max(observed) - min(observed)).total_seconds(), 3),
             "max_quote_age_seconds": round(max((_utc(now) - value).total_seconds() for value in observed), 3),
             "reasons": []}
@@ -140,6 +202,33 @@ def butterfly_economics(*, center: float, width: float, net_debit: float) -> dic
             "max_gain_points": width - net_debit, "breakeven_low": center - width + net_debit,
             "breakeven_high": center + width - net_debit,
             "debit_fraction_of_width": net_debit / width}
+
+
+def iron_condor_economics(
+    *,
+    put_long: float,
+    put_short: float,
+    call_short: float,
+    call_long: float,
+    net_credit: float,
+) -> dict[str, float]:
+    put_width = put_short - put_long
+    call_width = call_long - call_short
+    if put_width <= 0 or call_width <= 0 or put_short >= call_short:
+        raise ValueError("iron condor strikes must be put_long < put_short < call_short < call_long")
+    width = max(put_width, call_width)
+    if not 0 < net_credit < width:
+        raise ValueError("iron condor credit must be positive and below the wider wing")
+    return {
+        "put_width_points": put_width,
+        "call_width_points": call_width,
+        "width_points": width,
+        "max_gain_points": net_credit,
+        "max_loss_points": width - net_credit,
+        "breakeven_low": put_short - net_credit,
+        "breakeven_high": call_short + net_credit,
+        "credit_fraction_of_width": net_credit / width,
+    }
 
 
 def butterfly_payoff(settlement: float, *, center: float, width: float, net_debit: float) -> float:

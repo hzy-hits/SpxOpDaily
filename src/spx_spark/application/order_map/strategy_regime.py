@@ -27,10 +27,13 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v8"
+    policy_version: str = "strategy_policy.bootstrap.v9"
+    # v9: GTH desk map is a live structure scan, not an empty health heartbeat.
+    # Always recompute the 25Δ/5Δ iron condor from 1-minute quotes. Widen the
+    # Call/Put/butterfly scan around spot±5 and 10Δ/25Δ anchors. Winners still
+    # push only on trade_ready; unpassed debit spreads are not 可看.
     # v8: GTH enumerates 5-50pt Call/Put debit verticals and butterflies from
     # quotes no older than 60s, then pushes only rank winners on trade_ready.
-    # The 15-minute desk map is a health heartbeat, not a trade card.
     # v7: GTH human cards authorize only NEUTRAL session-advance; dip-reclaim
     # requires an aged bullish regime. Continuation m1 stays observe-only.
     trend_score: float = 6.0
@@ -45,6 +48,8 @@ class StrategyPolicy:
     gth_quote_max_age_seconds: float = 60.0
     gth_quote_max_skew_seconds: float = 60.0
     gth_widths: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0)
+    gth_long_offsets: tuple[float, ...] = (-5.0, 0.0, 5.0)
+    gth_delta_targets: tuple[float, ...] = (0.25, 0.10)
     opportunity_ttl_seconds: float = 300.0
     min_target_room_ratio: float = 1.5
     failed_break_min_target_room_ratio: float = 1.8

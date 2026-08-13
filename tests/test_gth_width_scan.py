@@ -224,19 +224,20 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v8"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v9"
     assert ranked.passed
     assert decision["action_authority"] == "manual"
     assert decision["decision_type"] in {
         "CALL_DEBIT_VERTICAL",
         "PUT_DEBIT_VERTICAL",
+        "CALL_BUTTERFLY",
+        "PUT_BUTTERFLY",
     }
-    assert decision["candidate"]["setup_kind"] == GTH_WIDTH_SCAN
+    assert decision["candidate"]["setup_kind"] in {GTH_WIDTH_SCAN, GTH_ATM_PIN}
     assert decision["candidate"]["candidate_id"] == ranked.passed[0]["candidate_id"]
-    assert all(row["setup_kind"] != GTH_ATM_PIN for row in ranked.passed)
 
 
-def test_gth_desk_map_stays_health_heartbeat_when_a_winner_exists() -> None:
+def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> None:
     payload = _payload()
     payload["strategy_decision"] = {
         "decision_type": "CALL_DEBIT_VERTICAL",
@@ -250,14 +251,21 @@ def test_gth_desk_map_stays_health_heartbeat_when_a_winner_exists() -> None:
             "opportunity_id": "strategy-opportunity:winner",
         },
         "execution": {"action": "MANUAL_LIMIT"},
+        "iron_condor_map": {
+            "status": "ready",
+            "strikes": [7650.0, 7700.0, 7800.0, 7840.0],
+            "quote": {"credit": 8.0},
+            "economics": {"max_gain_points": 8.0},
+        },
+        "rejection_funnel": {"candidate_enumerated": 40, "hard_gate_pass": 1},
         "data_quality": {"status": "ready", "reasons": []},
         "why_not": {"reasons": []},
     }
 
     sections = build_desk_message_sections(payload, NOW)
 
-    assert "结论  心跳 · 健康检查" in sections.desk_view
-    assert "最近候选  无" in sections.desk_view
+    assert "心跳 · 健康检查" not in sections.desk_view
+    assert "最近候选  无" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "Call 价差" not in sections.desk_view
-    assert "心跳 · 非交易卡" in sections.execution
+    assert "25Δ/5Δ 7650/7700/7800/7840 贷记 8" in sections.desk_view
+    assert "扫描中 · 铁鹰已标位" in sections.execution

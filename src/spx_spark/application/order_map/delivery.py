@@ -115,6 +115,18 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
     edge = candidate.get("edge") if isinstance(candidate.get("edge"), dict) else {}
     edge_status = edge.get("edge_status") or "research_unvalidated"
     policy_ev = _policy_ev_text(edge)
+    if candidate.get("setup_kind") == "IRON_CONDOR_DELTA":
+        return "\n".join((
+            "SPX STRATEGY DECISION · MANUAL CANDIDATE",
+            "Desk View  铁鹰 25Δ/5Δ · 仅人工限价",
+            f"Execution  {contracts} · conservative credit {quote.get('credit')} · 净贷记 ≥ {quote.get('credit')}",
+            f"有效期  {candidate.get('opportunity_valid_until')} · 提交前必须刷新报价 · 禁止市价",
+            f"Risk  最大亏损 ${float(economics.get('max_loss_points') or 0) * 100:.0f} · 短腿失效 {invalidation}",
+            f"Targets  短腿中点 {candidate.get('target_spx')}",
+            "Data Quality  conservative credit BBO · automatic_ordering=false",
+            f"决策 id={decision_id[:12]} 角色=MANUAL_CANDIDATE 原因=IRON_CONDOR_DELTA "
+            f"版本 policy={policy} git={git_sha}",
+        ))
     if candidate.get("setup_kind") == "EVENT_SETTLEMENT_THRESHOLD":
         view = candidate.get("view") if isinstance(candidate.get("view"), dict) else {}
         probability_event = (

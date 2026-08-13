@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from spx_spark.analytics.options.pricing import usable_delta
 from spx_spark.analytics.options.strategy_payoff import (
     butterfly_economics,
     conservative_butterfly_bbo,
@@ -25,6 +26,7 @@ from spx_spark.storage import LatestState
 
 WIDTHS: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
 GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
+GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 GTH_ATM_PIN = "GTH_ATM_PIN"
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
@@ -242,49 +244,97 @@ def _gth_width_verticals(
     rows: list[dict[str, Any]] = []
     for direction, right in (("UP", "C"), ("DOWN", "P")):
         target, stop = _facts_wall_ladder_geometry(facts, direction, spot)
-        if target is None or stop is None:
-            continue
-        for width in policy.gth_widths:
-            short_strike = spot + width if right == "C" else spot - width
-            if vertical_width_path_reasons(
-                long_strike=spot,
-                short_strike=short_strike,
-                right=right,
-                target=target,
-                remaining_expected_move=remaining,
-            ):
-                continue
-            legs = _session_option_legs(
-                latest,
-                expiry,
-                ((spot, right), (short_strike, right)),
-                now=now,
-                policy=quote_policy,
-                providers=(Provider.IBKR, Provider.SCHWAB),
-            )
-            if not legs:
-                continue
-            long, short = legs
-            row = _vertical_candidate_from_evidence(
-                {
-                    "setup_kind": GTH_WIDTH_SCAN,
-                    "setup_state": "ENTRY_WINDOW_OPEN",
-                    "direction": direction,
-                    "trigger_level": spot,
-                    "target_spx": target,
-                    "invalidation_spx": stop,
-                    "long": long,
-                    "short": short,
-                    "source": f"gth_{long.get('provider')}_width_enumeration",
-                    "geometry_source": "facts_wall_ladder_fallback",
-                },
-                facts,
-                now=now,
-                policy=quote_policy,
-            )
-            if row:
-                rows.append(row)
+        for long_strike in _gth_vertical_long_strikes(
+            latest,
+            expiry,
+            right,
+            spot,
+            now=now,
+            policy=quote_policy,
+        ):
+            near_spot = abs(long_strike - spot) <= 5.0
+            for width in policy.gth_widths:
+                short_strike = long_strike + width if right == "C" else long_strike - width
+                if near_spot:
+                    if target is None or stop is None:
+                        continue
+                    if vertical_width_path_reasons(
+                        long_strike=long_strike,
+                        short_strike=short_strike,
+                        right=right,
+                        target=target,
+                        remaining_expected_move=remaining,
+                    ):
+                        continue
+                    setup_kind = GTH_WIDTH_SCAN
+                    row_target, row_stop = target, stop
+                    geometry_source = "facts_wall_ladder_fallback"
+                else:
+                    setup_kind = GTH_DELTA_SCAN
+                    row_target, row_stop = short_strike, long_strike
+                    geometry_source = "gth_delta_anchor"
+                legs = _session_option_legs(
+                    latest,
+                    expiry,
+                    ((long_strike, right), (short_strike, right)),
+                    now=now,
+                    policy=quote_policy,
+                    providers=(Provider.IBKR, Provider.SCHWAB),
+                )
+                if not legs:
+                    continue
+                long, short = legs
+                row = _vertical_candidate_from_evidence(
+                    {
+                        "setup_kind": setup_kind,
+                        "setup_state": "ENTRY_WINDOW_OPEN",
+                        "direction": direction,
+                        "trigger_level": long_strike,
+                        "target_spx": row_target,
+                        "invalidation_spx": row_stop,
+                        "long": long,
+                        "short": short,
+                        "source": f"gth_{long.get('provider')}_width_enumeration",
+                        "geometry_source": geometry_source,
+                    },
+                    facts,
+                    now=now,
+                    policy=quote_policy,
+                )
+                if row:
+                    rows.append(row)
     return rows
+
+
+def _gth_vertical_long_strikes(
+    latest: LatestState,
+    expiry: str,
+    right: str,
+    spot: float,
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> list[float]:
+    anchors = {
+        value
+        for offset in policy.gth_long_offsets
+        if (value := _round_to_strike(spot + offset)) is not None
+    }
+    for target_delta in policy.gth_delta_targets:
+        strike = nearest_abs_delta_strike(
+            latest,
+            expiry,
+            right,
+            target_abs_delta=target_delta,
+            now=now,
+            policy=policy,
+            providers=(Provider.IBKR, Provider.SCHWAB),
+        )
+        if strike is not None:
+            anchors.add(strike)
+    if right == "C":
+        return sorted(value for value in anchors if value >= spot - 10.0)
+    return sorted(value for value in anchors if value <= spot + 10.0)
 
 
 def _vertical_candidate_from_evidence(
@@ -864,6 +914,9 @@ def _option_leg(
     )
     if quote is None:
         return {}
+    delta = None
+    if quote.greeks is not None:
+        delta = quote.greeks.delta
     return {
         "contract_id": contract_id,
         "strike": strike,
@@ -871,6 +924,7 @@ def _option_leg(
         "provider": quote.provider.value,
         "bid": quote.bid,
         "ask": quote.ask,
+        "delta": delta,
         "source_at": quote_source_at(quote).isoformat(),
     }
 
@@ -933,6 +987,50 @@ def _session_option_legs(
         ):
             return legs
     return []
+
+
+def nearest_abs_delta_strike(
+    latest: LatestState,
+    expiry: str,
+    right: str,
+    *,
+    target_abs_delta: float,
+    now: datetime,
+    policy: StrategyPolicy,
+    providers: Sequence[Provider],
+    max_distance: float = 0.08,
+) -> float | None:
+    """Return the strike whose |delta| is closest to target among fresh quotes."""
+
+    wanted = str(right or "").upper()
+    for provider in providers:
+        best_strike: float | None = None
+        best_distance: float | None = None
+        for quote in latest.quotes:
+            instrument = quote.instrument
+            if (
+                quote.provider is not provider
+                or instrument.expiry != expiry
+                or str(getattr(instrument.right, "value", instrument.right) or "").upper()
+                != wanted
+            ):
+                continue
+            source_at = quote_source_at(quote)
+            if source_at is None:
+                continue
+            age = (now - source_at).total_seconds()
+            if age < 0.0 or age > policy.quote_max_age_seconds:
+                continue
+            delta = usable_delta(quote)
+            if delta is None:
+                continue
+            distance = abs(abs(delta) - target_abs_delta)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_strike = _round_to_strike(instrument.strike)
+        if best_strike is not None and best_distance is not None and best_distance <= max_distance:
+            return best_strike
+    return None
 
 
 def _gth_quote_policy(policy: StrategyPolicy) -> StrategyPolicy:

@@ -18,6 +18,10 @@ from spx_spark.application.order_map.event_settlement_vertical import (
     enumerate_event_settlement_candidates,
     event_settlement_generation_reason,
 )
+from spx_spark.application.order_map.iron_condor import (
+    build_iron_condor_map,
+    enumerate_iron_condor_candidates,
+)
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
@@ -42,6 +46,13 @@ def build_strategy_decision(
     generation_reasons: list[str] = []
     rows: list[dict[str, Any]] = []
     rank = RankResult(passed=[], near_misses=[], gate_audit=[])
+    iron_condor_map = build_iron_condor_map(
+        payload,
+        facts,
+        latest,
+        now=_utc(now),
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
     if not reasons:
         rows = [
             *enumerate_event_settlement_candidates(
@@ -55,6 +66,13 @@ def build_strategy_decision(
                 payload,
                 facts,
                 regime,
+                latest,
+                now=_utc(now),
+                policy=DEFAULT_STRATEGY_POLICY,
+            ),
+            *enumerate_iron_condor_candidates(
+                payload,
+                facts,
                 latest,
                 now=_utc(now),
                 policy=DEFAULT_STRATEGY_POLICY,
@@ -82,14 +100,17 @@ def build_strategy_decision(
                     generation_reasons=generation_reasons,
                     manual_candidate=True,
                 )
-                return _candidate_decision(
-                    facts,
-                    {**regime, "entry_state": "GOOD_LOCATION"},
-                    rank.passed[0],
-                    candidates_considered=_candidate_summaries(rank),
-                    shadow_candidates=shadow_candidates,
-                    shadow_candidates_skipped=shadow_candidates_skipped,
-                    rejection_funnel=funnel,
+                return _with_iron_condor_map(
+                    _candidate_decision(
+                        facts,
+                        {**regime, "entry_state": "GOOD_LOCATION"},
+                        rank.passed[0],
+                        candidates_considered=_candidate_summaries(rank),
+                        shadow_candidates=shadow_candidates,
+                        shadow_candidates_skipped=shadow_candidates_skipped,
+                        rejection_funnel=funnel,
+                    ),
+                    iron_condor_map,
                 )
             reasons = _rank_reasons(rank)
         else:
@@ -113,20 +134,23 @@ def build_strategy_decision(
             )
             reasons = generation_reasons
     regime = {**regime, "entry_state": _entry_state(facts, reasons, rows, rank)}
-    return _no_trade_decision(
-        facts,
-        regime,
-        reasons,
-        nearest_candidates=rank.near_misses,
-        candidates_considered=_candidate_summaries(rank) if rows else [],
-        rejection_funnel=_rejection_funnel(
+    return _with_iron_condor_map(
+        _no_trade_decision(
             facts,
-            rows,
-            rank,
-            reasons=reasons,
-            generation_reasons=generation_reasons,
-            manual_candidate=False,
+            regime,
+            reasons,
+            nearest_candidates=rank.near_misses,
+            candidates_considered=_candidate_summaries(rank) if rows else [],
+            rejection_funnel=_rejection_funnel(
+                facts,
+                rows,
+                rank,
+                reasons=reasons,
+                generation_reasons=generation_reasons,
+                manual_candidate=False,
+            ),
         ),
+        iron_condor_map,
     )
 
 
@@ -187,6 +211,8 @@ def _candidate_decision(
     surface_shape = _surface_shape_summary(facts)
     result = _base_decision(facts, regime, (facts["decision_at"], available, candidate["opportunity_id"], candidate["quote"]))
     geometry_source = _decision_geometry_source(candidate)
+    quote = _map(candidate.get("quote"))
+    credit_entry = str(candidate.get("strategy_type") or "") == "IRON_CONDOR"
     result.update({
         "available_at": available,
         "geometry_source": geometry_source,
@@ -203,11 +229,14 @@ def _candidate_decision(
                       "surface_shape": surface_shape},
         "why_not": {"nearest_candidate": None, "reasons": [], "reauthorize_on": None,
                     "surface_shape": surface_shape},
-        "execution": {"action": "MANUAL_LIMIT", "order_type": "NET_DEBIT_LIMIT",
-                      "limit": _map(candidate.get("quote")).get("ask"),
-                      "quote_valid_until": candidate["quote_valid_until"],
-                      "opportunity_valid_until": candidate["opportunity_valid_until"],
-                      "automatic_ordering": False, "manual_action_only": True},
+        "execution": {
+            "action": "MANUAL_LIMIT",
+            "order_type": "NET_CREDIT_LIMIT" if credit_entry else "NET_DEBIT_LIMIT",
+            "limit": quote.get("credit") if credit_entry else quote.get("ask"),
+            "quote_valid_until": candidate["quote_valid_until"],
+            "opportunity_valid_until": candidate["opportunity_valid_until"],
+            "automatic_ordering": False, "manual_action_only": True,
+        },
         "risk": {"max_loss": round(float(economics["max_loss_points"]) * 100, 2),
                  "invalidation": {"instrument": "SPX", "price": candidate["invalidation_spx"]}},
         "targets": [{"instrument": "SPX", "price": candidate["target_spx"]}],
@@ -526,6 +555,13 @@ def _shadow_candidate_skip_reason(candidate: Mapping[str, Any]) -> str | None:
 def _hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _with_iron_condor_map(
+    decision: dict[str, Any], iron_condor_map: Mapping[str, Any]
+) -> dict[str, Any]:
+    decision["iron_condor_map"] = dict(iron_condor_map)
+    return decision
 
 
 def _map(value: object) -> Mapping[str, Any]:

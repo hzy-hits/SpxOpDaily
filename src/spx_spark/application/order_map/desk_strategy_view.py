@@ -14,8 +14,8 @@ def strategy_candidate_is_watchable(
 ) -> bool:
     """True when strategy_decision may be shown as a human RTH watch card.
 
-    GTH desk maps are health heartbeats. Winners go through trade_ready, not
-    this 15-minute card.
+    GTH 15-minute maps show the live iron-condor / width scan. Ranked winners
+    still go through trade_ready, so this card never becomes 可看 in GTH.
     """
 
     decision = _mapping(decision or payload.get("strategy_decision"))
@@ -51,7 +51,7 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
         payload, _mapping(payload.get("level_decision"))
     )
     if gth_session:
-        return _gth_health_desk_view(payload, decision, reasons)
+        return _gth_scan_desk_view(payload, decision, reasons)
     if watchable:
         conclusion = f"可看 · {strategy_candidate_label(candidate)}"
     else:
@@ -76,32 +76,47 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     )
 
 
-def _gth_health_desk_view(
+def _gth_scan_desk_view(
     payload: Mapping[str, Any],
     decision: Mapping[str, Any],
     reasons: list[str],
 ) -> str:
     del payload
+    ic_line = iron_condor_desk_line(_mapping(decision.get("iron_condor_map")))
+    funnel = _mapping(decision.get("rejection_funnel"))
+    scanned = funnel.get("candidate_enumerated")
+    scan_text = f"扫描 {int(scanned)} 组" if isinstance(scanned, int | float) else "扫描进行中"
+    candidate = _mapping(decision.get("candidate"))
+    decision_type = str(decision.get("decision_type") or "NO_TRADE")
+    setup = str(candidate.get("setup_kind") or "")
+    gth_scan_winner = decision_type != "NO_TRADE" and setup in {
+        "GTH_WIDTH_SCAN",
+        "GTH_DELTA_SCAN",
+        "GTH_ATM_PIN",
+        "IRON_CONDOR_DELTA",
+    }
+    if gth_scan_winner:
+        conclusion = f"扫描赢家已推送 · {strategy_candidate_label(candidate)}"
+    else:
+        conclusion = f"无过门赢家 · {scan_text}"
     quality = _mapping(decision.get("data_quality"))
     quality_reasons = [
         str(reason)
         for reason in quality.get("reasons") or ()
         if str(reason).strip()
     ]
-    if str(quality.get("status") or "").lower() == "ready" and not quality_reasons:
-        primary = "夜盘数据心跳正常"
-    elif quality_reasons:
+    if quality_reasons:
         primary = quality_reason_text(quality_reasons[0])
     elif reasons:
         primary = humanize_strategy_reason(reasons[0])
     else:
-        primary = "夜盘结构与报价仍在刷新"
+        primary = "1 分钟报价持续重算 5–50 点价差、蝶式与 25Δ/5Δ 铁鹰"
     return "\n".join(
         (
-            "结论  心跳 · 健康检查",
+            f"结论  {conclusion}",
             f"主因  {primary}",
-            "最近候选  无",
-            "下一步  过门赢家会单独推送交易卡；本卡不做交易建议",
+            f"铁鹰  {ic_line}",
+            "下一步  过门赢家单独推送交易卡；铁鹰随 delta 每周期重算，未过门价差不是可看",
         )
     )
 
@@ -126,7 +141,7 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
         return None
     candidate = _mapping(decision.get("candidate"))
     if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-        return "原因  夜盘 Desk Map 是健康心跳，交易卡只推过门赢家"
+        return "原因  夜盘 Desk Map 展示 25Δ/5Δ 铁鹰与宽度扫描；交易卡只推过门赢家"
     if strategy_candidate_is_watchable(payload, decision):
         return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
     reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]
@@ -141,6 +156,7 @@ def humanize_strategy_type(strategy_type: str) -> str:
         "PUT_DEBIT_VERTICAL": "Put 价差",
         "CALL_BUTTERFLY": "Call 蝶式",
         "PUT_BUTTERFLY": "Put 蝶式",
+        "IRON_CONDOR": "铁鹰",
     }.get(str(strategy_type or "").upper(), str(strategy_type or "候选").replace("_", " "))
 
 
@@ -174,6 +190,13 @@ def humanize_strategy_reason(reason: str) -> str:
         "gth_confirmed_level_candidate_unavailable": "夜盘确认墙位候选暂不可用",
         "gth_width_scan_no_fresh_quote": "夜盘没有 1 分钟内的两腿新鲜报价",
         "gth_scan_geometry_or_payoff_unavailable": "夜盘扫描缺少目标、失效位或权利金",
+        "iron_condor_delta_quotes_unavailable": "25Δ/5Δ 铁鹰缺少带 delta 的新鲜报价",
+        "iron_condor_four_leg_quote_unavailable": "铁鹰四腿报价不齐",
+        "iron_condor_credit_unavailable": "铁鹰保守贷记尚未形成",
+        "iron_condor_credit_fraction": "铁鹰贷记相对翼宽不在可接受区间",
+        "iron_condor_spot_outside_shorts": "现价已离开铁鹰短腿区间",
+        "iron_condor_short_delta_band": "铁鹰短腿不在 15–35Δ",
+        "iron_condor_long_delta_band": "铁鹰长腿不在 2–12Δ",
         "strategy_event_expired": "旧策略事件已过期",
         "gth_dip_reclaim_signal_expired": "夜盘回踩收复信号已过期",
         "source_entry_quality_blocked": "来源入场质量未过门",
@@ -389,6 +412,25 @@ def _nearest_candidate_line(nearest: Mapping[str, Any], failed_gates: list[str])
     if not actionable:
         return label
     return f"{label}（卡在：{humanize_strategy_reason(actionable[0])}）"
+
+
+def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
+    if not structure:
+        return "25Δ/5Δ 尚未计算"
+    strikes = [
+        f"{float(strike):g}"
+        for strike in structure.get("strikes") or ()
+        if finite_float(strike) is not None
+    ]
+    strike_text = "/".join(strikes) if strikes else "—"
+    if str(structure.get("status") or "") != "ready":
+        reason = humanize_strategy_reason(str(structure.get("reason") or "iron_condor_credit_unavailable"))
+        return f"25Δ/5Δ {strike_text} · {reason}"
+    economics = _mapping(structure.get("economics"))
+    quote = _mapping(structure.get("quote"))
+    credit = finite_float(quote.get("credit")) or finite_float(economics.get("max_gain_points"))
+    credit_text = f"{credit:g}" if credit is not None else "—"
+    return f"25Δ/5Δ {strike_text} 贷记 {credit_text}"
 
 
 def _looks_like_machine_token(value: str) -> bool:
