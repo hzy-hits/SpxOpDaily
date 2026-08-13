@@ -180,6 +180,8 @@ def quality_reason_text(reason: str) -> str:
     token = str(reason or "")
     if token in labels:
         return labels[token]
+    if token.startswith("analytical_leg_rejected:analytical_only_non_executable"):
+        return "结构腿仅分析用、不可当作执行报价"
     if token.startswith("density_clipped:"):
         return f"概率密度裁剪偏高（{token.partition(':')[2]}）"
     if token.startswith("underlier_mismatch:"):

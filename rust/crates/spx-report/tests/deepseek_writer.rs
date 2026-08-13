@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use spx_domain::{DeskMapProjectionV1, DeskMessageV2, Validate};
+use spx_domain::{DeskMapProjectionV1, DeskMessageV2, MarketSession, Validate};
 use spx_report::{
     DEEPSEEK_CHAT_COMPLETIONS_URL, DEEPSEEK_MODEL_ID, RESEARCH_ADVISORY_DISCLOSURE,
     RESEARCH_UNAVAILABLE_DISCLOSURE, ReportPrompt, ReportWriterClient, ReportWriterConfig,
@@ -208,6 +208,8 @@ fn assert_compact_prompt_contract(system_prompt: &str) {
         "Never expose raw audit codes",
         "at most one short research-background line",
         "Do not require Gamma",
+        "GTH and RTH desk maps are different products",
+        "gth_not_applicable",
     ] {
         assert!(system_prompt.contains(required), "missing {required}");
     }
@@ -679,6 +681,44 @@ fn required_research_disclosure_is_added_without_a_data_quality_byte_floor() {
             .as_str()
             .contains(RESEARCH_UNAVAILABLE_DISCLOSURE)
     );
+}
+
+#[test]
+fn gth_without_research_does_not_require_research_unavailable_disclosure() {
+    let source = message_value();
+    let mut projection = projection_with_message(&source);
+    projection.session = MarketSession::Gth;
+    let visible_content = serde_json::to_string(&source).unwrap();
+    let transport = RecordingTransport::new(TransportResponse::new(
+        200,
+        response(&visible_content, "stop"),
+    ));
+    let inspector = transport.clone();
+    let client = ReportWriterClient::new(config(true, 12_800), true, transport).unwrap();
+
+    let output = client.write_desk_map(&projection).unwrap();
+
+    assert_eq!(output.message.data_quality.as_str(), "Ready");
+    assert!(
+        !output
+            .message
+            .data_quality
+            .as_str()
+            .contains(RESEARCH_UNAVAILABLE_DISCLOSURE)
+    );
+    assert!(
+        !output
+            .message
+            .data_quality
+            .as_str()
+            .contains(RESEARCH_ADVISORY_DISCLOSURE)
+    );
+    let requests = inspector.requests();
+    let user_prompt = requests[0].body()["messages"][1]["content"]
+        .as_str()
+        .unwrap();
+    assert!(user_prompt.contains("research_context_status=gth_not_applicable"));
+    assert!(!user_prompt.contains("research_context_status=unavailable"));
 }
 
 #[test]

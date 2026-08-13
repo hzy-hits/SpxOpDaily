@@ -509,6 +509,80 @@ def test_gth_missing_coordinate_does_not_demand_cash_spx() -> None:
     assert "frozen/reference" not in sections.structure
 
 
+def test_gth_desk_map_does_not_mix_rth_cash_confirmation_or_analytical_only_noise() -> None:
+    gth_now = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    payload = _payload()
+    payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}
+    payload["underlier"] = {
+        "price": 7758.7,
+        "source": "chain_implied",
+        "kind": "chain_implied_spx",
+        "observed_value": 7758.7,
+        "spx_observed_value": 7758.7,
+    }
+    payload["minute_market_frame"] = {
+        "quality": "ready",
+        "es": {
+            "price": 7782.0,
+            "return_15m_points": 0.5,
+            "return_60m_points": 2.0,
+        },
+        "volume": {"price_volume_alignment_5m": "price_volume_aligned"},
+        "cross_asset": {"es_spy_direction_confirmation_15m": "unavailable"},
+        "diagnostics": {
+            "warnings": ["cash_index_cash_session_closed"],
+        },
+    }
+    payload["option_structure_frame"] = {
+        "as_of": gth_now.isoformat(),
+        "quality": "ready",
+        "l1": {"quality": "ready"},
+        "diagnostics": {"max_quote_age_seconds": 90.0},
+        "exposure": {
+            "oi_quality": "ibkr_ok",
+            "warnings": ["analytical_leg_rejected:analytical_only_non_executable:3"],
+        },
+        "structure": {
+            "put_wall": 7700.0,
+            "flip_zone": [7740.0, 7745.0],
+            "call_wall": 7775.0,
+            "gex_quality": "open_interest_gex",
+        },
+    }
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, gth_now)
+
+    assert projection.data_quality == "READY"
+    assert projection.quality_reasons == ()
+    assert "ES/SPY" not in sections.primary_path
+    assert "ES 15m +0.5pt / 60m +2pt" in sections.primary_path
+    assert "量价 同向确认" in sections.primary_path
+    assert sections.data_quality == "READY · 决策坐标与结构快照可用"
+    assert "analytical" not in sections.data_quality.lower()
+    assert "cash_index" not in sections.data_quality
+
+
+def test_rth_desk_map_still_flags_analytical_only_legs_as_degraded() -> None:
+    payload = _payload()
+    frame = dict(payload["option_structure_frame"])  # type: ignore[arg-type]
+    frame["exposure"] = {
+        "oi_quality": "ibkr_ok",
+        "warnings": ["analytical_leg_rejected:analytical_only_non_executable:3"],
+    }
+    payload["option_structure_frame"] = frame
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.data_quality == "DEGRADED"
+    assert projection.quality_reasons == (
+        "analytical_leg_rejected:analytical_only_non_executable:3",
+    )
+    assert "ES/SPY" in sections.primary_path
+    assert "结构腿仅分析用、不可当作执行报价" in sections.data_quality
+
+
 @pytest.mark.parametrize(
     "frame_update",
     (

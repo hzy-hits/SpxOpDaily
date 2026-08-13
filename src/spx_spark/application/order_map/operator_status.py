@@ -515,13 +515,22 @@ def _primary_path(
     else:
         basis = f"方向来源  尚无价格接受/拒绝确认；{guidance.bias}仅为 ES/量价背景"
         trigger = _observing_trigger(payload)
-    flow = (
-        f"流确认  ES 15m {_signed_points(es.get('return_15m_points'))} / "
-        f"60m {_signed_points(es.get('return_60m_points'))} · "
-        f"量价 {volume_alignment_text(volume.get('price_volume_alignment_5m'))} · "
-        "ES/SPY "
-        f"{cross_asset_confirmation_text(cross_asset.get('es_spy_direction_confirmation_15m'))}"
-    )
+    flow_parts = [
+        (
+            f"ES 15m {_signed_points(es.get('return_15m_points'))} / "
+            f"60m {_signed_points(es.get('return_60m_points'))}"
+        ),
+        f"量价 {volume_alignment_text(volume.get('price_volume_alignment_5m'))}",
+    ]
+    decision = _mapping(payload.get("level_decision"))
+    if not current_session_is_gth(payload, decision):
+        flow_parts.append(
+            "ES/SPY "
+            + cross_asset_confirmation_text(
+                cross_asset.get("es_spy_direction_confirmation_15m")
+            )
+        )
+    flow = "流确认  " + " · ".join(flow_parts)
     return f"Evidence · {basis}\n下一触发  {trigger}\n{flow}"
 
 
@@ -1060,10 +1069,15 @@ def _mapping(value: object) -> Mapping[str, Any]:
 
 
 def _rth_only_quality_reason(reason: str) -> bool:
-    # These reasons come from rth_market_state and are expected N/A outside
-    # the cash session; they must not make an otherwise valid GTH frame look
-    # broken.  The structured wire still retains every applicable GTH reason.
-    return reason.startswith("market_state:") or reason == "rth_heartbeat_degraded_snapshot"
+    # Cash-session and RTH-only diagnostics are expected N/A overnight.
+    # GTH structure also uses analytical-only IBKR legs; that is not a
+    # human-facing outage while the option frame remains ready.
+    return (
+        reason.startswith("market_state:")
+        or reason == "rth_heartbeat_degraded_snapshot"
+        or reason.startswith("analytical_leg_rejected:analytical_only_non_executable")
+        or reason.startswith("cash_index_")
+    )
 
 
 def _extend_reasons(

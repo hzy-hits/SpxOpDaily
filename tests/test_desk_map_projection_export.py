@@ -516,7 +516,7 @@ def test_gth_projection_does_not_relabel_prior_date_research_as_current(tmp_path
     assert wire["research_context"] is None
 
 
-def test_gth_projection_embeds_same_date_uncalibrated_research_context(tmp_path: Path) -> None:
+def test_gth_projection_does_not_embed_rth_research_context(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     context = _valid_research_context()
     context["document_id"] = "research-context:gth-same-date"
@@ -541,11 +541,11 @@ def test_gth_projection_embeds_same_date_uncalibrated_research_context(tmp_path:
     )
 
     assert wire["session"] == "gth"
-    assert wire["research_context_document_id"] == "research-context:gth-same-date"
-    assert wire["research_context"] == context
-    # Audit wire keeps research; operator Desk View must not show uncalibrated HMM.
+    assert wire["research_context_document_id"] is None
+    assert wire["research_context"] is None
     assert "HMM" not in wire["message"]["desk_view"]
-    assert "夜盘ES为主" not in wire["message"]["desk_view"]
+    assert "RTH收盘" not in wire["message"]["desk_view"]
+    assert "未校准研究观点" not in wire["message"]["desk_view"]
     assert wire["action_authority"] == "none"
     assert wire["automatic_ordering"] is False
 

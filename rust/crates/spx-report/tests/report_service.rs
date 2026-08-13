@@ -53,7 +53,8 @@ impl DeskMessageWriter for FakeWriter {
             WriterOutcome::Failure(code) => Err(DeskMessageWriteFailure::new(code)),
             WriterOutcome::Success => {
                 let mut message = projection.message.clone();
-                if projection.research_context.is_none() {
+                if projection.research_context.is_none() && projection.session != MarketSession::Gth
+                {
                     message.data_quality = token(&format!(
                         "{}\n{RESEARCH_UNAVAILABLE_DISCLOSURE}",
                         message.data_quality

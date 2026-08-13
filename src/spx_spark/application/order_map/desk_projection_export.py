@@ -233,7 +233,7 @@ def _research_context(
     )
     if document.get("schema_version") != "research_context.v2":
         return None, None
-    if session not in {"rth", "gth"}:
+    if session != "rth":
         return None, "research_context_session_not_supported"
 
     frame = document.get("cross_index_frame")

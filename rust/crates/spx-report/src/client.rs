@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spx_domain::{DeskDirection, DeskMapProjectionV1, DeskMessageV2, DeskStage, Token, Validate};
+use spx_domain::{
+    DeskDirection, DeskMapProjectionV1, DeskMessageV2, DeskStage, MarketSession, Token, Validate,
+};
 
 use crate::{
     DeepSeekHttpTransport, ReportWriterConfig, Transport, TransportRequest, TransportResponse,
@@ -27,6 +29,8 @@ Preserve decision-critical conditions, lifecycle state, current location, active
 Embedded research_context.v2 is bootstrap-unvalidated advisory evidence with no action authority. When a usable advisory forecast is present, integrate one decision-relevant horizon into Base Case and label it 未校准研究观点. A source-supplied forecast probability may be shown only as 未校准研究概率; never invent, calibrate, round into false certainty, or present a latent state as market-maker behavior. Research may inform Base Case but must never create trade direction, READY, a trigger, or an order.
 When research is present, keep at most one short research-background line. Label it 未校准 and 不产生方向. HMM state weights, P/Q diagnostics, Gamma and model internals belong to research evidence, not to the human action or execution fields. Never rename P−Q as edge because execution costs and net-PnL labels are not yet available.
 research_context_status=embedded_contract_valid means only that the wire contract passed; nested availability remains authoritative. Summarize the one most useful available research result instead of dumping every posterior, quantile, state ID, model version, or reason code.
+GTH and RTH desk maps are different products. When session is gth, do not mention cash SPX/NDX/DJI/RUT, RTH close or high/low forecasts, close-location, HMM/bootstrap research, or ES/SPY cash confirmation. GTH facts are the chain-implied or ES coordinate, live option walls, ES 15m/60m flow, and whether price has accepted or rejected a level. Expected overnight N/A is not a data outage.
+When research_context_status is gth_not_applicable, omit research entirely; data_quality must not say research is unavailable.
 When research_context_status is unavailable, data_quality must explicitly say research is unavailable and must make no HMM, range, or close-location claim.
 Direction may come only from an explicit price trigger confirmed by ES flow in the source projection. Gamma describes only the feedback mechanism that may suppress or amplify an already observed move; Gamma must never be presented as the source of an up or down direction.
 Dealer sign is unknown. Do not claim that market makers are buying, selling, forced to hedge, or causing a directional move.
@@ -438,10 +442,14 @@ impl<T: Transport> ReportWriterClient<T> {
             .map_err(|_| ReportWriterError::new(ReportWriterErrorCode::ProjectionInvalid))?;
         let projection_json = serde_json::to_string_pretty(projection)
             .map_err(|_| ReportWriterError::new(ReportWriterErrorCode::RequestSerialization))?;
-        let research_input = match &projection.research_context {
-            Some(_) => "research_context_status=embedded_contract_valid\nThe complete research_context.v2 appears once inside desk_map_projection.v1; do not duplicate it in the report."
+        let research_input = match (&projection.research_context, projection.session) {
+            (Some(_), _) => "research_context_status=embedded_contract_valid\nThe complete research_context.v2 appears once inside desk_map_projection.v1; do not duplicate it in the report."
                 .to_owned(),
-            None => format!(
+            (None, MarketSession::Gth) => {
+                "research_context_status=gth_not_applicable\nGTH desk maps do not include RTH research_context. Do not mention HMM, cash index, close-location, session high/low, bootstrap research, or that research is unavailable."
+                    .to_owned()
+            }
+            (None, _) => format!(
                 "research_context_status=unavailable\nRequired data_quality disclosure: {RESEARCH_UNAVAILABLE_DISCLOSURE}"
             ),
         };
@@ -487,7 +495,11 @@ fn apply_research_disclosure(
     projection: &DeskMapProjectionV1,
     metadata: &ResponseMetadata,
 ) -> Result<(), ReportWriterError> {
-    let disclosure = if projection.research_context.is_none()
+    let disclosure = if projection.session == MarketSession::Gth
+        && projection.research_context.is_none()
+    {
+        None
+    } else if projection.research_context.is_none()
         && !message
             .data_quality
             .as_str()
