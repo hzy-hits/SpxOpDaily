@@ -521,7 +521,7 @@ def _frozen_entry_quality(value: Mapping[str, object] | None) -> dict[str, objec
         return dict(value)
     return {
         "mode": "decision_grade",
-        "policy_version": "gth_trend_alignment_live_v2",
+        "policy_version": "gth_trend_alignment_live_v3",
         "verdict": "blocked",
         "block_reasons": ["trend_context_unavailable"],
         "features": {},

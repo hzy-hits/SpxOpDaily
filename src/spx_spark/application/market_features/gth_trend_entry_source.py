@@ -15,6 +15,15 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.strategy_contract import policy_version
 
 
+ES_TREND_SOURCE_MODES = frozenset({"trend", "trend_advance"})
+ADVANCE_SOURCE_KIND = "gth_es_trend_advance"
+TRANSITION_SOURCE_KIND = "gth_es_trend_transition"
+
+
+def is_es_trend_source(source_mode: str) -> bool:
+    return source_mode in ES_TREND_SOURCE_MODES
+
+
 def resolve_gth_manual_source(
     level_decision: Mapping[str, object],
     trend_state: Mapping[str, object],
@@ -23,8 +32,17 @@ def resolve_gth_manual_source(
     ttl_seconds: float,
     max_source_lag_seconds: float,
 ) -> tuple[str, Mapping[str, object], str, str | None, int, list[str], str | None]:
-    """Prefer one valid fresh transition, then retain the confirmed-level path."""
+    """Prefer a fresh session-advance, then a valid transition, then the confirmed-level path."""
 
+    advance_event, advance_reasons = current_gth_trend_advance(
+        trend_state,
+        now=now,
+        ttl_seconds=ttl_seconds,
+        max_source_lag_seconds=max_source_lag_seconds,
+    )
+    if advance_event is not None and not advance_reasons:
+        event_id = str(advance_event["source_event_id"])
+        return "trend_advance", advance_event, event_id, ADVANCE_SOURCE_KIND, 0, [], None
     trend_event, trend_reasons = current_gth_trend_transition(
         trend_state,
         now=now,
@@ -33,7 +51,7 @@ def resolve_gth_manual_source(
     )
     if trend_event is not None and not trend_reasons:
         event_id = str(trend_event["source_event_id"])
-        return "trend", trend_event, event_id, "gth_es_trend_transition", 0, [], None
+        return "trend", trend_event, event_id, TRANSITION_SOURCE_KIND, 0, [], None
     level_expiry = _time(level_decision.get("expires_at"))
     level_ready = bool(
         level_decision.get("formal_signal") is True
@@ -120,7 +138,7 @@ def manual_source_path_fields(
     level_decision: Mapping[str, object],
     source: Mapping[str, object],
 ) -> tuple[str, str, str]:
-    if source_mode == "trend":
+    if is_es_trend_source(source_mode):
         return "breakout", str(source.get("direction") or ""), "trend"
     return (
         str(level_decision.get("thesis") or ""),
@@ -130,10 +148,15 @@ def manual_source_path_fields(
 
 
 def source_policy_fields(source_mode: str) -> dict[str, str]:
+    if source_mode == "trend_advance":
+        return {
+            "directional_source": "confirmed_gth_trend_advance.v1",
+            "source_priority": "fresh_advance_then_level_then_transition",
+        }
     if source_mode == "trend":
         return {
             "directional_source": "confirmed_gth_trend_transition.v1",
-            "source_priority": "fresh_transition_then_level",
+            "source_priority": "fresh_advance_then_level_then_transition",
         }
     return {
         "directional_source": "confirmed_frozen_level_path.v2",
@@ -226,6 +249,71 @@ def current_gth_trend_transition(
     return source, []
 
 
+def current_gth_trend_advance(
+    trend_state: Mapping[str, object],
+    *,
+    now: datetime,
+    ttl_seconds: float,
+    max_source_lag_seconds: float,
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Return one fresh session-advance or continuation m1, never a regime flip."""
+
+    expected_session = f"{DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()}:gth"
+    if str(trend_state.get("session_id") or "") != expected_session:
+        return None, []
+    candidates: list[Mapping[str, object]] = []
+    raw_advance = trend_state.get("last_advance")
+    if isinstance(raw_advance, Mapping):
+        candidates.append(raw_advance)
+    raw_continuation = trend_state.get("last_continuation")
+    if (
+        isinstance(raw_continuation, Mapping)
+        and raw_continuation.get("event_type") == "continuation"
+        and raw_continuation.get("signal_stage") == "entry_advisory"
+    ):
+        candidates.append(raw_continuation)
+    for raw_event in candidates:
+        source, reasons = _validate_advance_event(
+            raw_event,
+            expected_session=expected_session,
+            now=now,
+            ttl_seconds=ttl_seconds,
+            max_source_lag_seconds=max_source_lag_seconds,
+        )
+        if source is not None and not reasons:
+            return source, []
+    return None, []
+
+
+def _validate_advance_event(
+    raw_event: Mapping[str, object],
+    *,
+    expected_session: str,
+    now: datetime,
+    ttl_seconds: float,
+    max_source_lag_seconds: float,
+) -> tuple[dict[str, object] | None, list[str]]:
+    provider = str(raw_event.get("provider") or "").lower()
+    if provider not in {Provider.IBKR.value, Provider.SCHWAB.value}:
+        return None, ["trend_advance_provider_unsupported"]
+    source = _normalize_advance(raw_event, expected_session=expected_session)
+    if source is None:
+        return None, ["trend_advance_unavailable"]
+    at = _time(source.get("at"))
+    source_at = _time(source.get("source_at"))
+    if at is None or source_at is None:
+        return None, ["trend_advance_timestamp_unavailable"]
+    source_lag = (at - source_at).total_seconds()
+    if source_lag < -1.0 or source_lag > max_source_lag_seconds:
+        return None, ["trend_advance_source_stale_at_confirmation"]
+    age = (now - at).total_seconds()
+    if age < -1.0:
+        return None, ["trend_advance_in_future"]
+    if age > ttl_seconds:
+        return source, ["source_signal_expired"]
+    return source, []
+
+
 def trend_transition_expiry(
     source: Mapping[str, object],
     *,
@@ -296,7 +384,7 @@ def candidate_geometry_context(
 ) -> tuple[dict[str, object], list[str]]:
     selection_spx = (
         _number(parity.get("price"))
-        if source_mode == "trend" and parity is not None
+        if is_es_trend_source(source_mode) and parity is not None
         else _number(level_decision.get("level")) or _number(levels.get(level_kind))
     )
     reasons = [] if selection_spx is not None else ["trigger_level_unavailable"]
@@ -304,7 +392,7 @@ def candidate_geometry_context(
         reasons.append("direct_es_invalidation_unavailable")
     basis = (
         float(es_reference["price"]) - float(parity["price"])
-        if source_mode == "trend" and es_reference is not None and parity is not None
+        if is_es_trend_source(source_mode) and es_reference is not None and parity is not None
         else _number(level_decision.get("es_basis_points"))
     )
     if basis is None:
@@ -317,10 +405,10 @@ def candidate_geometry_context(
             invalidation_buffer_points=invalidation_buffer_points,
             target_distance_points=target_distance_points,
         )
-        if source_mode == "trend" and parity is not None and es_reference is not None
+        if is_es_trend_source(source_mode) and parity is not None and es_reference is not None
         else None
     )
-    if source_mode == "trend" and trend_geometry is None:
+    if is_es_trend_source(source_mode) and trend_geometry is None:
         reasons.append("trend_anchor_geometry_unavailable")
     trigger_level = (
         float(trend_geometry["anchor_spx"])
@@ -417,4 +505,37 @@ def _normalize_transition(
         "source_event_id": event_id,
         "source_event_type": "transition",
         "direction": "up" if regime == "bullish" else "down",
+    }
+
+
+def _normalize_advance(
+    event: Mapping[str, object],
+    *,
+    expected_session: str,
+) -> dict[str, object] | None:
+    session_id = str(event.get("session_id") or "")
+    event_id = str(event.get("event_id") or "")
+    provider = str(event.get("provider") or "")
+    price = _number(event.get("price"))
+    direction = str(event.get("direction") or "")
+    event_type = str(event.get("event_type") or "")
+    if (
+        session_id != expected_session
+        or direction not in {"up", "down"}
+        or event_type not in {"advance", "continuation"}
+        or event.get("signal_stage") != "entry_advisory"
+        or not event_id
+        or not provider
+        or price is None
+        or price <= 0
+        or event.get("automatic_ordering") is not False
+        or event.get("operator_action")
+        not in {"evaluate_call_setup", "evaluate_put_setup"}
+    ):
+        return None
+    return {
+        **event,
+        "source_event_id": event_id,
+        "source_event_type": event_type,
+        "direction": direction,
     }

@@ -775,6 +775,35 @@ def test_current_gth_trend_transition_builds_bounded_manual_card(
     assert "趋势延续" not in card["text"]
 
 
+def test_current_gth_trend_advance_builds_bounded_manual_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_ready_market(monkeypatch, now=NOW, parity_price=7368.0, es_price=7398.0)
+    trend_state = _trend_advance_state(NOW, direction="up")
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=trend_state,
+        macro_event={"entry_allowed": True},
+        now=NOW,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    event = trend_state["last_advance"]
+    assert candidate["status"] == "manual_ready"
+    assert candidate["source_kind"] == "gth_es_trend_advance"
+    assert candidate["source_signal_id"] == event["event_id"]
+    assert candidate["path_kind"] == "trend_advance_call"
+    assert candidate["position_type"] == "call_debit_spread"
+    assert candidate["automatic_ordering"] is False
+    card = _notification_intent(candidate, event_id="advance-ready", now=NOW)
+    assert "ES 顺势推进确认多头" in card["text"]
+    assert "趋势已确认切换" not in card["text"]
+
+
 def test_gth_trend_transition_rechecks_and_m1_do_not_rearm_the_same_event(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3451,6 +3480,49 @@ def test_failed_cancellation_blocks_a_new_gth_ready_lifecycle(
         for row in _notification_rows(settings)
         if row["channel"] != "__cancellation__"
     } == {f"{first['candidate_id']}:ready"}
+
+
+def _trend_advance_state(
+    at: datetime,
+    *,
+    direction: str,
+    session_id: str = "2026-07-15:gth",
+    provider: str = "ibkr",
+    price: float = 7398.0,
+) -> dict[str, object]:
+    option_right = "C" if direction == "up" else "P"
+    event = {
+        "event_type": "advance",
+        "event_id": f"globex-advance:{session_id}:{direction}:m1",
+        "session_id": session_id,
+        "sequence": 1,
+        "regime": "bullish" if direction == "up" else "bearish",
+        "direction": direction,
+        "milestone_index": 1,
+        "anchor_price": price - 10.0 if direction == "up" else price + 10.0,
+        "extension_points": 10.0,
+        "threshold_points": 10.0,
+        "at": at.isoformat(),
+        "source_at": at.isoformat(),
+        "price": price,
+        "provider": provider,
+        "metrics": {},
+        "signal_stage": "entry_advisory",
+        "option_right": option_right,
+        "operator_action": (
+            "evaluate_call_setup" if option_right == "C" else "evaluate_put_setup"
+        ),
+        "automatic_ordering": False,
+    }
+    return {
+        "version": 2,
+        "session_id": session_id,
+        "regime": "neutral",
+        "last_advance": event,
+        "last_advance_at": at.isoformat(),
+        "advance_milestone_index": 1,
+        "advance_events_in_session": 1,
+    }
 
 
 def _trend_transition_state(

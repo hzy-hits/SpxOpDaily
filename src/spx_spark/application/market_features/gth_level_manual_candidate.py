@@ -34,6 +34,7 @@ from spx_spark.application.market_features.gth_trend_entry_source import (
     candidate_geometry_context,
     candidate_trigger_coordinate,
     confirmation_baseline,
+    is_es_trend_source,
     manual_source_expiry,
     manual_source_path_fields,
     resolve_gth_manual_source,
@@ -109,7 +110,7 @@ def evaluate_gth_level_manual_candidate(
     gth_position_fraction: float | None = None,
     play_stats: PlayOutcomeStats | None = None,
 ) -> dict[str, object]:
-    """Build one GTH manual vertical from a level path or bounded trend transition."""
+    """Build one GTH manual vertical from a level path, session-advance, or trend transition."""
     now = _utc(now)
     trend_state = trend_state if isinstance(trend_state, Mapping) else {}
     trend_regime = str(trend_state.get("regime") or "unknown")
@@ -146,7 +147,7 @@ def evaluate_gth_level_manual_candidate(
         "policy_version": candidate_policy_version,
         "source_signal_id": source_id or None,
         "source_tombstone_id": source_tombstone_id,
-        "source_event_id": source.get("source_event_id") if source_mode == "trend" else source_id,
+        "source_event_id": source.get("source_event_id") if is_es_trend_source(source_mode) else source_id,
         "reentry_generation": generation,
         "source_kind": source_kind,
         "evaluated_at": now.isoformat(),
@@ -210,7 +211,7 @@ def evaluate_gth_level_manual_candidate(
         return {**base, "status": "disabled", "block_reasons": ["disabled"]}
     if not source_id:
         return _blocked(base, trend_source_reasons or ["gth_level_not_confirmed_or_near"])
-    reasons: list[str] = list(trend_source_reasons) if source_mode == "trend" else []
+    reasons: list[str] = list(trend_source_reasons) if is_es_trend_source(source_mode) else []
     ranking_diagnostics: list[str] = []
     if not DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
         reasons.append("spx_gth_session_required")
@@ -266,7 +267,9 @@ def evaluate_gth_level_manual_candidate(
     ):
         right, position_type = "P", "put_debit_spread"
         path_kind = (
-            "trend_transition_put"
+            "trend_advance_put"
+            if source_mode == "trend_advance"
+            else "trend_transition_put"
             if source_mode == "trend"
             else "flip_low_breakdown_put"
             if level_kind == "flip_low"
@@ -281,7 +284,13 @@ def evaluate_gth_level_manual_candidate(
         and level_kind in {"flip_high", "call_wall", "trend"}
     ):
         right, position_type = "C", "call_debit_spread"
-        path_kind = "trend_transition_call" if source_mode == "trend" else "upper_acceptance_call"
+        path_kind = (
+            "trend_advance_call"
+            if source_mode == "trend_advance"
+            else "trend_transition_call"
+            if source_mode == "trend"
+            else "upper_acceptance_call"
+        )
     else:
         return _blocked(base, [*reasons, "unsupported_gth_level_path"])
     session_date = DEFAULT_MARKET_CALENDAR.research_expiry(now)
@@ -320,17 +329,17 @@ def evaluate_gth_level_manual_candidate(
             max_dispersion_points=policy.gth_manual_candidate_max_parity_dispersion_points,
             max_pair_interval_points=policy.gth_manual_candidate_max_parity_interval_points,
         )
-        if source_mode == "trend"
+        if is_es_trend_source(source_mode)
         else None
     )
-    if source_mode == "trend" and parity is None:
+    if is_es_trend_source(source_mode) and parity is None:
         reasons.append("chain_implied_target_unavailable")
     source_provider = str(source.get("provider") or "").lower()
     es_providers = (
         (Provider.SCHWAB, Provider.IBKR)
-        if source_mode == "trend" and source_provider == Provider.SCHWAB.value
+        if is_es_trend_source(source_mode) and source_provider == Provider.SCHWAB.value
         else (Provider.IBKR, Provider.SCHWAB)
-        if source_mode == "trend"
+        if is_es_trend_source(source_mode)
         else (Provider.IBKR,)
     )
     es_reference = _direct_es_reference(
@@ -430,7 +439,7 @@ def evaluate_gth_level_manual_candidate(
     long_contract_id = spxw_contract_id(expiry, long_strike, right)
     short_contract_id = spxw_contract_id(expiry, short_strike, right)
     identity_parts = [CONTRACT_VERSION, candidate_policy_version, path_kind]
-    if source_mode == "trend":
+    if is_es_trend_source(source_mode):
         identity_parts.append(source_id)
     else:
         identity_parts.extend((long_contract_id, short_contract_id))

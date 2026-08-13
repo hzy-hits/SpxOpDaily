@@ -374,7 +374,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v5"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v6"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1678,6 +1678,12 @@ def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cann
 
     assert rejected["decision_type"] == "NO_TRADE"
     assert "trend_background_cannot_authorize_entry" in rejected["why_not"]["reasons"]
+
+    payload["gth_level_manual_candidate"] = _gth_candidate(now, "trend_advance_call")
+    advanced = build_strategy_decision(payload, _state(now), now)
+    assert advanced["decision_type"] == "CALL_DEBIT_VERTICAL", advanced["why_not"]
+    assert advanced["candidate"]["source"] == "gth_level_manual_candidate"
+    assert advanced["candidate"]["setup_kind"] == "TREND_PULLBACK"
 
 
 def test_gth_selector_evidence_can_compete_while_operator_edge_authority_is_unavailable() -> None:

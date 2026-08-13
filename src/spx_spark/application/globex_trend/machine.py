@@ -11,6 +11,7 @@ from spx_spark.settings.globex_trend import GlobexTrendSettings
 
 
 GTH_DIRECTIONAL_ADVISORY_CONTRACT_VERSION = "gth_directional_advisory.v1"
+ADVANCE_HOLD_BUFFER_POINTS = 1.5
 
 
 def initial_state(session_id: str) -> dict[str, Any]:
@@ -35,6 +36,12 @@ def initial_state(session_id: str) -> dict[str, Any]:
         "continuation_events_in_context": 0,
         "last_continuation_at": None,
         "last_continuation": None,
+        "last_advance": None,
+        "last_advance_at": None,
+        "advance_milestone_index": 0,
+        "advance_candidate_index": None,
+        "advance_candidate_observations": 0,
+        "advance_events_in_session": 0,
         "pending_directional_advisory_id": None,
         "active_directional_advisory_id": None,
         "active_directional_advisory_accepted_at": None,
@@ -94,16 +101,27 @@ def advance_trend_state(
     if target is None or target is regime:
         current["candidate_regime"] = None
         current["candidate_observations"] = 0
-        event = _advance_continuation(
-            current,
-            at=at,
-            price=float(price),
-            provider=provider,
-            source_at=source_at,
-            regime=regime,
-            allowed=continuation_allowed,
-            policy=policy,
-        )
+        if regime is GlobexTrendRegime.NEUTRAL:
+            event = _advance_session_trend(
+                current,
+                at=at,
+                price=float(price),
+                provider=provider,
+                source_at=source_at,
+                allowed=continuation_allowed,
+                policy=policy,
+            )
+        else:
+            event = _advance_continuation(
+                current,
+                at=at,
+                price=float(price),
+                provider=provider,
+                source_at=source_at,
+                regime=regime,
+                allowed=continuation_allowed,
+                policy=policy,
+            )
         return current, event
 
     _reset_continuation_candidate(current)
@@ -167,6 +185,12 @@ def _migrate_continuation_state(
 ) -> None:
     if "continuation_milestone_index" in state:
         state.setdefault("last_continuation", None)
+        state.setdefault("last_advance", None)
+        state.setdefault("last_advance_at", None)
+        state.setdefault("advance_milestone_index", 0)
+        state.setdefault("advance_candidate_index", None)
+        state.setdefault("advance_candidate_observations", 0)
+        state.setdefault("advance_events_in_session", 0)
         state.setdefault("pending_directional_advisory_id", None)
         state.setdefault("active_directional_advisory_id", None)
         state.setdefault("active_directional_advisory_accepted_at", None)
@@ -197,6 +221,12 @@ def _migrate_continuation_state(
             "continuation_events_in_context": consumed,
             "last_continuation_at": None,
             "last_continuation": None,
+            "last_advance": None,
+            "last_advance_at": None,
+            "advance_milestone_index": 0,
+            "advance_candidate_index": None,
+            "advance_candidate_observations": 0,
+            "advance_events_in_session": 0,
             "pending_directional_advisory_id": None,
             "active_directional_advisory_id": None,
             "active_directional_advisory_accepted_at": None,
@@ -206,6 +236,152 @@ def _migrate_continuation_state(
             ),
         }
     )
+
+
+def _advance_session_trend(
+    state: dict[str, Any],
+    *,
+    at: datetime,
+    price: float,
+    provider: str,
+    source_at: datetime,
+    allowed: bool,
+    policy: GlobexTrendSettings,
+) -> dict[str, Any] | None:
+    """Confirm a no-pullback grind while Globex is still NEUTRAL.
+
+    Established bullish/bearish legs keep using continuation-from-transition.
+    A 3-point impulse flip is a transition and must not authorize here.
+    """
+
+    metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
+    session_high = metrics.get("session_high")
+    session_low = metrics.get("session_low")
+    return_15m = metrics.get("return_15m_points")
+    return_60m = metrics.get("return_60m_points")
+    return_180m = metrics.get("return_180m_points")
+    if (
+        not isinstance(session_high, int | float)
+        or not isinstance(session_low, int | float)
+        or not isinstance(return_15m, int | float)
+        or int(state.get("advance_events_in_session") or 0)
+        >= policy.continuation_session_budget
+    ):
+        _reset_advance_candidate(state)
+        return None
+
+    rebound = float(price) - float(session_low)
+    drawdown = float(session_high) - float(price)
+    up_ok = (
+        return_15m >= 0
+        and (return_60m is None or return_60m >= 0)
+        and (return_180m is None or return_180m >= 0)
+        and rebound >= policy.continuation_step_points
+        and drawdown <= ADVANCE_HOLD_BUFFER_POINTS
+    )
+    down_ok = (
+        return_15m <= 0
+        and (return_60m is None or return_60m <= 0)
+        and (return_180m is None or return_180m <= 0)
+        and drawdown >= policy.continuation_step_points
+        and rebound <= ADVANCE_HOLD_BUFFER_POINTS
+    )
+    if up_ok:
+        direction = "up"
+        extension = rebound
+        anchor = float(session_low)
+    elif down_ok:
+        direction = "down"
+        extension = drawdown
+        anchor = float(session_high)
+    else:
+        _reset_advance_candidate(state)
+        return None
+
+    last_at_raw = state.get("last_advance_at")
+    if isinstance(last_at_raw, str):
+        try:
+            last_at = datetime.fromisoformat(last_at_raw)
+        except ValueError:
+            last_at = None
+        if (
+            last_at is not None
+            and (at - last_at).total_seconds() < policy.continuation_cooldown_seconds
+        ):
+            _reset_advance_candidate(state)
+            return None
+
+    milestone_index = int(state.get("advance_milestone_index") or 0) + 1
+    if extension < policy.continuation_step_points * milestone_index:
+        _reset_advance_candidate(state)
+        return None
+    if not allowed:
+        state["advance_milestone_index"] = milestone_index
+        _reset_advance_candidate(state)
+        return None
+
+    same_candidate = state.get("advance_candidate_index") == milestone_index
+    observations = (
+        int(state.get("advance_candidate_observations") or 0) + 1 if same_candidate else 1
+    )
+    state["advance_candidate_index"] = milestone_index
+    state["advance_candidate_observations"] = observations
+    if observations < policy.continuation_confirmation_observations:
+        return None
+
+    option_right = "C" if direction == "up" else "P"
+    event = {
+        "event_type": "advance",
+        "event_id": (
+            f"globex-advance:{state['session_id']}:{direction}:m{milestone_index}"
+        ),
+        "session_id": state["session_id"],
+        "sequence": milestone_index,
+        "regime": "bullish" if direction == "up" else "bearish",
+        "direction": direction,
+        "milestone_index": milestone_index,
+        "anchor_price": anchor,
+        "extension_points": extension,
+        "threshold_points": policy.continuation_step_points * milestone_index,
+        "at": at.isoformat(),
+        "source_at": source_at.isoformat(),
+        "price": float(price),
+        "provider": provider,
+        "metrics": dict(metrics),
+        "advisory_contract_version": GTH_DIRECTIONAL_ADVISORY_CONTRACT_VERSION,
+        "advisory_id": f"gth-advance:{state['session_id']}:{direction}:m{milestone_index}",
+        "advisory_status": "advisory_ready",
+        "signal_stage": "entry_advisory",
+        "option_right": option_right,
+        "direction_source": "session_extreme_hold",
+        "signal_coordinate": {
+            "kind": "future",
+            "instrument_id": "future:ES",
+        },
+        "option_coordinate_status": "not_authorized_from_es_direction",
+        "quote_attachment_status": "direction_only",
+        "parent_advisory_id": None,
+        "contract_id": None,
+        "entry_limit": None,
+        "execution_eligible": False,
+        "automatic_ordering": False,
+        "operator_action": (
+            "evaluate_call_setup" if option_right == "C" else "evaluate_put_setup"
+        ),
+        "execution_block_reasons": [
+            "gth_directional_advisory_only",
+            "exact_same_coordinate_option_expression_required",
+            "rth_trade_ready_authority_not_reused",
+        ],
+        "operator_action_note": "gth_trend_advance",
+    }
+    state["advance_milestone_index"] = milestone_index
+    state["advance_events_in_session"] = int(state.get("advance_events_in_session") or 0) + 1
+    state["last_advance_at"] = at.isoformat()
+    state["last_advance"] = event
+    state["pending_event"] = event
+    _reset_advance_candidate(state)
+    return event
 
 
 def _advance_continuation(
@@ -344,6 +520,11 @@ def _advance_continuation(
     state["pending_event"] = event
     _reset_continuation_candidate(state)
     return event
+
+
+def _reset_advance_candidate(state: dict[str, Any]) -> None:
+    state["advance_candidate_index"] = None
+    state["advance_candidate_observations"] = 0
 
 
 def _reset_continuation_candidate(state: dict[str, Any]) -> None:

@@ -293,6 +293,27 @@ def test_gth_trend_quality_is_decision_grade_and_point_in_time() -> None:
     assert result["features"]["expected_session_id"] == "2026-07-14:gth"
 
 
+def test_gth_trend_quality_allows_dip_inside_supportive_macro() -> None:
+    result = _gth_trend_entry_quality(
+        {
+            "session_id": "2026-07-14:gth",
+            "updated_at": (NOW - timedelta(seconds=30)).isoformat(),
+            "regime": "bullish",
+            "metrics": {
+                "return_15m_points": -4.0,
+                "return_60m_points": 6.0,
+                "return_180m_points": 8.0,
+            },
+        },
+        session_date="2026-07-14",
+        at=NOW,
+        max_age_seconds=90.0,
+    )
+    assert result["verdict"] == "pass"
+    assert result["policy_version"] == "gth_trend_alignment_live_v3"
+    assert result["block_reasons"] == []
+
+
 def test_gth_trend_quality_blocks_the_july_29_bad_call_context() -> None:
     result = _gth_trend_entry_quality(
         {
@@ -313,6 +334,27 @@ def test_gth_trend_quality_blocks_the_july_29_bad_call_context() -> None:
     assert result["mode"] == "decision_grade"
     assert result["verdict"] == "blocked"
     assert "trend_60m_not_positive" in result["block_reasons"]
+
+
+def test_gth_trend_quality_blocks_bearish_macro_even_after_short_bounce() -> None:
+    result = _gth_trend_entry_quality(
+        {
+            "session_id": "2026-07-14:gth",
+            "updated_at": NOW.isoformat(),
+            "regime": "bearish",
+            "metrics": {
+                "return_15m_points": 1.0,
+                "return_60m_points": -7.75,
+                "return_180m_points": -10.75,
+            },
+        },
+        session_date="2026-07-14",
+        at=NOW,
+        max_age_seconds=90.0,
+    )
+    assert result["verdict"] == "blocked"
+    assert "trend_not_bullish" in result["block_reasons"]
+    assert "trend_180m_negative" in result["block_reasons"]
 
 
 @pytest.mark.parametrize(

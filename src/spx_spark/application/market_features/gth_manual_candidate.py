@@ -151,7 +151,7 @@ def evaluate_gth_manual_candidate(
         if entry_quality.get("mode") != "decision_grade":
             reasons.append("source_entry_quality_not_decision_grade")
         if not str(entry_quality.get("policy_version") or "").startswith(
-            "gth_trend_alignment_live_v2"
+            "gth_trend_alignment_live_v"
         ):
             reasons.append("source_entry_quality_policy_incompatible")
         if entry_quality.get("verdict") != "pass":
@@ -817,11 +817,21 @@ def _notification_intent(
             f"ES 趋势已确认切换为空头，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
         )
         explanation = "当前 GTH 空头切换已确认，并已绑定实时 IBKR SPXW 限定亏损价差"
+    elif level_path == "trend_advance_put":
+        trigger_text = (
+            f"ES 顺势推进确认空头，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "无回撤的向下推进已确认，用限定亏损的 Put 借记价差表达"
     elif level_path == "trend_transition_call":
         trigger_text = (
             f"ES 趋势已确认切换为多头，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
         )
         explanation = "当前 GTH 多头切换已确认，并已绑定实时 IBKR SPXW 限定亏损价差"
+    elif level_path == "trend_advance_call":
+        trigger_text = (
+            f"ES 顺势推进确认多头，隐含 SPX {float(candidate['current_parity_spx']):.2f}"
+        )
+        explanation = "无回撤的向上推进已确认，用限定亏损的 Call 借记价差表达"
     elif level_path == "lower_rejection_call":
         trigger_text = (
             f"SPX 拒绝下沿并收复 {float(candidate['trigger_level']):.2f}；"

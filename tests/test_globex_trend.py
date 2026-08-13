@@ -82,7 +82,7 @@ def test_globex_replay_detects_down_up_down_without_churn() -> None:
             source_at=observed_at,
             policy=policy,
         )
-        if transition is not None and transition.get("event_type") != "continuation":
+        if transition is not None and transition.get("event_type") == "transition":
             transitions.append(transition)
 
     assert [event["to_regime"] for event in transitions] == [
@@ -772,6 +772,97 @@ def test_es_transition_keeps_globex_semantics_outside_cash_session() -> None:
 
     assert alert.title == "ES Globex 多头趋势确认"
     assert "现金盘外" in alert.detail
+
+
+def test_neutral_session_advance_confirms_slow_grind_without_pullback() -> None:
+    policy = GlobexTrendSettings()
+    start = datetime(2026, 8, 12, 4, 15, tzinfo=UTC)
+    state = initial_state("2026-08-12:gth")
+    events: list[dict[str, object]] = []
+    price = 7750.0
+    for minute in range(0, 203):
+        price = 7750.0 + minute * 0.05
+        observed_at = start + timedelta(minutes=minute)
+        state, event = advance_trend_state(
+            state,
+            session_id="2026-08-12:gth",
+            at=observed_at,
+            price=price,
+            provider="schwab",
+            source_at=observed_at,
+            policy=policy,
+        )
+        if event is not None:
+            events.append(event)
+
+    assert state["regime"] == "neutral"
+    assert [event["event_type"] for event in events] == ["advance"]
+    assert events[0]["direction"] == "up"
+    assert events[0]["signal_stage"] == "entry_advisory"
+    assert events[0]["extension_points"] >= 10.0
+    assert events[0]["automatic_ordering"] is False
+    assert events[0]["event_id"] == "globex-advance:2026-08-12:gth:up:m1"
+
+
+def test_session_advance_requires_hold_and_ignores_one_bar_spike() -> None:
+    policy = GlobexTrendSettings()
+    start = datetime(2026, 8, 12, 4, 15, tzinfo=UTC)
+    state = initial_state("2026-08-12:gth")
+    events: list[dict[str, object]] = []
+    for minute in range(0, 201):
+        price = 7750.0 + minute * 0.05
+        if minute == 200:
+            price = 7760.0
+        observed_at = start + timedelta(minutes=minute)
+        state, event = advance_trend_state(
+            state,
+            session_id="2026-08-12:gth",
+            at=observed_at,
+            price=price,
+            provider="schwab",
+            source_at=observed_at,
+            policy=policy,
+        )
+        if event is not None:
+            events.append(event)
+    dump_at = start + timedelta(minutes=201)
+    state, event = advance_trend_state(
+        state,
+        session_id="2026-08-12:gth",
+        at=dump_at,
+        price=7749.0,
+        provider="schwab",
+        source_at=dump_at,
+        policy=policy,
+    )
+    if event is not None:
+        events.append(event)
+
+    assert events == []
+    assert state["regime"] == "neutral"
+    assert state["last_advance"] is None
+
+
+def test_session_advance_does_not_fire_on_sub_ten_point_impulse() -> None:
+    policy = GlobexTrendSettings()
+    start = datetime(2026, 8, 13, 0, 15, tzinfo=UTC)
+    state = initial_state("2026-08-13:gth")
+    events: list[dict[str, object]] = []
+    for minute, price in ((0, 7770.0), (15, 7768.0), (16, 7767.5), (20, 7773.8)):
+        observed_at = start + timedelta(minutes=minute)
+        state, event = advance_trend_state(
+            state,
+            session_id="2026-08-13:gth",
+            at=observed_at,
+            price=price,
+            provider="schwab",
+            source_at=observed_at,
+            policy=policy,
+        )
+        if event is not None:
+            events.append(event)
+
+    assert all(item.get("event_type") != "advance" for item in events)
 
 
 def _minute_path(

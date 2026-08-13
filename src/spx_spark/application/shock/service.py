@@ -789,18 +789,15 @@ def _gth_trend_entry_quality(
     expected_session_id = trend_context_id(at)
     if not expected_session_id.startswith(f"{session_date}:") or session_id != expected_session_id:
         reasons.append("trend_session_mismatch")
-    if regime != "bullish":
+    if regime == "bearish":
         reasons.append("trend_not_bullish")
-    if return_15m is None:
-        reasons.append("trend_15m_unavailable")
-    elif return_15m <= 0:
-        reasons.append("trend_15m_not_positive")
-    if return_60m is None:
-        reasons.append("trend_60m_unavailable")
-    elif return_60m <= 0:
-        reasons.append("trend_60m_not_positive")
     if return_180m is not None and return_180m < 0:
         reasons.append("trend_180m_negative")
+    elif return_180m is None:
+        if return_60m is None:
+            reasons.append("trend_macro_unavailable")
+        elif return_60m < 0:
+            reasons.append("trend_60m_not_positive")
     features = {
         "session_id": session_id or None,
         "expected_session_id": expected_session_id,
@@ -812,7 +809,7 @@ def _gth_trend_entry_quality(
     }
     return {
         "mode": "decision_grade",
-        "policy_version": "gth_trend_alignment_live_v2",
+        "policy_version": "gth_trend_alignment_live_v3",
         "evaluated_at": now.isoformat() if now is not None else None,
         "verdict": "blocked" if reasons else "pass",
         "block_reasons": reasons,

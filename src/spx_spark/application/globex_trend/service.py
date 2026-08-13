@@ -165,7 +165,7 @@ def _es_price_observation(
 
 
 def alert_from_event(event: dict[str, Any]) -> Alert:
-    if event.get("event_type") == "continuation":
+    if event.get("event_type") in {"continuation", "advance"}:
         return continuation_alert_from_event(event)
     metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
     target = str(event["to_regime"])
@@ -240,11 +240,19 @@ def continuation_alert_from_event(event: dict[str, Any]) -> Alert:
         or ("entry_advisory" if milestone == 1 else "opportunity_management")
     )
     common = (
-        f"ES {session_label} {label}延续 m{milestone}：自确认锚点 "
-        f"{float(event['anchor_price']):.2f} 顺势延伸 {extension:.1f}点，"
+        f"ES {session_label} {label}顺势推进 m{milestone}：自 session 极值 "
+        f"{float(event['anchor_price']):.2f} 延伸 {extension:.1f}点，"
         f"当前 {float(event['price']):.2f}；"
         f"15m {format_points(metrics.get('return_15m_points'))}，"
         f"60m {format_points(metrics.get('return_60m_points'))}。"
+        if event.get("event_type") == "advance"
+        else (
+            f"ES {session_label} {label}延续 m{milestone}：自确认锚点 "
+            f"{float(event['anchor_price']):.2f} 顺势延伸 {extension:.1f}点，"
+            f"当前 {float(event['price']):.2f}；"
+            f"15m {format_points(metrics.get('return_15m_points'))}，"
+            f"60m {format_points(metrics.get('return_60m_points'))}。"
+        )
     )
     if signal_stage == "entry_advisory":
         kind = "gth_directional_advisory"
@@ -364,12 +372,18 @@ def run(
                     "metrics": state.get("metrics"),
                     "transition": (
                         event
-                        if isinstance(event, dict) and event.get("event_type") != "continuation"
+                        if isinstance(event, dict)
+                        and event.get("event_type") not in {"continuation", "advance"}
                         else None
                     ),
                     "continuation": (
                         event
                         if isinstance(event, dict) and event.get("event_type") == "continuation"
+                        else None
+                    ),
+                    "advance": (
+                        event
+                        if isinstance(event, dict) and event.get("event_type") == "advance"
                         else None
                     ),
                     "provider": observation.provider.value,
