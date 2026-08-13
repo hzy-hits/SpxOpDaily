@@ -218,10 +218,10 @@ def _vertical_hard_gates(
         return [{"gate": "entry_quality_atr_or_geometry_unavailable", "actual": None, "threshold": "present"}]
     long_strike = _number(long.get("strike"))
     short_strike = _number(short.get("strike"))
-    right = str(candidate.get("right") or long.get("right") or "").upper()
     remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
     if long_strike is None or short_strike is None:
         return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
+    right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
     path_reasons = vertical_width_path_reasons(
         long_strike=long_strike,
         short_strike=short_strike,
@@ -702,6 +702,24 @@ def _width_path_gate(
     if reason == "vertical_remaining_move_unavailable":
         return {"gate": reason, "actual": remaining_expected_move, "threshold": ">0"}
     return _reason_gate(reason)
+
+
+def _vertical_right(
+    candidate: Mapping[str, Any],
+    long: Mapping[str, Any],
+    *,
+    long_strike: float,
+    short_strike: float,
+) -> str:
+    right = str(candidate.get("right") or long.get("right") or "").upper()
+    if right in {"C", "P"}:
+        return right
+    strategy_type = str(candidate.get("strategy_type") or "").upper()
+    if strategy_type.startswith("CALL_"):
+        return "C"
+    if strategy_type.startswith("PUT_"):
+        return "P"
+    return "C" if short_strike > long_strike else "P"
 
 
 def _rejected(candidate: Mapping[str, Any], failed_gates: list[dict[str, Any]]) -> dict[str, Any]:

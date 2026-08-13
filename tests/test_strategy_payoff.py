@@ -1298,6 +1298,7 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
         "session_date": "2026-08-07",
         "spot": {"spx": 100.0},
         "path": {"atr_5m": 10.0, "distance_to_vwap_points": 0.0, "impulse_15m_points": 0.0},
+        "volatility": {"expected_move_points": 40.0},
         "probability": {
             "event": {"kind": "terminal_above", "target_at": (now + timedelta(minutes=5)).isoformat()},
             "q": 0.6,
