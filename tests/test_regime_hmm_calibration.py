@@ -18,6 +18,8 @@ from spx_spark.data_platform.research.regime_hmm_calibration import (
     MIN_TRAIN_DAYS,
     DecisionEvent,
     TickPath,
+    _agree_direction,
+    _disagree_direction,
     brier_score,
     evaluate_filter_slices,
     evaluate_gates,
@@ -354,3 +356,69 @@ def test_gth_observation_recipes_rank_named_inputs() -> None:
     assert sixty["legacy_20_70_10"]["hit_rate"] == 0.0
     assert sixty["sign_nq_1m"]["hit_rate"] == 1.0
     assert report["ranked_forward_60s"][0]["name"] in {"gth_70_30_fast", "sign_nq_1m"}
+
+
+def test_agree_direction_keeps_only_same_side() -> None:
+    assert _agree_direction("UP", "UP") == "UP"
+    assert _agree_direction("DOWN", "DOWN") == "DOWN"
+    assert _agree_direction("UP", "DOWN") is None
+    assert _agree_direction("UP", None) is None
+    assert _disagree_direction("UP", "DOWN") == "UP"
+    assert _disagree_direction("UP", "UP") is None
+
+
+def test_es_nq_confirm_drops_disagreements() -> None:
+    agree = _event("2026-08-05", 0, label=1, spread=0.6, session_bucket="gth")
+    disagree = _event("2026-08-05", 1, label=1, spread=0.6, session_bucket="gth")
+    events = [
+        DecisionEvent(
+            **{
+                **asdict(agree),
+                "hmm_recipes": {
+                    "sign_es_1m": {"state": "TREND", "direction": "UP", "probability": 1.0},
+                    "sign_es_1m_confirm_nq": {
+                        "state": "TREND",
+                        "direction": "UP",
+                        "probability": 1.0,
+                    },
+                    "sign_es_1m_disagree_nq": {
+                        "state": "UNCERTAIN",
+                        "direction": None,
+                        "probability": None,
+                    },
+                },
+                "forward_60s_points": 1.0,
+                "forward_1m_points": 1.0,
+                "forward_5m_points": 1.0,
+            }
+        ),
+        DecisionEvent(
+            **{
+                **asdict(disagree),
+                "hmm_recipes": {
+                    "sign_es_1m": {"state": "TREND", "direction": "UP", "probability": 1.0},
+                    "sign_es_1m_confirm_nq": {
+                        "state": "UNCERTAIN",
+                        "direction": None,
+                        "probability": None,
+                    },
+                    "sign_es_1m_disagree_nq": {
+                        "state": "TREND",
+                        "direction": "UP",
+                        "probability": 1.0,
+                    },
+                },
+                "forward_60s_points": -1.0,
+                "forward_1m_points": -1.0,
+                "forward_5m_points": -1.0,
+            }
+        ),
+    ]
+    report = evaluate_gth_observation_recipes(events)
+    sixty = report["horizons"]["forward_60s_points"]
+    assert sixty["sign_es_1m"]["n"] == 2
+    assert sixty["sign_es_1m"]["hit_rate"] == 0.5
+    assert sixty["sign_es_1m_confirm_nq"]["n"] == 1
+    assert sixty["sign_es_1m_confirm_nq"]["hit_rate"] == 1.0
+    assert sixty["sign_es_1m_disagree_nq"]["n"] == 1
+    assert sixty["sign_es_1m_disagree_nq"]["hit_rate"] == 0.0

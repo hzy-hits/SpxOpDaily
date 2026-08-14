@@ -523,6 +523,18 @@ def _sign_recipe(direction: str | None) -> dict[str, object]:
     return {"state": "TREND", "direction": direction, "probability": 1.0}
 
 
+def _agree_direction(left: str | None, right: str | None) -> str | None:
+    if left in {"UP", "DOWN"} and left == right:
+        return left
+    return None
+
+
+def _disagree_direction(left: str | None, right: str | None) -> str | None:
+    if left in {"UP", "DOWN"} and right in {"UP", "DOWN"} and left != right:
+        return left
+    return None
+
+
 def _gth_recipe_map(
     *,
     bucket: str,
@@ -555,6 +567,12 @@ def _gth_recipe_map(
             _signed_direction(_es_number(es_features, "vwap_distance_points"))
         ),
         "sign_nq_1m": _sign_recipe(nq_1m),
+        "sign_es_1m_confirm_nq": _sign_recipe(
+            _agree_direction(momentum_1m_direction, nq_1m)
+        ),
+        "sign_es_1m_disagree_nq": _sign_recipe(
+            _disagree_direction(momentum_1m_direction, nq_1m)
+        ),
         "sign_nq_15m": _sign_recipe(nq_15m),
         "sign_qqq_15m": _sign_recipe(qqq_15m),
         "sign_vix_fade": _sign_recipe(vix_fade),
@@ -1545,6 +1563,165 @@ def evaluate_gth_observation_recipes(
     return report
 
 
+HMM_SWEEP_TEST_DAYS = (
+    "2026-07-28",
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-05",
+    "2026-08-06",
+    "2026-08-07",
+    "2026-08-10",
+    "2026-08-11",
+    "2026-08-12",
+    "2026-08-13",
+)
+
+
+def collect_gth_es_nq_events(
+    data_root: str | Path,
+    day: date,
+) -> tuple[list[DecisionEvent], dict[str, object]]:
+    """GTH clocks only: ES/NQ 1m signs and ES forwards, no HMM frames."""
+
+    session = DEFAULT_MARKET_CALENDAR.session(day)
+    if session is None:
+        return [], {"session_date": day.isoformat(), "skipped": "no_session"}
+    samples = load_day_samples(data_root, day)
+    ticks = load_day_ticks(data_root, day)
+    session_id = day.isoformat()
+    es_by_minute: dict[datetime, float] = {}
+    nq_by_minute: dict[datetime, float] = {}
+    sample_by_minute: dict[datetime, dict[str, object]] = {}
+    for sample in samples:
+        if sample.get("session_id") != session_id:
+            continue
+        at = datetime.fromisoformat(str(sample["at"]))
+        sample_by_minute[at] = sample
+        es_price = _instrument_price(sample, "future:ES")
+        if es_price is not None:
+            es_by_minute[at] = es_price
+        nq_price = _instrument_price(sample, "future:NQ")
+        if nq_price is not None:
+            nq_by_minute[at] = nq_price
+    tick_path = ticks.get("future:ES")
+    events: list[DecisionEvent] = []
+    clocks = 0
+    for clock in sorted(gth_decision_clocks(day)):
+        clocks += 1
+        es_price = es_by_minute.get(clock)
+        if es_price is None:
+            continue
+        sample = sample_by_minute.get(clock) or {}
+        tick_source = _instrument_source_at(sample, "future:ES") or clock
+        es_1m = _lookback_points(es_by_minute, clock, 1)
+        nq_1m = _lookback_points(nq_by_minute, clock, 1)
+        es_dir = _signed_direction(es_1m)
+        nq_dir = _signed_direction(nq_1m)
+        agree = _agree_direction(es_dir, nq_dir)
+        recipes = {
+            "sign_es_1m": _sign_recipe(es_dir),
+            "sign_nq_1m": _sign_recipe(nq_dir),
+            "sign_es_1m_confirm_nq": _sign_recipe(agree),
+            "sign_es_1m_disagree_nq": _sign_recipe(_disagree_direction(es_dir, nq_dir)),
+            "sign_es_1m_confirm_nq_1pt": _sign_recipe(
+                agree if es_1m is not None and abs(es_1m) >= 1.0 else None
+            ),
+        }
+        events.append(
+            DecisionEvent(
+                session_date=session_id,
+                at=clock.isoformat(),
+                spx_price=es_price,
+                close_price=es_price,
+                label=0,
+                posterior_spread=0.0,
+                direction_score=0.0,
+                momentum_return_60m=None,
+                session_bucket="gth",
+                coordinate="es",
+                es_price=es_price,
+                hmm_used=False,
+                momentum_return_1m=es_1m,
+                momentum_1m_direction=es_dir,
+                forward_1m_points=_forward_points(es_by_minute, clock, 1),
+                forward_5m_points=_forward_points(es_by_minute, clock, 5),
+                forward_5s_points=(
+                    tick_path.forward_points(tick_source, 5) if tick_path is not None else None
+                ),
+                forward_15s_points=(
+                    tick_path.forward_points(tick_source, 15) if tick_path is not None else None
+                ),
+                forward_30s_points=(
+                    tick_path.forward_points(tick_source, 30) if tick_path is not None else None
+                ),
+                forward_60s_points=(
+                    tick_path.forward_points(tick_source, 60) if tick_path is not None else None
+                ),
+                hmm_recipes=recipes,
+            )
+        )
+    return events, {
+        "session_date": session_id,
+        "gth_clocks": clocks,
+        "gth_events": len(events),
+        "es_minutes": len(es_by_minute),
+        "nq_minutes": len(nq_by_minute),
+    }
+
+
+def build_gth_es_nq_confirm_report(
+    data_root: str | Path,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    generated = (generated_at or datetime.now(tz=UTC)).astimezone(UTC)
+    events_by_day: dict[str, list[DecisionEvent]] = {}
+    diagnostics: list[dict[str, object]] = []
+    for day in list_lake_session_dates(data_root):
+        events, day_diagnostics = collect_gth_es_nq_events(data_root, day)
+        diagnostics.append(day_diagnostics)
+        if events:
+            events_by_day[day.isoformat()] = events
+    ordered_days = sorted(events_by_day)
+    all_events = [event for day in ordered_days for event in events_by_day[day]]
+    native_test_days = ordered_days[MIN_TRAIN_DAYS:]
+    native_oos = [
+        event for event in all_events if event.session_date in set(native_test_days)
+    ]
+    aligned_oos = [
+        event for event in all_events if event.session_date in set(HMM_SWEEP_TEST_DAYS)
+    ]
+    in_sample = evaluate_gth_observation_recipes(all_events)
+    native_wf = evaluate_gth_observation_recipes(native_oos)
+    aligned_wf = evaluate_gth_observation_recipes(aligned_oos)
+    in_sample["sample"] = "all_gth_clocks"
+    native_wf["sample"] = "walk_forward_after_first_10_days"
+    native_wf["test_days"] = native_test_days
+    aligned_wf["sample"] = "aligned_to_hmm_sweep_test_days"
+    aligned_wf["test_days"] = [day for day in HMM_SWEEP_TEST_DAYS if day in events_by_day]
+    return {
+        "schema_version": "gth_es_nq_confirm.v1",
+        "generated_at": generated.isoformat(),
+        "semantics": "research_filter_only_not_execution_authority",
+        "n_days_with_events": len(events_by_day),
+        "n_events": len(all_events),
+        "in_sample": in_sample,
+        "walk_forward": native_wf,
+        "walk_forward_aligned_hmm_sweep": aligned_wf,
+        "day_diagnostics": diagnostics,
+        "recipes": [
+            "sign_es_1m",
+            "sign_nq_1m",
+            "sign_es_1m_confirm_nq",
+            "sign_es_1m_disagree_nq",
+            "sign_es_1m_confirm_nq_1pt",
+        ],
+    }
+
+
 def build_report(
     data_root: str | Path,
     *,
@@ -1663,6 +1840,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=max(1, min(8, os.cpu_count() or 1)),
         help="Parallel session rebuild workers (default: min(8, CPUs))",
     )
+    parser.add_argument(
+        "--es-nq-confirm-only",
+        action="store_true",
+        help="Skip HMM frames; score GTH ES 1m ∩ NQ 1m confirmation only.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1775,8 +1957,63 @@ def _print_gth_observation_sweep(payload: Mapping[str, object]) -> None:
             print(f"  60s {name}: n={n} hit={hit:.3f} mean={mean:+.2f}{extra}")
 
 
+def _print_confirm_table(title: str, payload: Mapping[str, object]) -> None:
+    print(title)
+    names = (
+        "sign_es_1m",
+        "sign_nq_1m",
+        "sign_es_1m_confirm_nq",
+        "sign_es_1m_confirm_nq_1pt",
+        "sign_es_1m_disagree_nq",
+    )
+    sixty = (payload.get("horizons") or {}).get("forward_60s_points")
+    one = (payload.get("horizons") or {}).get("forward_1m_points")
+    five = (payload.get("horizons") or {}).get("forward_5m_points")
+    if not isinstance(sixty, Mapping):
+        return
+    print(f"  n_gth_events={payload.get('n_gth_events')}")
+    for name in names:
+        row = sixty.get(name)
+        if not isinstance(row, Mapping):
+            continue
+        later = one.get(name) if isinstance(one, Mapping) else {}
+        later5 = five.get(name) if isinstance(five, Mapping) else {}
+        hit = row.get("hit_rate")
+        mean = row.get("mean_signed_points")
+        hit1 = later.get("hit_rate") if isinstance(later, Mapping) else None
+        hit5 = later5.get("hit_rate") if isinstance(later5, Mapping) else None
+        extra = ""
+        if isinstance(hit1, float):
+            extra += f" | 1m n={later.get('n')} hit={hit1:.3f}"
+        if isinstance(hit5, float):
+            extra += f" | 5m n={later5.get('n')} hit={hit5:.3f}"
+        if isinstance(hit, float) and isinstance(mean, float):
+            print(f"  60s {name}: n={row.get('n')} hit={hit:.3f} mean={mean:+.2f}{extra}")
+        else:
+            print(f"  60s {name}: n={row.get('n')}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.es_nq_confirm_only:
+        report = build_gth_es_nq_confirm_report(args.data_root)
+        output = args.output or Path("/tmp/gth_es_nq_confirm.json")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, allow_nan=False, indent=2, sort_keys=True) + "\n")
+        print(f"report: {output}")
+        print(
+            f"days={report['n_days_with_events']} events={report['n_events']}"
+        )
+        in_sample = report.get("in_sample")
+        if isinstance(in_sample, Mapping):
+            _print_confirm_table("in-sample:", in_sample)
+        walk_forward_block = report.get("walk_forward")
+        if isinstance(walk_forward_block, Mapping):
+            _print_confirm_table("walk-forward after first 10 days:", walk_forward_block)
+        aligned = report.get("walk_forward_aligned_hmm_sweep")
+        if isinstance(aligned, Mapping):
+            _print_confirm_table("walk-forward aligned to HMM sweep test days:", aligned)
+        return 0
     report = build_report(args.data_root, workers=args.workers)
     output = args.output or (
         Path(args.data_root) / "reports" / "research" / "regime_hmm_calibration.json"
