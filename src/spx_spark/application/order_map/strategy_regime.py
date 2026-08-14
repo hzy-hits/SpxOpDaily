@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    PIN_BUTTERFLY_MANAGEMENT_POLICY,
     ManagementPolicy,
 )
 
@@ -20,6 +21,7 @@ __all__ = (
     "DEFAULT_STRATEGY_POLICY",
     "MARK_HORIZONS_MINUTES",
     "ManagementPolicy",
+    "PIN_BUTTERFLY_MANAGEMENT_POLICY",
     "StrategyPolicy",
     "assess_regime",
 )
@@ -27,7 +29,10 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v14"
+    policy_version: str = "strategy_policy.bootstrap.v15"
+    # v15: RTH pin butterflies no longer require OI-GEX as a capability gate.
+    # STABLE_PIN management holds to 15:45 ET with trail; debit verticals keep
+    # the v1 20-minute time stop and 50% premium stop.
     # v14: RTH pin butterflies must keep spot inside the tent, wait until
     # minutes_to_close <= 12 per width point (5-wide from 15:00 ET), and not
     # pin a body while a wall still sits inside 1.5x remaining EM outside the

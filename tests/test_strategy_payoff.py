@@ -8,12 +8,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from spx_spark.analytics.options.strategy_payoff import (
+    DEFAULT_MANAGEMENT_POLICY,
+    PIN_BUTTERFLY_MANAGEMENT_POLICY,
     PolicyMark,
     butterfly_economics,
     butterfly_payoff,
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
     debit_vertical_reach_reasons,
+    management_policy_for_candidate,
     simulate_management_policy,
     vertical_economics,
     vertical_payoff,
@@ -375,7 +378,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v14"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v15"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -548,6 +551,38 @@ def test_candidate_factory_emits_stable_candidate_id() -> None:
     assert len(rows[0]["candidate_id"]) == 16
     assert rows[0]["automatic_ordering"] is False
     assert rows[0]["manual_action_only"] is True
+
+
+def test_missing_oi_gex_does_not_block_stable_pin_butterfly() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    payload["option_structure_frame"]["structure"]["gex_quality"] = (
+        "no_open_interest_gex"
+    )
+    bars = _or_failed_break_bars(now, "UP")
+    late = {
+        "bar_start": now.isoformat(),
+        "open": 7738.0,
+        "high": 7739.0,
+        "low": 7737.0,
+        "close": 7738.0,
+        "quality": "ok",
+    }
+    _attach_rth_setup_path(payload, [*bars, late], "LH_LL")
+    latest = _pin_state(now)
+    facts = build_market_fact_pack(payload, latest, now)
+    decision = build_strategy_decision(payload, latest, now)
+
+    assert facts["capabilities"]["butterfly"]["ready"] is True
+    assert facts["capabilities"]["butterfly"]["structure_ready"] is True
+    assert "butterfly_structure_capability_unavailable" not in facts[
+        "capabilities"
+    ]["butterfly"]["reasons"]
+    assert decision["decision_type"] == "CALL_BUTTERFLY", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "STABLE_PIN"
+    assert "rth_entry_window_too_late" not in decision.get("why_not", {}).get(
+        "reasons", []
+    )
 
 
 def test_degraded_gamma_structure_keeps_vertical_capability_and_blocks_butterfly() -> None:
@@ -2593,6 +2628,53 @@ def test_management_policy_premium_stop_before_arm() -> None:
     assert label.tp_armed is False
     assert label.exit_reason == "premium_stop"
     assert label.mae_points == pytest.approx(-0.6)
+
+
+def test_pin_butterfly_policy_holds_past_default_time_and_premium_stop() -> None:
+    start = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)  # 15:00 ET
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=5), combo_bid=0.40),
+        PolicyMark(at=start + timedelta(minutes=25), combo_bid=0.80),
+        PolicyMark(at=start + timedelta(minutes=35), combo_bid=1.60),
+        PolicyMark(at=start + timedelta(minutes=40), combo_bid=1.80),
+        PolicyMark(at=start + timedelta(minutes=44), combo_bid=1.20),
+        PolicyMark(at=start + timedelta(minutes=45), combo_bid=1.10),
+    ]
+    default = simulate_management_policy(
+        marks, entry_ask=1.0, leg_count=3, entry_at=start
+    )
+    pin = simulate_management_policy(
+        marks,
+        entry_ask=1.0,
+        leg_count=3,
+        entry_at=start,
+        policy=PIN_BUTTERFLY_MANAGEMENT_POLICY,
+    )
+    assert default.exit_reason == "premium_stop"
+    assert default.exit_at == start + timedelta(minutes=5)
+    assert pin.exit_reason == "trail"
+    assert pin.tp_armed is True
+    assert pin.exit_at == start + timedelta(minutes=44)
+    assert pin.exit_at > default.exit_at
+    assert pin.policy_version == "management_policy.pin_butterfly.hold_1545.v1"
+    assert default.policy_version == "management_policy.v1"
+
+
+def test_management_policy_for_candidate_keeps_verticals_on_v1() -> None:
+    assert (
+        management_policy_for_candidate(
+            {"setup_kind": "STABLE_PIN", "strategy_type": "PUT_BUTTERFLY"}
+        )
+        is PIN_BUTTERFLY_MANAGEMENT_POLICY
+    )
+    assert (
+        management_policy_for_candidate(
+            {"setup_kind": "TREND_PULLBACK", "strategy_type": "CALL_DEBIT_VERTICAL"}
+        )
+        is DEFAULT_MANAGEMENT_POLICY
+    )
+    assert DEFAULT_MANAGEMENT_POLICY.time_stop_minutes == 20
+    assert DEFAULT_MANAGEMENT_POLICY.premium_stop_fraction == pytest.approx(0.50)
 
 
 @given(

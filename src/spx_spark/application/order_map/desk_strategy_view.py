@@ -238,6 +238,9 @@ def humanize_strategy_reason(reason: str) -> str:
         "butterfly_entry_too_early": "距收盘过早，窄翼蝶式尚未授权",
         "butterfly_unresolved_nearby_wall": "附近墙位仍在剩余期望位移内，不是稳定钉住",
         "butterfly_three_leg_bbo_unavailable": "三腿双边报价不齐",
+        "butterfly_structure_capability_unavailable": "期权结构帧未就绪，不能评估蝶式",
+        "butterfly_value_center_or_density_unavailable": "价值中枢或密度不足，不能评估蝶式",
+        "butterfly_expiry_unavailable": "蝶式缺少到期日",
         "shock_active": "盘中冲击进行中",
         "shock_post_shock_discovery": "冲击后中枢重建中",
     }

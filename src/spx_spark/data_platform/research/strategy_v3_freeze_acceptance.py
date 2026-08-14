@@ -18,6 +18,8 @@ from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    management_policy_for_candidate,
+    policy_mark_horizon_end,
     simulate_management_policy,
 )
 from spx_spark.application.order_map.candidate_factory import enumerate_candidates
@@ -676,12 +678,21 @@ def _label_candidate(
     if entry_ask is None:
         return None
     provider = str(legs[0].get("provider") or "schwab")
+    session = date.fromisoformat(session_date)
+    policy = management_policy_for_candidate(candidate)
     marks = _combo_bid_marks(
         store,
         legs=legs,
         provider=provider,
         start=decision_at,
-        end=decision_at + timedelta(minutes=lookforward_minutes),
+        end=policy_mark_horizon_end(
+            decision_at,
+            policy,
+            session_date=session,
+            lookforward_minutes=(
+                None if policy.time_stop_minutes is None else lookforward_minutes
+            ),
+        ),
     )
     if not marks:
         return None
@@ -690,8 +701,8 @@ def _label_candidate(
         entry_ask=entry_ask,
         leg_count=len(legs),
         entry_at=decision_at,
-        policy=DEFAULT_MANAGEMENT_POLICY,
-        session_date=date.fromisoformat(session_date),
+        policy=policy,
+        session_date=session,
     )
     return {
         "schema_version": "strategy_policy_label.v1",

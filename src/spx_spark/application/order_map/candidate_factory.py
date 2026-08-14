@@ -77,6 +77,13 @@ def candidate_generation_reasons(
     """Return legacy-compatible reasons when enumeration yields no rows."""
 
     if DEFAULT_MARKET_CALENDAR.is_rth_open(_utc(now)):
+        if str(regime.get("terminal_state") or "") == "PIN_STABLE":
+            butterfly_reasons = _capability_reasons(facts, "butterfly")
+            if butterfly_reasons:
+                return butterfly_reasons
+            if not _map(payload.get("option_structure_frame")).get("front_expiry"):
+                return ["butterfly_expiry_unavailable"]
+            return ["butterfly_three_leg_bbo_unavailable"]
         capability_reasons = _capability_reasons(facts, "vertical")
         if capability_reasons:
             return capability_reasons

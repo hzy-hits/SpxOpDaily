@@ -224,7 +224,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v14"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v15"
     assert ranked.passed
     assert decision["action_authority"] == "manual"
     assert decision["decision_type"] in {

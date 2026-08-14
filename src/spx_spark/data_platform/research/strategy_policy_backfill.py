@@ -11,13 +11,15 @@ import json
 import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
     PolicyMark,
+    management_policy_for_candidate,
+    policy_mark_horizon_end,
     simulate_management_policy,
 )
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
@@ -76,7 +78,16 @@ def _label_decision(
     if entry_ask is None:
         return None
     provider = str(legs[0].get("provider") or "schwab")
-    end = decision_at + timedelta(minutes=lookforward_minutes)
+    session = _session_date(decision.get("session_date"))
+    policy = management_policy_for_candidate(candidate)
+    end = policy_mark_horizon_end(
+        decision_at,
+        policy,
+        session_date=session,
+        lookforward_minutes=(
+            None if policy.time_stop_minutes is None else lookforward_minutes
+        ),
+    )
     marks = _combo_bid_marks(
         store,
         legs=legs,
@@ -86,13 +97,12 @@ def _label_decision(
     )
     if not marks:
         return None
-    session = _session_date(decision.get("session_date"))
     label = simulate_management_policy(
         marks,
         entry_ask=entry_ask,
         leg_count=len(legs),
         entry_at=decision_at,
-        policy=DEFAULT_MANAGEMENT_POLICY,
+        policy=policy,
         session_date=session,
     )
     regime = _map(decision.get("regime"))
