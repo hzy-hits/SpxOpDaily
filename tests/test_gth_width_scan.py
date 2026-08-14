@@ -8,7 +8,12 @@ from spx_spark.application.order_map.candidate_factory import (
     enumerate_candidates,
 )
 from spx_spark.application.order_map.operator_status import build_desk_message_sections
-from spx_spark.application.order_map.strategy_ranker import rank_candidates
+from spx_spark.application.order_map.strategy_ranker import (
+    GthDirectionLock,
+    apply_gth_winner_stick,
+    gth_direction_lock,
+    rank_candidates,
+)
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
@@ -224,7 +229,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v17"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v18"
     assert ranked.passed
     assert decision["action_authority"] == "manual"
     assert decision["decision_type"] in {
@@ -235,6 +240,41 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
     }
     assert decision["candidate"]["setup_kind"] in {GTH_WIDTH_SCAN, GTH_ATM_PIN}
     assert decision["candidate"]["candidate_id"] == ranked.passed[0]["candidate_id"]
+
+
+def test_gth_decision_keeps_locked_direction_instead_of_best_vertical(
+    monkeypatch,
+) -> None:
+    facts = _facts()
+    regime = _regime()
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+        lambda payload, latest, at: facts,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.assess_regime",
+        lambda supplied: regime,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select._gth_direction_lock",
+        lambda *_args, **_kwargs: GthDirectionLock(
+            direction="NEUTRAL",
+            opportunity_id="strategy-opportunity:missing",
+            started_at=NOW,
+        ),
+    )
+
+    decision = build_strategy_decision(
+        _payload(),
+        _state(NOW),
+        NOW,
+        data_root=None,
+        probability_settings=None,
+    )
+
+    assert decision["action_authority"] == "manual"
+    assert decision["candidate"]["direction"] == "NEUTRAL"
+    assert decision["candidate"]["setup_kind"] == GTH_ATM_PIN
 
 
 def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> None:
@@ -271,3 +311,111 @@ def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> N
     assert "可看 ·" not in sections.desk_view
     assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 8 最大亏损 2" in sections.desk_view
     assert "扫描中 · 铁鹰已标位" in sections.execution
+
+
+def test_gth_direction_lock_uses_streak_start_not_latest_reprint() -> None:
+    start = datetime(2026, 8, 14, 7, 54, 42, tzinfo=timezone.utc)
+    cards = (
+        {
+            "session_mode": "gth",
+            "direction": "NEUTRAL",
+            "opportunity_id": "strategy-opportunity:butterfly",
+            "decision_at": start,
+        },
+        {
+            "session_mode": "gth",
+            "direction": "NEUTRAL",
+            "opportunity_id": "strategy-opportunity:butterfly",
+            "decision_at": start + timedelta(seconds=120),
+        },
+    )
+    locked = gth_direction_lock(cards, now=start + timedelta(seconds=170), stick_seconds=180.0)
+    expired = gth_direction_lock(cards, now=start + timedelta(seconds=181), stick_seconds=180.0)
+
+    assert locked is not None
+    assert locked.direction == "NEUTRAL"
+    assert locked.opportunity_id == "strategy-opportunity:butterfly"
+    assert locked.started_at == start
+    assert expired is None
+
+
+def test_gth_winner_stick_keeps_locked_opportunity_over_higher_score() -> None:
+    lock = GthDirectionLock(
+        direction="NEUTRAL",
+        opportunity_id="strategy-opportunity:butterfly",
+        started_at=NOW,
+    )
+    passed = [
+        {
+            "opportunity_id": "strategy-opportunity:call",
+            "direction": "UP",
+            "selection_score": 2.07,
+        },
+        {
+            "opportunity_id": "strategy-opportunity:butterfly",
+            "direction": "NEUTRAL",
+            "selection_score": 0.12,
+        },
+        {
+            "opportunity_id": "strategy-opportunity:put",
+            "direction": "DOWN",
+            "selection_score": 2.70,
+        },
+    ]
+
+    stuck, reason = apply_gth_winner_stick(passed, lock)
+
+    assert reason is None
+    assert stuck[0]["opportunity_id"] == "strategy-opportunity:butterfly"
+    assert [row["direction"] for row in stuck] == ["NEUTRAL", "UP", "DOWN"]
+
+
+def test_gth_winner_stick_keeps_same_direction_when_winner_drops() -> None:
+    lock = GthDirectionLock(
+        direction="DOWN",
+        opportunity_id="strategy-opportunity:old-put",
+        started_at=NOW,
+    )
+    passed = [
+        {
+            "opportunity_id": "strategy-opportunity:call",
+            "direction": "UP",
+            "selection_score": 2.07,
+        },
+        {
+            "opportunity_id": "strategy-opportunity:new-put",
+            "direction": "DOWN",
+            "selection_score": 1.90,
+        },
+    ]
+
+    stuck, reason = apply_gth_winner_stick(passed, lock)
+
+    assert reason is None
+    assert stuck[0]["opportunity_id"] == "strategy-opportunity:new-put"
+    assert stuck[0]["direction"] == "DOWN"
+
+
+def test_gth_winner_stick_blocks_opposite_direction_when_none_remain() -> None:
+    lock = GthDirectionLock(
+        direction="NEUTRAL",
+        opportunity_id="strategy-opportunity:butterfly",
+        started_at=NOW,
+    )
+    passed = [
+        {
+            "opportunity_id": "strategy-opportunity:call",
+            "direction": "UP",
+            "selection_score": 2.07,
+        },
+        {
+            "opportunity_id": "strategy-opportunity:put",
+            "direction": "DOWN",
+            "selection_score": 2.70,
+        },
+    ]
+
+    stuck, reason = apply_gth_winner_stick(passed, lock)
+
+    assert stuck == []
+    assert reason == "gth_winner_stick_direction_locked"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -37,6 +37,104 @@ class RankResult:
     passed: list[dict[str, Any]]
     near_misses: list[dict[str, Any]]
     gate_audit: list[dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class GthDirectionLock:
+    direction: str
+    opportunity_id: str
+    started_at: datetime
+
+
+def gth_direction_lock(
+    cards: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+    stick_seconds: float,
+) -> GthDirectionLock | None:
+    """Return the active GTH direction lock, or None once hysteresis expires.
+
+    The lock starts at the earliest card in the latest same-direction GTH
+    streak. Later reprints of the same winner do not extend it.
+    """
+
+    if stick_seconds <= 0:
+        return None
+    now = _utc(now)
+    gth_cards = []
+    for row in cards:
+        mode = str(row.get("session_mode") or "").strip().lower()
+        direction = str(row.get("direction") or "").strip().upper()
+        opportunity_id = str(row.get("opportunity_id") or "").strip()
+        decision_at = row.get("decision_at")
+        if mode != "gth" or not direction or not opportunity_id:
+            continue
+        if not isinstance(decision_at, datetime):
+            continue
+        gth_cards.append(
+            {
+                "direction": direction,
+                "opportunity_id": opportunity_id,
+                "decision_at": _utc(decision_at),
+            }
+        )
+    if not gth_cards:
+        return None
+    gth_cards.sort(key=lambda item: item["decision_at"], reverse=True)
+    latest = gth_cards[0]
+    started_at = latest["decision_at"]
+    for row in gth_cards[1:]:
+        if row["direction"] != latest["direction"]:
+            break
+        started_at = row["decision_at"]
+    if now >= started_at + timedelta(seconds=stick_seconds):
+        return None
+    return GthDirectionLock(
+        direction=str(latest["direction"]),
+        opportunity_id=str(latest["opportunity_id"]),
+        started_at=started_at,
+    )
+
+
+def apply_gth_winner_stick(
+    passed: list[dict[str, Any]],
+    lock: GthDirectionLock | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Keep the GTH winner/direction during the stick window.
+
+    Prefer the locked opportunity if it still passes. Otherwise keep the best
+    remaining candidate in that direction. Opposite directions wait until the
+    lock expires rather than replacing the human card.
+    """
+
+    if lock is None or not passed:
+        return passed, None
+    locked_direction = lock.direction.upper()
+    matching = [
+        row
+        for row in passed
+        if str(row.get("opportunity_id") or "") == lock.opportunity_id
+    ]
+    if matching:
+        rest = [
+            row
+            for row in passed
+            if str(row.get("opportunity_id") or "") != lock.opportunity_id
+        ]
+        return [matching[0], *rest], None
+    same_direction = [
+        row
+        for row in passed
+        if str(row.get("direction") or "").upper() == locked_direction
+    ]
+    if same_direction:
+        others = [
+            row
+            for row in passed
+            if str(row.get("direction") or "").upper() != locked_direction
+        ]
+        return [*same_direction, *others], None
+    return [], "gth_winner_stick_direction_locked"
 
 
 def rank_candidates(

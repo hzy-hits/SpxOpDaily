@@ -29,7 +29,10 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v17"
+    policy_version: str = "strategy_policy.bootstrap.v18"
+    # v18: GTH keeps one human direction at a time and sticks the winner for
+    # gth_winner_stick_seconds. Rank may not flip UP/DOWN/NEUTRAL, and delivery
+    # may not print the opposite side, until that hysteresis expires.
     # v17: one perception contract, session-selected owners. Cash HMM may own
     # RTH path_direction (SPX). Globex HMM never owns GTH path_direction; it
     # only publishes cross_state (NQ/YM/RTY vs ES). GTH direction is ES path.
@@ -104,6 +107,9 @@ class StrategyPolicy:
     # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
     candidate_cooldown_seconds: float = 300.0
     max_cards_per_direction_per_session: int = 6
+    # GTH hysteresis from the start of the current direction streak, not a
+    # sliding window: reprinting the same winner must not refresh the lock.
+    gth_winner_stick_seconds: float = 180.0
     # Confirmation bar plus this many subsequent 5m bars remain ENTRY_WINDOW_OPEN.
     rth_setup_hold_bars: int = 2
     max_trigger_target_progress: float = 0.60

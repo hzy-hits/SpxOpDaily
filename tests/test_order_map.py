@@ -5094,6 +5094,64 @@ def test_strategy_flood_control_session_cap_is_per_session_mode(monkeypatch) -> 
     assert blocked["counts"]["session_direction"] == 6
 
 
+def test_gth_flood_control_blocks_opposite_direction_during_winner_stick(
+    monkeypatch,
+) -> None:
+    from spx_spark.application.order_map.delivery import _flood_control_block
+    from spx_spark.config import NotificationSettings
+
+    now = datetime(2026, 8, 14, 7, 54, 47, tzinfo=timezone.utc)
+    prior = (
+        {
+            "decision_id": "strategy:butterfly",
+            "decision_at": now - timedelta(seconds=5),
+            "opportunity_id": "strategy-opportunity:butterfly",
+            "direction": "NEUTRAL",
+            "setup_kind": "GTH_ATM_PIN",
+            "trigger_level": 7800.0,
+            "session_mode": "gth",
+        },
+    )
+    monkeypatch.setattr(
+        "spx_spark.infrastructure.operational_db.recent_selected_strategy_cards",
+        lambda **_kwargs: prior,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.delivery.notification_event_exists",
+        lambda _settings, _event_id: True,
+    )
+    call_decision = {
+        "session_date": "2026-08-14",
+        "decision_id": "strategy:call",
+        "market_facts": {"session": {"mode": "gth"}},
+        "candidate": {
+            "opportunity_id": "strategy-opportunity:call",
+            "setup_kind": "GTH_WIDTH_SCAN",
+            "direction": "UP",
+            "trigger_level": 7810.0,
+        },
+    }
+
+    blocked = _flood_control_block(
+        call_decision,
+        call_decision["candidate"],
+        NotificationSettings.from_env(),
+        now=now,
+    )
+
+    assert blocked is not None
+    assert blocked["outcome"] == "flood_control_gth_direction_lock"
+    assert blocked["counts"]["locked_direction"] == "NEUTRAL"
+
+    later = _flood_control_block(
+        call_decision,
+        call_decision["candidate"],
+        NotificationSettings.from_env(),
+        now=now + timedelta(seconds=180),
+    )
+    assert later is None
+
+
 def test_order_map_refresh_same_slot_replay_and_material_change_have_stable_ids(
     tmp_path: Path, monkeypatch
 ) -> None:

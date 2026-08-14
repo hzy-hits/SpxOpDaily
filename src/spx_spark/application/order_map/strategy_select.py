@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,10 +31,13 @@ from spx_spark.application.order_map.path_distribution import (
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
+    StrategyPolicy,
     assess_regime,
 )
 from spx_spark.application.order_map.strategy_ranker import (
     RankResult,
+    apply_gth_winner_stick,
+    gth_direction_lock,
     rank_candidates,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
@@ -93,6 +97,21 @@ def build_strategy_decision(
                 probability_settings=probability_settings,
                 now=_utc(now),
             )
+            stick_reason: str | None = None
+            if rank.passed:
+                stuck, stick_reason = apply_gth_winner_stick(
+                    rank.passed,
+                    _gth_direction_lock(
+                        facts,
+                        now=_utc(now),
+                        policy=DEFAULT_STRATEGY_POLICY,
+                    ),
+                )
+                rank = RankResult(
+                    passed=stuck,
+                    near_misses=rank.near_misses,
+                    gate_audit=rank.gate_audit,
+                )
             if rank.passed:
                 winner, shadows, iron_condor_map = _attach_winner_path_distributions(
                     facts,
@@ -125,7 +144,7 @@ def build_strategy_decision(
                     ),
                     iron_condor_map,
                 )
-            reasons = _rank_reasons(rank)
+            reasons = [stick_reason] if stick_reason else _rank_reasons(rank)
         else:
             event_reason = event_settlement_generation_reason(
                 payload, now=_utc(now)
@@ -630,6 +649,36 @@ def _attach_iron_condor_only_paths(
         data_root=data_root,
         probability_settings=probability_settings,
         now=now,
+    )
+
+
+def _gth_direction_lock(
+    facts: Mapping[str, Any],
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+):
+    if str(_map(facts.get("session")).get("mode") or "") != "gth":
+        return None
+    session_date = str(facts.get("session_date") or "")
+    if not session_date or policy.gth_winner_stick_seconds <= 0:
+        return None
+    # Unit tests pin this flag and must not read the host operational sqlite.
+    isolated = os.getenv("SPX_SPARK_DISABLE_RUNTIME_OVERRIDES", "").strip().lower()
+    if isolated in {"1", "true", "yes"}:
+        return None
+    try:
+        from spx_spark.infrastructure.operational_db import recent_selected_strategy_cards
+
+        rows = recent_selected_strategy_cards(session_date=session_date)
+    except (OSError, ValueError):
+        return None
+    except Exception:  # noqa: BLE001 - unmigrated sqlite must not block GTH ranking
+        return None
+    return gth_direction_lock(
+        rows,
+        now=now,
+        stick_seconds=policy.gth_winner_stick_seconds,
     )
 
 

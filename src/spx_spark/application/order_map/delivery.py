@@ -22,6 +22,7 @@ from spx_spark.application.order_map.desk_projection_export import (
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.render import render_template
+from spx_spark.application.order_map.strategy_ranker import gth_direction_lock
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import (
     call_hypothesis_critic,
@@ -468,6 +469,22 @@ def _flood_control_block(
         elif abs(float(stored_trigger) - float(trigger_level)) <= 0.01:
             cooldown_hits += 1
     counts = {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
+    if session_mode == "gth":
+        lock = gth_direction_lock(
+            tuple(accepted.values()),
+            now=now,
+            stick_seconds=DEFAULT_STRATEGY_POLICY.gth_winner_stick_seconds,
+        )
+        if lock is not None and direction.upper() != lock.direction.upper():
+            return {
+                "accepted": False,
+                "outcome": "flood_control_gth_direction_lock",
+                "counts": {
+                    **counts,
+                    "locked_direction": lock.direction,
+                    "lock_started_at": lock.started_at.isoformat(),
+                },
+            }
     if cooldown_hits > 0:
         return {
             "accepted": False,
