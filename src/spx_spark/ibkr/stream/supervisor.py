@@ -380,25 +380,32 @@ class StreamRuntime:
                 )
                 if data_plane_healthy:
                     self.session_had_healthy_flush = True
-                    fresh_spxw_quotes = int(
-                        event.get("fresh_spxw_quotes", event.get("fresh_quotes", 0)) or 0
+                # Entitlement recovery is independent of leftover farm flags.
+                # A 10197 latch must drop after continuous fresh SPXW without a
+                # new competing error; farm=broken must not reset that window
+                # or force a collector restart.
+                fresh_spxw_quotes = int(
+                    event.get("fresh_spxw_quotes", event.get("fresh_quotes", 0)) or 0
+                )
+                circuit_recovered = False
+                if fresh_spxw_quotes > 0:
+                    circuit_recovered = self.competing_session_circuit.observe_healthy(
+                        now_monotonic=time.monotonic()
                     )
-                    circuit_recovered = False
-                    if fresh_spxw_quotes > 0:
-                        circuit_recovered = self.competing_session_circuit.observe_healthy(
-                            now_monotonic=time.monotonic()
-                        )
-                    else:
-                        self.competing_session_circuit.interrupt_recovery()
-                    if circuit_recovered:
-                        self._clear_competing_session_health_latch()
-                        log_event(
-                            {
-                                "task": "ibkr_stream",
-                                "event": "competing_session_recovered",
-                                "stable_seconds": self.competing_session_circuit.recovery_seconds,
-                            }
-                        )
+                else:
+                    self.competing_session_circuit.interrupt_recovery()
+                if circuit_recovered:
+                    self._clear_competing_session_health_latch()
+                    log_event(
+                        {
+                            "task": "ibkr_stream",
+                            "event": "competing_session_recovered",
+                            "stable_seconds": self.competing_session_circuit.recovery_seconds,
+                            "data_plane_healthy": data_plane_healthy,
+                            "fresh_spxw_quotes": fresh_spxw_quotes,
+                        }
+                    )
+                if data_plane_healthy or circuit_recovered:
                     clear_conflict = getattr(
                         self.collector,
                         "clear_market_data_conflict",
@@ -406,8 +413,6 @@ class StreamRuntime:
                     )
                     if callable(clear_conflict):
                         clear_conflict()
-                else:
-                    self.competing_session_circuit.interrupt_recovery()
                 self._publish_health(
                     data_plane_healthy=data_plane_healthy,
                     policy_blocked=False,

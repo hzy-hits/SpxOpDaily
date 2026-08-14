@@ -501,6 +501,60 @@ def test_brief_healthy_flush_preserves_competing_session_backoff_history(
     assert runtime.session_had_healthy_flush is True
 
 
+def test_fresh_spxw_releases_10197_latch_even_when_farm_flag_is_broken(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock, disconnect_after_flushes=4)
+
+    def farm_broken_but_live_spxw() -> dict[str, object]:
+        collector.flush_times.append(clock.now)
+        if len(collector.flush_times) >= collector.disconnect_after_flushes:
+            collector.ib.connected = False
+        return {
+            "task": "ibkr_stream",
+            "event": "flush",
+            "quotes": 48,
+            "fresh_quotes": 47,
+            "fresh_spxw_quotes": 46,
+            "data_plane_healthy": False,
+            "farm_status": "broken",
+            "provider_status": "degraded",
+            "provider_reason": "IBKR market data farms not ready",
+        }
+
+    collector.flush = farm_broken_but_live_spxw  # type: ignore[method-assign]
+    runtime, events = make_runtime(
+        monkeypatch,
+        collector,
+        exact_leg_pin_enabled=False,
+        flush_interval_seconds=1.0,
+    )
+    storage, _healthy_at = _seed_healthy_stream_health(tmp_path)
+    runtime.storage_settings = storage  # type: ignore[assignment]
+    runtime.competing_session_circuit.recovery_seconds = 1.0
+    runtime.competing_session_circuit.open(now_monotonic=0.0)
+    runtime._invalidate_competing_session_health(
+        error_code=10197,
+        message="No market data during competing live session",
+    )
+
+    latched = gth_ibkr_entry_control(tmp_path, now=datetime.now(tz=timezone.utc))
+    assert latched["allowed"] is False
+    assert latched["reason"] == "ibkr_competing_session"
+
+    assert runtime.session_loop() is True
+
+    assert runtime.competing_session_circuit.failures == 0
+    assert runtime._competing_health_latched_sequence is None
+    assert any(event.get("event") == "competing_session_recovered" for event in events)
+    recovered = gth_ibkr_entry_control(tmp_path, now=datetime.now(tz=timezone.utc))
+    assert recovered["source_reason"] != "competing live session callback latched (IBKR 10197)"
+    assert recovered["circuit_state"] == "closed"
+    assert recovered["conflict_count"] == 0
+
+
 def test_non_competing_subscription_failure_does_not_open_conflict_circuit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
