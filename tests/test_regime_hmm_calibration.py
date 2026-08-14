@@ -13,6 +13,7 @@ from spx_spark.data_platform.research.regime_hmm_calibration import (
     DecisionEvent,
     TickPath,
     brier_score,
+    evaluate_filter_slices,
     evaluate_gates,
     evaluate_path_skill,
     expected_calibration_error,
@@ -222,3 +223,39 @@ def test_path_skill_includes_1m_and_quote_path_force() -> None:
     assert rth["forward_5s_points"]["hmm_trend"]["mean_signed_points"] == 0.25
     assert rth["tick_force_60s"]["hmm_trend"]["mean_aligned_mfe"] == 1.5
     assert rth["tick_force_60s"]["hmm_trend"]["mean_adverse"] == 0.4
+
+
+def test_filter_slices_separate_confirmation_from_weak_trend() -> None:
+    base = _event("2026-08-05", 0, label=1, spread=0.6, hmm_path_direction="UP")
+    confirmed = DecisionEvent(
+        **{
+            **asdict(base),
+            "hmm_max_probability": 0.80,
+            "momentum_1m_direction": "UP",
+            "forward_60s_points": 1.0,
+            "forward_1m_points": 1.0,
+            "forward_5m_points": 1.0,
+            "es_path_direction": "UP",
+            "cross_index_direction": "DOWN",
+        }
+    )
+    faded = DecisionEvent(
+        **{
+            **asdict(base),
+            "at": "2026-08-05T11:00:00+00:00",
+            "hmm_max_probability": 0.56,
+            "momentum_1m_direction": "DOWN",
+            "forward_60s_points": -1.0,
+            "forward_1m_points": -1.0,
+            "forward_5m_points": -1.0,
+            "es_path_direction": "DOWN",
+            "cross_index_direction": "UP",
+        }
+    )
+    report = evaluate_filter_slices([confirmed, faded])
+    sixty = report["rth"]["forward_60s_points"]
+    assert sixty["hmm_trend_p55"]["n"] == 2
+    assert sixty["hmm_trend_p70"]["n"] == 1
+    assert sixty["hmm_trend_agree_1m"]["hit_rate"] == 1.0
+    assert sixty["hmm_trend_disagree_1m"]["hit_rate"] == 0.0
+    assert report["rth"]["mismatch"]["hmm_vs_es_1m"]["agree_rate"] == 0.5

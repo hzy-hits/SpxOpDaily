@@ -73,6 +73,8 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 UTC = timezone.utc
 ET = ZoneInfo("America/New_York")
 SCHEMA_VERSION = "regime_hmm_calibration.v3"
+FILTER_PROBABILITY_GATES = (0.55, 0.65, 0.70, 0.75)
+IMPROVEMENT_HORIZONS = ("forward_60s_points", "forward_1m_points", "forward_5m_points")
 POLICY_VERSION = "hmm_close_direction_logistic.v1"
 FEATURE_RECONSTRUCTION = "quote_lake_minute_frames.v2+schwab_last_quote_path.v1"
 CASH_INDEX_INSTRUMENTS = ("index:SPX", "index:NDX", "index:DJI", "index:RUT")
@@ -147,6 +149,11 @@ class DecisionEvent:
     momentum_return_5m: float | None = None
     momentum_1m_direction: str | None = None
     momentum_5m_direction: str | None = None
+    hmm_max_probability: float | None = None
+    es_path_score: float | None = None
+    cross_index_score: float | None = None
+    es_path_direction: str | None = None
+    cross_index_direction: str | None = None
 
 
 def lake_quotes_root(data_root: str | Path) -> Path:
@@ -414,6 +421,17 @@ def _forward_points(
     return later - price_now
 
 
+def _observation_component_score(observation: Mapping[str, object], name: str) -> float | None:
+    components = observation.get("components")
+    payload = components.get(name) if isinstance(components, Mapping) else None
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get("score")
+    if isinstance(value, int | float) and math.isfinite(float(value)):
+        return float(value)
+    return None
+
+
 def _signed_direction(value: float | None) -> str | None:
     if value is None or value == 0:
         return None
@@ -468,10 +486,14 @@ def _assess_hmm_path(
     }
     assessment = assess_regime(facts)
     hmm = assessment.get("hmm") if isinstance(assessment.get("hmm"), Mapping) else {}
+    max_probability = hmm.get("max_state_probability")
     return {
         "path_state": assessment.get("path_state"),
         "path_direction": assessment.get("path_direction"),
         "hmm_used": hmm.get("used") is True,
+        "hmm_max_probability": (
+            float(max_probability) if isinstance(max_probability, int | float) else None
+        ),
         "cross_index_source": cross.get("source"),
         "cross_index_ready": (
             cross.get("status") == "ready" and cross.get("session_open") is True
@@ -573,6 +595,8 @@ def build_day_events(
         posterior = _online_posterior(score, posterior)
         if minute_at not in decision_ats:
             continue
+        es_path_score = _observation_component_score(observation, "es_path")
+        cross_index_score = _observation_component_score(observation, "cash_index")
         es_features = frame.es if isinstance(frame.es, Mapping) else {}
         momentum_60 = _es_number(es_features, "return_60m_points")
         momentum_1 = _es_number(es_features, "return_1m_points")
@@ -666,6 +690,13 @@ def build_day_events(
                 momentum_return_5m=momentum_5,
                 momentum_1m_direction=_signed_direction(momentum_1),
                 momentum_5m_direction=_signed_direction(momentum_5),
+                hmm_max_probability=mapped.get("hmm_max_probability")
+                if isinstance(mapped.get("hmm_max_probability"), int | float)
+                else max(posterior),
+                es_path_score=es_path_score,
+                cross_index_score=cross_index_score,
+                es_path_direction=_signed_direction(es_path_score),
+                cross_index_direction=_signed_direction(cross_index_score),
             )
         )
     diagnostics = {
@@ -1102,6 +1133,142 @@ def evaluate_path_skill(
     return report
 
 
+def _is_hmm_trend(event: DecisionEvent) -> bool:
+    return (
+        event.hmm_used
+        and event.hmm_path_state == "TREND"
+        and event.hmm_path_direction in {"UP", "DOWN"}
+    )
+
+
+def _select_trend(
+    events: Sequence[DecisionEvent],
+    *,
+    min_probability: float = 0.55,
+    agree_1m: bool | None = None,
+) -> list[DecisionEvent]:
+    selected: list[DecisionEvent] = []
+    for event in events:
+        if not _is_hmm_trend(event):
+            continue
+        probability = event.hmm_max_probability
+        if probability is not None and probability < min_probability:
+            continue
+        if agree_1m is True and event.hmm_path_direction != event.momentum_1m_direction:
+            continue
+        if agree_1m is False and (
+            event.momentum_1m_direction is None
+            or event.hmm_path_direction == event.momentum_1m_direction
+        ):
+            continue
+        selected.append(event)
+    return selected
+
+
+def _agree_rate(
+    events: Sequence[DecisionEvent],
+    left,
+    right,
+) -> dict[str, object]:
+    n = hits = 0
+    for event in events:
+        first, second = left(event), right(event)
+        if first not in {"UP", "DOWN"} or second not in {"UP", "DOWN"}:
+            continue
+        n += 1
+        hits += first == second
+    return {"n": n, "agree_rate": round(hits / n, 6) if n else None}
+
+
+def _direction_mismatch(events: Sequence[DecisionEvent]) -> dict[str, object]:
+    trend = [event for event in events if _is_hmm_trend(event)]
+    return {
+        "hmm_vs_es_1m": _agree_rate(
+            trend,
+            lambda event: event.hmm_path_direction,
+            lambda event: event.momentum_1m_direction,
+        ),
+        "cross_vs_es_1m": _agree_rate(
+            events,
+            lambda event: event.cross_index_direction,
+            lambda event: event.momentum_1m_direction,
+        ),
+        "es_path_vs_es_1m": _agree_rate(
+            events,
+            lambda event: event.es_path_direction,
+            lambda event: event.momentum_1m_direction,
+        ),
+        "hmm_vs_cross_index": _agree_rate(
+            trend,
+            lambda event: event.hmm_path_direction,
+            lambda event: event.cross_index_direction,
+        ),
+    }
+
+
+def evaluate_filter_slices(events: Sequence[DecisionEvent]) -> dict[str, object]:
+    """Diagnostic gates on top of production TREND. Not an execution policy."""
+
+    by_bucket: dict[str, list[DecisionEvent]] = {"rth": [], "gth": []}
+    for event in events:
+        if event.session_bucket in by_bucket:
+            by_bucket[event.session_bucket].append(event)
+    report: dict[str, object] = {
+        "semantics": "research_filters_only_not_execution_authority",
+        "production_trend_min_probability": 0.55,
+    }
+    for bucket, bucket_events in by_bucket.items():
+        rows: dict[str, object] = {"mismatch": _direction_mismatch(bucket_events)}
+        for horizon in IMPROVEMENT_HORIZONS:
+            horizon_rows: dict[str, object] = {
+                f"hmm_trend_p{int(gate * 100):02d}": _skill_row(
+                    _select_trend(bucket_events, min_probability=gate),
+                    direction_of=lambda event: event.hmm_path_direction,
+                    horizon=horizon,
+                )
+                for gate in FILTER_PROBABILITY_GATES
+            }
+            horizon_rows["hmm_trend_agree_1m"] = _skill_row(
+                _select_trend(bucket_events, agree_1m=True),
+                direction_of=lambda event: event.hmm_path_direction,
+                horizon=horizon,
+            )
+            horizon_rows["hmm_trend_disagree_1m"] = _skill_row(
+                _select_trend(bucket_events, agree_1m=False),
+                direction_of=lambda event: event.hmm_path_direction,
+                horizon=horizon,
+            )
+            horizon_rows["hmm_trend_agree_1m_p70"] = _skill_row(
+                _select_trend(bucket_events, min_probability=0.70, agree_1m=True),
+                direction_of=lambda event: event.hmm_path_direction,
+                horizon=horizon,
+            )
+            horizon_rows["es_path_sign"] = _skill_row(
+                bucket_events,
+                direction_of=lambda event: event.es_path_direction,
+                horizon=horizon,
+            )
+            horizon_rows["cross_index_sign"] = _skill_row(
+                bucket_events,
+                direction_of=lambda event: event.cross_index_direction,
+                horizon=horizon,
+            )
+            horizon_rows["fade_cross_index"] = _skill_row(
+                bucket_events,
+                direction_of=lambda event: (
+                    "DOWN"
+                    if event.cross_index_direction == "UP"
+                    else "UP"
+                    if event.cross_index_direction == "DOWN"
+                    else None
+                ),
+                horizon=horizon,
+            )
+            rows[horizon] = horizon_rows
+        report[bucket] = rows
+    return report
+
+
 def _day_worker(
     payload: tuple[str, str, str],
 ) -> tuple[str, list[DecisionEvent], dict[str, object]]:
@@ -1163,6 +1330,10 @@ def build_report(
     path_skill_walk_forward = evaluate_path_skill(oos_events)
     path_skill_walk_forward["sample"] = "walk_forward_test_days_only"
     path_skill_walk_forward["test_days"] = sorted(test_days)
+    filter_slices = evaluate_filter_slices(all_events)
+    filter_slices["sample"] = "in_sample_all_decision_events"
+    filter_slices_walk_forward = evaluate_filter_slices(oos_events)
+    filter_slices_walk_forward["sample"] = "walk_forward_test_days_only"
     fitted_policy = None
     if len(rth_events) >= GATE_MIN_TEST_EVENTS:
         intercept, slope = fit_logistic(
@@ -1194,6 +1365,8 @@ def build_report(
         "evaluation": evaluation,
         "path_skill": path_skill,
         "path_skill_walk_forward": path_skill_walk_forward,
+        "filter_slices": filter_slices,
+        "filter_slices_walk_forward": filter_slices_walk_forward,
         **gates,
         "fitted_policy": fitted_policy,
         "day_diagnostics": diagnostics,
@@ -1270,6 +1443,40 @@ def _print_path_skill(path_skill: Mapping[str, object]) -> None:
             )
 
 
+def _print_filter_slices(payload: Mapping[str, object]) -> None:
+    names = (
+        "hmm_trend_p55",
+        "hmm_trend_p70",
+        "hmm_trend_agree_1m",
+        "hmm_trend_disagree_1m",
+        "hmm_trend_agree_1m_p70",
+        "es_path_sign",
+        "cross_index_sign",
+        "fade_cross_index",
+    )
+    for bucket in ("rth", "gth"):
+        block = payload.get(bucket)
+        if not isinstance(block, Mapping):
+            continue
+        mismatch = block.get("mismatch") if isinstance(block.get("mismatch"), Mapping) else {}
+        print(f"  {bucket} mismatch: {mismatch}")
+        for horizon in IMPROVEMENT_HORIZONS:
+            rows = block.get(horizon)
+            if not isinstance(rows, Mapping):
+                continue
+            parts = []
+            for name in names:
+                row = rows.get(name)
+                if not isinstance(row, Mapping) or not row.get("n"):
+                    continue
+                hit = row.get("hit_rate")
+                mean = row.get("mean_signed_points")
+                if isinstance(hit, float) and isinstance(mean, float):
+                    parts.append(f"{name} n={row['n']} hit={hit:.3f} mean={mean:+.2f}")
+            if parts:
+                print(f"  {bucket} {horizon}: " + " | ".join(parts))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     report = build_report(args.data_root, workers=args.workers)
@@ -1303,6 +1510,10 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(oos, Mapping):
         print("path_skill walk-forward test days:")
         _print_path_skill(oos)
+    slices = report.get("filter_slices_walk_forward")
+    if isinstance(slices, Mapping):
+        print("filter slices walk-forward:")
+        _print_filter_slices(slices)
     return 0
 
 
