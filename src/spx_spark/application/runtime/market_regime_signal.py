@@ -37,7 +37,7 @@ from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, r
 
 UTC = timezone.utc
 SCHEMA_VERSION = "market_regime_signal.experimental.v2"
-MODEL_SCHEMA_VERSION = "online_gaussian_hmm_3state_cross_index.v3"
+MODEL_SCHEMA_VERSION = "online_gaussian_hmm_3state_cross_index.v4"
 RANGE_SCHEMA_VERSION = "same_day_range.experimental.v2"
 STATE_NAMES = ("state_00", "state_01", "state_02")
 STATE_HINTS = {
@@ -77,6 +77,7 @@ _MODEL_SPEC = {
         "breadth_15m",
     ),
     "cross_index_session_policy": "rth_cash_gth_globex_futures_percent_vs_es",
+    "observation_owner": "session_selected_cross_index",
     "prior_rth_schema_version": "prior_rth_context.v2",
     "parameter_mode": "fixed_bootstrap",
     "inference": "causal_forward_filter",

@@ -390,6 +390,9 @@ def build_order_payload_with_retry(
         payload["strategy_distribution_forecast"] = load_json(
             Path(storage_settings.data_root) / "latest" / "strategy_distribution_forecast.json"
         )
+        payload["experimental_research_signals"] = load_json(
+            Path(storage_settings.data_root) / "latest" / "experimental_research_signals.json"
+        )
         payload["minute_market_frame"] = market_frame
         _apply_gth_em_usage(payload, market_frame)
         payload["option_structure_frame"] = option_frame

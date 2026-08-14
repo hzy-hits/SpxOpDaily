@@ -639,6 +639,9 @@ def run(
         "gth_dip_reclaim_evidence": gth_dip_reclaim_evidence,
         "trade_intent": strategy_trigger_intent,
         "strategy_distribution_forecast": strategy_distribution_forecast,
+        "experimental_research_signals": load_json(
+            latest_root / "experimental_research_signals.json"
+        ),
         "candidates": [],
     }
     strategy_decision = build_strategy_decision(

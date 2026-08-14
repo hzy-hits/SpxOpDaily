@@ -29,7 +29,10 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v15"
+    policy_version: str = "strategy_policy.bootstrap.v16"
+    # v16: session-selected index HMM owns path_state when the cash (RTH) or
+    # globex-futures (GTH) basket is ready. ES path remains the fallback and
+    # a VWAP direction check. HMM still cannot skip hard gates or order.
     # v15: RTH pin butterflies no longer require OI-GEX as a capability gate.
     # STABLE_PIN management holds to 15:45 ET with trail; debit verticals keep
     # the v1 20-minute time stop and 50% premium stop.
@@ -84,6 +87,9 @@ class StrategyPolicy:
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
+    hmm_trend_min_probability: float = 0.55
+    hmm_balanced_min_probability: float = 0.50
+    hmm_max_age_seconds: float = 90.0
     butterfly_max_debit_fraction: float = 0.35
     butterfly_max_risk_usd: float = 1000.0
     butterfly_minutes_per_width_point: float = 12.0
@@ -110,6 +116,13 @@ class StrategyPolicy:
 DEFAULT_STRATEGY_POLICY = StrategyPolicy()
 
 
+HMM_STATE_DIRECTION = {
+    "state_00": "DOWN",
+    "state_01": None,
+    "state_02": "UP",
+}
+
+
 def assess_regime(
     facts: Mapping[str, Any], policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY
 ) -> dict[str, Any]:
@@ -119,41 +132,57 @@ def assess_regime(
     slope, price_side = _number(path.get("vwap_slope")), str(path.get("price_vs_vwap") or "").lower()
     direction = "UP" if score is not None and score > 0 else "DOWN" if score is not None and score < 0 else None
     inputs = (score, efficiency, crosses, breadth, slope)
-    trend = bool(
-        None not in inputs
-        and abs(float(score)) >= policy.trend_score
-        and float(efficiency) >= policy.trend_efficiency
-        and float(crosses) <= policy.trend_max_vwap_crosses
-        and ((float(score) > 0 and float(breadth) >= policy.trend_min_breadth and float(slope) > 0)
-             or (float(score) < 0 and float(breadth) <= 1 - policy.trend_min_breadth and float(slope) < 0))
-    )
-    contradictions = []
-    if trend and price_side and ("above" if float(score) > 0 else "below") not in price_side:
-        trend = False
-        contradictions.append("price_vwap_direction_conflict")
-    balanced = bool(
-        score is not None and efficiency is not None and crosses is not None
-        and abs(score) <= policy.balanced_max_score
-        and efficiency < policy.balanced_max_efficiency
-        and crosses >= policy.balanced_min_vwap_crosses
-    )
-    capabilities = _map(facts.get("capabilities"))
-    path_capability = _map(capabilities.get("path"))
-    path_capability_ready = (
-        path_capability.get("ready") is True
-        if path_capability
-        else _map(facts.get("quality")).get("status") == "ready"
-    )
-    if not path_capability_ready:
-        state, reasons = "UNCERTAIN", ["strategy_facts_degraded"]
-    elif any(value is None for value in inputs):
-        state, reasons = "UNCERTAIN", ["path_inputs_unavailable"]
-    elif trend:
-        state, reasons = "TREND", ["direction_score_confirmed", "path_efficiency_confirmed"]
-    elif balanced:
-        state, direction, reasons = "BALANCED", None, ["low_path_efficiency", "multiple_vwap_crosses"]
+    contradictions: list[str] = []
+    hmm_used = _hmm_index_path(facts, policy)
+    if hmm_used is not None:
+        state, direction, reasons, hmm_payload = hmm_used
+        if (
+            state == "TREND"
+            and direction in {"UP", "DOWN"}
+            and price_side
+            and ("above" if direction == "UP" else "below") not in price_side
+        ):
+            state = "TRANSITION"
+            contradictions.append("price_vwap_direction_conflict")
+            reasons = [*reasons, "hmm_price_vwap_contradiction"]
+        confidence = round(float(hmm_payload["max_state_probability"]), 2)
     else:
-        state, reasons = "TRANSITION", ["path_inputs_not_aligned"]
+        trend = bool(
+            None not in inputs
+            and abs(float(score)) >= policy.trend_score
+            and float(efficiency) >= policy.trend_efficiency
+            and float(crosses) <= policy.trend_max_vwap_crosses
+            and ((float(score) > 0 and float(breadth) >= policy.trend_min_breadth and float(slope) > 0)
+                 or (float(score) < 0 and float(breadth) <= 1 - policy.trend_min_breadth and float(slope) < 0))
+        )
+        if trend and price_side and ("above" if float(score) > 0 else "below") not in price_side:
+            trend = False
+            contradictions.append("price_vwap_direction_conflict")
+        balanced = bool(
+            score is not None and efficiency is not None and crosses is not None
+            and abs(score) <= policy.balanced_max_score
+            and efficiency < policy.balanced_max_efficiency
+            and crosses >= policy.balanced_min_vwap_crosses
+        )
+        capabilities = _map(facts.get("capabilities"))
+        path_capability = _map(capabilities.get("path"))
+        path_capability_ready = (
+            path_capability.get("ready") is True
+            if path_capability
+            else _map(facts.get("quality")).get("status") == "ready"
+        )
+        if not path_capability_ready:
+            state, reasons = "UNCERTAIN", ["strategy_facts_degraded"]
+        elif any(value is None for value in inputs):
+            state, reasons = "UNCERTAIN", ["path_inputs_unavailable"]
+        elif trend:
+            state, reasons = "TREND", ["direction_score_confirmed", "path_efficiency_confirmed"]
+        elif balanced:
+            state, direction, reasons = "BALANCED", None, ["low_path_efficiency", "multiple_vwap_crosses"]
+        else:
+            state, reasons = "TRANSITION", ["path_inputs_not_aligned"]
+        hmm_payload = _hmm_unused_payload(facts)
+        confidence = round(sum(value is not None for value in inputs) / 5, 2)
     event_state = {
         "pre_event": "SCHEDULED_EVENT_RISK", "post_event": "POST_EVENT_DISCOVERY",
         "normal": "NORMAL",
@@ -163,8 +192,71 @@ def assess_regime(
         "schema_version": "regime_assessment.v1", "policy_version": policy.policy_version,
         "path_state": state, "path_direction": direction, "terminal_state": pin["terminal_state"],
         "event_state": event_state, "entry_state": "INSUFFICIENT_DATA",
-        "confidence": round(sum(value is not None for value in inputs) / 5, 2),
+        "confidence": confidence,
         "reasons": reasons, "contradictions": contradictions, "pin": pin,
+        "hmm": hmm_payload,
+    }
+
+
+def _hmm_index_path(
+    facts: Mapping[str, Any], policy: StrategyPolicy
+) -> tuple[str, str | None, list[str], dict[str, Any]] | None:
+    hmm = _map(facts.get("hmm"))
+    cross = _map(facts.get("cross_index"))
+    source = str(cross.get("source") or "")
+    posterior = _map(hmm.get("posterior"))
+    probabilities = {
+        state: _number(posterior.get(state)) for state in HMM_STATE_DIRECTION
+    }
+    if (
+        hmm.get("status") != "available"
+        or cross.get("status") != "ready"
+        or cross.get("session_open") is not True
+        or source not in {"cash_index", "globex_index"}
+        or any(value is None for value in probabilities.values())
+    ):
+        return None
+    resolved = {state: float(value) for state, value in probabilities.items() if value is not None}
+    dominant = max(resolved, key=resolved.__getitem__)
+    max_probability = resolved[dominant]
+    direction = HMM_STATE_DIRECTION[dominant]
+    payload = {
+        "used": True,
+        "status": "available",
+        "source": source,
+        "anchor": cross.get("anchor"),
+        "dominant_state": dominant,
+        "max_state_probability": round(max_probability, 4),
+        "posterior": {state: round(value, 4) for state, value in resolved.items()},
+        "reason": None,
+    }
+    if dominant == "state_01" and max_probability >= policy.hmm_balanced_min_probability:
+        return "BALANCED", None, ["hmm_index_balanced"], payload
+    if direction in {"UP", "DOWN"} and max_probability >= policy.hmm_trend_min_probability:
+        return (
+            "TREND",
+            direction,
+            ["hmm_index_trend", f"hmm_dominant:{dominant}"],
+            payload,
+        )
+    return "TRANSITION", direction, ["hmm_index_mixed_posterior"], payload
+
+
+def _hmm_unused_payload(facts: Mapping[str, Any]) -> dict[str, Any]:
+    hmm = _map(facts.get("hmm"))
+    cross = _map(facts.get("cross_index"))
+    reason = str(hmm.get("reason") or "")
+    if hmm.get("status") != "available":
+        reason = reason or "hmm_unavailable"
+    elif cross.get("status") != "ready" or cross.get("session_open") is not True:
+        reason = reason or "hmm_index_basket_not_ready"
+    else:
+        reason = reason or "hmm_index_not_used"
+    return {
+        "used": False,
+        "status": hmm.get("status") or "unavailable",
+        "source": cross.get("source"),
+        "reason": reason,
     }
 
 

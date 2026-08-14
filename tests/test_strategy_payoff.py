@@ -209,6 +209,135 @@ def test_frozen_pin_cases_migrate_on_aug5_and_rank_7710_on_aug6() -> None:
     assert [row["center"] for row in aug6["pin"]["top_centers"]][:1] == [7710.0]
 
 
+def test_index_hmm_owns_gth_path_state_from_globex_basket() -> None:
+    regime = assess_regime(
+        {
+            "path": {},
+            "event": {"state": "normal"},
+            "quality": {"status": "ready"},
+            "capabilities": {"path": {"ready": False}},
+            "cross_index": {
+                "source": "globex_index",
+                "status": "ready",
+                "session_open": True,
+                "anchor": "future:ES",
+            },
+            "hmm": {
+                "status": "available",
+                "posterior": {"state_00": 0.08, "state_01": 0.12, "state_02": 0.80},
+            },
+            "shock": {"state": "NONE"},
+        }
+    )
+    assert regime["path_state"] == "TREND"
+    assert regime["path_direction"] == "UP"
+    assert regime["hmm"]["used"] is True
+    assert regime["hmm"]["source"] == "globex_index"
+    assert "hmm_index_trend" in regime["reasons"]
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v16"
+
+
+def test_index_hmm_owns_rth_balanced_from_cash_basket() -> None:
+    regime = assess_regime(
+        {
+            "path": {"direction_score": 8.0, "efficiency_ratio_30m": 0.6},
+            "event": {"state": "normal"},
+            "cross_index": {
+                "source": "cash_index",
+                "status": "ready",
+                "session_open": True,
+                "anchor": "index:SPX",
+            },
+            "hmm": {
+                "status": "available",
+                "posterior": {"state_00": 0.15, "state_01": 0.70, "state_02": 0.15},
+            },
+            "shock": {"state": "NONE"},
+        }
+    )
+    assert regime["path_state"] == "BALANCED"
+    assert regime["path_direction"] is None
+    assert regime["hmm"]["used"] is True
+    assert regime["hmm"]["source"] == "cash_index"
+    assert "hmm_index_balanced" in regime["reasons"]
+
+
+def test_index_hmm_trend_yields_to_vwap_price_contradiction() -> None:
+    regime = assess_regime(
+        {
+            "path": {"price_vs_vwap": "below"},
+            "event": {"state": "normal"},
+            "cross_index": {
+                "source": "globex_index",
+                "status": "ready",
+                "session_open": True,
+                "anchor": "future:ES",
+            },
+            "hmm": {
+                "status": "available",
+                "posterior": {"state_00": 0.05, "state_01": 0.10, "state_02": 0.85},
+            },
+            "shock": {"state": "NONE"},
+        }
+    )
+    assert regime["path_state"] == "TRANSITION"
+    assert "price_vwap_direction_conflict" in regime["contradictions"]
+    assert "hmm_price_vwap_contradiction" in regime["reasons"]
+    assert regime["hmm"]["used"] is True
+
+
+def test_index_hmm_absent_keeps_es_path_fallback() -> None:
+    facts = _frozen_pin_facts("2026-08-06")
+    facts["path"] = {
+        **facts["path"],
+        "direction_score": 8.0,
+        "efficiency_ratio_30m": 0.6,
+        "vwap_crosses_30m": 1.0,
+        "breadth_above_vwap": 0.7,
+        "vwap_slope": 0.4,
+        "price_vs_vwap": "above",
+    }
+    facts["capabilities"] = {"path": {"ready": True}}
+    facts["quality"] = {"status": "ready"}
+    regime = assess_regime(facts)
+    assert regime["path_state"] == "TREND"
+    assert regime["path_direction"] == "UP"
+    assert regime["hmm"]["used"] is False
+
+
+def test_fact_pack_reads_index_hmm_from_research_signals() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["minute_market_frame"]["cross_asset"] = {
+        "cross_index": {
+            "source": "cash_index",
+            "status": "ready",
+            "session_open": True,
+            "anchor": "index:SPX",
+        }
+    }
+    payload["experimental_research_signals"] = {
+        "schema_version": "research_context.v2",
+        "action_authority": "none",
+        "generated_at": (now - timedelta(seconds=5)).isoformat(),
+        "regime": {
+            "observed_through": (now - timedelta(seconds=5)).isoformat(),
+            "posterior": [
+                {"state_id": "state_00", "probability": 0.10},
+                {"state_id": "state_01", "probability": 0.18},
+                {"state_id": "state_02", "probability": 0.72},
+            ],
+        },
+    }
+    facts = build_market_fact_pack(payload, _state(now), now)
+    regime = assess_regime(facts)
+    assert facts["hmm"]["status"] == "available"
+    assert facts["cross_index"]["source"] == "cash_index"
+    assert regime["path_state"] == "TREND"
+    assert regime["path_direction"] == "UP"
+    assert regime["hmm"]["used"] is True
+
+
 def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     decision = build_strategy_decision(_pin_payload(now), _pin_state(now), now)
@@ -378,7 +507,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v15"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v16"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]

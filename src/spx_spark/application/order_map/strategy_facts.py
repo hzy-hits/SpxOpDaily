@@ -314,6 +314,8 @@ def build_market_fact_pack(
         "shock": shock,
         "gth_evidence": _gth_fact(gth_level),
         "gth_dip_reclaim_evidence": _gth_fact(gth_dip_reclaim),
+        "cross_index": _cross_index_fact(market),
+        "hmm": _hmm_fact(payload, decision_at),
         "probability": {
             "q": q_event.get("probability"), "p_empirical": p_event.get("probability"),
             "p_interval_low": p_event.get("interval_low"),
@@ -798,6 +800,80 @@ def _with_setup_window(
         }
     )
     return row
+
+
+def _cross_index_fact(market: Mapping[str, Any]) -> dict[str, Any]:
+    cross = _map(_map(market.get("cross_asset")).get("cross_index"))
+    return {
+        "source": cross.get("source"),
+        "status": cross.get("status"),
+        "session_open": cross.get("session_open") is True,
+        "anchor": cross.get("anchor"),
+        "missing_instruments": list(cross.get("missing_instruments") or ()),
+        "reason_codes": list(cross.get("reason_codes") or ()),
+    }
+
+
+def _hmm_fact(payload: Mapping[str, Any], decision_at: datetime) -> dict[str, Any]:
+    document = _map(
+        payload.get("experimental_research_signals") or payload.get("research_context")
+    )
+    regime = _map(document.get("regime"))
+    posterior = _posterior_map(regime.get("posterior") or document.get("posterior"))
+    observed = _time(
+        regime.get("observed_through")
+        or regime.get("available_at")
+        or regime.get("as_of")
+        or document.get("generated_at")
+        or document.get("as_of")
+    )
+    unavailable = {
+        "status": "unavailable",
+        "posterior": {},
+        "dominant_state": None,
+        "max_state_probability": None,
+        "reason": "hmm_unavailable",
+    }
+    if document.get("action_authority") not in {None, "none"}:
+        return {**unavailable, "reason": "hmm_action_authority_rejected"}
+    if posterior is None or observed is None:
+        return unavailable
+    if observed > decision_at:
+        return {**unavailable, "reason": "hmm_from_future"}
+    age = (decision_at - observed).total_seconds()
+    if age > DEFAULT_STRATEGY_POLICY.hmm_max_age_seconds:
+        return {**unavailable, "reason": "hmm_stale"}
+    dominant = max(posterior, key=posterior.__getitem__)
+    return {
+        "status": "available",
+        "posterior": posterior,
+        "dominant_state": dominant,
+        "max_state_probability": posterior[dominant],
+        "observed_through": observed.isoformat(),
+        "reason": None,
+    }
+
+
+def _posterior_map(raw: object) -> dict[str, float] | None:
+    values: dict[str, float] = {}
+    if isinstance(raw, Mapping):
+        for state in ("state_00", "state_01", "state_02"):
+            number = _number(raw.get(state))
+            if number is None:
+                return None
+            values[state] = number
+        return values
+    if not isinstance(raw, list | tuple):
+        return None
+    for row in raw:
+        item = _map(row)
+        state = str(item.get("state_id") or "")
+        number = _number(item.get("probability"))
+        if state and number is not None:
+            values[state] = number
+    if any(state not in values for state in ("state_00", "state_01", "state_02")):
+        return None
+    return {state: values[state] for state in ("state_00", "state_01", "state_02")}
 
 
 def _map(value: object) -> Mapping[str, Any]:

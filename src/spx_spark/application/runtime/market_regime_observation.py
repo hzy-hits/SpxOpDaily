@@ -18,8 +18,8 @@ ES_FEATURE_WEIGHTS = {
     "vwap_slope_15m_points": 0.10,
 }
 OBSERVATION_COMPONENT_WEIGHTS = {
-    "es_path": 0.70,
-    "cash_index": 0.20,
+    "es_path": 0.20,
+    "cash_index": 0.70,
     "prior_rth": 0.10,
 }
 
