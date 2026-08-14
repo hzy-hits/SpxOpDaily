@@ -29,7 +29,10 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v18"
+    policy_version: str = "strategy_policy.bootstrap.v19"
+    # v19: GTH Call/Put debit verticals require TREND aligned with the
+    # candidate direction. Cheapness ranking stays, but TRANSITION/UNCERTAIN
+    # or the opposite side is a hard-gate zero. ATM butterflies may still pass.
     # v18: GTH keeps one human direction at a time and sticks the winner for
     # gth_winner_stick_seconds. Rank may not flip UP/DOWN/NEUTRAL, and delivery
     # may not print the opposite side, until that hysteresis expires.

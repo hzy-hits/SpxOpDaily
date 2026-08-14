@@ -265,7 +265,7 @@ def _hard_gate_candidate(
     gates.extend(_macro_hard_gates(candidate, facts))
     strategy_type = str(candidate.get("strategy_type") or "")
     if strategy_type.endswith("_DEBIT_VERTICAL"):
-        gates.extend(_vertical_hard_gates(candidate, facts, policy=policy))
+        gates.extend(_vertical_hard_gates(candidate, facts, regime, policy=policy))
     elif strategy_type.endswith("_BUTTERFLY"):
         gates.extend(_butterfly_hard_gates(candidate, facts, regime, policy=policy))
     elif strategy_type == _IRON_CONDOR_TYPE:
@@ -307,13 +307,14 @@ def _macro_hard_gates(
 def _vertical_hard_gates(
     candidate: dict[str, Any],
     facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
     *,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
     if candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP:
         return _event_settlement_vertical_hard_gates(candidate)
     if candidate.get("setup_kind") in {_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN}:
-        return _gth_scan_vertical_hard_gates(candidate, facts, policy=policy)
+        return _gth_scan_vertical_hard_gates(candidate, facts, regime, policy=policy)
     long, short = _map(candidate.get("long")), _map(candidate.get("short"))
     if not long or not short:
         return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
@@ -371,6 +372,7 @@ def _vertical_hard_gates(
 def _gth_scan_vertical_hard_gates(
     candidate: Mapping[str, Any],
     facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
     *,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
@@ -386,6 +388,17 @@ def _gth_scan_vertical_hard_gates(
     if None in (target, stop, debit_fraction, long_strike, short_strike):
         return [{"gate": "gth_scan_geometry_or_payoff_unavailable", "actual": None, "threshold": "present"}]
     gates: list[dict[str, Any]] = []
+    path_state = str(regime.get("path_state") or "")
+    path_direction = str(regime.get("path_direction") or "").upper()
+    direction = str(candidate.get("direction") or "").upper()
+    if path_state != "TREND" or path_direction != direction:
+        gates.append(
+            {
+                "gate": "gth_vertical_requires_aligned_trend",
+                "actual": f"{path_state}:{path_direction or 'none'}",
+                "threshold": f"TREND:{direction or 'directional'}",
+            }
+        )
     remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
     right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
     if candidate.get("setup_kind") == _GTH_DELTA_SCAN:

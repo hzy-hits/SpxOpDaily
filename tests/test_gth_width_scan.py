@@ -128,8 +128,8 @@ def _facts() -> dict[str, object]:
     }
 
 
-def _regime() -> dict[str, object]:
-    return {
+def _regime(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
         "schema_version": "regime_assessment.v1",
         "policy_version": StrategyPolicy().policy_version,
         "path_state": "UNCERTAIN",
@@ -142,6 +142,28 @@ def _regime() -> dict[str, object]:
         "contradictions": [],
         "pin": {},
     }
+    row.update(overrides)
+    return row
+
+
+def _rank(regime: dict[str, object]):
+    facts = _facts()
+    return rank_candidates(
+        enumerate_candidates(
+            _payload(),
+            facts,
+            regime,
+            _state(NOW),
+            now=NOW,
+            policy=StrategyPolicy(),
+        ),
+        facts,
+        regime,
+        policy=StrategyPolicy(),
+        data_root=None,
+        probability_settings=None,
+        now=NOW,
+    )
 
 
 def _payload() -> dict[str, object]:
@@ -229,16 +251,12 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v18"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v19"
     assert ranked.passed
+    assert {row["setup_kind"] for row in ranked.passed} == {GTH_ATM_PIN}
     assert decision["action_authority"] == "manual"
-    assert decision["decision_type"] in {
-        "CALL_DEBIT_VERTICAL",
-        "PUT_DEBIT_VERTICAL",
-        "CALL_BUTTERFLY",
-        "PUT_BUTTERFLY",
-    }
-    assert decision["candidate"]["setup_kind"] in {GTH_WIDTH_SCAN, GTH_ATM_PIN}
+    assert decision["decision_type"] in {"CALL_BUTTERFLY", "PUT_BUTTERFLY"}
+    assert decision["candidate"]["setup_kind"] == GTH_ATM_PIN
     assert decision["candidate"]["candidate_id"] == ranked.passed[0]["candidate_id"]
 
 
@@ -275,6 +293,40 @@ def test_gth_decision_keeps_locked_direction_instead_of_best_vertical(
     assert decision["action_authority"] == "manual"
     assert decision["candidate"]["direction"] == "NEUTRAL"
     assert decision["candidate"]["setup_kind"] == GTH_ATM_PIN
+
+
+def test_gth_directional_verticals_require_aligned_trend() -> None:
+    uncertain = _rank(_regime())
+    transition = _rank(_regime(path_state="TRANSITION", path_direction="UP"))
+    trend_up = _rank(_regime(path_state="TREND", path_direction="UP"))
+    trend_down = _rank(_regime(path_state="TREND", path_direction="DOWN"))
+
+    def _types(result) -> set[str]:
+        return {str(row.get("strategy_type")) for row in result.passed}
+
+    def _gated(result, strategy_type: str) -> bool:
+        return any(
+            str(row.get("strategy_type")) == strategy_type
+            and any(
+                str(gate.get("gate")) == "gth_vertical_requires_aligned_trend"
+                for gate in row.get("gate_failures") or ()
+            )
+            for row in result.gate_audit
+        )
+
+    assert "CALL_DEBIT_VERTICAL" not in _types(uncertain)
+    assert "PUT_DEBIT_VERTICAL" not in _types(uncertain)
+    assert "CALL_DEBIT_VERTICAL" not in _types(transition)
+    assert "PUT_DEBIT_VERTICAL" not in _types(transition)
+    assert _gated(uncertain, "CALL_DEBIT_VERTICAL")
+    assert _gated(uncertain, "PUT_DEBIT_VERTICAL")
+    assert _gated(transition, "PUT_DEBIT_VERTICAL")
+    assert "CALL_DEBIT_VERTICAL" in _types(trend_up)
+    assert "PUT_DEBIT_VERTICAL" not in _types(trend_up)
+    assert _gated(trend_up, "PUT_DEBIT_VERTICAL")
+    assert "PUT_DEBIT_VERTICAL" in _types(trend_down)
+    assert "CALL_DEBIT_VERTICAL" not in _types(trend_down)
+    assert _gated(trend_down, "CALL_DEBIT_VERTICAL")
 
 
 def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> None:

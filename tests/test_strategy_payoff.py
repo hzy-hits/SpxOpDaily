@@ -241,7 +241,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v18"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v19"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -278,6 +278,39 @@ def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
     assert regime["hmm"]["owns_path"] is False
     assert "es_path_return_confirmed" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
+
+
+def test_gth_es_path_is_transition_when_return_exists_but_efficiency_is_low() -> None:
+    regime = assess_regime(
+        {
+            "session": {"mode": "gth", "legal": True},
+            "path": {
+                "return_5m_points": 3.2,
+                "impulse_15m_points": 1.4,
+                "return_1m_points": 0.8,
+                "efficiency_ratio_30m": 0.17,
+                "distance_to_vwap_points": 4.5,
+            },
+            "event": {"state": "normal"},
+            "quality": {"status": "ready"},
+            "capabilities": {"path": {"ready": True}},
+            "cross_index": {
+                "source": "globex_index",
+                "status": "ready",
+                "session_open": True,
+                "anchor": "future:ES",
+            },
+            "hmm": {
+                "status": "available",
+                "posterior": {"state_00": 0.02, "state_01": 0.01, "state_02": 0.97},
+            },
+            "shock": {"state": "NONE"},
+        }
+    )
+    assert regime["path_state"] == "TRANSITION"
+    assert regime["path_direction"] == "UP"
+    assert "es_path_not_aligned" in regime["reasons"]
+    assert regime["hmm"]["owns_path"] is False
 
 
 def test_index_hmm_owns_rth_balanced_from_cash_basket() -> None:
@@ -586,7 +619,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v18"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v19"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
