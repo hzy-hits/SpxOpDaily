@@ -283,7 +283,8 @@ def test_schwab_stream_defaults_to_live_with_separate_shadow_path_available(
     settings = SchwabStreamSettings.from_env()
 
     assert settings.mode == "live"
-    assert settings.canonical_symbols == ("SPX", "SPY", "RSP", "ES", "MES")
+    assert settings.canonical_symbols == ("SPX", "SPY", "RSP", "ES", "MES", "NQ", "RTY", "YM")
+    assert settings.validation_future_symbols == ()
     assert settings.symbol_refresh_interval_seconds == 300.0
     assert settings.shadow_latest_path == str(tmp_path / "latest" / "schwab_stream_shadow.json")
 

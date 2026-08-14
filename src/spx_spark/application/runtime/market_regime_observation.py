@@ -118,7 +118,11 @@ def build_feature_observation(
 def _cash_index_component(
     market: Mapping[str, object],
 ) -> tuple[float | None, dict[str, object]]:
-    cash = _mapping(_mapping(market.get("cross_asset")).get("cash_index"))
+    cross_asset = _mapping(market.get("cross_asset"))
+    selected = _mapping(cross_asset.get("cross_index"))
+    if selected.get("source") == "globex_index":
+        return _globex_index_component(selected)
+    cash = _mapping(cross_asset.get("cash_index"))
     relative = _mapping(cash.get("relative_to_spx_15m_bps"))
     breadth = _mapping(cash.get("breadth_15m"))
     relative_values = [
@@ -140,6 +144,7 @@ def _cash_index_component(
     )
     payload: dict[str, object] = {
         "status": "available" if complete else "degraded",
+        "source": "cash_index",
         "relative_to_spx_15m_bps": {
             instrument: relative.get(instrument)
             for instrument in ("index:SPX", "index:NDX", "index:DJI", "index:RUT")
@@ -154,6 +159,77 @@ def _cash_index_component(
         "reason_codes": list(cash.get("reason_codes") or ()),
         "semantics": "observed_cash_index_price_regime_not_market_maker_behavior",
     }
+    return _finish_cross_index_score(
+        payload,
+        complete=complete,
+        relative_values=relative_values,
+        dispersion=dispersion,
+        up_count=up_count,
+        down_count=down_count,
+    )
+
+
+def _globex_index_component(
+    selected: Mapping[str, object],
+) -> tuple[float | None, dict[str, object]]:
+    relative = _mapping(selected.get("relative_to_anchor_15m_bps"))
+    breadth = _mapping(selected.get("breadth_15m"))
+    relative_values = [
+        _number(relative.get(instrument))
+        for instrument in ("future:NQ", "future:YM", "future:RTY")
+    ]
+    dispersion = _number(selected.get("dispersion_15m_bps"))
+    up_count = _non_negative_int(breadth.get("up_count"))
+    down_count = _non_negative_int(breadth.get("down_count"))
+    flat_count = _non_negative_int(breadth.get("flat_count"))
+    complete = (
+        selected.get("status") == "ready"
+        and selected.get("session_open") is True
+        and all(value is not None for value in relative_values)
+        and dispersion is not None
+        and up_count is not None
+        and down_count is not None
+        and flat_count is not None
+        and up_count + down_count + flat_count == 4
+    )
+    payload: dict[str, object] = {
+        "status": "available" if complete else "degraded",
+        "source": "globex_index",
+        "anchor": "future:ES",
+        "relative_to_es_15m_bps": {
+            instrument: relative.get(instrument)
+            for instrument in ("future:ES", "future:NQ", "future:YM", "future:RTY")
+        },
+        "dispersion_15m_bps": dispersion,
+        "breadth_15m": {
+            "up_count": up_count,
+            "down_count": down_count,
+            "flat_count": flat_count,
+        },
+        "missing_instruments": list(selected.get("missing_instruments") or ()),
+        "reason_codes": list(selected.get("reason_codes") or ()),
+        "calibration": selected.get("calibration"),
+        "semantics": "observed_globex_futures_relative_to_es_not_cash_index",
+    }
+    return _finish_cross_index_score(
+        payload,
+        complete=complete,
+        relative_values=relative_values,
+        dispersion=dispersion,
+        up_count=up_count,
+        down_count=down_count,
+    )
+
+
+def _finish_cross_index_score(
+    payload: dict[str, object],
+    *,
+    complete: bool,
+    relative_values: list[float | None],
+    dispersion: float | None,
+    up_count: int | None,
+    down_count: int | None,
+) -> tuple[float | None, dict[str, object]]:
     if not complete:
         payload["score"] = None
         return None, payload

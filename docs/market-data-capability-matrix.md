@@ -9,7 +9,7 @@ live market data; the provider source timestamp must advance.
 | Schwab REST equity `regular` | US RTH | production | SPY/QQQ/IWM/RSP and cross-asset context | GTH SPX replacement |
 | Schwab REST equity `extended` | eligible extended/overnight | production when its source time is newer | overnight ETF/equity direction and breadth | assuming every equity is 24/5; option pricing |
 | Schwab stream ES/MES | CME Globex | production | path, returns, volume, VWAP, basis context | native SPX or SPXW GEX |
-| Schwab stream NQ/RTY/YM | Globex | validation | acceptance telemetry only | agent/strategy decisions until promoted |
+| Schwab stream NQ/RTY/YM | Globex | production | GTH/overnight cross-index percent returns relative to ES | SPX coordinate; option pricing; RTH cash NDX/DJI/RUT replacement |
 | Schwab stream one ES futures option | Globex | validation | entitlement, continuity, timestamp, spread and OI probe | ES surface/GEX; SPXW pricing |
 | IBKR SPXW current expiry | Cboe GTH | production | exclusive GTH SPXW bid/ask, IV and option pricing | replacement with stale Schwab rows |
 | Schwab SPXW current expiry | Cboe GTH | unavailable for live pricing | frozen audit/last structure only | GTH model price, limit, probability or entry |
@@ -31,10 +31,15 @@ block without being mislabeled as cash-session data.
 
 ## Acceptance-only lanes
 
-NQ/RTY/YM and the ES futures-option probe are persisted for evidence but are not
-referenced by the decision engine. `/healthz.stream.validation` reports, per
-provider symbol, message rows, normalized rows, live rows and last source time.
+The ES futures-option probe is persisted for evidence but is not referenced by
+the decision engine. `/healthz.stream.validation` reports, per provider symbol,
+message rows, normalized rows, live rows and last source time.
 
-Promotion requires a separate reviewed change after continuous session
-coverage is measured. It must not happen automatically from one successful
-subscription.
+NQ/RTY/YM were promoted from this lane: GTH/overnight uses their percent
+returns minus ES (`globex_index`). RTH still uses cash SPX/NDX/DJI/RUT
+(`cash_index`). They still cannot become the SPX coordinate, SPXW pricing, or
+a strategy hard gate.
+
+Promotion of any remaining validation lane requires a separate reviewed change
+after continuous session coverage is measured. It must not happen automatically
+from one successful subscription.

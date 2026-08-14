@@ -34,6 +34,9 @@ from spx_spark.storage import LatestState
 
 TRACKED_INSTRUMENTS = (
     "future:ES",
+    "future:NQ",
+    "future:YM",
+    "future:RTY",
     "index:SPX",
     "index:NDX",
     "index:DJI",

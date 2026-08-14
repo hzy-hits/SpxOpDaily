@@ -409,6 +409,15 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
     assert cash_index["relative_to_spx_15m_bps"]["index:SPX"] is None
     assert cash_index["reason_codes"] == ["cash_index_cash_session_closed"]
     assert cash_index["semantics"] == ("observed_cash_index_price_regime_not_market_maker_behavior")
+    globex_index = frame.cross_asset["globex_index"]
+    assert globex_index["status"] == "degraded"
+    assert globex_index["missing_instruments"] == ["future:NQ", "future:YM", "future:RTY"]
+    assert globex_index["globex_session_open"] is True
+    assert "globex_index_missing:future:NQ" in globex_index["reason_codes"]
+    cross_index = frame.cross_asset["cross_index"]
+    assert cross_index["source"] == "globex_index"
+    assert cross_index["status"] == "degraded"
+    assert cross_index["anchor"] == "future:ES"
     assert frame.volatility["vix1d_vix_ratio"] is None
     assert frame.volatility["es_realized_vol_60m_annualized"] is not None
     assert frame.volatility["atm_iv_minus_es_realized_vol"] is not None
@@ -450,6 +459,12 @@ def test_cash_index_features_publish_synchronized_rth_relative_strength_and_disp
     assert cash_index["dispersion_15m_bps"] > 0.0
     assert cash_index["relative_to_spx_15m_bps"]["index:SPX"] == 0.0
     assert cash_index["reason_codes"] == []
+    globex_index = frame.cross_asset["globex_index"]
+    assert globex_index["status"] == "degraded"
+    assert globex_index["globex_session_open"] is False
+    assert "globex_index_rth_uses_cash" in globex_index["reason_codes"]
+    assert frame.cross_asset["cross_index"]["source"] == "cash_index"
+    assert frame.cross_asset["cross_index"]["status"] == "ready"
 
     samples[-1]["instruments"]["index:RUT"]["source_at"] = (now - timedelta(seconds=6)).isoformat()
     skewed = build_minute_market_frame(
@@ -513,6 +528,72 @@ def test_cash_index_features_keep_missing_index_explicit_and_suppress_dispersion
     assert cash_index["return_15m_available_count"] == 3
     assert frame.cross_asset["returns"]["index:RUT"]["return_15m_pct"] is None
     assert cash_index["reason_codes"] == ["cash_index_missing:index:RUT"]
+
+
+def test_globex_index_features_publish_percent_returns_relative_to_es() -> None:
+    start = datetime(2026, 8, 3, 5, 0, tzinfo=UTC)
+    now = start + timedelta(minutes=15)
+    session_id = globex_session_id(now)
+    samples = [
+        _market_sample(
+            start + timedelta(minutes=minute),
+            session_id=session_id,
+            es=7_800.0 + minute,
+            nq=30_000.0 + minute * 8.0,
+            ym=54_000.0 + minute * 2.0,
+            rty=3_000.0 + minute * 0.5,
+            volume=1_000.0 + minute,
+            spx=7_750.0 + minute,
+            ndx=29_800.0 + minute * 8.0,
+            dji=53_900.0 + minute * 2.0,
+            rut=2_980.0 + minute * 0.5,
+        )
+        for minute in range(16)
+    ]
+
+    frame = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    )
+
+    cash_index = frame.cross_asset["cash_index"]
+    globex_index = frame.cross_asset["globex_index"]
+    cross_index = frame.cross_asset["cross_index"]
+    assert cash_index["status"] == "degraded"
+    assert cash_index["reason_codes"] == ["cash_index_cash_session_closed"]
+    assert globex_index["status"] == "ready"
+    assert globex_index["globex_session_open"] is True
+    assert globex_index["calibration"] == "percent_return_minus_es"
+    assert globex_index["role_map"]["index:NDX"] == "future:NQ"
+    assert globex_index["relative_to_es_15m_bps"]["future:ES"] == 0.0
+    assert globex_index["relative_to_es_15m_bps"]["future:NQ"] > 0.0
+    assert globex_index["dispersion_15m_bps"] > 0.0
+    assert globex_index["reason_codes"] == []
+    assert cross_index["source"] == "globex_index"
+    assert cross_index["status"] == "ready"
+    assert cross_index["anchor"] == "future:ES"
+
+    samples[-1]["instruments"]["future:RTY"]["source_at"] = (
+        now - timedelta(seconds=6)
+    ).isoformat()
+    skewed = build_minute_market_frame(
+        samples,
+        now=now,
+        expected_move_points=None,
+        atm_iv=None,
+        structural_levels={},
+        volume_baselines={},
+        policy=MarketFeatureSettings(),
+    ).cross_asset["globex_index"]
+    assert skewed["status"] == "degraded"
+    assert skewed["source_skew_seconds"] == 6.0
+    assert skewed["dispersion_15m_bps"] is None
+    assert skewed["reason_codes"] == ["globex_index_source_skew_exceeded"]
 
 
 def test_gth_expected_move_starts_at_2015_et_and_resets_with_session() -> None:
@@ -1257,6 +1338,9 @@ def _market_sample(
     ndx: float | None = None,
     dji: float | None = None,
     rut: float | None = None,
+    nq: float | None = None,
+    ym: float | None = None,
+    rty: float | None = None,
     vix: float | None = None,
     vvix: float | None = None,
 ) -> dict[str, object]:
@@ -1264,6 +1348,9 @@ def _market_sample(
         "future:ES": _sample_quote(es, volume, at),
     }
     for instrument_id, value in (
+        ("future:NQ", nq),
+        ("future:YM", ym),
+        ("future:RTY", rty),
         ("equity:SPY", spy),
         ("equity:QQQ", qqq),
         ("equity:RSP", rsp),

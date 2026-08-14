@@ -98,8 +98,10 @@ not establish that every broker API redistributes it.
 1. REST equity normalization selects the newer regular/extended source block
    and persists `market_session`, `regular_source_at`, `extended_source_at`, and
    both session observations.
-2. NQ/RTY/YM run in an explicit validation universe with per-symbol message,
-   normalization, live-row, and last-source telemetry.
+2. NQ/RTY/YM are production GTH cross-index futures. Minute frames publish
+   percent returns minus ES in `globex_index`; RTH continues to use cash
+   SPX/NDX/DJI/RUT in `cash_index`. They must not become the SPX coordinate or
+   option-pricing source.
 3. `LEVELONE_FUTURES_OPTIONS` supports exactly one configured probe symbol.
    REST verified `./ESU26C7600` live at 2026-07-14 01:36 UTC. After the
    token-owner restart, WebSocket source time advanced continuously with live

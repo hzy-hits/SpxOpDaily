@@ -50,8 +50,8 @@ DATA_SOURCE_CAPABILITIES: tuple[DataSourceCapability, ...] = (
         Provider.SCHWAB,
         "NQ/RTY/YM",
         "CME/CBOT Globex",
-        CapabilityStatus.VALIDATION,
-        "source-time acceptance only until explicitly promoted",
+        CapabilityStatus.PRODUCTION,
+        "GTH cross-index percent returns relative to ES; never SPX coordinate, option pricing, or RTH cash replacement",
     ),
     DataSourceCapability(
         "schwab_stream_es_futures_option_probe",

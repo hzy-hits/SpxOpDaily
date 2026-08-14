@@ -17,8 +17,24 @@ CASH_INDEX_INSTRUMENTS = (
     "index:DJI",
     "index:RUT",
 )
+GLOBEX_INDEX_INSTRUMENTS = (
+    "future:ES",
+    "future:NQ",
+    "future:YM",
+    "future:RTY",
+)
+GLOBEX_CASH_ROLE_MAP = {
+    "index:SPX": "future:ES",
+    "index:NDX": "future:NQ",
+    "index:DJI": "future:YM",
+    "index:RUT": "future:RTY",
+}
+RTH_CASH_CLOSED_SEGMENTS = frozenset({"rth", "maintenance"})
 RETURN_INSTRUMENTS = (
     "future:ES",
+    "future:NQ",
+    "future:YM",
+    "future:RTY",
     "equity:SPY",
     "equity:QQQ",
     "equity:RSP",
@@ -43,12 +59,18 @@ def cross_asset_features(
     }
     latest = samples[-1] if samples else {}
     cash_index = _cash_index_features(latest, returns=returns, policy=policy)
-    for instrument_id in cash_index["missing_instruments"]:
+    globex_index = _globex_index_features(latest, returns=returns, policy=policy)
+    for instrument_id in (*cash_index["missing_instruments"], *globex_index["missing_instruments"]):
         returns[instrument_id] = {
             "return_5m_pct": None,
             "return_15m_pct": None,
             "return_60m_pct": None,
         }
+    cross_index = _session_cross_index(
+        latest.get("segment"),
+        cash_index=cash_index,
+        globex_index=globex_index,
+    )
 
     es = _instrument(latest, "future:ES")
     spx = _instrument(latest, "index:SPX")
@@ -99,6 +121,8 @@ def cross_asset_features(
     return {
         "returns": returns,
         "cash_index": cash_index,
+        "globex_index": globex_index,
+        "cross_index": cross_index,
         "es_spx_basis_points": basis,
         "es_spx_basis_rolling_median": rolling_basis,
         "es_spx_basis_deviation_points": _difference(basis, rolling_basis),
@@ -125,10 +149,115 @@ def _cash_index_features(
     policy: MarketFeatureSettings,
 ) -> dict[str, Any]:
     cash_session_open = latest.get("segment") == "rth"
+    basket = _relative_basket_features(
+        latest,
+        returns=returns,
+        policy=policy,
+        instruments=CASH_INDEX_INSTRUMENTS,
+        session_open=cash_session_open,
+        reason_prefix="cash_index",
+        closed_reason="cash_index_cash_session_closed",
+        anchor_id="index:SPX",
+        relative_key="relative_to_spx_15m_bps",
+        semantics="observed_cash_index_price_regime_not_market_maker_behavior",
+    )
+    basket.update(
+        {
+            "cash_session": "rth",
+            "cash_session_open": cash_session_open,
+        }
+    )
+    return basket
+
+
+def _globex_index_features(
+    latest: dict[str, Any],
+    *,
+    returns: dict[str, dict[str, float | None]],
+    policy: MarketFeatureSettings,
+) -> dict[str, Any]:
+    segment = latest.get("segment")
+    globex_session_open = segment not in RTH_CASH_CLOSED_SEGMENTS
+    closed_reason = (
+        "globex_index_rth_uses_cash"
+        if segment == "rth"
+        else "globex_index_session_closed"
+    )
+    basket = _relative_basket_features(
+        latest,
+        returns=returns,
+        policy=policy,
+        instruments=GLOBEX_INDEX_INSTRUMENTS,
+        session_open=globex_session_open,
+        reason_prefix="globex_index",
+        closed_reason=closed_reason,
+        anchor_id="future:ES",
+        relative_key="relative_to_es_15m_bps",
+        semantics="observed_globex_futures_relative_to_es_not_cash_index",
+    )
+    basket.update(
+        {
+            "globex_session": segment,
+            "globex_session_open": globex_session_open,
+            "calibration": "percent_return_minus_es",
+            "role_map": dict(GLOBEX_CASH_ROLE_MAP),
+        }
+    )
+    return basket
+
+
+def _session_cross_index(
+    segment: object,
+    *,
+    cash_index: dict[str, Any],
+    globex_index: dict[str, Any],
+) -> dict[str, Any]:
+    if segment == "rth":
+        selected = cash_index
+        source = "cash_index"
+        anchor = "index:SPX"
+        relative_key = "relative_to_spx_15m_bps"
+        session_open = cash_index.get("cash_session_open") is True
+    else:
+        selected = globex_index
+        source = "globex_index"
+        anchor = "future:ES"
+        relative_key = "relative_to_es_15m_bps"
+        session_open = globex_index.get("globex_session_open") is True
+    return {
+        "source": source,
+        "status": selected.get("status"),
+        "anchor": anchor,
+        "session_open": session_open,
+        "required_instruments": list(selected.get("required_instruments") or ()),
+        "missing_instruments": list(selected.get("missing_instruments") or ()),
+        "relative_to_anchor_15m_bps": dict(selected.get(relative_key) or {}),
+        "dispersion_15m_bps": selected.get("dispersion_15m_bps"),
+        "breadth_15m": selected.get("breadth_15m"),
+        "reason_codes": list(selected.get("reason_codes") or ()),
+        "semantics": selected.get("semantics"),
+        "calibration": selected.get("calibration"),
+        "role_map": dict(selected.get("role_map") or {}),
+    }
+
+
+def _relative_basket_features(
+    latest: dict[str, Any],
+    *,
+    returns: dict[str, dict[str, float | None]],
+    policy: MarketFeatureSettings,
+    instruments: tuple[str, ...],
+    session_open: bool,
+    reason_prefix: str,
+    closed_reason: str,
+    anchor_id: str,
+    relative_key: str,
+    semantics: str,
+) -> dict[str, Any]:
     observations: dict[str, dict[str, object]] = {}
     missing: list[str] = []
     source_times: list[datetime] = []
-    for instrument_id in CASH_INDEX_INSTRUMENTS:
+    for instrument_id in instruments:
         quote = _instrument(latest, instrument_id)
         source_at = _parse_at(quote.get("source_at")) if quote else None
         price = _number(quote.get("price")) if quote else None
@@ -164,7 +293,7 @@ def _cash_index_features(
         (max(source_times) - min(source_times)).total_seconds() if len(source_times) >= 2 else None
     )
     synchronized = (
-        cash_session_open
+        session_open
         and not missing
         and source_skew is not None
         and source_skew <= policy.provider_sync_tolerance_seconds
@@ -173,40 +302,38 @@ def _cash_index_features(
         instrument_id: (
             None if instrument_id in missing else returns[instrument_id]["return_15m_pct"]
         )
-        for instrument_id in CASH_INDEX_INSTRUMENTS
+        for instrument_id in instruments
     }
     complete_returns = all(value is not None for value in return_15m.values())
     usable = synchronized and complete_returns
-    spx_return = return_15m["index:SPX"] if usable else None
+    anchor_return = return_15m[anchor_id] if usable else None
     relative = {
         instrument_id: (
-            (float(value) - float(spx_return)) * 10_000.0
-            if value is not None and spx_return is not None
+            (float(value) - float(anchor_return)) * 10_000.0
+            if value is not None and anchor_return is not None
             else None
         )
         for instrument_id, value in return_15m.items()
     }
     return_bps = [float(value) * 10_000.0 for value in return_15m.values() if value is not None]
-    reason_codes = [f"cash_index_missing:{instrument_id}" for instrument_id in missing]
-    if not cash_session_open:
-        reason_codes.append("cash_index_cash_session_closed")
+    reason_codes = [f"{reason_prefix}_missing:{instrument_id}" for instrument_id in missing]
+    if not session_open:
+        reason_codes.append(closed_reason)
     elif not missing and not synchronized:
-        reason_codes.append("cash_index_source_skew_exceeded")
+        reason_codes.append(f"{reason_prefix}_source_skew_exceeded")
     if synchronized and not complete_returns:
-        reason_codes.append("cash_index_15m_history_incomplete")
+        reason_codes.append(f"{reason_prefix}_15m_history_incomplete")
     return {
         "status": "ready" if usable else "degraded",
-        "required_instruments": list(CASH_INDEX_INSTRUMENTS),
+        "required_instruments": list(instruments),
         "observations": observations,
         "missing_instruments": missing,
-        "cash_session": "rth",
-        "cash_session_open": cash_session_open,
         "complete": not missing,
         "synchronized": synchronized,
         "source_skew_seconds": source_skew,
         "source_skew_limit_seconds": policy.provider_sync_tolerance_seconds,
         "return_15m_available_count": len(return_bps),
-        "relative_to_spx_15m_bps": relative,
+        relative_key: relative,
         "dispersion_15m_bps": statistics.pstdev(return_bps) if usable else None,
         "breadth_15m": (
             {
@@ -218,7 +345,7 @@ def _cash_index_features(
             else None
         ),
         "reason_codes": sorted(reason_codes),
-        "semantics": "observed_cash_index_price_regime_not_market_maker_behavior",
+        "semantics": semantics,
     }
 
 
@@ -329,4 +456,10 @@ def _number(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-__all__ = ["CASH_INDEX_INSTRUMENTS", "cross_asset_features", "direction_confirmation"]
+__all__ = [
+    "CASH_INDEX_INSTRUMENTS",
+    "GLOBEX_CASH_ROLE_MAP",
+    "GLOBEX_INDEX_INSTRUMENTS",
+    "cross_asset_features",
+    "direction_confirmation",
+]

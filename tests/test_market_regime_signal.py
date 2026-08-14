@@ -774,6 +774,70 @@ def test_missing_cash_index_is_explicit_and_degrades_without_blocking_advisory_r
     assert payload["action_authority"] == "none"
 
 
+def test_gth_globex_index_feeds_advisory_component_without_authority(
+    tmp_path: Path,
+) -> None:
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_premarket(paths)
+    market = _read(paths.market)
+    market["cross_asset"] = {
+        "cash_index": {
+            "status": "degraded",
+            "cash_session_open": False,
+            "reason_codes": ["cash_index_cash_session_closed"],
+        },
+        "cross_index": {
+            "source": "globex_index",
+            "status": "ready",
+            "session_open": True,
+            "anchor": "future:ES",
+            "relative_to_anchor_15m_bps": {
+                "future:ES": 0.0,
+                "future:NQ": 12.0,
+                "future:YM": -4.0,
+                "future:RTY": 6.0,
+            },
+            "dispersion_15m_bps": 10.0,
+            "breadth_15m": {"up_count": 3, "down_count": 1, "flat_count": 0},
+            "missing_instruments": [],
+            "reason_codes": [],
+            "calibration": "percent_return_minus_es",
+        },
+    }
+    _write(paths.market, market)
+
+    payload = produce_once(paths=paths, now=PREMARKET_NOW, freshness_policy=DEFAULT_FRESHNESS)
+    internal = _build_from_paths(paths, now=PREMARKET_NOW, market=market)
+    observation = internal["regime"]["observation"]["components"]["cash_index"]
+
+    assert observation["status"] == "available"
+    assert observation["source"] == "globex_index"
+    assert observation["relative_to_es_15m_bps"]["future:NQ"] == 12.0
+    assert "cash_index_component_unavailable" not in payload["regime_reason_codes"]
+    assert payload["action_authority"] == "none"
+    assert payload["cross_index_frame"]["missing_instruments"] == [
+        "index:SPX",
+        "index:NDX",
+        "index:DJI",
+        "index:RUT",
+    ]
+
+    weaker = copy.deepcopy(market)
+    weaker["cross_asset"]["cross_index"]["relative_to_anchor_15m_bps"].update(
+        {"future:NQ": -30.0, "future:YM": -25.0, "future:RTY": -35.0}
+    )
+    weaker["cross_asset"]["cross_index"]["dispersion_15m_bps"] = 40.0
+    weaker["cross_asset"]["cross_index"]["breadth_15m"] = {
+        "up_count": 0,
+        "down_count": 4,
+        "flat_count": 0,
+    }
+    weaker_score = _build_from_paths(paths, now=PREMARKET_NOW, market=weaker)["regime"][
+        "observation"
+    ]["direction_score"]
+    assert weaker_score != pytest.approx(internal["regime"]["observation"]["direction_score"])
+
+
 def test_incomplete_prior_rth_four_index_context_is_explicitly_degraded(
     tmp_path: Path,
 ) -> None:
