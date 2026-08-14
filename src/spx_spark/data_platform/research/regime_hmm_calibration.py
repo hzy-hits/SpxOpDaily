@@ -887,7 +887,15 @@ def build_report(
     gates = evaluate_gates(evaluation)
     all_events = [event for events in events_by_day.values() for event in events]
     rth_events = [event for event in all_events if event.session_bucket == "rth"]
+    test_days = {
+        str(day) for day in (evaluation.get("test_days") or []) if isinstance(day, str)
+    }
+    oos_events = [event for event in all_events if event.session_date in test_days]
     path_skill = evaluate_path_skill(all_events)
+    path_skill["sample"] = "in_sample_all_decision_events"
+    path_skill_walk_forward = evaluate_path_skill(oos_events)
+    path_skill_walk_forward["sample"] = "walk_forward_test_days_only"
+    path_skill_walk_forward["test_days"] = sorted(test_days)
     fitted_policy = None
     if len(rth_events) >= GATE_MIN_TEST_EVENTS:
         intercept, slope = fit_logistic(
@@ -918,6 +926,7 @@ def build_report(
         "n_days_with_events": len(events_by_day),
         "evaluation": evaluation,
         "path_skill": path_skill,
+        "path_skill_walk_forward": path_skill_walk_forward,
         **gates,
         "fitted_policy": fitted_policy,
         "day_diagnostics": diagnostics,
@@ -1003,7 +1012,12 @@ def main(argv: list[str] | None = None) -> int:
             )
     path_skill = report.get("path_skill")
     if isinstance(path_skill, Mapping):
+        print("path_skill in-sample:")
         _print_path_skill(path_skill)
+    oos = report.get("path_skill_walk_forward")
+    if isinstance(oos, Mapping):
+        print("path_skill walk-forward test days:")
+        _print_path_skill(oos)
     return 0
 
 
