@@ -655,7 +655,7 @@ def _butterfly_candidates(
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
     if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
-        return _gth_butterfly_candidates(payload, facts, latest, now=now, policy=policy)
+        return []
     if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         return []
     if _capability_reasons(facts, "butterfly"):
@@ -728,52 +728,6 @@ def _butterfly_candidates(
                     )
                     if row:
                         rows.append(row)
-    return rows
-
-
-def _gth_butterfly_candidates(
-    payload: Mapping[str, Any],
-    facts: Mapping[str, Any],
-    latest: LatestState,
-    *,
-    now: datetime,
-    policy: StrategyPolicy,
-) -> list[dict[str, Any]]:
-    frame = _map(payload.get("option_structure_frame"))
-    expiry = str(frame.get("front_expiry") or payload.get("expiry") or "")
-    centers = {
-        _round_to_strike(_number(_map(facts.get("spot")).get("spx"))),
-        _round_to_strike(_number(_map(facts.get("structure")).get("q_mode"))),
-    }
-    if not expiry:
-        return []
-    quote_policy = _gth_quote_policy(policy)
-    rows: list[dict[str, Any]] = []
-    for center in sorted(value for value in centers if value is not None):
-        for width in policy.gth_widths:
-            for right in ("C", "P"):
-                row = _butterfly_candidate(
-                    facts,
-                    latest,
-                    expiry,
-                    center=center,
-                    width=width,
-                    right=right,
-                    now=now,
-                    policy=quote_policy,
-                    source="gth_width_butterfly",
-                    setup_kind=GTH_ATM_PIN,
-                    direction="NEUTRAL",
-                    thesis_direction="NEUTRAL",
-                    payoff_shape="PIN_CONCENTRATED",
-                    manual_authority_eligible=True,
-                    selection_prior=0.0,
-                    pin={},
-                    geometry_source="gth_atm_pin",
-                    providers=(Provider.IBKR, Provider.SCHWAB),
-                )
-                if row:
-                    rows.append(row)
     return rows
 
 

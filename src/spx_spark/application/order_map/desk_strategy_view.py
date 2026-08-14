@@ -116,7 +116,7 @@ def _gth_scan_desk_view(
     elif reasons:
         primary = humanize_strategy_reason(reasons[0])
     else:
-        primary = "1 分钟报价持续重算 5–50 点价差、蝶式与 5–20Δ 10 点翼宽铁鹰"
+        primary = "1 分钟报价持续重算 5–50 点价差与 5–20Δ 10 点翼宽铁鹰"
     return "\n".join(
         (
             f"结论  {conclusion}",
@@ -228,6 +228,8 @@ def humanize_strategy_reason(reason: str) -> str:
         "macro_entry_not_authorized": "宏观事件窗口禁止新建议",
         "session_not_open_for_spxw_strategy": "当前不在可评估 SPXW 的时段",
         "no_supported_strategy_candidate": "没有通过门控的可交易候选",
+        "gth_butterfly_rth_only": "夜盘不授权蝶式，只在 RTH 稳定钉住评估",
+        "gth_vertical_requires_aligned_trend": "夜盘方向价差要求 TREND 且与路径同向",
         "butterfly_requires_pin_stable": "蝶式要求稳定钉住环境",
         "butterfly_shock_veto": "冲击状态未平复，禁止新开蝶式",
         "butterfly_body_far_from_value_center": "蝶式身体偏离价值中枢过远",

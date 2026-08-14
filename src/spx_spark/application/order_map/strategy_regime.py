@@ -29,7 +29,9 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v20"
+    policy_version: str = "strategy_policy.bootstrap.v21"
+    # v21: Butterflies are RTH-only (STABLE_PIN). GTH ATM flies are not
+    # enumerated or human-authoritative; night path is too hard to pin.
     # v20: GTH winner stick and delivery direction lock only count cards the
     # outbox accepted. Selected-but-never-pushed cycles must not lock the desk.
     # v19: GTH Call/Put debit verticals require TREND aligned with the

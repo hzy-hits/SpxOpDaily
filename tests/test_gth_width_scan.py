@@ -176,7 +176,7 @@ def _payload() -> dict[str, object]:
     }
 
 
-def test_gth_enumerates_fresh_width_verticals_and_butterflies() -> None:
+def test_gth_enumerates_fresh_width_verticals_not_butterflies() -> None:
     rows = enumerate_candidates(
         _payload(),
         _facts(),
@@ -199,7 +199,7 @@ def test_gth_enumerates_fresh_width_verticals_and_butterflies() -> None:
     assert widths <= set(StrategyPolicy().gth_widths)
     assert 5.0 in widths
     assert 50.0 not in widths
-    assert butterflies
+    assert butterflies == []
     assert all(row["quote"]["status"] == "ready" for row in verticals)
 
 
@@ -252,20 +252,18 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v20"
-    assert ranked.passed
-    assert {row["setup_kind"] for row in ranked.passed} == {GTH_ATM_PIN}
-    assert decision["action_authority"] == "manual"
-    assert decision["decision_type"] in {"CALL_BUTTERFLY", "PUT_BUTTERFLY"}
-    assert decision["candidate"]["setup_kind"] == GTH_ATM_PIN
-    assert decision["candidate"]["candidate_id"] == ranked.passed[0]["candidate_id"]
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v21"
+    assert ranked.passed == []
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["action_authority"] == "none"
+    assert decision["candidate"] is None
 
 
 def test_gth_decision_keeps_locked_direction_instead_of_best_vertical(
     monkeypatch,
 ) -> None:
     facts = _facts()
-    regime = _regime()
+    regime = _regime(path_state="TREND", path_direction="UP")
     monkeypatch.setattr(
         "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
         lambda payload, latest, at: facts,
@@ -291,9 +289,9 @@ def test_gth_decision_keeps_locked_direction_instead_of_best_vertical(
         probability_settings=None,
     )
 
-    assert decision["action_authority"] == "manual"
-    assert decision["candidate"]["direction"] == "NEUTRAL"
-    assert decision["candidate"]["setup_kind"] == GTH_ATM_PIN
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["action_authority"] == "none"
+    assert "gth_winner_stick_direction_locked" in (decision.get("why_not") or {}).get("reasons", [])
 
 
 def test_gth_directional_verticals_require_aligned_trend() -> None:
@@ -324,6 +322,8 @@ def test_gth_directional_verticals_require_aligned_trend() -> None:
     assert _gated(transition, "PUT_DEBIT_VERTICAL")
     assert "CALL_DEBIT_VERTICAL" in _types(trend_up)
     assert "PUT_DEBIT_VERTICAL" not in _types(trend_up)
+    assert "CALL_BUTTERFLY" not in _types(trend_up)
+    assert "PUT_BUTTERFLY" not in _types(trend_up)
     assert _gated(trend_up, "PUT_DEBIT_VERTICAL")
     assert "PUT_DEBIT_VERTICAL" in _types(trend_down)
     assert "CALL_DEBIT_VERTICAL" not in _types(trend_down)

@@ -688,36 +688,14 @@ def _gth_scan_butterfly_hard_gates(
     *,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
-    gates: list[dict[str, Any]] = []
-    legs = candidate.get("legs")
-    economics = _map(candidate.get("economics"))
-    if not isinstance(legs, list) or len(legs) != 3 or any(not _map(leg) for leg in legs):
-        gates.append({"gate": "butterfly_three_leg_bbo_unavailable", "actual": None, "threshold": "three_legs"})
-    if _number(economics.get("max_loss_points")) is None or _number(economics.get("max_gain_points")) is None:
-        gates.append({"gate": "butterfly_economics_unavailable", "actual": None, "threshold": "valid_debit"})
-    shock_state = str(_map(facts.get("shock")).get("state") or "NONE")
-    if shock_state not in {"NONE", "RECLAIMED"}:
-        gates.append({"gate": "butterfly_shock_veto", "actual": shock_state, "threshold": ["NONE", "RECLAIMED"]})
-    center = _number(candidate.get("center"))
-    spot = _number(_map(facts.get("spot")).get("spx"))
-    distance = abs(center - spot) if center is not None and spot is not None else None
-    if distance is None or distance > policy.pin_body_max_spot_distance_points:
-        gates.append(
-            {
-                "gate": "butterfly_body_spot_distance",
-                "actual": distance,
-                "threshold": policy.pin_body_max_spot_distance_points,
-            }
-        )
-    width = _number(economics.get("width_points")) or _number(candidate.get("width"))
-    debit = _number(economics.get("max_loss_points"))
-    debit_fraction = debit / width if debit is not None and width is not None and width > 0 else None
-    if debit_fraction is None or debit_fraction > policy.butterfly_max_debit_fraction:
-        gates.append({"gate": "butterfly_debit_fraction", "actual": debit_fraction, "threshold": policy.butterfly_max_debit_fraction})
-    risk_usd = debit * 100.0 if debit is not None else None
-    if risk_usd is None or risk_usd > policy.butterfly_max_risk_usd:
-        gates.append({"gate": "butterfly_risk_budget", "actual": risk_usd, "threshold": policy.butterfly_max_risk_usd})
-    return gates
+    del facts, policy
+    return [
+        {
+            "gate": "gth_butterfly_rth_only",
+            "actual": candidate.get("setup_kind"),
+            "threshold": "rth_stable_pin",
+        }
+    ]
 
 
 def _iron_condor_hard_gates(
