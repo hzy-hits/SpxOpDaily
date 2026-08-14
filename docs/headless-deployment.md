@@ -151,8 +151,10 @@ What happens when a phone/desktop login preempts the automated session:
    exponentially to five minutes.
 
 A brief usable flush starts recovery but does not erase the conflict history.
-The circuit closes only after 30 continuous seconds of fresh live SPXW data
-(`IBKR_CONFLICT_RECOVERY_SECONDS`, default 30).
+The circuit closes only after 8 continuous seconds of fresh live SPXW data
+(`IBKR_CONFLICT_RECOVERY_SECONDS` boot default 8; live value in
+`<data_root>/runtime/ibkr_conflict.toml`, hot-reloaded without a collector
+restart).
 While it is open or recovering, farm-health automation must not restart IB
 Gateway: 10197 is an entitlement-owner conflict, and a second Gateway restart
 during the broker-session handoff can make the overlap worse.

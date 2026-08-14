@@ -378,7 +378,7 @@ class RuntimePolicySettings:
     runtime_mode_path: str
     agent_override_default_ttl_minutes: int
     ibkr_conflict_probe_max_seconds: int = 15
-    ibkr_conflict_recovery_seconds: int = 30
+    ibkr_conflict_recovery_seconds: int = 8
 
     def __post_init__(self) -> None:
         if self.ibkr_conflict_probe_seconds <= 0:

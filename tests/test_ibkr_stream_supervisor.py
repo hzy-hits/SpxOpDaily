@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from spx_spark.application.market_features.provider_entry_control import (
     gth_ibkr_entry_control,
 )
 from spx_spark.ibkr.stream.health import persist_stream_health
+from spx_spark.ibkr.stream.models import parse_conflict_overlay
 from spx_spark.ibkr.stream.session_ops import SessionOps
 from spx_spark.ibkr.stream.supervisor import StreamRuntime
 from spx_spark.ibkr.verifier import IbkrError
@@ -654,6 +656,7 @@ def test_health_projection_validity_tracks_policy_heartbeat(
 
 
 def test_competing_session_standby_heartbeats_keep_retry_visible(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = FakeClock()
@@ -674,7 +677,7 @@ def test_competing_session_standby_heartbeats_keep_retry_visible(
         ibkr_conflict_recovery_seconds=30.0,
     )
     runtime.__post_init__()
-    runtime.storage_settings = SimpleNamespace(data_root="/tmp")  # type: ignore[assignment]
+    runtime.storage_settings = SimpleNamespace(data_root=str(tmp_path))  # type: ignore[assignment]
     for _ in range(7):
         runtime.competing_session_circuit.open(now_monotonic=clock.now)
 
@@ -694,3 +697,156 @@ def test_competing_session_standby_heartbeats_keep_retry_visible(
     assert heartbeat["retry_in_seconds"] == pytest.approx(270.0)
     assert heartbeat["reason"] == "competing live session cooldown (IBKR 10197)"
     assert runtime.competing_session_circuit.recovery_seconds == 30.0
+
+
+def test_parse_conflict_overlay_accepts_flat_and_value_leaves() -> None:
+    flat = parse_conflict_overlay(
+        {
+            "recovery_seconds": 8,
+            "probe_seconds": 15,
+            "probe_max_seconds": 15,
+        }
+    )
+    nested = parse_conflict_overlay(
+        {
+            "recovery_seconds": {"value": 8},
+            "probe_seconds": {"value": 15, "description": "ignored"},
+            "probe_max_seconds": {"value": 20},
+        }
+    )
+
+    assert flat is not None
+    assert nested is not None
+    assert flat.recovery_seconds == 8.0
+    assert nested.recovery_seconds == 8.0
+    assert nested.probe_max_seconds == 20.0
+
+
+def test_parse_conflict_overlay_rejects_invalid() -> None:
+    assert parse_conflict_overlay({}) is None
+    assert (
+        parse_conflict_overlay(
+            {
+                "recovery_seconds": 0,
+                "probe_seconds": 15,
+                "probe_max_seconds": 15,
+            }
+        )
+        is None
+    )
+    assert (
+        parse_conflict_overlay(
+            {
+                "recovery_seconds": 8,
+                "probe_seconds": 20,
+                "probe_max_seconds": 15,
+            }
+        )
+        is None
+    )
+
+
+def test_conflict_overlay_hot_reload_updates_circuit_without_restart(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    runtime, events = make_runtime(monkeypatch, collector)
+    runtime.storage_settings = SimpleNamespace(data_root=str(tmp_path))  # type: ignore[assignment]
+
+    runtime._refresh_conflict_overlay()
+    overlay_path = tmp_path / "runtime" / "ibkr_conflict.toml"
+    assert overlay_path.is_file()
+    assert runtime.competing_session_circuit.recovery_seconds == 8.0
+    assert runtime.competing_session_circuit.min_seconds == 5.0
+
+    overlay_path.write_text(
+        "schema_version = 1\n"
+        "recovery_seconds = 3\n"
+        "probe_seconds = 7\n"
+        "probe_max_seconds = 11\n",
+        encoding="utf-8",
+    )
+    stamped = overlay_path.stat().st_mtime + 1
+    os.utime(overlay_path, (stamped, stamped))
+
+    runtime._refresh_conflict_overlay()
+
+    assert runtime.competing_session_circuit.recovery_seconds == 3.0
+    assert runtime.competing_session_circuit.min_seconds == 7.0
+    assert runtime.competing_session_circuit.max_seconds == 11.0
+    assert any(event.get("event") == "conflict_overlay_reloaded" for event in events)
+
+    runtime._refresh_conflict_overlay()
+    assert sum(event.get("event") == "conflict_overlay_reloaded" for event in events) == 1
+
+
+def test_invalid_conflict_overlay_keeps_previous_circuit_values(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    runtime, events = make_runtime(monkeypatch, collector)
+    runtime.storage_settings = SimpleNamespace(data_root=str(tmp_path))  # type: ignore[assignment]
+    runtime._refresh_conflict_overlay()
+    overlay_path = tmp_path / "runtime" / "ibkr_conflict.toml"
+    overlay_path.write_text("recovery_seconds = 0\nprobe_seconds = 15\n", encoding="utf-8")
+    stamped = overlay_path.stat().st_mtime + 1
+    os.utime(overlay_path, (stamped, stamped))
+
+    runtime._refresh_conflict_overlay()
+
+    assert runtime.competing_session_circuit.recovery_seconds == 8.0
+    assert runtime.competing_session_circuit.min_seconds == 5.0
+    assert any(event.get("event") == "conflict_overlay_ignored" for event in events)
+
+
+def test_existing_conflict_overlay_is_not_overwritten(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overlay_path = tmp_path / "runtime" / "ibkr_conflict.toml"
+    overlay_path.parent.mkdir(parents=True)
+    overlay_path.write_text(
+        "recovery_seconds = 4\nprobe_seconds = 9\nprobe_max_seconds = 9\n",
+        encoding="utf-8",
+    )
+    clock = FakeClock()
+    collector = FakeCollector(clock)
+    runtime, _events = make_runtime(monkeypatch, collector)
+    runtime.storage_settings = SimpleNamespace(data_root=str(tmp_path))  # type: ignore[assignment]
+
+    runtime._refresh_conflict_overlay()
+
+    assert overlay_path.read_text(encoding="utf-8").startswith("recovery_seconds = 4")
+    assert runtime.competing_session_circuit.recovery_seconds == 4.0
+    assert runtime.competing_session_circuit.min_seconds == 9.0
+
+
+def test_session_loop_picks_up_overlay_edit_without_rebuild(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    collector = FakeCollector(clock, disconnect_after_flushes=2)
+    runtime, events = make_runtime(
+        monkeypatch,
+        collector,
+        exact_leg_pin_enabled=False,
+        flush_interval_seconds=1.0,
+    )
+    runtime.storage_settings = SimpleNamespace(data_root=str(tmp_path))  # type: ignore[assignment]
+    runtime._refresh_conflict_overlay()
+    overlay_path = tmp_path / "runtime" / "ibkr_conflict.toml"
+    overlay_path.write_text(
+        "recovery_seconds = 2\nprobe_seconds = 6\nprobe_max_seconds = 6\n",
+        encoding="utf-8",
+    )
+    stamped = overlay_path.stat().st_mtime + 1
+    os.utime(overlay_path, (stamped, stamped))
+
+    assert runtime.session_loop() is True
+    assert runtime.competing_session_circuit.recovery_seconds == 2.0
+    assert any(event.get("event") == "conflict_overlay_reloaded" for event in events)

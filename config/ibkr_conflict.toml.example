@@ -1,0 +1,17 @@
+# Copy to <MARKET_DATA_DATA_ROOT>/runtime/ibkr_conflict.toml on the host
+# (production: /srv/data/spx-spark/data/runtime/ibkr_conflict.toml).
+#
+# spx-spark-ibkr-stream seeds that path on first start and hot-reloads it on
+# every flush / policy heartbeat. Edit the live file to change 10197 timing
+# without restarting the collector or redeploying code. Do not commit the
+# live overlay; it is host-local runtime state.
+#
+# schema_version = 1
+# recovery_seconds: continuous fresh SPXW required before the 10197 circuit closes
+# probe_seconds: initial read-only reclaim delay after 10197
+# probe_max_seconds: exponential backoff cap; must be >= probe_seconds
+
+schema_version = 1
+recovery_seconds = 8
+probe_seconds = 15
+probe_max_seconds = 15

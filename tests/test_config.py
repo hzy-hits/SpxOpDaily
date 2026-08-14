@@ -122,6 +122,14 @@ def test_runtime_policy_loads_bounded_competing_session_cooldown(monkeypatch) ->
     assert policy.ibkr_conflict_recovery_seconds == 30
 
 
+def test_runtime_policy_default_conflict_recovery_is_eight(monkeypatch) -> None:
+    monkeypatch.delenv("IBKR_CONFLICT_RECOVERY_SECONDS", raising=False)
+
+    policy = RuntimePolicySettings.from_env()
+
+    assert policy.ibkr_conflict_recovery_seconds == 8
+
+
 def test_runtime_policy_rejects_non_positive_conflict_recovery() -> None:
     with pytest.raises(ValueError, match="RECOVERY_SECONDS"):
         RuntimePolicySettings(

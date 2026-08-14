@@ -342,7 +342,7 @@ ibkr_connect_retry_seconds = { value = 60, description = "Seconds to wait before
 ibkr_conflict_retry_minutes = { value = 1, description = "Minutes before an active reclaim attempt after an IBKR live/paper conflict." }
 ibkr_conflict_probe_seconds = { value = 15, description = "Initial seconds before rebuilding read-only market-data subscriptions after an IBKR live/paper conflict." }
 ibkr_conflict_probe_max_seconds = { value = 15, description = "Maximum exponential cooldown between full market-data recovery attempts after repeated IBKR 10197 conflicts. Cap equals the initial delay so probes stay at 15s instead of stretching to minutes." }
-ibkr_conflict_recovery_seconds = { value = 30, description = "Continuous fresh SPXW flush required before the 10197 circuit closes; independent of the 15s probe cadence so brief entitlement flicker cannot reopen every probe." }
+ibkr_conflict_recovery_seconds = { value = 8, description = "Boot default for continuous fresh SPXW required before the 10197 circuit closes. Live values hot-reload from <data_root>/runtime/ibkr_conflict.toml without restarting the collector." }
 ibkr_fallback_provider = { value = "schwab", description = "Provider name used when IBKR is unavailable or intentionally disabled." }
 strict_no_session_fight = { value = false, description = "Allows the paper collector to reclaim market data promptly after a live session releases it; live still has IBKR-enforced priority while connected." }
 weekend_maintenance_mode = { value = true, description = "Reserves non-trading weekends for maintenance unless futures have reopened." }

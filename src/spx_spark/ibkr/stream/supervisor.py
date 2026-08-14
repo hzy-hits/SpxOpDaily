@@ -12,9 +12,14 @@ from spx_spark.ibkr.stream.collector import StreamCollector
 from spx_spark.ibkr.stream.health import persist_stream_health
 from spx_spark.ibkr.stream.models import (
     CompetingSessionCircuit,
+    ConflictOverlay,
     ReconnectPolicy,
     StreamAction,
+    apply_conflict_overlay,
+    conflict_overlay_path,
     effective_hot_flush_sleep_seconds,
+    load_conflict_overlay,
+    seed_conflict_overlay,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
@@ -46,6 +51,11 @@ class StreamRuntime:
     session_had_healthy_flush: bool = False
     _health_lock: RLock = field(init=False, repr=False)
     _competing_health_latched_sequence: int | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _conflict_overlay_mtime: float | None = field(
         init=False,
         default=None,
         repr=False,
@@ -82,7 +92,7 @@ class StreamRuntime:
                 getattr(
                     self.runtime_policy,
                     "ibkr_conflict_recovery_seconds",
-                    30.0,
+                    8.0,
                 )
             ),
             0.1,
@@ -92,12 +102,14 @@ class StreamRuntime:
             max_seconds=conflict_max,
             recovery_seconds=recovery_seconds,
         )
+        self._refresh_conflict_overlay()
 
     def expired(self) -> bool:
         return self.deadline is not None and time.monotonic() >= self.deadline
 
     def run(self) -> int:
         while not self.expired():
+            self._refresh_conflict_overlay()
             if not self.collector.connection_required():
                 block_reason = getattr(self.collector, "market_data_block_reason", None)
                 reason = block_reason() if callable(block_reason) else None
@@ -252,6 +264,7 @@ class StreamRuntime:
         """Maintain positions/account visibility without market subscriptions."""
 
         while not self.expired():
+            self._refresh_conflict_overlay()
             self.collector.ib.sleep(self.stream_settings.policy_check_seconds)
             position_event = self.collector.flush_position_shadow_if_due(
                 now_monotonic=time.monotonic()
@@ -317,6 +330,7 @@ class StreamRuntime:
         )
         next_flush_at = time.monotonic() + flush_interval
         while not self.expired():
+            self._refresh_conflict_overlay()
             if not self._wait_for_hot_flush(next_flush_at=next_flush_at):
                 return False
             flush_started_at = time.monotonic()
@@ -502,6 +516,54 @@ class StreamRuntime:
                     if event is not None:
                         log_event(event)
         return False
+
+    def _refresh_conflict_overlay(self) -> None:
+        overlay_path = conflict_overlay_path(
+            getattr(self.storage_settings, "data_root", None)
+        )
+        if overlay_path is None:
+            return
+        circuit = self.competing_session_circuit
+        if not overlay_path.exists():
+            seed_conflict_overlay(
+                overlay_path,
+                ConflictOverlay(
+                    recovery_seconds=circuit.recovery_seconds,
+                    probe_seconds=circuit.min_seconds,
+                    probe_max_seconds=circuit.max_seconds,
+                ),
+            )
+        overlay, mtime, error = load_conflict_overlay(
+            overlay_path,
+            previous_mtime=self._conflict_overlay_mtime,
+        )
+        if error is not None:
+            self._conflict_overlay_mtime = mtime
+            log_event(
+                {
+                    "task": "ibkr_stream",
+                    "event": "conflict_overlay_ignored",
+                    "error": error,
+                    "path": str(overlay_path),
+                }
+            )
+            return
+        if overlay is None:
+            if mtime is not None:
+                self._conflict_overlay_mtime = mtime
+            return
+        self._conflict_overlay_mtime = mtime
+        if apply_conflict_overlay(circuit, overlay):
+            log_event(
+                {
+                    "task": "ibkr_stream",
+                    "event": "conflict_overlay_reloaded",
+                    "recovery_seconds": circuit.recovery_seconds,
+                    "probe_seconds": circuit.min_seconds,
+                    "probe_max_seconds": circuit.max_seconds,
+                    "path": str(overlay_path),
+                }
+            )
 
     def _defer_competing_session(self, *, phase: str) -> None:
         delay = self.competing_session_circuit.open(now_monotonic=time.monotonic())

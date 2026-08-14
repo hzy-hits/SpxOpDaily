@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import random
+import tempfile
 import time
-from math import ceil, log2
+import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from math import ceil, isfinite, log2
+from pathlib import Path
 
 from spx_spark.config import IbkrSettings
 from spx_spark.sampling import OptionContractSpec
@@ -43,7 +48,7 @@ class CompetingSessionCircuit:
 
     min_seconds: float
     max_seconds: float
-    recovery_seconds: float = 30.0
+    recovery_seconds: float = 8.0
     failures: int = 0
     retry_not_before: float = 0.0
     recovery_started_at: float | None = None
@@ -162,6 +167,132 @@ class OptionSubscriptionPlan:
     @property
     def rotation_count(self) -> int:
         return len(self.rotations)
+
+
+CONFLICT_OVERLAY_RELATIVE = Path("runtime") / "ibkr_conflict.toml"
+
+
+@dataclass(frozen=True, slots=True)
+class ConflictOverlay:
+    recovery_seconds: float
+    probe_seconds: float
+    probe_max_seconds: float
+
+
+def conflict_overlay_path(data_root: object) -> Path | None:
+    if not data_root:
+        return None
+    return Path(str(data_root)).expanduser() / CONFLICT_OVERLAY_RELATIVE
+
+
+def parse_conflict_overlay(payload: Mapping[str, object]) -> ConflictOverlay | None:
+    recovery = _overlay_positive_seconds(payload.get("recovery_seconds"))
+    probe = _overlay_positive_seconds(payload.get("probe_seconds"))
+    probe_max = _overlay_positive_seconds(payload.get("probe_max_seconds"))
+    if recovery is None or probe is None or probe_max is None:
+        return None
+    if probe_max < probe:
+        return None
+    return ConflictOverlay(
+        recovery_seconds=recovery,
+        probe_seconds=probe,
+        probe_max_seconds=probe_max,
+    )
+
+
+def load_conflict_overlay(
+    path: Path,
+    *,
+    previous_mtime: float | None = None,
+) -> tuple[ConflictOverlay | None, float | None, str | None]:
+    """Load the 10197 overlay if it changed.
+
+    Returns ``(overlay, mtime, error)``. ``overlay`` is ``None`` when the file
+    is missing, unchanged, or invalid. Invalid files keep the previous circuit
+    values and return a reason in ``error``.
+    """
+
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return None, None, None
+    except OSError as exc:
+        return None, previous_mtime, f"stat failed: {exc}"
+    if previous_mtime is not None and mtime == previous_mtime:
+        return None, mtime, None
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return None, mtime, f"invalid overlay: {exc}"
+    if not isinstance(payload, dict):
+        return None, mtime, "overlay root must be a table"
+    overlay = parse_conflict_overlay(payload)
+    if overlay is None:
+        return None, mtime, "overlay needs positive recovery/probe seconds"
+    return overlay, mtime, None
+
+
+def render_conflict_overlay(overlay: ConflictOverlay) -> str:
+    return (
+        "# Hot-reloaded by spx-spark-ibkr-stream on each flush.\n"
+        "# Edit this file to change 10197 recovery without restarting the collector.\n"
+        "schema_version = 1\n"
+        f"recovery_seconds = {overlay.recovery_seconds:g}\n"
+        f"probe_seconds = {overlay.probe_seconds:g}\n"
+        f"probe_max_seconds = {overlay.probe_max_seconds:g}\n"
+    )
+
+
+def seed_conflict_overlay(path: Path, overlay: ConflictOverlay) -> bool:
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = render_conflict_overlay(overlay)
+    file_descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temp_path = Path(temp_name)
+    try:
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            file_descriptor = -1
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        temp_path.unlink(missing_ok=True)
+    return True
+
+
+def apply_conflict_overlay(
+    circuit: CompetingSessionCircuit, overlay: ConflictOverlay
+) -> bool:
+    changed = (
+        circuit.recovery_seconds != overlay.recovery_seconds
+        or circuit.min_seconds != overlay.probe_seconds
+        or circuit.max_seconds != overlay.probe_max_seconds
+    )
+    circuit.recovery_seconds = overlay.recovery_seconds
+    circuit.min_seconds = overlay.probe_seconds
+    circuit.max_seconds = overlay.probe_max_seconds
+    return changed
+
+
+def _overlay_positive_seconds(raw: object) -> float | None:
+    if isinstance(raw, Mapping):
+        raw = raw.get("value")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    value = float(raw)
+    if not isfinite(value) or value <= 0:
+        return None
+    return value
 
 
 def replace_client_id(settings: IbkrSettings, client_id: int) -> IbkrSettings:

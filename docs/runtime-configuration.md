@@ -66,9 +66,14 @@ or rotation failure. The collector preserves that reason through a dedicated
 circuit breaker. Non-invasive probes start after
 `IBKR_CONFLICT_PROBE_SECONDS` and back off exponentially to
 `IBKR_CONFLICT_PROBE_MAX_SECONDS`; only continuous fresh usable flushes for
-`IBKR_CONFLICT_RECOVERY_SECONDS` (default 30) close the circuit. Probe cadence
-and recovery stability are independent. A TCP reconnect alone does not reset
-it, and the collector never preempts or logs out the external Live session.
+`IBKR_CONFLICT_RECOVERY_SECONDS` (boot default 8) close the circuit. Probe
+cadence and recovery stability are independent. After startup the collector
+hot-reloads `<MARKET_DATA_DATA_ROOT>/runtime/ibkr_conflict.toml` on each
+flush, so operators can change `recovery_seconds` / `probe_seconds` /
+`probe_max_seconds` without restarting `spx-spark-ibkr-stream`. Missing files
+are seeded once from the boot defaults and never overwritten. A TCP reconnect
+alone does not reset the circuit, and the collector never preempts or logs out
+the external Live session.
 
 The stream also writes
 `<MARKET_DATA_DATA_ROOT>/latest/ibkr_stream_health.json`. This projection keeps
