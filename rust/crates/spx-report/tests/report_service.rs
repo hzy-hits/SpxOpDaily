@@ -471,7 +471,7 @@ fn omitted_p_vs_q_diagnostics_persist_the_compact_writer_message() {
         "NO TRADE\nP/Q研究（未校准，不产生方向） 5分钟上行终值跟随：P 62%（前日止，n=98/14日，区间52%–71%） · Q代理 49% · P−Q +13pp；未扣点差/滑点，真实成交与净收益标签尚不可用 → NO TRADE",
     );
     let mut compressed = source.message.clone();
-    compressed.desk_view = token("NO TRADE · wait for the next price trigger");
+    compressed.desk_view = token("NO TRADE · 等待下一个价格触发");
     write_latest(&config.projection_path, source);
 
     let transport = StaticTransport::new(deepseek_response(
@@ -493,7 +493,7 @@ fn omitted_p_vs_q_diagnostics_persist_the_compact_writer_message() {
     assert_eq!(intents.len(), 1);
     assert_eq!(
         intents[0].message.desk_view.as_str(),
-        "NO TRADE · wait for the next price trigger"
+        "NO TRADE · 等待下一个价格触发"
     );
     assert!(!intents[0].message.desk_view.as_str().contains("P/Q"));
     assert!(!intents[0].message.desk_view.as_str().contains("P−Q"));

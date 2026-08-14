@@ -475,12 +475,6 @@ impl<T: Transport> ReportWriterClient<T> {
                 output.metadata.clone(),
             )
         })?;
-        if operator_language_is_english_paraphrase(&message, &projection.message) {
-            return Err(ReportWriterError::with_metadata(
-                ReportWriterErrorCode::OperatorLanguageViolation,
-                output.metadata.clone(),
-            ));
-        }
         apply_research_disclosure(&mut message, projection, &output.metadata)?;
         validate_rendered_message(&message, projection, &output.metadata)?;
         Ok(DeskReportOutput {
@@ -556,6 +550,8 @@ fn validate_rendered_message(
         Some(ReportWriterErrorCode::CriticalFactMissing)
     } else if visible_internal_detail_leaked(message, projection) {
         Some(ReportWriterErrorCode::InternalDetailLeak)
+    } else if operator_language_is_english_paraphrase(message, &projection.message) {
+        Some(ReportWriterErrorCode::OperatorLanguageViolation)
     } else {
         None
     };
@@ -604,7 +600,13 @@ fn research_advisory_is_disclosed(message: &DeskMessageV2) -> bool {
 fn operator_language_is_english_paraphrase(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
     const MIN_CJK_CHARS: usize = 8;
     cjk_char_count(&message_text(source)) >= MIN_CJK_CHARS
-        && cjk_char_count(&message_text(actual)) < MIN_CJK_CHARS
+        && cjk_char_count(&operator_language_text(actual)) < MIN_CJK_CHARS
+}
+
+fn operator_language_text(message: &DeskMessageV2) -> String {
+    message_text(message)
+        .replace(RESEARCH_UNAVAILABLE_DISCLOSURE, "")
+        .replace(RESEARCH_ADVISORY_DISCLOSURE, "")
 }
 
 fn cjk_char_count(text: &str) -> usize {

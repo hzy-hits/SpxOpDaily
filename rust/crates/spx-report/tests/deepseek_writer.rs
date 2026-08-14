@@ -816,13 +816,13 @@ fn dropping_direction_or_no_trade_semantic_markers_fails_closed() {
 }
 
 #[test]
-fn chinese_source_rejects_english_paraphrase_before_research_disclosure() {
+fn chinese_source_rejects_english_paraphrase() {
     let source = chinese_operator_message_value();
     let projection = projection_with_direction(&source, "none");
     let english = json!({
         "title": "SPX Desk Map",
         "desk_view": "NO TRADE — no qualifying winner, 0 groups scanned; trigger coordinates unavailable",
-        "location": "Night observation coordinate pending; reference ES 7823.8, cash SPX not applicable",
+        "location": "Night observation coordinate pending; reference ES 7823.8, level 7510, cash SPX not applicable",
         "structure": "Put/Flip/Call reference 7750 / 7765-7770 / 7825; option frame not ready. Flip zone is structure, not a debit vertical.",
         "primary_path": "方向来源: no price acceptance/rejection confirmation; wait for Flip 7765-7770",
         "alternative_path": "No single-sided direction; no live invalidation level exists",
