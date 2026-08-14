@@ -1,13 +1,19 @@
 """Walk-forward calibration for the advisory online HMM regime filter.
 
 This harness rebuilds per-minute market frames from the parquet quote lake,
-runs the exact production observation + forward-filter code path, and then
-evaluates whether the HMM posterior carries any calibrated predictive skill
-for the same-day RTH close direction versus honest baselines.
+runs the exact production observation + forward-filter code path, maps the
+posterior through ``assess_regime`` (the v16 index-HMM path owner), and then
+evaluates:
+
+1. Same-day RTH close direction versus honest logistic baselines (unchanged
+   gate contract).
+2. HMM ``TREND`` hit rate and signed forward points at 30m / 60m, split by
+   RTH cash-index and GTH Globex-futures baskets.
 
 The output is a versioned calibration report with explicit gates.  Promotion
 of the runtime research contract (``evidence_status`` / ``use_scope``) is a
-separate, user-approved step that must cite a passing report.
+separate, user-approved step that must cite a passing report.  HMM still has
+``action_authority=none`` and cannot skip hard gates or order.
 
 Documented reconstruction differences versus the live runtime:
 
@@ -18,8 +24,13 @@ Documented reconstruction differences versus the live runtime:
 - No historical option frame is replayed, so the ES score scale uses the
   bounded local fallback exactly as production does when expected move is
   missing.
-- The posterior starts uniform at the RTH open instead of carrying overnight
-  GTH updates.
+- The posterior starts uniform at the first Globex observation of the
+  session and is carried through GTH into RTH (closer to production than
+  the v1 RTH-open reset).
+- RTH D / VWAP-cross / breadth inputs are not in the lake minute frame, so
+  the ES-path fallback inside ``assess_regime`` is UNCERTAIN here.  The
+  honest non-HMM baselines are the observation-score sign and ES 60m
+  momentum, not a reconstructed RTH D TREND call.
 """
 
 from __future__ import annotations
@@ -27,9 +38,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -39,6 +52,7 @@ from spx_spark.application.market_features.market import build_minute_market_fra
 from spx_spark.application.market_features.prior_rth_context import (
     build_prior_rth_context,
 )
+from spx_spark.application.order_map.strategy_regime import assess_regime
 from spx_spark.application.runtime.market_regime_observation import (
     build_feature_observation,
 )
@@ -52,20 +66,31 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 
 UTC = timezone.utc
 ET = ZoneInfo("America/New_York")
-SCHEMA_VERSION = "regime_hmm_calibration.v1"
+SCHEMA_VERSION = "regime_hmm_calibration.v2"
 POLICY_VERSION = "hmm_close_direction_logistic.v1"
-FEATURE_RECONSTRUCTION = "quote_lake_minute_frames.v1"
+FEATURE_RECONSTRUCTION = "quote_lake_minute_frames.v2"
 CASH_INDEX_INSTRUMENTS = ("index:SPX", "index:NDX", "index:DJI", "index:RUT")
-LAKE_INSTRUMENTS = ("future:ES", *CASH_INDEX_INSTRUMENTS)
+GLOBEX_INDEX_INSTRUMENTS = ("future:ES", "future:NQ", "future:YM", "future:RTY")
+LAKE_INSTRUMENTS = (*GLOBEX_INDEX_INSTRUMENTS, *CASH_INDEX_INSTRUMENTS)
 DECISION_TIMES_ET = tuple(
     time(hour, minute) for hour in range(10, 16) for minute in (0, 30)
 )
+# GTH clocks on Globex session D: prior-evening 21:00 ET through 08:00 ET.
+GTH_DECISION_TIMES_ET = (
+    time(21, 0),
+    time(0, 0),
+    time(3, 0),
+    time(6, 0),
+    time(8, 0),
+)
 RESEARCH_SYNC_TOLERANCE_SECONDS = 65.0
+FORWARD_MATCH_TOLERANCE_MINUTES = 2
 MIN_TRAIN_DAYS = 10
 GATE_MIN_TEST_DAYS = 20
 GATE_MIN_TEST_EVENTS = 120
 GATE_MAX_ECE = 0.10
 PROBABILITY_FLOOR = 1e-6
+PATH_SKILL_HORIZONS = ("forward_30m_points", "forward_60m_points", "close_points")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +105,18 @@ class DecisionEvent:
     posterior_spread: float
     direction_score: float
     momentum_return_60m: float | None
+    session_bucket: str = "rth"
+    coordinate: str = "spx"
+    es_price: float | None = None
+    hmm_path_state: str | None = None
+    hmm_path_direction: str | None = None
+    hmm_used: bool = False
+    cross_index_source: str | None = None
+    cross_index_ready: bool = False
+    score_direction: str | None = None
+    momentum_direction: str | None = None
+    forward_30m_points: float | None = None
+    forward_60m_points: float | None = None
 
 
 def lake_quotes_root(data_root: str | Path) -> Path:
@@ -146,7 +183,7 @@ def load_day_samples(data_root: str | Path, day: date) -> list[dict[str, object]
             at_key,
             {
                 "at": at_key,
-                "session_id": day.isoformat(),
+                "session_id": _globex_session_id(minute_at),
                 "segment": _segment(minute_at),
                 "instruments": {},
             },
@@ -186,6 +223,123 @@ def _segment(at: datetime) -> str:
     return "curb"
 
 
+def _globex_session_id(at: datetime) -> str:
+    local = at.astimezone(ET)
+    business_date = local.date() + timedelta(days=1) if local.hour >= 18 else local.date()
+    return business_date.isoformat()
+
+
+def rth_decision_clocks(day: date) -> frozenset[datetime]:
+    return frozenset(
+        datetime.combine(day, decision_time, tzinfo=ET).astimezone(UTC)
+        for decision_time in DECISION_TIMES_ET
+    )
+
+
+def gth_decision_clocks(day: date) -> frozenset[datetime]:
+    """GTH decision clocks belonging to Globex/RTH session ``day``."""
+
+    clocks: set[datetime] = set()
+    for decision_time in GTH_DECISION_TIMES_ET:
+        clock_day = day - timedelta(days=1) if decision_time >= time(18) else day
+        clocks.add(datetime.combine(clock_day, decision_time, tzinfo=ET).astimezone(UTC))
+    return frozenset(clocks)
+
+
+def _instrument_price(sample: Mapping[str, object], instrument_id: str) -> float | None:
+    instruments = sample.get("instruments")
+    quote = instruments.get(instrument_id) if isinstance(instruments, Mapping) else None
+    if isinstance(quote, Mapping) and isinstance(quote.get("price"), int | float):
+        price = float(quote["price"])
+        return price if math.isfinite(price) and price > 0 else None
+    return None
+
+
+def _forward_points(
+    series: Mapping[datetime, float],
+    at: datetime,
+    minutes: int,
+) -> float | None:
+    price_now = series.get(at)
+    if price_now is None:
+        return None
+    target = at + timedelta(minutes=minutes)
+    later = series.get(target)
+    if later is None:
+        for extra in range(1, FORWARD_MATCH_TOLERANCE_MINUTES + 1):
+            later = series.get(target + timedelta(minutes=extra))
+            if later is not None:
+                break
+    if later is None:
+        return None
+    return later - price_now
+
+
+def _signed_direction(value: float | None) -> str | None:
+    if value is None or value == 0:
+        return None
+    return "UP" if value > 0 else "DOWN"
+
+
+def _price_vs_vwap(es: Mapping[str, object]) -> str | None:
+    distance = es.get("vwap_distance_points")
+    if not isinstance(distance, int | float):
+        return None
+    if distance > 0:
+        return "above"
+    if distance < 0:
+        return "below"
+    return "at"
+
+
+def _assess_hmm_path(
+    *,
+    posterior: tuple[float, float, float],
+    observed_through: datetime,
+    frame: object,
+) -> dict[str, object]:
+    es = frame.es if isinstance(getattr(frame, "es", None), Mapping) else {}
+    cross_asset = (
+        frame.cross_asset if isinstance(getattr(frame, "cross_asset", None), Mapping) else {}
+    )
+    cross = cross_asset.get("cross_index") if isinstance(cross_asset, Mapping) else {}
+    cross = cross if isinstance(cross, Mapping) else {}
+    facts = {
+        "path": {
+            "price_vs_vwap": _price_vs_vwap(es),
+            "vwap_slope": es.get("vwap_slope_15m_points"),
+            "efficiency_ratio_30m": es.get("trend_efficiency_30m"),
+        },
+        "hmm": {
+            "status": "available",
+            "posterior": {
+                "state_00": posterior[0],
+                "state_01": posterior[1],
+                "state_02": posterior[2],
+            },
+            "observed_through": observed_through.isoformat(),
+        },
+        "cross_index": {
+            "source": cross.get("source"),
+            "status": cross.get("status"),
+            "session_open": cross.get("session_open") is True,
+            "anchor": cross.get("anchor"),
+        },
+        "event": {"state": "normal"},
+    }
+    assessment = assess_regime(facts)
+    hmm = assessment.get("hmm") if isinstance(assessment.get("hmm"), Mapping) else {}
+    return {
+        "path_state": assessment.get("path_state"),
+        "path_direction": assessment.get("path_direction"),
+        "hmm_used": hmm.get("used") is True,
+        "cross_index_source": cross.get("source"),
+        "cross_index_ready": (
+            cross.get("status") == "ready" and cross.get("session_open") is True
+        ),
+    }
+
+
 def build_day_events(
     data_root: str | Path,
     day: date,
@@ -208,13 +362,24 @@ def build_day_events(
     )
     open_at = session.open_at.astimezone(UTC)
     close_at = session.close_at.astimezone(UTC)
+    session_id = day.isoformat()
+    parsed: list[tuple[datetime, dict[str, object]]] = []
     spx_by_minute: dict[datetime, float] = {}
+    es_by_minute: dict[datetime, float] = {}
     for sample in samples:
         at = datetime.fromisoformat(str(sample["at"]))
-        instruments = sample.get("instruments")
-        spx = instruments.get("index:SPX") if isinstance(instruments, Mapping) else None
-        if isinstance(spx, Mapping) and isinstance(spx.get("price"), int | float):
-            spx_by_minute[at] = float(spx["price"])
+        parsed.append((at, sample))
+        spx_price = _instrument_price(sample, "index:SPX")
+        if spx_price is not None:
+            spx_by_minute[at] = spx_price
+        es_price = _instrument_price(sample, "future:ES")
+        if es_price is not None:
+            es_by_minute[at] = es_price
+    session_rows = [
+        (at, sample)
+        for at, sample in parsed
+        if sample.get("session_id") == session_id
+    ]
     rth_spx = {at: price for at, price in spx_by_minute.items() if open_at <= at <= close_at}
     if len(rth_spx) < 300:
         return [], {
@@ -223,25 +388,21 @@ def build_day_events(
             "spx_rth_minutes": len(rth_spx),
         }
     close_price = rth_spx[max(rth_spx)]
-    decision_ats = {
-        datetime.combine(day, decision_time, tzinfo=ET).astimezone(UTC)
-        for decision_time in DECISION_TIMES_ET
-    }
+    rth_clocks = rth_decision_clocks(day)
+    gth_clocks = gth_decision_clocks(day)
+    decision_ats = rth_clocks | gth_clocks
+    last_decision_at = max(decision_ats)
     posterior = (1 / 3, 1 / 3, 1 / 3)
     events: list[DecisionEvent] = []
-    minutes = sorted(at for at in spx_by_minute if open_at <= at <= close_at)
-    frame_samples = [
-        sample
-        for sample in samples
-        if datetime.fromisoformat(str(sample["at"])) <= close_at
-    ]
+    window: list[dict[str, object]] = []
     observed = 0
-    for minute_at in minutes:
-        window = [
-            sample
-            for sample in frame_samples
-            if datetime.fromisoformat(str(sample["at"])) <= minute_at
-        ]
+    hmm_used_events = 0
+    gth_events = 0
+    rth_events = 0
+    for minute_at, sample in session_rows:
+        if minute_at > last_decision_at:
+            break
+        window.append(sample)
         frame = build_minute_market_frame(
             window,
             now=minute_at,
@@ -256,7 +417,7 @@ def build_day_events(
             "cross_asset": frame.cross_asset,
             "frame_id": frame.frame_id,
             "as_of": minute_at.isoformat(),
-            "session_id": day.isoformat(),
+            "session_id": session_id,
             "quality": frame.quality.value,
         }
         observation = build_feature_observation(
@@ -270,33 +431,83 @@ def build_day_events(
         observed += 1
         score = float(observation["direction_score"])
         posterior = _online_posterior(score, posterior)
-        if minute_at in decision_ats:
+        if minute_at not in decision_ats:
+            continue
+        es_features = frame.es if isinstance(frame.es, Mapping) else {}
+        momentum = (
+            float(es_features["return_60m_points"])
+            if isinstance(es_features.get("return_60m_points"), int | float)
+            else None
+        )
+        mapped = _assess_hmm_path(
+            posterior=posterior,
+            observed_through=minute_at,
+            frame=frame,
+        )
+        if minute_at in rth_clocks:
             spx_price = spx_by_minute.get(minute_at)
             if spx_price is None:
                 continue
-            es_features = frame.es if isinstance(frame.es, Mapping) else {}
-            momentum = es_features.get("return_60m_points")
-            events.append(
-                DecisionEvent(
-                    session_date=day.isoformat(),
-                    at=minute_at.isoformat(),
-                    spx_price=spx_price,
-                    close_price=close_price,
-                    label=1 if close_price > spx_price else 0,
-                    posterior_spread=float(posterior[2] - posterior[0]),
-                    direction_score=score,
-                    momentum_return_60m=(
-                        float(momentum) if isinstance(momentum, int | float) else None
-                    ),
-                )
+            bucket = "rth"
+            coordinate = "spx"
+            forward_30 = _forward_points(spx_by_minute, minute_at, 30)
+            forward_60 = _forward_points(spx_by_minute, minute_at, 60)
+            label = 1 if close_price > spx_price else 0
+            rth_events += 1
+        else:
+            es_price = es_by_minute.get(minute_at)
+            if es_price is None:
+                continue
+            spx_price = spx_by_minute.get(minute_at, es_price)
+            bucket = "gth"
+            coordinate = "es"
+            forward_30 = _forward_points(es_by_minute, minute_at, 30)
+            forward_60 = _forward_points(es_by_minute, minute_at, 60)
+            label = 0
+            gth_events += 1
+        if mapped["hmm_used"]:
+            hmm_used_events += 1
+        events.append(
+            DecisionEvent(
+                session_date=day.isoformat(),
+                at=minute_at.isoformat(),
+                spx_price=spx_price,
+                close_price=close_price,
+                label=label,
+                posterior_spread=float(posterior[2] - posterior[0]),
+                direction_score=score,
+                momentum_return_60m=momentum,
+                session_bucket=bucket,
+                coordinate=coordinate,
+                es_price=es_by_minute.get(minute_at),
+                hmm_path_state=str(mapped["path_state"]) if mapped["path_state"] else None,
+                hmm_path_direction=(
+                    str(mapped["path_direction"]) if mapped["path_direction"] else None
+                ),
+                hmm_used=bool(mapped["hmm_used"]),
+                cross_index_source=(
+                    str(mapped["cross_index_source"])
+                    if mapped["cross_index_source"]
+                    else None
+                ),
+                cross_index_ready=bool(mapped["cross_index_ready"]),
+                score_direction=_signed_direction(score),
+                momentum_direction=_signed_direction(momentum),
+                forward_30m_points=forward_30,
+                forward_60m_points=forward_60,
             )
+        )
     diagnostics = {
         "session_date": day.isoformat(),
         "prior_session_date": prior_day.isoformat(),
         "prior_context_status": prior_context.get("status"),
         "spx_rth_minutes": len(rth_spx),
+        "session_minutes": len(session_rows),
         "observation_updates": observed,
         "decision_events": len(events),
+        "rth_events": rth_events,
+        "gth_events": gth_events,
+        "hmm_used_events": hmm_used_events,
     }
     return events, diagnostics
 
@@ -506,15 +717,147 @@ def evaluate_gates(evaluation: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _horizon_points(event: DecisionEvent, horizon: str) -> float | None:
+    if horizon == "forward_30m_points":
+        return event.forward_30m_points
+    if horizon == "forward_60m_points":
+        return event.forward_60m_points
+    if horizon == "close_points":
+        if event.session_bucket != "rth":
+            return None
+        return event.close_price - event.spx_price
+    raise ValueError(f"unknown horizon {horizon}")
+
+
+def _signed_forward(points: float | None, direction: str | None) -> float | None:
+    if points is None or direction not in {"UP", "DOWN"}:
+        return None
+    return points if direction == "UP" else -points
+
+
+def _skill_row(events: Sequence[DecisionEvent], *, direction_of, horizon: str) -> dict[str, object]:
+    signed: list[float] = []
+    hits = misses = 0
+    for event in events:
+        value = _signed_forward(_horizon_points(event, horizon), direction_of(event))
+        if value is None:
+            continue
+        signed.append(value)
+        if value > 0:
+            hits += 1
+        elif value < 0:
+            misses += 1
+    n = hits + misses
+    return {
+        "n": n,
+        "hit_rate": round(hits / n, 6) if n else None,
+        "mean_signed_points": round(sum(signed) / len(signed), 6) if signed else None,
+        "mean_abs_points": (
+            round(sum(abs(value) for value in signed) / len(signed), 6) if signed else None
+        ),
+    }
+
+
+def evaluate_path_skill(
+    events: Sequence[DecisionEvent],
+) -> dict[str, object]:
+    """Directional skill of the production HMM path mapping versus baselines."""
+
+    by_bucket: dict[str, list[DecisionEvent]] = {"rth": [], "gth": []}
+    for event in events:
+        if event.session_bucket in by_bucket:
+            by_bucket[event.session_bucket].append(event)
+    report: dict[str, object] = {
+        "semantics": "research_evidence_only_not_execution_authority",
+        "hmm_cannot_skip_hard_gates": True,
+        "automatic_ordering": False,
+        "baselines": {
+            "hmm_trend": "assess_regime TREND UP/DOWN after VWAP contradiction",
+            "score_sign": "sign of HMM observation direction_score",
+            "momentum_sign": "sign of ES return_60m_points",
+        },
+    }
+    for bucket, bucket_events in by_bucket.items():
+        hmm_trend = [
+            event
+            for event in bucket_events
+            if event.hmm_used
+            and event.hmm_path_state == "TREND"
+            and event.hmm_path_direction in {"UP", "DOWN"}
+        ]
+        hmm_balanced = [
+            event for event in bucket_events if event.hmm_used and event.hmm_path_state == "BALANCED"
+        ]
+        state_counts: dict[str, int] = {}
+        for event in bucket_events:
+            key = str(event.hmm_path_state or "missing")
+            state_counts[key] = state_counts.get(key, 0) + 1
+        horizons = (
+            PATH_SKILL_HORIZONS
+            if bucket == "rth"
+            else tuple(name for name in PATH_SKILL_HORIZONS if name != "close_points")
+        )
+        bucket_report: dict[str, object] = {
+            "n_events": len(bucket_events),
+            "hmm_used": sum(1 for event in bucket_events if event.hmm_used),
+            "path_state_counts": dict(sorted(state_counts.items())),
+            "coordinate": "spx" if bucket == "rth" else "es",
+        }
+        for horizon in horizons:
+            bucket_report[horizon] = {
+                "hmm_trend": _skill_row(
+                    hmm_trend,
+                    direction_of=lambda event: event.hmm_path_direction,
+                    horizon=horizon,
+                ),
+                "score_sign": _skill_row(
+                    bucket_events,
+                    direction_of=lambda event: event.score_direction,
+                    horizon=horizon,
+                ),
+                "momentum_sign": _skill_row(
+                    bucket_events,
+                    direction_of=lambda event: event.momentum_direction,
+                    horizon=horizon,
+                ),
+            }
+            if hmm_balanced:
+                abs_moves = [
+                    abs(points)
+                    for event in hmm_balanced
+                    if (points := _horizon_points(event, horizon)) is not None
+                ]
+                bucket_report[horizon]["hmm_balanced_mean_abs_points"] = (
+                    round(sum(abs_moves) / len(abs_moves), 6) if abs_moves else None
+                )
+                bucket_report[horizon]["hmm_balanced_n"] = len(abs_moves)
+        report[bucket] = bucket_report
+    return report
+
+
+def _day_worker(
+    payload: tuple[str, str, str],
+) -> tuple[str, list[DecisionEvent], dict[str, object]]:
+    data_root, day_s, prior_s = payload
+    events, diagnostics = build_day_events(
+        data_root,
+        date.fromisoformat(day_s),
+        prior_day=date.fromisoformat(prior_s),
+    )
+    return day_s, events, diagnostics
+
+
 def build_report(
     data_root: str | Path,
     *,
     generated_at: datetime | None = None,
+    workers: int = 1,
 ) -> dict[str, object]:
     generated = (generated_at or datetime.now(tz=UTC)).astimezone(UTC)
     session_dates = list_lake_session_dates(data_root)
     events_by_day: dict[str, list[DecisionEvent]] = {}
     diagnostics: list[dict[str, object]] = []
+    jobs: list[tuple[str, str, str]] = []
     for index, day in enumerate(session_dates):
         if index == 0:
             continue
@@ -524,30 +867,40 @@ def build_report(
                 {"session_date": day.isoformat(), "skipped": "prior_session_not_in_lake"}
             )
             continue
-        events, day_diagnostics = build_day_events(
-            data_root,
-            day,
-            prior_day=prior_day,
-        )
+        jobs.append((str(data_root), day.isoformat(), prior_day.isoformat()))
+    worker_count = max(1, int(workers))
+    if worker_count == 1 or len(jobs) <= 1:
+        results = [_day_worker(job) for job in jobs]
+    else:
+        with ProcessPoolExecutor(max_workers=worker_count) as pool:
+            results = list(pool.map(_day_worker, jobs))
+    for day_s, events, day_diagnostics in results:
         diagnostics.append(day_diagnostics)
         if events:
-            events_by_day[day.isoformat()] = events
-    evaluation = walk_forward(events_by_day)
+            events_by_day[day_s] = events
+    rth_events_by_day = {
+        day: [event for event in events if event.session_bucket == "rth"]
+        for day, events in events_by_day.items()
+        if any(event.session_bucket == "rth" for event in events)
+    }
+    evaluation = walk_forward(rth_events_by_day)
     gates = evaluate_gates(evaluation)
     all_events = [event for events in events_by_day.values() for event in events]
+    rth_events = [event for event in all_events if event.session_bucket == "rth"]
+    path_skill = evaluate_path_skill(all_events)
     fitted_policy = None
-    if len(all_events) >= GATE_MIN_TEST_EVENTS:
+    if len(rth_events) >= GATE_MIN_TEST_EVENTS:
         intercept, slope = fit_logistic(
-            [event.posterior_spread for event in all_events],
-            [event.label for event in all_events],
+            [event.posterior_spread for event in rth_events],
+            [event.label for event in rth_events],
         )
         fitted_policy = {
             "policy_version": POLICY_VERSION,
             "feature": "posterior_spread",
             "intercept": round(intercept, 10),
             "slope": round(slope, 10),
-            "trained_through": max(events_by_day) if events_by_day else None,
-            "n_events": len(all_events),
+            "trained_through": max(rth_events_by_day) if rth_events_by_day else None,
+            "n_events": len(rth_events),
         }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -555,11 +908,16 @@ def build_report(
         "model_version": MODEL_VERSION,
         "feature_reconstruction": FEATURE_RECONSTRUCTION,
         "decision_times_et": [value.isoformat(timespec="minutes") for value in DECISION_TIMES_ET],
+        "gth_decision_times_et": [
+            value.isoformat(timespec="minutes") for value in GTH_DECISION_TIMES_ET
+        ],
         "min_train_days": MIN_TRAIN_DAYS,
         "target": "spx_rth_close_above_decision_price",
+        "path_skill_target": "signed_forward_points_on_session_coordinate",
         "session_dates_available": [day.isoformat() for day in session_dates],
         "n_days_with_events": len(events_by_day),
         "evaluation": evaluation,
+        "path_skill": path_skill,
         **gates,
         "fitted_policy": fitted_policy,
         "day_diagnostics": diagnostics,
@@ -579,12 +937,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="Report path (default: <data-root>/reports/research/regime_hmm_calibration.json)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(8, os.cpu_count() or 1)),
+        help="Parallel session rebuild workers (default: min(8, CPUs))",
+    )
     return parser.parse_args(argv)
+
+
+def _print_path_skill(path_skill: Mapping[str, object]) -> None:
+    for bucket in ("rth", "gth"):
+        payload = path_skill.get(bucket)
+        if not isinstance(payload, Mapping):
+            continue
+        print(
+            f"path_skill {bucket}: events={payload.get('n_events')} "
+            f"hmm_used={payload.get('hmm_used')} "
+            f"states={payload.get('path_state_counts')}"
+        )
+        for horizon in PATH_SKILL_HORIZONS:
+            rows = payload.get(horizon)
+            if not isinstance(rows, Mapping):
+                continue
+            parts = []
+            for name in ("hmm_trend", "score_sign", "momentum_sign"):
+                row = rows.get(name)
+                if not isinstance(row, Mapping) or not row.get("n"):
+                    continue
+                hit = row.get("hit_rate")
+                mean = row.get("mean_signed_points")
+                parts.append(
+                    f"{name} n={row['n']} hit={hit:.3f} mean={mean:+.2f}"
+                    if isinstance(hit, float) and isinstance(mean, float)
+                    else f"{name} n={row['n']}"
+                )
+            if parts:
+                print(f"  {horizon}: " + " | ".join(parts))
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    report = build_report(args.data_root)
+    report = build_report(args.data_root, workers=args.workers)
     output = args.output or (
         Path(args.data_root) / "reports" / "research" / "regime_hmm_calibration.json"
     )
@@ -607,6 +1001,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"  {name:>10}: brier={values['brier']:.4f}"
                 f" log_loss={values['log_loss']:.4f} ece={values['ece_5bin']:.4f}"
             )
+    path_skill = report.get("path_skill")
+    if isinstance(path_skill, Mapping):
+        _print_path_skill(path_skill)
     return 0
 
 

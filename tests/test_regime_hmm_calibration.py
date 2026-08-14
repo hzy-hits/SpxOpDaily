@@ -4,20 +4,39 @@ from __future__ import annotations
 
 import math
 import random
+from datetime import date, time
 
 from spx_spark.data_platform.research.regime_hmm_calibration import (
+    ET,
     MIN_TRAIN_DAYS,
     DecisionEvent,
     brier_score,
     evaluate_gates,
+    evaluate_path_skill,
     expected_calibration_error,
     fit_logistic,
+    gth_decision_clocks,
     log_loss,
+    rth_decision_clocks,
     walk_forward,
 )
 
 
-def _event(day: str, index: int, *, label: int, spread: float) -> DecisionEvent:
+def _event(
+    day: str,
+    index: int,
+    *,
+    label: int,
+    spread: float,
+    session_bucket: str = "rth",
+    hmm_path_state: str | None = "TREND",
+    hmm_path_direction: str | None = None,
+    hmm_used: bool = True,
+    forward_30m_points: float | None = None,
+    forward_60m_points: float | None = None,
+) -> DecisionEvent:
+    direction = hmm_path_direction or ("UP" if label else "DOWN")
+    signed = 4.0 if direction == "UP" else -4.0
     return DecisionEvent(
         session_date=day,
         at=f"{day}T1{index}:00:00+00:00",
@@ -27,6 +46,15 @@ def _event(day: str, index: int, *, label: int, spread: float) -> DecisionEvent:
         posterior_spread=spread,
         direction_score=spread,
         momentum_return_60m=5.0 if label else -5.0,
+        session_bucket=session_bucket,
+        coordinate="spx" if session_bucket == "rth" else "es",
+        hmm_path_state=hmm_path_state,
+        hmm_path_direction=direction if hmm_path_state == "TREND" else None,
+        hmm_used=hmm_used,
+        score_direction="UP" if spread > 0 else "DOWN",
+        momentum_direction="UP" if label else "DOWN",
+        forward_30m_points=forward_30m_points if forward_30m_points is not None else signed,
+        forward_60m_points=forward_60m_points if forward_60m_points is not None else signed * 1.5,
     )
 
 
@@ -93,3 +121,57 @@ def test_gates_fail_closed_on_insufficient_data() -> None:
     verdict = evaluate_gates(result)
     assert verdict["gates"]["data_gate"]["passed"] is False
     assert verdict["verdict"] == "fail"
+
+
+def test_gth_decision_clocks_belong_to_the_globex_session() -> None:
+    clocks = gth_decision_clocks(date(2026, 8, 5))
+    local = sorted(clock.astimezone(ET) for clock in clocks)
+    assert [value.time().replace(tzinfo=None) for value in local] == [
+        time(21, 0),
+        time(0, 0),
+        time(3, 0),
+        time(6, 0),
+        time(8, 0),
+    ]
+    assert local[0].date().isoformat() == "2026-08-04"
+    assert {value.date().isoformat() for value in local[1:]} == {"2026-08-05"}
+    rth = rth_decision_clocks(date(2026, 8, 5))
+    assert clocks.isdisjoint(rth)
+
+
+def test_path_skill_counts_signed_hmm_trend_separately_from_gth() -> None:
+    events = [
+        _event("2026-08-05", 0, label=1, spread=0.6, hmm_path_direction="UP"),
+        _event("2026-08-05", 1, label=0, spread=-0.6, hmm_path_direction="DOWN"),
+        _event(
+            "2026-08-05",
+            2,
+            label=1,
+            spread=0.2,
+            session_bucket="gth",
+            hmm_path_direction="UP",
+            forward_30m_points=3.0,
+            forward_60m_points=-1.0,
+        ),
+        _event(
+            "2026-08-05",
+            3,
+            label=1,
+            spread=0.1,
+            hmm_path_state="BALANCED",
+            hmm_used=True,
+            forward_30m_points=0.5,
+        ),
+    ]
+    report = evaluate_path_skill(events)
+    rth = report["rth"]
+    gth = report["gth"]
+    assert rth["n_events"] == 3
+    assert gth["n_events"] == 1
+    assert rth["forward_30m_points"]["hmm_trend"]["n"] == 2
+    assert rth["forward_30m_points"]["hmm_trend"]["hit_rate"] == 1.0
+    assert rth["close_points"]["hmm_trend"]["hit_rate"] == 1.0
+    assert gth["forward_30m_points"]["hmm_trend"]["hit_rate"] == 1.0
+    assert gth["forward_60m_points"]["hmm_trend"]["hit_rate"] == 0.0
+    assert "close_points" not in gth
+    assert rth["forward_30m_points"]["hmm_balanced_n"] == 1
