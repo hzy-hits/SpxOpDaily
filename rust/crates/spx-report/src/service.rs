@@ -64,6 +64,7 @@ impl DeskMessageWriteFailure {
                 | ReportWriterErrorCode::InternalDetailLeak
                 | ReportWriterErrorCode::ResearchAdvisoryMissing
                 | ReportWriterErrorCode::ResearchDisclosureFailed
+                | ReportWriterErrorCode::OperatorLanguageViolation
         );
         self.metadata.as_ref().filter(|metadata| {
             validation_failed
@@ -801,6 +802,7 @@ mod tests {
             ReportWriterErrorCode::InternalDetailLeak,
             ReportWriterErrorCode::ResearchAdvisoryMissing,
             ReportWriterErrorCode::ResearchDisclosureFailed,
+            ReportWriterErrorCode::OperatorLanguageViolation,
         ];
         for code in validation_codes {
             assert!(

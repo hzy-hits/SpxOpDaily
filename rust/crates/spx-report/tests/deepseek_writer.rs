@@ -168,6 +168,20 @@ fn concise_semantic_message_value() -> Value {
     })
 }
 
+fn chinese_operator_message_value() -> Value {
+    json!({
+        "title": "SPX Desk Map",
+        "desk_view": "NO TRADE — 无过门赢家，扫描 0 组；触发坐标不可用",
+        "location": "夜盘观察坐标待定；参考 ES 7823.8，参考位 7510，现金 SPX 不适用",
+        "structure": "Put/Flip/Call 参考 7750 / 7765–7770 / 7825；期权帧未就绪。Flip 区是结构，不是借记垂直。",
+        "primary_path": "方向来源: 尚无价格接受或拒绝确认；下一触发是等待当前 Flip 7765–7770",
+        "alternative_path": "没有单边方向，也没有实时失效位；一旦形成接受或拒绝立刻重算",
+        "targets": "没有活跃交易目标；触发确认前不下单",
+        "execution": "WAIT；扫描进行中；铁鹰位已标，只有过门候选才会推送",
+        "data_quality": "降级 — 主影响：触发坐标不可用（GTH 用期权隐含/ES，不是现金 SPX）"
+    })
+}
+
 fn numeric_message_value() -> Value {
     json!({
         "title": "Desk 101",
@@ -211,6 +225,8 @@ fn assert_compact_prompt_contract(system_prompt: &str) {
         "GTH and RTH desk maps are different products",
         "gth_not_applicable",
         "Flip zone is structure",
+        "Simplified Chinese",
+        "Do not paraphrase a Chinese source",
     ] {
         assert!(system_prompt.contains(required), "missing {required}");
     }
@@ -797,6 +813,71 @@ fn dropping_direction_or_no_trade_semantic_markers_fails_closed() {
         assert!(error.metadata().is_some());
         assert!(!format!("{error:?}").contains("required semantic marker deliberately omitted"));
     }
+}
+
+#[test]
+fn chinese_source_rejects_english_paraphrase_before_research_disclosure() {
+    let source = chinese_operator_message_value();
+    let projection = projection_with_direction(&source, "none");
+    let english = json!({
+        "title": "SPX Desk Map",
+        "desk_view": "NO TRADE — no qualifying winner, 0 groups scanned; trigger coordinates unavailable",
+        "location": "Night observation coordinate pending; reference ES 7823.8, cash SPX not applicable",
+        "structure": "Put/Flip/Call reference 7750 / 7765-7770 / 7825; option frame not ready. Flip zone is structure, not a debit vertical.",
+        "primary_path": "方向来源: no price acceptance/rejection confirmation; wait for Flip 7765-7770",
+        "alternative_path": "No single-sided direction; no live invalidation level exists",
+        "targets": "No active trade targets until trigger confirmed",
+        "execution": "WAIT; scan running; only passing candidates may be pushed",
+        "data_quality": "DEGRADED — primary impact: trigger coordinates unavailable"
+    });
+    let client = ReportWriterClient::new(
+        config(true, 12_800),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&serde_json::to_string(&english).unwrap(), "stop"),
+        )),
+    )
+    .unwrap();
+
+    let error = client.write_desk_map(&projection).unwrap_err();
+
+    assert_eq!(
+        error.code(),
+        ReportWriterErrorCode::OperatorLanguageViolation
+    );
+    assert_eq!(error.to_string(), "operator_language_violation");
+}
+
+#[test]
+fn chinese_source_accepts_compact_simplified_chinese_rewrite() {
+    let source = chinese_operator_message_value();
+    let projection = projection_with_direction(&source, "none");
+    let compact = json!({
+        "title": "SPX Desk Map",
+        "desk_view": "NO TRADE — 无过门赢家，扫描 0 组",
+        "location": "夜盘坐标待定，参考 ES 7823.8，参考位 7510",
+        "structure": "参考 Put/Flip/Call 7750 / 7765–7770 / 7825；期权帧未就绪。Flip 区是结构，不是借记垂直。",
+        "primary_path": "方向来源: 等待当前 Flip 7765–7770 的接受或拒绝",
+        "alternative_path": "尚无单边方向或实时失效位，结构成形后立刻重算",
+        "targets": "触发确认前没有活跃目标",
+        "execution": "WAIT；继续扫描，不过门不推送",
+        "data_quality": "降级：GTH 触发坐标不可用，不能用现金 SPX"
+    });
+    let client = ReportWriterClient::new(
+        config(true, 12_800),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&serde_json::to_string(&compact).unwrap(), "stop"),
+        )),
+    )
+    .unwrap();
+
+    let output = client.write_desk_map(&projection).unwrap();
+    assert!(output.message.desk_view.as_str().contains("无过门赢家"));
+    assert!(output.message.primary_path.as_str().contains("方向来源"));
+    assert!(output.message.execution.as_str().contains("WAIT"));
 }
 
 #[test]

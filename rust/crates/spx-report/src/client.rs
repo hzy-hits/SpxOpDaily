@@ -22,6 +22,7 @@ Return exactly one JSON object and no surrounding prose or Markdown fence.
 The object must contain exactly these string fields:
 title, desk_view, location, structure, primary_path, alternative_path, targets, execution, data_quality.
 Every field must be non-empty. Do not add, remove, rename, or nest fields.
+Write every operator-facing field value in Simplified Chinese. Do not paraphrase a Chinese source projection into English prose. Keep only English tokens that already appear in the source or this contract: NO TRADE, READY, HOLD, PAUSED, WAIT, CLOSED, LONG / CALL, SHORT / PUT, ES, SPX, SPXW, VWAP, OR, Flip, Gamma, NBBO, GTH, RTH, and strike/ticker labels.
 Use the complete desk_map_projection.v1 JSON and explicit research-context status supplied by the user as the sole factual authority.
 Write an operator-facing compact report, not a transcript of the source object. Synthesize repeated facts and omit internal detail that does not change the human decision.
 Use the fixed fields as this presentation contract: desk_view is Base Case and the current human decision; location plus structure explain Why; primary_path is the next Trigger; alternative_path is Invalidation or the genuinely distinct alternative; targets contains only active structural or trade targets; execution states exactly what the operator may do; data_quality states the Primary Data Impact.
@@ -236,6 +237,7 @@ pub enum ReportWriterErrorCode {
     InternalDetailLeak,
     ResearchAdvisoryMissing,
     ResearchDisclosureFailed,
+    OperatorLanguageViolation,
 }
 
 impl ReportWriterErrorCode {
@@ -265,6 +267,7 @@ impl ReportWriterErrorCode {
             Self::InternalDetailLeak => "internal_detail_leak",
             Self::ResearchAdvisoryMissing => "research_advisory_missing",
             Self::ResearchDisclosureFailed => "research_disclosure_failed",
+            Self::OperatorLanguageViolation => "operator_language_violation",
         }
     }
 }
@@ -472,6 +475,12 @@ impl<T: Transport> ReportWriterClient<T> {
                 output.metadata.clone(),
             )
         })?;
+        if operator_language_is_english_paraphrase(&message, &projection.message) {
+            return Err(ReportWriterError::with_metadata(
+                ReportWriterErrorCode::OperatorLanguageViolation,
+                output.metadata.clone(),
+            ));
+        }
         apply_research_disclosure(&mut message, projection, &output.metadata)?;
         validate_rendered_message(&message, projection, &output.metadata)?;
         Ok(DeskReportOutput {
@@ -590,6 +599,21 @@ fn research_advisory_is_disclosed(message: &DeskMessageV2) -> bool {
         || text.contains("不授权 READY")
         || text.contains("不改变价格触发或READY");
     explicitly_uncalibrated && explicitly_non_actionable
+}
+
+fn operator_language_is_english_paraphrase(actual: &DeskMessageV2, source: &DeskMessageV2) -> bool {
+    const MIN_CJK_CHARS: usize = 8;
+    cjk_char_count(&message_text(source)) >= MIN_CJK_CHARS
+        && cjk_char_count(&message_text(actual)) < MIN_CJK_CHARS
+}
+
+fn cjk_char_count(text: &str) -> usize {
+    text.chars()
+        .filter(|&character| {
+            ('\u{4E00}'..='\u{9FFF}').contains(&character)
+                || ('\u{3400}'..='\u{4DBF}').contains(&character)
+        })
+        .count()
 }
 
 fn none_direction_has_actionable_language(message: &DeskMessageV2) -> bool {
