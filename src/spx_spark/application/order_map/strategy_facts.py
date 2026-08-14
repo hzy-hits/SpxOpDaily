@@ -255,6 +255,8 @@ def build_market_fact_pack(
             "vwap": es_vwap - basis if es_vwap is not None and basis is not None else None,
             "distance_to_vwap_points": _number(es.get("vwap_distance_points")),
             "impulse_15m_points": _number(es.get("return_15m_points")),
+            "return_1m_points": _number(es.get("return_1m_points")),
+            "return_5m_points": _number(es.get("return_5m_points")),
             "return_60m_points": _number(es.get("return_60m_points")),
             "atr_5m": atr,
             "pin_path_spx": [

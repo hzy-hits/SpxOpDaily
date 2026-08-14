@@ -209,9 +209,10 @@ def test_frozen_pin_cases_migrate_on_aug5_and_rank_7710_on_aug6() -> None:
     assert [row["center"] for row in aug6["pin"]["top_centers"]][:1] == [7710.0]
 
 
-def test_index_hmm_owns_gth_path_state_from_globex_basket() -> None:
+def test_globex_hmm_publishes_cross_state_not_path() -> None:
     regime = assess_regime(
         {
+            "session": {"mode": "gth", "legal": True},
             "path": {},
             "event": {"state": "normal"},
             "quality": {"status": "ready"},
@@ -229,12 +230,54 @@ def test_index_hmm_owns_gth_path_state_from_globex_basket() -> None:
             "shock": {"state": "NONE"},
         }
     )
-    assert regime["path_state"] == "TREND"
-    assert regime["path_direction"] == "UP"
+    assert regime["path_state"] == "UNCERTAIN"
+    assert regime["path_direction"] is None
+    assert regime["cross_state"] == "TREND"
+    assert regime["cross_direction"] == "UP"
+    assert regime["coordinate"] == "future:ES"
     assert regime["hmm"]["used"] is True
+    assert regime["hmm"]["owns_path"] is False
     assert regime["hmm"]["source"] == "globex_index"
-    assert "hmm_index_trend" in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v16"
+    assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
+    assert "es_path_returns_unavailable" in regime["reasons"]
+    assert "hmm_index_trend" not in regime["reasons"]
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v17"
+
+
+def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
+    regime = assess_regime(
+        {
+            "session": {"mode": "gth", "legal": True},
+            "path": {
+                "return_5m_points": -2.4,
+                "impulse_15m_points": -3.1,
+                "return_1m_points": -1.2,
+                "efficiency_ratio_30m": 0.6,
+                "distance_to_vwap_points": -1.5,
+            },
+            "event": {"state": "normal"},
+            "quality": {"status": "ready"},
+            "capabilities": {"path": {"ready": True}},
+            "cross_index": {
+                "source": "globex_index",
+                "status": "ready",
+                "session_open": True,
+                "anchor": "future:ES",
+            },
+            "hmm": {
+                "status": "available",
+                "posterior": {"state_00": 0.08, "state_01": 0.12, "state_02": 0.80},
+            },
+            "shock": {"state": "NONE"},
+        }
+    )
+    assert regime["path_state"] == "TREND"
+    assert regime["path_direction"] == "DOWN"
+    assert regime["cross_state"] == "TREND"
+    assert regime["cross_direction"] == "UP"
+    assert regime["hmm"]["owns_path"] is False
+    assert "es_path_return_confirmed" in regime["reasons"]
+    assert "hmm_index_trend" not in regime["reasons"]
 
 
 def test_index_hmm_owns_rth_balanced_from_cash_basket() -> None:
@@ -257,21 +300,23 @@ def test_index_hmm_owns_rth_balanced_from_cash_basket() -> None:
     )
     assert regime["path_state"] == "BALANCED"
     assert regime["path_direction"] is None
+    assert regime["cross_state"] == "BALANCED"
     assert regime["hmm"]["used"] is True
+    assert regime["hmm"]["owns_path"] is True
     assert regime["hmm"]["source"] == "cash_index"
     assert "hmm_index_balanced" in regime["reasons"]
 
 
-def test_index_hmm_trend_yields_to_vwap_price_contradiction() -> None:
+def test_cash_hmm_trend_yields_to_vwap_price_contradiction() -> None:
     regime = assess_regime(
         {
             "path": {"price_vs_vwap": "below"},
             "event": {"state": "normal"},
             "cross_index": {
-                "source": "globex_index",
+                "source": "cash_index",
                 "status": "ready",
                 "session_open": True,
-                "anchor": "future:ES",
+                "anchor": "index:SPX",
             },
             "hmm": {
                 "status": "available",
@@ -281,9 +326,39 @@ def test_index_hmm_trend_yields_to_vwap_price_contradiction() -> None:
         }
     )
     assert regime["path_state"] == "TRANSITION"
+    assert regime["path_direction"] == "UP"
+    assert regime["cross_state"] == "TREND"
+    assert regime["cross_direction"] == "UP"
     assert "price_vwap_direction_conflict" in regime["contradictions"]
     assert "hmm_price_vwap_contradiction" in regime["reasons"]
     assert regime["hmm"]["used"] is True
+    assert regime["hmm"]["owns_path"] is True
+
+
+def test_gth_es_path_yields_to_vwap_price_contradiction() -> None:
+    regime = assess_regime(
+        {
+            "session": {"mode": "gth", "legal": True},
+            "path": {
+                "return_5m_points": 2.2,
+                "efficiency_ratio_30m": 0.6,
+                "distance_to_vwap_points": -1.0,
+            },
+            "event": {"state": "normal"},
+            "cross_index": {
+                "source": "globex_index",
+                "status": "ready",
+                "session_open": True,
+                "anchor": "future:ES",
+            },
+            "shock": {"state": "NONE"},
+        }
+    )
+    assert regime["path_state"] == "TRANSITION"
+    assert regime["path_direction"] == "UP"
+    assert "price_vwap_direction_conflict" in regime["contradictions"]
+    assert "es_price_vwap_contradiction" in regime["reasons"]
+    assert regime["hmm"]["owns_path"] is False
 
 
 def test_index_hmm_absent_keeps_es_path_fallback() -> None:
@@ -331,11 +406,15 @@ def test_fact_pack_reads_index_hmm_from_research_signals() -> None:
     }
     facts = build_market_fact_pack(payload, _state(now), now)
     regime = assess_regime(facts)
+    assert facts["path"]["return_1m_points"] == pytest.approx(0.4)
+    assert facts["path"]["return_5m_points"] == pytest.approx(1.2)
     assert facts["hmm"]["status"] == "available"
     assert facts["cross_index"]["source"] == "cash_index"
     assert regime["path_state"] == "TREND"
     assert regime["path_direction"] == "UP"
     assert regime["hmm"]["used"] is True
+    assert regime["hmm"]["owns_path"] is True
+    assert regime["cross_state"] == "TREND"
 
 
 def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
@@ -507,7 +586,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v16"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v17"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -2511,6 +2590,8 @@ def _decision_payload(now: datetime) -> dict[str, object]:
                 "price": 7735.0,
                 "vwap": 7733.0,
                 "vwap_distance_points": 2.0,
+                "return_1m_points": 0.4,
+                "return_5m_points": 1.2,
                 "return_15m_points": 3.0,
                 "return_60m_points": 8.0,
                 "vwap_slope_15m_points": 0.5,

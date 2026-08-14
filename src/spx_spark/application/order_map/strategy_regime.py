@@ -29,7 +29,11 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v16"
+    policy_version: str = "strategy_policy.bootstrap.v17"
+    # v17: one perception contract, session-selected owners. Cash HMM may own
+    # RTH path_direction (SPX). Globex HMM never owns GTH path_direction; it
+    # only publishes cross_state (NQ/YM/RTY vs ES). GTH direction is ES path.
+    # HMM still cannot skip hard gates or order.
     # v16: session-selected index HMM owns path_state when the cash (RTH) or
     # globex-futures (GTH) basket is ready. ES path remains the fallback and
     # a VWAP direction check. HMM still cannot skip hard gates or order.
@@ -90,6 +94,7 @@ class StrategyPolicy:
     hmm_trend_min_probability: float = 0.55
     hmm_balanced_min_probability: float = 0.50
     hmm_max_age_seconds: float = 90.0
+    gth_trend_min_abs_return_points: float = 1.0
     butterfly_max_debit_fraction: float = 0.35
     butterfly_max_risk_usd: float = 1000.0
     butterfly_minutes_per_width_point: float = 12.0
@@ -130,12 +135,32 @@ def assess_regime(
     score, efficiency = _number(path.get("direction_score")), _number(path.get("efficiency_ratio_30m"))
     crosses, breadth = _number(path.get("vwap_crosses_30m")), _number(path.get("breadth_above_vwap"))
     slope, price_side = _number(path.get("vwap_slope")), str(path.get("price_vs_vwap") or "").lower()
+    if not price_side:
+        distance = _number(path.get("distance_to_vwap_points"))
+        price_side = "above" if distance is not None and distance > 0 else "below" if distance is not None and distance < 0 else ""
     direction = "UP" if score is not None and score > 0 else "DOWN" if score is not None and score < 0 else None
     inputs = (score, efficiency, crosses, breadth, slope)
     contradictions: list[str] = []
-    hmm_used = _hmm_index_path(facts, policy)
-    if hmm_used is not None:
-        state, direction, reasons, hmm_payload = hmm_used
+    cross = _map(facts.get("cross_index"))
+    source = str(cross.get("source") or "")
+    session_mode = str(_map(facts.get("session")).get("mode") or "")
+    if source == "globex_index":
+        distance = _number(path.get("distance_to_vwap_points"))
+        if distance is not None:
+            price_side = (
+                "above" if distance > 0 else "below" if distance < 0 else ""
+            )
+    hmm_cross = _hmm_cross_map(facts, policy)
+    if hmm_cross is None:
+        cross_state, cross_direction = None, None
+        hmm_payload = {**_hmm_unused_payload(facts), "owns_path": False}
+    else:
+        cross_state, cross_direction, _cross_reasons, hmm_payload = hmm_cross
+        hmm_payload = {**hmm_payload, "owns_path": False}
+    hmm_owns_path = hmm_cross is not None and source == "cash_index"
+    if hmm_owns_path:
+        state, direction, reasons, _ = hmm_cross
+        hmm_payload = {**hmm_payload, "owns_path": True}
         if (
             state == "TREND"
             and direction in {"UP", "DOWN"}
@@ -147,58 +172,122 @@ def assess_regime(
             reasons = [*reasons, "hmm_price_vwap_contradiction"]
         confidence = round(float(hmm_payload["max_state_probability"]), 2)
     else:
-        trend = bool(
-            None not in inputs
-            and abs(float(score)) >= policy.trend_score
-            and float(efficiency) >= policy.trend_efficiency
-            and float(crosses) <= policy.trend_max_vwap_crosses
-            and ((float(score) > 0 and float(breadth) >= policy.trend_min_breadth and float(slope) > 0)
-                 or (float(score) < 0 and float(breadth) <= 1 - policy.trend_min_breadth and float(slope) < 0))
+        if hmm_cross is not None:
+            hmm_payload = {**hmm_payload, "reason": "hmm_cross_state_only_not_path"}
+        state, direction, reasons, contradictions, confidence = _coordinate_path(
+            facts,
+            policy,
+            inputs=inputs,
+            price_side=price_side,
+            direction=direction,
+            use_es_path=source == "globex_index" or session_mode == "gth",
         )
-        if trend and price_side and ("above" if float(score) > 0 else "below") not in price_side:
-            trend = False
-            contradictions.append("price_vwap_direction_conflict")
-        balanced = bool(
-            score is not None and efficiency is not None and crosses is not None
-            and abs(score) <= policy.balanced_max_score
-            and efficiency < policy.balanced_max_efficiency
-            and crosses >= policy.balanced_min_vwap_crosses
-        )
-        capabilities = _map(facts.get("capabilities"))
-        path_capability = _map(capabilities.get("path"))
-        path_capability_ready = (
-            path_capability.get("ready") is True
-            if path_capability
-            else _map(facts.get("quality")).get("status") == "ready"
-        )
-        if not path_capability_ready:
-            state, reasons = "UNCERTAIN", ["strategy_facts_degraded"]
-        elif any(value is None for value in inputs):
-            state, reasons = "UNCERTAIN", ["path_inputs_unavailable"]
-        elif trend:
-            state, reasons = "TREND", ["direction_score_confirmed", "path_efficiency_confirmed"]
-        elif balanced:
-            state, direction, reasons = "BALANCED", None, ["low_path_efficiency", "multiple_vwap_crosses"]
-        else:
-            state, reasons = "TRANSITION", ["path_inputs_not_aligned"]
-        hmm_payload = _hmm_unused_payload(facts)
-        confidence = round(sum(value is not None for value in inputs) / 5, 2)
     event_state = {
         "pre_event": "SCHEDULED_EVENT_RISK", "post_event": "POST_EVENT_DISCOVERY",
         "normal": "NORMAL",
     }.get(str(event.get("state") or "unavailable"), "UNCERTAIN")
     pin = _pin_assessment(facts, policy)
+    coordinate = {
+        "cash_index": "index:SPX",
+        "globex_index": "future:ES",
+    }.get(source) or cross.get("anchor")
     return {
         "schema_version": "regime_assessment.v1", "policy_version": policy.policy_version,
         "path_state": state, "path_direction": direction, "terminal_state": pin["terminal_state"],
         "event_state": event_state, "entry_state": "INSUFFICIENT_DATA",
+        "cross_state": cross_state, "cross_direction": cross_direction,
+        "coordinate": coordinate,
         "confidence": confidence,
         "reasons": reasons, "contradictions": contradictions, "pin": pin,
         "hmm": hmm_payload,
     }
 
 
-def _hmm_index_path(
+def _coordinate_path(
+    facts: Mapping[str, Any],
+    policy: StrategyPolicy,
+    *,
+    inputs: tuple[Any, ...],
+    price_side: str,
+    direction: str | None,
+    use_es_path: bool,
+) -> tuple[str, str | None, list[str], list[str], float]:
+    if use_es_path:
+        return _es_coordinate_path(_map(facts.get("path")), policy, price_side=price_side)
+    score, efficiency, crosses, breadth, slope = inputs
+    contradictions: list[str] = []
+    capabilities = _map(facts.get("capabilities"))
+    path_capability = _map(capabilities.get("path"))
+    path_capability_ready = (
+        path_capability.get("ready") is True
+        if path_capability
+        else _map(facts.get("quality")).get("status") == "ready"
+    )
+    confidence = round(sum(value is not None for value in inputs) / 5, 2)
+    if not path_capability_ready:
+        return "UNCERTAIN", direction, ["strategy_facts_degraded"], contradictions, confidence
+    if None in inputs:
+        return "UNCERTAIN", direction, ["path_inputs_unavailable"], contradictions, confidence
+    trend = bool(
+        abs(float(score)) >= policy.trend_score
+        and float(efficiency) >= policy.trend_efficiency
+        and float(crosses) <= policy.trend_max_vwap_crosses
+        and ((float(score) > 0 and float(breadth) >= policy.trend_min_breadth and float(slope) > 0)
+             or (float(score) < 0 and float(breadth) <= 1 - policy.trend_min_breadth and float(slope) < 0))
+    )
+    if trend and price_side and ("above" if float(score) > 0 else "below") not in price_side:
+        trend = False
+        contradictions.append("price_vwap_direction_conflict")
+    balanced = bool(
+        abs(score) <= policy.balanced_max_score
+        and efficiency < policy.balanced_max_efficiency
+        and crosses >= policy.balanced_min_vwap_crosses
+    )
+    if trend:
+        return "TREND", direction, ["direction_score_confirmed", "path_efficiency_confirmed"], contradictions, 1.0
+    if balanced:
+        return "BALANCED", None, ["low_path_efficiency", "multiple_vwap_crosses"], contradictions, confidence
+    return "TRANSITION", direction, ["path_inputs_not_aligned"], contradictions, confidence
+
+
+def _es_coordinate_path(
+    path: Mapping[str, Any],
+    policy: StrategyPolicy,
+    *,
+    price_side: str,
+) -> tuple[str, str | None, list[str], list[str], float]:
+    ret5 = _number(path.get("return_5m_points"))
+    ret15 = _first_number(path.get("impulse_15m_points"), path.get("return_15m_points"))
+    ret1 = _number(path.get("return_1m_points"))
+    returns = [value for value in (ret5, ret15, ret1) if value is not None]
+    contradictions: list[str] = []
+    if not returns:
+        return "UNCERTAIN", None, ["es_path_returns_unavailable"], contradictions, 0.0
+    threshold = policy.gth_trend_min_abs_return_points
+    signed = next((value for value in returns if abs(value) >= threshold), returns[0])
+    direction = "UP" if signed > 0 else "DOWN" if signed < 0 else None
+    if direction is None:
+        return "TRANSITION", None, ["es_path_flat"], contradictions, 0.4
+    vwap_conflict = bool(
+        price_side and ("above" if direction == "UP" else "below") not in price_side
+    )
+    if vwap_conflict:
+        contradictions.append("price_vwap_direction_conflict")
+    efficiency = _number(path.get("efficiency_ratio_30m"))
+    trend = bool(
+        efficiency is not None
+        and float(efficiency) >= policy.trend_efficiency
+        and abs(float(signed)) >= threshold
+        and not vwap_conflict
+    )
+    if trend:
+        return "TREND", direction, ["es_path_return_confirmed", "path_efficiency_confirmed"], contradictions, 0.7
+    if vwap_conflict:
+        return "TRANSITION", direction, ["es_price_vwap_contradiction"], contradictions, 0.5
+    return "TRANSITION", direction, ["es_path_not_aligned"], contradictions, 0.5
+
+
+def _hmm_cross_map(
     facts: Mapping[str, Any], policy: StrategyPolicy
 ) -> tuple[str, str | None, list[str], dict[str, Any]] | None:
     hmm = _map(facts.get("hmm"))
@@ -332,3 +421,11 @@ def _map(value: object) -> Mapping[str, Any]:
 
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
+
+
+def _first_number(*values: object) -> float | None:
+    for value in values:
+        number = _number(value)
+        if number is not None:
+            return number
+    return None
