@@ -82,7 +82,7 @@ class StreamRuntime:
                 getattr(
                     self.runtime_policy,
                     "ibkr_conflict_recovery_seconds",
-                    60.0,
+                    30.0,
                 )
             ),
             0.1,

@@ -66,7 +66,7 @@ or rotation failure. The collector preserves that reason through a dedicated
 circuit breaker. Non-invasive probes start after
 `IBKR_CONFLICT_PROBE_SECONDS` and back off exponentially to
 `IBKR_CONFLICT_PROBE_MAX_SECONDS`; only continuous fresh usable flushes for
-`IBKR_CONFLICT_RECOVERY_SECONDS` (default 60) close the circuit. Probe cadence
+`IBKR_CONFLICT_RECOVERY_SECONDS` (default 30) close the circuit. Probe cadence
 and recovery stability are independent. A TCP reconnect alone does not reset
 it, and the collector never preempts or logs out the external Live session.
 

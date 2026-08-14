@@ -113,13 +113,13 @@ def test_runtime_policy_uses_beijing_window():
 def test_runtime_policy_loads_bounded_competing_session_cooldown(monkeypatch) -> None:
     monkeypatch.setenv("IBKR_CONFLICT_PROBE_SECONDS", "7")
     monkeypatch.setenv("IBKR_CONFLICT_PROBE_MAX_SECONDS", "120")
-    monkeypatch.setenv("IBKR_CONFLICT_RECOVERY_SECONDS", "60")
+    monkeypatch.setenv("IBKR_CONFLICT_RECOVERY_SECONDS", "30")
 
     policy = RuntimePolicySettings.from_env()
 
     assert policy.ibkr_conflict_probe_seconds == 7
     assert policy.ibkr_conflict_probe_max_seconds == 120
-    assert policy.ibkr_conflict_recovery_seconds == 60
+    assert policy.ibkr_conflict_recovery_seconds == 30
 
 
 def test_runtime_policy_rejects_non_positive_conflict_recovery() -> None:
