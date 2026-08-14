@@ -781,6 +781,35 @@ def test_gth_omits_rth_only_market_state_failures_but_keeps_gth_failures() -> No
     assert projection.quality_reasons == ("ibkr_feed_unavailable",)
 
 
+def test_rth_desk_stays_ready_when_ibkr_is_down_and_schwab_frames_are_live() -> None:
+    payload = _payload()
+    payload["session_phase"] = {"name": "us_open_hour", "name_cn": "开盘首小时"}
+    payload["option_structure_frame"] = {
+        **payload["option_structure_frame"],  # type: ignore[dict-item]
+        "quality": "ready",
+        "structure": {"gex_quality": "open_interest_gex"},
+        "exposure": {"oi_quality": "schwab_unverified", "warnings": ["schwab_oi_unverified"]},
+        "l1": {"quality": "ready"},
+        "diagnostics": {
+            "warnings": [
+                "IBKR feed unavailable; stale SPXW option quotes suppressed",
+                "open interest wall scope:schwab_rth_lane",
+            ]
+        },
+    }
+    payload["warnings"] = [
+        "ibkr_feed_unavailable",
+        "IBKR feed unavailable; stale SPXW option quotes suppressed",
+    ]
+
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert projection.data_quality == "READY"
+    assert projection.quality_reasons == ()
+    assert sections.data_quality == "READY · 决策坐标与结构快照可用"
+
+
 def test_current_rth_phase_overrides_latched_globex_decision_for_quality() -> None:
     payload = _payload()
     payload["session_phase"] = {"name": "us_open_hour", "name_cn": "开盘首小时"}
@@ -1195,13 +1224,13 @@ def test_desk_data_quality_keeps_raw_reasons_in_projection_but_summarizes_human_
         "oi:missing",
         "gex:no_open_interest_gex",
         "density_clipped:28%",
-        "schwab_unverified",
         "wall_source_frozen",
         "exposure_coverage_low",
         "nbbo_sparse",
         *(f"payload_warning_{index}" for index in range(1, 7)),
     }
     assert expected.issubset(set(projection.quality_reasons))
+    assert "schwab_unverified" not in projection.quality_reasons
     assert "主要影响：市场帧降级，ES 流确认需谨慎" in sections.data_quality
     assert "次要影响：期权结构帧降级" in sections.data_quality
     assert f"共 {len(projection.quality_reasons)} 项" in sections.data_quality

@@ -273,6 +273,10 @@ def quality_reason_text(reason: str) -> str:
         "oi:missing": "OI 不可用，Gamma 代理失效",
         "oi:schwab_unverified": "Schwab OI 未验证，Gamma 代理仅供审计",
         "gex:no_open_interest_gex": "缺少 OI-GEX，不能解释 Gamma 机制",
+        "ibkr_feed_unavailable": "IBKR 源不可用，已抑制陈旧 SPXW 报价",
+        "schwab_oi_unverified": "Schwab OI 未验证，Gamma 代理仅供审计",
+        "open interest wall scope:schwab_rth_lane": "RTH 墙位使用 Schwab OI（IBKR 热通道不可用）",
+        "open interest wall scope:ibkr_hot_lane": "墙位范围仅含 IBKR 热通道 OI",
         "decision_snapshot_inconsistent": "旧事件与当前结构不一致",
         "unknown_level_phase": "状态机阶段非法",
         "market_frame:unavailable": "市场帧不可用，ES 流确认不能验证",
@@ -284,13 +288,15 @@ def quality_reason_text(reason: str) -> str:
     token = str(reason or "")
     if token in labels:
         return labels[token]
+    lowered = token.lower()
     if token.startswith("analytical_leg_rejected:analytical_only_non_executable"):
         return "结构腿仅分析用、不可当作执行报价"
+    if "ibkr feed unavailable" in lowered or "stale spxw option quotes suppressed" in lowered:
+        return "IBKR 源不可用，已抑制陈旧 SPXW 报价"
     if token.startswith("density_clipped:"):
         return f"概率密度裁剪偏高（{token.partition(':')[2]}）"
     if token.startswith("underlier_mismatch:"):
         return "标的坐标不匹配，墙位与 Gamma 告警已抑制"
-    lowered = token.lower()
     if "entitlement" in lowered or "greeks feed not live" in lowered:
         return "Greeks 实时权限不可用，分析腿暂不可用"
     if lowered.startswith("analytical leg rejected"):

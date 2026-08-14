@@ -49,14 +49,17 @@ def _open_interest_provider(quote: Quote) -> str:
 
 def _verified_oi_pairs(
     pairs: dict[float, dict[OptionRight, Quote]],
+    *,
+    provider: str = "ibkr",
 ) -> dict[float, dict[OptionRight, Quote]]:
-    """Retain prices/volume while stripping every non-IBKR OI observation."""
+    """Retain prices/volume while stripping OI from every other provider."""
 
+    lane = str(provider or "ibkr").lower()
     return {
         strike: {
             right: (
                 quote
-                if _open_interest_provider(quote) == "ibkr"
+                if _open_interest_provider(quote) == lane
                 else replace(quote, open_interest=None)
             )
             for right, quote in pair.items()
@@ -69,15 +72,26 @@ def oi_wall_coverage(
     pairs: dict[float, dict[OptionRight, Quote]],
     *,
     underlier: float,
+    provider: str = "ibkr",
 ) -> tuple[bool, str, float]:
-    """Require IBKR hot-lane two-wing OI before publishing walls.
+    """Require one provider's two-wing OI before publishing walls.
 
-    Coverage is scored against IBKR OI observations only. Schwab wide-chain
-    legs must not dilute the ratio: they are a different breadth product, and
-    IBKR's option lane is about 84 concurrent lines around ATM. Passing this
-    gate yields hot-zone overnight OI walls, not full-chain OI.
+    IBKR coverage is scored against the hot lane only. Schwab wide-chain
+    legs must not dilute that ratio: they are a different breadth product,
+    and IBKR's option lane is about 84 concurrent lines around ATM.
+    Passing the IBKR gate yields hot-zone OI walls, not full-chain OI.
+    RTH may separately pass a Schwab-only lane when IBKR quotes are gone.
     """
 
+    lane = str(provider or "ibkr").lower()
+    missing_reason = (
+        "ibkr_hot_lane_missing" if lane == "ibkr" else "schwab_rth_lane_missing"
+    )
+    success_reason = (
+        "verified_hot_lane_two_wing_coverage"
+        if lane == "ibkr"
+        else "schwab_rth_lane_two_wing_coverage"
+    )
     legs = [
         quote
         for pair in pairs.values()
@@ -86,20 +100,20 @@ def oi_wall_coverage(
     if not legs:
         return False, "oi_coverage_missing", 0.0
 
-    def is_ibkr_oi(quote: Quote) -> bool:
-        return _open_interest_provider(quote) == "ibkr"
+    def is_lane_oi(quote: Quote) -> bool:
+        return _open_interest_provider(quote) == lane
 
     def trusted_positive(quote: Quote) -> bool:
         if finite_float(quote.open_interest) is None or float(quote.open_interest) <= 0:
             return False
-        return is_ibkr_oi(quote)
+        return is_lane_oi(quote)
 
-    ibkr_legs = [quote for quote in legs if is_ibkr_oi(quote)]
-    if not ibkr_legs:
-        return False, "ibkr_hot_lane_missing", 0.0
+    lane_legs = [quote for quote in legs if is_lane_oi(quote)]
+    if not lane_legs:
+        return False, missing_reason, 0.0
 
-    trusted = [quote for quote in ibkr_legs if trusted_positive(quote)]
-    ratio = len(trusted) / len(ibkr_legs)
+    trusted = [quote for quote in lane_legs if trusted_positive(quote)]
+    ratio = len(trusted) / len(lane_legs)
     if ratio < MIN_OI_CONTRACT_COVERAGE_RATIO:
         return False, "oi_contract_coverage_below_threshold", ratio
     if len({float(quote.instrument.strike or 0.0) for quote in trusted}) < MIN_OI_DISTINCT_STRIKES:
@@ -116,7 +130,30 @@ def oi_wall_coverage(
     )
     if not put_wing or not call_wing:
         return False, "oi_two_wing_coverage_missing", ratio
-    return True, "verified_hot_lane_two_wing_coverage", ratio
+    return True, success_reason, ratio
+
+
+def _select_oi_wall_source(
+    pairs: dict[float, dict[OptionRight, Quote]],
+    *,
+    underlier: float | None,
+    as_of: datetime,
+) -> tuple[bool, str, float, str]:
+    """Prefer IBKR hot-lane OI; during RTH, use Schwab when IBKR quotes are absent."""
+
+    if underlier is None:
+        return False, "underlier_unavailable", 0.0, "ibkr"
+    usable, reason, ratio = oi_wall_coverage(
+        pairs, underlier=underlier, provider="ibkr"
+    )
+    if usable or reason != "ibkr_hot_lane_missing":
+        return usable, reason, ratio, "ibkr"
+    if not DEFAULT_MARKET_CALENDAR.is_rth_open(as_of):
+        return usable, reason, ratio, "ibkr"
+    schwab_usable, schwab_reason, schwab_ratio = oi_wall_coverage(
+        pairs, underlier=underlier, provider="schwab"
+    )
+    return schwab_usable, schwab_reason, schwab_ratio, "schwab"
 
 
 def build_expiry_map(
@@ -191,12 +228,12 @@ def build_expiry_map(
         )
 
     intraday = expiry == DEFAULT_MARKET_CALENDAR.research_expiry(as_of).strftime("%Y%m%d")
-    oi_usable, oi_coverage_reason, oi_coverage_ratio = (
-        oi_wall_coverage(pairs, underlier=underlier)
-        if underlier
-        else (False, "underlier_unavailable", 0.0)
+    oi_usable, oi_coverage_reason, oi_coverage_ratio, oi_provider = _select_oi_wall_source(
+        pairs,
+        underlier=underlier,
+        as_of=as_of,
     )
-    verified_oi_pairs = _verified_oi_pairs(pairs)
+    verified_oi_pairs = _verified_oi_pairs(pairs, provider=oi_provider if oi_usable else "ibkr")
     if oi_usable:
         gex_weighting = "oi_plus_volume" if intraday else "oi"
     else:
@@ -309,6 +346,9 @@ def build_expiry_map(
             f"open interest wall coverage rejected:{oi_coverage_reason}:"
             f"{oi_coverage_ratio:.3f}"
         )
+    elif oi_provider == "schwab":
+        warnings.append("open interest wall scope:schwab_rth_lane")
+        warnings.append("schwab_oi_unverified")
     elif any(_open_interest_provider(quote) != "ibkr" for quote in quotes):
         warnings.append("open interest wall scope:ibkr_hot_lane")
     if underlier_mismatch:

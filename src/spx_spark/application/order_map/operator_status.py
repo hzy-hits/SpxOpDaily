@@ -1010,6 +1010,10 @@ def _data_quality(
     _extend_reasons(reasons, warnings)
     if current_session_is_gth(payload, decision):
         reasons = [reason for reason in reasons if not _rth_only_quality_reason(reason)]
+    else:
+        reasons = [
+            reason for reason in reasons if not _rth_expected_ibkr_absent_reason(reason)
+        ]
     unique = tuple(dict.fromkeys(reason for reason in reasons if reason))
     return ("DEGRADED", unique) if unique else ("READY", ())
 
@@ -1083,6 +1087,27 @@ def _rth_only_quality_reason(reason: str) -> bool:
         or reason == "rth_heartbeat_degraded_snapshot"
         or reason.startswith("analytical_leg_rejected:analytical_only_non_executable")
         or reason.startswith("cash_index_")
+    )
+
+
+def _rth_expected_ibkr_absent_reason(reason: str) -> bool:
+    # RTH prices and SPXW NBBO come from Schwab. IBKR Live is shared with the
+    # user's TWS/mobile session, so 10197 / feed-down is expected and must not
+    # mark the desk DEGRADED while Schwab frames remain ready.
+    token = str(reason or "").strip()
+    lowered = token.lower()
+    return (
+        token
+        in {
+            "oi:schwab_unverified",
+            "schwab_oi_unverified",
+            "schwab_unverified",
+            "ibkr_feed_unavailable",
+            "open interest wall scope:ibkr_hot_lane",
+            "open interest wall scope:schwab_rth_lane",
+        }
+        or "ibkr feed unavailable" in lowered
+        or "stale spxw option quotes suppressed" in lowered
     )
 
 

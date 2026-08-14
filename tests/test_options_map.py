@@ -1331,7 +1331,7 @@ def test_single_strike_open_interest_cannot_publish_oi_walls() -> None:
     )
 
 
-def test_schwab_open_interest_cannot_publish_oi_walls() -> None:
+def test_schwab_open_interest_publishes_oi_walls_during_rth() -> None:
     now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
     underlier = Quote(
         instrument=InstrumentId.index("SPX"),
@@ -1366,6 +1366,42 @@ def test_schwab_open_interest_cannot_publish_oi_walls() -> None:
     ]
 
     expiry = build_options_map(make_state(underlier, *rows, now=now)).expiries[0]
+
+    assert expiry.gex_quality == "open_interest_gex"
+    assert expiry.wall_method == "oi_gex"
+    assert expiry.put_wall in {7450.0, 7500.0}
+    assert expiry.call_wall in {7500.0, 7550.0}
+    assert "open interest wall scope:schwab_rth_lane" in expiry.warnings
+    assert "schwab_oi_unverified" in expiry.warnings
+
+
+def test_schwab_open_interest_cannot_publish_oi_walls_during_gth() -> None:
+    now = datetime(2026, 7, 6, 1, 0, tzinfo=timezone.utc)
+    rows = [
+        replace(
+            make_option(
+                expiry="20260706",
+                strike=strike,
+                right=right,
+                mark=10.0,
+                iv=0.20,
+                gamma=0.003,
+                open_interest=100.0,
+                now=now,
+            ),
+            provider=Provider.SCHWAB,
+        )
+        for strike, right in (
+            (7450.0, "P"),
+            (7450.0, "C"),
+            (7500.0, "P"),
+            (7500.0, "C"),
+            (7550.0, "P"),
+            (7550.0, "C"),
+        )
+    ]
+
+    expiry = build_expiry_map("20260706", rows, 7500.0, as_of=now)
 
     assert expiry.gex_quality == "no_open_interest_gex"
     assert expiry.wall_method != "oi_gex"
