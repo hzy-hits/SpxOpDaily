@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -94,6 +94,34 @@ def gth_direction_lock(
         opportunity_id=str(latest["opportunity_id"]),
         started_at=started_at,
     )
+
+
+def outbox_accepted_strategy_cards(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    event_exists: Callable[[str], bool],
+    exclude_opportunity_id: str = "",
+) -> tuple[dict[str, Any], ...]:
+    """Keep one row per opportunity that actually reached the outbox.
+
+    Rank stick and delivery flood control share this filter. A decision
+    persisted as ``selected`` but never accepted as ``{opportunity}:ready``
+    must not lock the desk or consume quota.
+    """
+
+    accepted: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_opportunity = str(row.get("opportunity_id") or "")
+        if not row_opportunity or row_opportunity == exclude_opportunity_id:
+            continue
+        known = accepted.get(row_opportunity)
+        if known is not None:
+            if row["decision_at"] > known["decision_at"]:
+                accepted[row_opportunity] = dict(row)
+            continue
+        if event_exists(f"{row_opportunity}:ready"):
+            accepted[row_opportunity] = dict(row)
+    return tuple(accepted.values())
 
 
 def apply_gth_winner_stick(

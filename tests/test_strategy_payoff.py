@@ -241,7 +241,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v19"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v20"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -619,7 +619,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v19"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v20"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]

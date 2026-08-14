@@ -12,6 +12,7 @@ from spx_spark.application.order_map.strategy_ranker import (
     GthDirectionLock,
     apply_gth_winner_stick,
     gth_direction_lock,
+    outbox_accepted_strategy_cards,
     rank_candidates,
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
@@ -251,7 +252,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v19"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v20"
     assert ranked.passed
     assert {row["setup_kind"] for row in ranked.passed} == {GTH_ATM_PIN}
     assert decision["action_authority"] == "manual"
@@ -389,6 +390,45 @@ def test_gth_direction_lock_uses_streak_start_not_latest_reprint() -> None:
     assert locked.opportunity_id == "strategy-opportunity:butterfly"
     assert locked.started_at == start
     assert expired is None
+
+
+def test_gth_stick_ignores_selected_cards_that_never_reached_outbox() -> None:
+    start = datetime(2026, 8, 14, 8, 43, 18, tzinfo=timezone.utc)
+    selected = (
+        {
+            "session_mode": "gth",
+            "direction": "DOWN",
+            "opportunity_id": "strategy-opportunity:put",
+            "decision_at": start - timedelta(seconds=20),
+        },
+        {
+            "session_mode": "gth",
+            "direction": "UP",
+            "opportunity_id": "strategy-opportunity:call",
+            "decision_at": start,
+        },
+        {
+            "session_mode": "gth",
+            "direction": "UP",
+            "opportunity_id": "strategy-opportunity:call",
+            "decision_at": start + timedelta(seconds=30),
+        },
+    )
+    unpublished = outbox_accepted_strategy_cards(
+        selected,
+        event_exists=lambda _event_id: False,
+    )
+    pushed_put = outbox_accepted_strategy_cards(
+        selected,
+        event_exists=lambda event_id: event_id == "strategy-opportunity:put:ready",
+    )
+
+    assert unpublished == ()
+    assert gth_direction_lock(unpublished, now=start + timedelta(seconds=60), stick_seconds=180.0) is None
+    locked = gth_direction_lock(pushed_put, now=start + timedelta(seconds=60), stick_seconds=180.0)
+    assert locked is not None
+    assert locked.direction == "DOWN"
+    assert locked.opportunity_id == "strategy-opportunity:put"
 
 
 def test_gth_winner_stick_keeps_locked_opportunity_over_higher_score() -> None:

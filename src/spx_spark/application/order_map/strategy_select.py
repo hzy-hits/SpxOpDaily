@@ -38,6 +38,7 @@ from spx_spark.application.order_map.strategy_ranker import (
     RankResult,
     apply_gth_winner_stick,
     gth_direction_lock,
+    outbox_accepted_strategy_cards,
     rank_candidates,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
@@ -668,9 +669,16 @@ def _gth_direction_lock(
     if isolated in {"1", "true", "yes"}:
         return None
     try:
+        from spx_spark.config import NotificationSettings
         from spx_spark.infrastructure.operational_db import recent_selected_strategy_cards
+        from spx_spark.notifier.dispatcher import notification_event_exists
 
         rows = recent_selected_strategy_cards(session_date=session_date)
+        settings = NotificationSettings.from_env()
+        rows = outbox_accepted_strategy_cards(
+            rows,
+            event_exists=lambda event_id: notification_event_exists(settings, event_id),
+        )
     except (OSError, ValueError):
         return None
     except Exception:  # noqa: BLE001 - unmigrated sqlite must not block GTH ranking

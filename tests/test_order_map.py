@@ -5152,6 +5152,55 @@ def test_gth_flood_control_blocks_opposite_direction_during_winner_stick(
     assert later is None
 
 
+def test_gth_flood_control_ignores_selected_cards_that_never_reached_outbox(
+    monkeypatch,
+) -> None:
+    from spx_spark.application.order_map.delivery import _flood_control_block
+    from spx_spark.config import NotificationSettings
+
+    now = datetime(2026, 8, 14, 8, 43, 18, tzinfo=timezone.utc)
+    prior = (
+        {
+            "decision_id": "strategy:unpublished-call",
+            "decision_at": now,
+            "opportunity_id": "strategy-opportunity:unpublished-call",
+            "direction": "UP",
+            "setup_kind": "GTH_WIDTH_SCAN",
+            "trigger_level": 7810.0,
+            "session_mode": "gth",
+        },
+    )
+    monkeypatch.setattr(
+        "spx_spark.infrastructure.operational_db.recent_selected_strategy_cards",
+        lambda **_kwargs: prior,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.delivery.notification_event_exists",
+        lambda _settings, _event_id: False,
+    )
+    butterfly = {
+        "session_date": "2026-08-14",
+        "decision_id": "strategy:butterfly",
+        "market_facts": {"session": {"mode": "gth"}},
+        "candidate": {
+            "opportunity_id": "strategy-opportunity:butterfly",
+            "setup_kind": "GTH_ATM_PIN",
+            "direction": "NEUTRAL",
+            "trigger_level": 7800.0,
+        },
+    }
+
+    assert (
+        _flood_control_block(
+            butterfly,
+            butterfly["candidate"],
+            NotificationSettings.from_env(),
+            now=now + timedelta(seconds=30),
+        )
+        is None
+    )
+
+
 def test_order_map_refresh_same_slot_replay_and_material_change_have_stable_ids(
     tmp_path: Path, monkeypatch
 ) -> None:

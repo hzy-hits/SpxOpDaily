@@ -29,7 +29,9 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v19"
+    policy_version: str = "strategy_policy.bootstrap.v20"
+    # v20: GTH winner stick and delivery direction lock only count cards the
+    # outbox accepted. Selected-but-never-pushed cycles must not lock the desk.
     # v19: GTH Call/Put debit verticals require TREND aligned with the
     # candidate direction. Cheapness ranking stays, but TRANSITION/UNCERTAIN
     # or the opposite side is a hard-gate zero. ATM butterflies may still pass.

@@ -22,7 +22,10 @@ from spx_spark.application.order_map.desk_projection_export import (
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.render import render_template
-from spx_spark.application.order_map.strategy_ranker import gth_direction_lock
+from spx_spark.application.order_map.strategy_ranker import (
+    gth_direction_lock,
+    outbox_accepted_strategy_cards,
+)
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import (
     call_hypothesis_critic,
@@ -436,24 +439,17 @@ def _flood_control_block(
         session_date=session_date,
         exclude_decision_id=str(decision.get("decision_id") or "") or None,
     )
-    accepted: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        row_opportunity = str(row.get("opportunity_id") or "")
-        if not row_opportunity or row_opportunity == opportunity_id:
-            continue
-        known = accepted.get(row_opportunity)
-        if known is not None:
-            if row["decision_at"] > known["decision_at"]:
-                accepted[row_opportunity] = row
-            continue
-        if notification_event_exists(settings, f"{row_opportunity}:ready"):
-            accepted[row_opportunity] = row
+    accepted = outbox_accepted_strategy_cards(
+        rows,
+        event_exists=lambda event_id: notification_event_exists(settings, event_id),
+        exclude_opportunity_id=opportunity_id,
+    )
     cooldown_start = now - timedelta(
         seconds=max(DEFAULT_STRATEGY_POLICY.candidate_cooldown_seconds, 0.0)
     )
     session_direction = 0
     cooldown_hits = 0
-    for row in accepted.values():
+    for row in accepted:
         if str(row.get("direction") or "").upper() != direction.upper():
             continue
         if str(row.get("session_mode") or session_mode) != session_mode:
@@ -471,7 +467,7 @@ def _flood_control_block(
     counts = {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
     if session_mode == "gth":
         lock = gth_direction_lock(
-            tuple(accepted.values()),
+            accepted,
             now=now,
             stick_seconds=DEFAULT_STRATEGY_POLICY.gth_winner_stick_seconds,
         )
