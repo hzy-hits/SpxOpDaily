@@ -7,8 +7,10 @@ evaluates:
 
 1. Same-day RTH close direction versus honest logistic baselines (unchanged
    gate contract).
-2. HMM ``TREND`` hit rate and signed forward points at 30m / 60m, split by
-   RTH cash-index and GTH Globex-futures baskets.
+2. HMM ``TREND`` hit rate and signed forward points at quote-path
+   5s/15s/30s/60s, minute 1m/5m/30m/60m, and RTH close, split by RTH
+   cash-index and GTH Globex-futures baskets.  Short-horizon force also
+   reports 60s aligned MFE on the Schwab last-quote path.
 
 The output is a versioned calibration report with explicit gates.  Promotion
 of the runtime research contract (``evidence_status`` / ``use_scope``) is a
@@ -29,8 +31,11 @@ Documented reconstruction differences versus the live runtime:
   the v1 RTH-open reset).
 - RTH D / VWAP-cross / breadth inputs are not in the lake minute frame, so
   the ES-path fallback inside ``assess_regime`` is UNCERTAIN here.  The
-  honest non-HMM baselines are the observation-score sign and ES 60m
+  honest non-HMM baselines are the observation-score sign and ES 1m/5m/60m
   momentum, not a reconstructed RTH D TREND call.
+- Quote-path "tick" force uses Schwab ``last`` snapshots (median gap ~2s on
+  ES), not the CME tape.  5s/15s/30s/60s forwards start from the last print
+  inside the decision minute.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ import argparse
 import json
 import math
 import os
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -66,9 +72,9 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 
 UTC = timezone.utc
 ET = ZoneInfo("America/New_York")
-SCHEMA_VERSION = "regime_hmm_calibration.v2"
+SCHEMA_VERSION = "regime_hmm_calibration.v3"
 POLICY_VERSION = "hmm_close_direction_logistic.v1"
-FEATURE_RECONSTRUCTION = "quote_lake_minute_frames.v2"
+FEATURE_RECONSTRUCTION = "quote_lake_minute_frames.v2+schwab_last_quote_path.v1"
 CASH_INDEX_INSTRUMENTS = ("index:SPX", "index:NDX", "index:DJI", "index:RUT")
 GLOBEX_INDEX_INSTRUMENTS = ("future:ES", "future:NQ", "future:YM", "future:RTY")
 LAKE_INSTRUMENTS = (*GLOBEX_INDEX_INSTRUMENTS, *CASH_INDEX_INSTRUMENTS)
@@ -85,12 +91,24 @@ GTH_DECISION_TIMES_ET = (
 )
 RESEARCH_SYNC_TOLERANCE_SECONDS = 65.0
 FORWARD_MATCH_TOLERANCE_MINUTES = 2
+TICK_FORWARD_TOLERANCE_SECONDS = 8.0
+TICK_INSTRUMENTS = ("future:ES", "index:SPX")
 MIN_TRAIN_DAYS = 10
 GATE_MIN_TEST_DAYS = 20
 GATE_MIN_TEST_EVENTS = 120
 GATE_MAX_ECE = 0.10
 PROBABILITY_FLOOR = 1e-6
-PATH_SKILL_HORIZONS = ("forward_30m_points", "forward_60m_points", "close_points")
+PATH_SKILL_HORIZONS = (
+    "forward_5s_points",
+    "forward_15s_points",
+    "forward_30s_points",
+    "forward_60s_points",
+    "forward_1m_points",
+    "forward_5m_points",
+    "forward_30m_points",
+    "forward_60m_points",
+    "close_points",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +135,18 @@ class DecisionEvent:
     momentum_direction: str | None = None
     forward_30m_points: float | None = None
     forward_60m_points: float | None = None
+    forward_1m_points: float | None = None
+    forward_5m_points: float | None = None
+    forward_5s_points: float | None = None
+    forward_15s_points: float | None = None
+    forward_30s_points: float | None = None
+    forward_60s_points: float | None = None
+    mfe_60s_points: float | None = None
+    mae_60s_points: float | None = None
+    momentum_return_1m: float | None = None
+    momentum_return_5m: float | None = None
+    momentum_1m_direction: str | None = None
+    momentum_5m_direction: str | None = None
 
 
 def lake_quotes_root(data_root: str | Path) -> Path:
@@ -210,6 +240,98 @@ def load_day_samples(data_root: str | Path, day: date) -> list[dict[str, object]
     return [by_minute[at_key] for at_key in sorted(by_minute)]
 
 
+@dataclass(frozen=True, slots=True)
+class TickPath:
+    """Causal Schwab last-quote path for one instrument on one lake date."""
+
+    times: tuple[datetime, ...]
+    prices: tuple[float, ...]
+
+    def forward_points(self, source_at: datetime, seconds: int) -> float | None:
+        if not self.times:
+            return None
+        start = bisect_right(self.times, source_at) - 1
+        if start < 0:
+            return None
+        target = source_at + timedelta(seconds=seconds)
+        later = bisect_left(self.times, target)
+        if later >= len(self.times):
+            return None
+        delay = (self.times[later] - target).total_seconds()
+        if delay > TICK_FORWARD_TOLERANCE_SECONDS:
+            return None
+        return self.prices[later] - self.prices[start]
+
+    def excursion(self, source_at: datetime, seconds: int = 60) -> tuple[float | None, float | None]:
+        if not self.times:
+            return None, None
+        start = bisect_right(self.times, source_at) - 1
+        if start < 0:
+            return None, None
+        end = source_at + timedelta(seconds=seconds)
+        price = self.prices[start]
+        high = low = price
+        index = start + 1
+        saw_later = False
+        while index < len(self.times) and self.times[index] <= end:
+            later_price = self.prices[index]
+            high = max(high, later_price)
+            low = min(low, later_price)
+            saw_later = True
+            index += 1
+        if not saw_later:
+            return None, None
+        return high - price, price - low
+
+
+def load_day_ticks(
+    data_root: str | Path,
+    day: date,
+) -> dict[str, TickPath]:
+    """Load Schwab last prints for quote-path force measurement."""
+
+    partition = lake_quotes_root(data_root) / f"date={day.isoformat()}" / "provider=schwab"
+    empty = {instrument_id: TickPath((), ()) for instrument_id in TICK_INSTRUMENTS}
+    if not partition.exists():
+        return empty
+    glob = str(partition / "**" / "*.parquet")
+    placeholders = ", ".join("?" for _ in TICK_INSTRUMENTS)
+    connection = duckdb.connect()
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT instrument_id, source_at, last
+            FROM read_parquet(?)
+            WHERE instrument_id IN ({placeholders})
+              AND last IS NOT NULL AND last > 0
+              AND source_at IS NOT NULL
+            ORDER BY 1, 2
+            """,
+            [glob, *TICK_INSTRUMENTS],
+        ).fetchall()
+    finally:
+        connection.close()
+    buckets: dict[str, list[tuple[datetime, float]]] = {instrument_id: [] for instrument_id in TICK_INSTRUMENTS}
+    for instrument_id, source_at, last in rows:
+        if instrument_id not in buckets or source_at is None or last is None:
+            continue
+        at = (
+            source_at.astimezone(UTC)
+            if source_at.tzinfo is not None
+            else source_at.replace(tzinfo=UTC)
+        )
+        price = float(last)
+        if math.isfinite(price) and price > 0:
+            buckets[str(instrument_id)].append((at, price))
+    return {
+        instrument_id: TickPath(
+            times=tuple(item[0] for item in items),
+            prices=tuple(item[1] for item in items),
+        )
+        for instrument_id, items in buckets.items()
+    }
+
+
 def _segment(at: datetime) -> str:
     clock = at.astimezone(ET).time()
     if clock >= time(18) or clock < time(3):
@@ -244,6 +366,23 @@ def gth_decision_clocks(day: date) -> frozenset[datetime]:
         clock_day = day - timedelta(days=1) if decision_time >= time(18) else day
         clocks.add(datetime.combine(clock_day, decision_time, tzinfo=ET).astimezone(UTC))
     return frozenset(clocks)
+
+
+def _instrument_source_at(sample: Mapping[str, object], instrument_id: str) -> datetime | None:
+    instruments = sample.get("instruments")
+    quote = instruments.get(instrument_id) if isinstance(instruments, Mapping) else None
+    raw = quote.get("source_at") if isinstance(quote, Mapping) else None
+    if not isinstance(raw, str):
+        return None
+    parsed = datetime.fromisoformat(raw)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _es_number(es: Mapping[str, object], key: str) -> float | None:
+    value = es.get(key)
+    if isinstance(value, int | float) and math.isfinite(float(value)):
+        return float(value)
+    return None
 
 
 def _instrument_price(sample: Mapping[str, object], instrument_id: str) -> float | None:
@@ -352,6 +491,7 @@ def build_day_events(
     if session is None:
         return [], {"session_date": day.isoformat(), "skipped": "no_session"}
     samples = load_day_samples(data_root, day)
+    ticks = load_day_ticks(data_root, day)
     prior_samples = load_day_samples(data_root, prior_day)
     prior_context = build_prior_rth_context(
         prior_samples,
@@ -434,11 +574,9 @@ def build_day_events(
         if minute_at not in decision_ats:
             continue
         es_features = frame.es if isinstance(frame.es, Mapping) else {}
-        momentum = (
-            float(es_features["return_60m_points"])
-            if isinstance(es_features.get("return_60m_points"), int | float)
-            else None
-        )
+        momentum_60 = _es_number(es_features, "return_60m_points")
+        momentum_1 = _es_number(es_features, "return_1m_points")
+        momentum_5 = _es_number(es_features, "return_5m_points")
         mapped = _assess_hmm_path(
             posterior=posterior,
             observed_through=minute_at,
@@ -450,8 +588,9 @@ def build_day_events(
                 continue
             bucket = "rth"
             coordinate = "spx"
-            forward_30 = _forward_points(spx_by_minute, minute_at, 30)
-            forward_60 = _forward_points(spx_by_minute, minute_at, 60)
+            minute_series = spx_by_minute
+            tick_path = ticks.get("index:SPX")
+            tick_source = _instrument_source_at(sample, "index:SPX")
             label = 1 if close_price > spx_price else 0
             rth_events += 1
         else:
@@ -461,12 +600,16 @@ def build_day_events(
             spx_price = spx_by_minute.get(minute_at, es_price)
             bucket = "gth"
             coordinate = "es"
-            forward_30 = _forward_points(es_by_minute, minute_at, 30)
-            forward_60 = _forward_points(es_by_minute, minute_at, 60)
+            minute_series = es_by_minute
+            tick_path = ticks.get("future:ES")
+            tick_source = _instrument_source_at(sample, "future:ES")
             label = 0
             gth_events += 1
         if mapped["hmm_used"]:
             hmm_used_events += 1
+        mfe_60s = mae_60s = None
+        if tick_path is not None and tick_source is not None:
+            mfe_60s, mae_60s = tick_path.excursion(tick_source, 60)
         events.append(
             DecisionEvent(
                 session_date=day.isoformat(),
@@ -476,7 +619,7 @@ def build_day_events(
                 label=label,
                 posterior_spread=float(posterior[2] - posterior[0]),
                 direction_score=score,
-                momentum_return_60m=momentum,
+                momentum_return_60m=momentum_60,
                 session_bucket=bucket,
                 coordinate=coordinate,
                 es_price=es_by_minute.get(minute_at),
@@ -492,9 +635,37 @@ def build_day_events(
                 ),
                 cross_index_ready=bool(mapped["cross_index_ready"]),
                 score_direction=_signed_direction(score),
-                momentum_direction=_signed_direction(momentum),
-                forward_30m_points=forward_30,
-                forward_60m_points=forward_60,
+                momentum_direction=_signed_direction(momentum_60),
+                forward_30m_points=_forward_points(minute_series, minute_at, 30),
+                forward_60m_points=_forward_points(minute_series, minute_at, 60),
+                forward_1m_points=_forward_points(minute_series, minute_at, 1),
+                forward_5m_points=_forward_points(minute_series, minute_at, 5),
+                forward_5s_points=(
+                    tick_path.forward_points(tick_source, 5)
+                    if tick_path is not None and tick_source is not None
+                    else None
+                ),
+                forward_15s_points=(
+                    tick_path.forward_points(tick_source, 15)
+                    if tick_path is not None and tick_source is not None
+                    else None
+                ),
+                forward_30s_points=(
+                    tick_path.forward_points(tick_source, 30)
+                    if tick_path is not None and tick_source is not None
+                    else None
+                ),
+                forward_60s_points=(
+                    tick_path.forward_points(tick_source, 60)
+                    if tick_path is not None and tick_source is not None
+                    else None
+                ),
+                mfe_60s_points=mfe_60s,
+                mae_60s_points=mae_60s,
+                momentum_return_1m=momentum_1,
+                momentum_return_5m=momentum_5,
+                momentum_1m_direction=_signed_direction(momentum_1),
+                momentum_5m_direction=_signed_direction(momentum_5),
             )
         )
     diagnostics = {
@@ -718,10 +889,18 @@ def evaluate_gates(evaluation: Mapping[str, object]) -> dict[str, object]:
 
 
 def _horizon_points(event: DecisionEvent, horizon: str) -> float | None:
-    if horizon == "forward_30m_points":
-        return event.forward_30m_points
-    if horizon == "forward_60m_points":
-        return event.forward_60m_points
+    mapping = {
+        "forward_5s_points": event.forward_5s_points,
+        "forward_15s_points": event.forward_15s_points,
+        "forward_30s_points": event.forward_30s_points,
+        "forward_60s_points": event.forward_60s_points,
+        "forward_1m_points": event.forward_1m_points,
+        "forward_5m_points": event.forward_5m_points,
+        "forward_30m_points": event.forward_30m_points,
+        "forward_60m_points": event.forward_60m_points,
+    }
+    if horizon in mapping:
+        return mapping[horizon]
     if horizon == "close_points":
         if event.session_bucket != "rth":
             return None
@@ -758,6 +937,76 @@ def _skill_row(events: Sequence[DecisionEvent], *, direction_of, horizon: str) -
     }
 
 
+def _aligned_mfe(event: DecisionEvent, direction: str | None) -> float | None:
+    if direction == "UP":
+        return event.mfe_60s_points
+    if direction == "DOWN":
+        return event.mae_60s_points
+    return None
+
+
+def _aligned_mae(event: DecisionEvent, direction: str | None) -> float | None:
+    if direction == "UP":
+        return event.mae_60s_points
+    if direction == "DOWN":
+        return event.mfe_60s_points
+    return None
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    return round(sum(values) / len(values), 6) if values else None
+
+
+def _tick_force_rows(
+    events: Sequence[DecisionEvent],
+    *,
+    hmm_trend: Sequence[DecisionEvent],
+    hmm_balanced: Sequence[DecisionEvent],
+) -> dict[str, object]:
+    """60s aligned MFE on the Schwab last path: force, not a hit-rate claim."""
+
+    def row(subset: Sequence[DecisionEvent], *, direction_of) -> dict[str, object]:
+        aligned = []
+        adverse = []
+        ranges = []
+        for event in subset:
+            mfe = _aligned_mfe(event, direction_of(event))
+            mae = _aligned_mae(event, direction_of(event))
+            if mfe is not None:
+                aligned.append(mfe)
+            if mae is not None:
+                adverse.append(mae)
+            if event.mfe_60s_points is not None and event.mae_60s_points is not None:
+                ranges.append(event.mfe_60s_points + event.mae_60s_points)
+        return {
+            "n": len(aligned),
+            "mean_aligned_mfe": _mean(aligned),
+            "mean_adverse": _mean(adverse),
+            "mean_range": _mean(ranges),
+        }
+
+    return {
+        "semantics": "schwab_last_quote_path_not_exchange_tape",
+        "hmm_trend": row(hmm_trend, direction_of=lambda event: event.hmm_path_direction),
+        "score_sign": row(events, direction_of=lambda event: event.score_direction),
+        "momentum_1m_sign": row(events, direction_of=lambda event: event.momentum_1m_direction),
+        "hmm_balanced": {
+            "n": sum(
+                1
+                for event in hmm_balanced
+                if event.mfe_60s_points is not None and event.mae_60s_points is not None
+            ),
+            "mean_range": _mean(
+                [
+                    event.mfe_60s_points + event.mae_60s_points
+                    for event in hmm_balanced
+                    if event.mfe_60s_points is not None and event.mae_60s_points is not None
+                ]
+            ),
+        },
+    }
+
+
 def evaluate_path_skill(
     events: Sequence[DecisionEvent],
 ) -> dict[str, object]:
@@ -774,8 +1023,11 @@ def evaluate_path_skill(
         "baselines": {
             "hmm_trend": "assess_regime TREND UP/DOWN after VWAP contradiction",
             "score_sign": "sign of HMM observation direction_score",
+            "momentum_1m_sign": "sign of ES return_1m_points",
+            "momentum_5m_sign": "sign of ES return_5m_points",
             "momentum_sign": "sign of ES return_60m_points",
         },
+        "quote_path": "schwab_last_snapshot_not_exchange_tape",
     }
     for bucket, bucket_events in by_bucket.items():
         hmm_trend = [
@@ -815,6 +1067,16 @@ def evaluate_path_skill(
                     direction_of=lambda event: event.score_direction,
                     horizon=horizon,
                 ),
+                "momentum_1m_sign": _skill_row(
+                    bucket_events,
+                    direction_of=lambda event: event.momentum_1m_direction,
+                    horizon=horizon,
+                ),
+                "momentum_5m_sign": _skill_row(
+                    bucket_events,
+                    direction_of=lambda event: event.momentum_5m_direction,
+                    horizon=horizon,
+                ),
                 "momentum_sign": _skill_row(
                     bucket_events,
                     direction_of=lambda event: event.momentum_direction,
@@ -831,6 +1093,11 @@ def evaluate_path_skill(
                     round(sum(abs_moves) / len(abs_moves), 6) if abs_moves else None
                 )
                 bucket_report[horizon]["hmm_balanced_n"] = len(abs_moves)
+        bucket_report["tick_force_60s"] = _tick_force_rows(
+            bucket_events,
+            hmm_trend=hmm_trend,
+            hmm_balanced=hmm_balanced,
+        )
         report[bucket] = bucket_report
     return report
 
@@ -970,7 +1237,13 @@ def _print_path_skill(path_skill: Mapping[str, object]) -> None:
             if not isinstance(rows, Mapping):
                 continue
             parts = []
-            for name in ("hmm_trend", "score_sign", "momentum_sign"):
+            for name in (
+                "hmm_trend",
+                "score_sign",
+                "momentum_1m_sign",
+                "momentum_5m_sign",
+                "momentum_sign",
+            ):
                 row = rows.get(name)
                 if not isinstance(row, Mapping) or not row.get("n"):
                     continue
@@ -983,6 +1256,18 @@ def _print_path_skill(path_skill: Mapping[str, object]) -> None:
                 )
             if parts:
                 print(f"  {horizon}: " + " | ".join(parts))
+        force = payload.get("tick_force_60s")
+        if isinstance(force, Mapping):
+            trend = force.get("hmm_trend") if isinstance(force.get("hmm_trend"), Mapping) else {}
+            balanced = (
+                force.get("hmm_balanced") if isinstance(force.get("hmm_balanced"), Mapping) else {}
+            )
+            print(
+                "  tick_force_60s: "
+                f"TREND n={trend.get('n')} mfe={trend.get('mean_aligned_mfe')} "
+                f"adv={trend.get('mean_adverse')} | "
+                f"BAL n={balanced.get('n')} range={balanced.get('mean_range')}"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

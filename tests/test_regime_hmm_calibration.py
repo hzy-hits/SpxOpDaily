@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 import random
-from datetime import date, time
+from dataclasses import asdict
+from datetime import date, datetime, time, timedelta, timezone
 
 from spx_spark.data_platform.research.regime_hmm_calibration import (
     ET,
     MIN_TRAIN_DAYS,
     DecisionEvent,
+    TickPath,
     brier_score,
     evaluate_gates,
     evaluate_path_skill,
@@ -175,3 +177,48 @@ def test_path_skill_counts_signed_hmm_trend_separately_from_gth() -> None:
     assert gth["forward_60m_points"]["hmm_trend"]["hit_rate"] == 0.0
     assert "close_points" not in gth
     assert rth["forward_30m_points"]["hmm_balanced_n"] == 1
+
+
+def test_tick_path_measures_short_horizon_force() -> None:
+    start = datetime(2026, 8, 5, 14, 0, tzinfo=timezone.utc)
+    times = tuple(start + timedelta(seconds=offset) for offset in (0, 2, 5, 8, 15, 40, 70))
+    path = TickPath(times, (100.0, 100.25, 100.5, 100.25, 101.0, 99.5, 102.0))
+    assert path.forward_points(start, 5) == 0.5
+    assert path.forward_points(start, 15) == 1.0
+    mfe, mae = path.excursion(start, 60)
+    assert mfe == 1.0
+    assert mae == 0.5
+
+
+def test_path_skill_includes_1m_and_quote_path_force() -> None:
+    events = [
+        _event(
+            "2026-08-05",
+            0,
+            label=1,
+            spread=0.6,
+            hmm_path_direction="UP",
+            forward_30m_points=4.0,
+            forward_60m_points=6.0,
+        ),
+    ]
+    # Frozen dataclass: rebuild with short-horizon fields via replace-like constructor.
+    event = events[0]
+    short = DecisionEvent(
+        **{
+            **asdict(event),
+            "forward_1m_points": 1.0,
+            "forward_5m_points": 2.0,
+            "forward_5s_points": 0.25,
+            "mfe_60s_points": 1.5,
+            "mae_60s_points": 0.4,
+            "momentum_1m_direction": "UP",
+            "momentum_5m_direction": "UP",
+        }
+    )
+    report = evaluate_path_skill([short])
+    rth = report["rth"]
+    assert rth["forward_1m_points"]["hmm_trend"]["hit_rate"] == 1.0
+    assert rth["forward_5s_points"]["hmm_trend"]["mean_signed_points"] == 0.25
+    assert rth["tick_force_60s"]["hmm_trend"]["mean_aligned_mfe"] == 1.5
+    assert rth["tick_force_60s"]["hmm_trend"]["mean_adverse"] == 0.4
