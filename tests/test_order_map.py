@@ -4843,6 +4843,49 @@ def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> No
     assert "automatic_ordering" not in text
 
 
+def test_render_strategy_butterfly_prints_three_legs_and_wing_range() -> None:
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
+
+    now = datetime(2026, 8, 13, 17, 0, tzinfo=timezone.utc)
+    text = _render_strategy_candidate(
+        {
+            "decision_id": "strategy:test-put-fly",
+            "decision_at": now.isoformat(),
+            "policy_version": "strategy_policy.bootstrap.v14",
+        },
+        {
+            "setup_kind": "STABLE_PIN",
+            "direction": "NEUTRAL",
+            "strategy_type": "PUT_BUTTERFLY",
+            "center": 7785.0,
+            "width": 5.0,
+            "right": "P",
+            "target_spx": 7785.0,
+            "invalidation_spx": [7780.0, 7790.0],
+            "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+            "legs": [
+                {"strike": 7780.0, "right": "P"},
+                {"strike": 7785.0, "right": "P"},
+                {"strike": 7790.0, "right": "P"},
+            ],
+            "quote": {"bid": 0.45, "ask": 0.90},
+            "economics": {
+                "max_loss_points": 0.9,
+                "width_points": 5.0,
+                "debit_fraction_of_width": 0.18,
+            },
+        },
+    )
+
+    assert "【SPX 人工候选 · Put 蝶式】" in text
+    assert "稳定钉住 · 中性 · 只许限价" in text
+    assert "买 7780P / 卖 2×7785P / 买 7790P" in text
+    assert "净借记 ≤ 0.90" in text
+    assert "SPX 离开 7780–7790 失效" in text
+    assert "买 - / 卖 -" not in text
+    assert "升破 -" not in text
+
+
 def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
     tmp_path: Path, monkeypatch
 ) -> None:

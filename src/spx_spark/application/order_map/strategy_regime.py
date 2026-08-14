@@ -27,7 +27,12 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v13"
+    policy_version: str = "strategy_policy.bootstrap.v14"
+    # v14: RTH pin butterflies must keep spot inside the tent, wait until
+    # minutes_to_close <= 12 per width point (5-wide from 15:00 ET), and not
+    # pin a body while a wall still sits inside 1.5x remaining EM outside the
+    # wings. Card text prints the three legs. PIN_STABLE itself is unchanged
+    # so iron-condor 12:30 timing does not move.
     # v13: RTH confirmation stays open for two extra 5m bars so a human card
     # can still print; session-episode reclaim expires at the same 60%
     # progress cap as debit chase; flood caps are per session_mode so GTH
@@ -76,6 +81,8 @@ class StrategyPolicy:
     pin_body_max_spot_distance_points: float = 15.0
     butterfly_max_debit_fraction: float = 0.35
     butterfly_max_risk_usd: float = 1000.0
+    butterfly_minutes_per_width_point: float = 12.0
+    butterfly_unresolved_wall_em_multiple: float = 1.5
     # v5: debit vertical short strike may not pass the target, and width may
     # not exceed remaining 0DTE expected move. Missing EM fails closed.
     # V3-3a flood control (activated with policy_version bump to bootstrap.v2).

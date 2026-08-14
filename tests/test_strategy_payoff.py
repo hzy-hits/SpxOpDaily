@@ -375,7 +375,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v13"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v14"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1169,6 +1169,115 @@ def test_butterfly_body_far_from_value_center_fails_ranker_hard_gate() -> None:
     assert rank.passed == []
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
     assert "butterfly_body_value_center_distance" in gates
+
+
+def _stable_pin_butterfly(
+    *,
+    center: float = 7710.0,
+    width: float = 10.0,
+    right: str = "C",
+    debit: float = 3.2,
+) -> dict:
+    return {
+        "candidate_id": f"fly-{center:.0f}-{width:.0f}{right}",
+        "strategy_type": "CALL_BUTTERFLY" if right == "C" else "PUT_BUTTERFLY",
+        "setup_kind": "STABLE_PIN",
+        "direction": "NEUTRAL",
+        "selection_score": 1.0,
+        "center": center,
+        "width": width,
+        "right": right,
+        "legs": [
+            {"strike": center - width, "right": right},
+            {"strike": center, "right": right},
+            {"strike": center + width, "right": right},
+        ],
+        "quote": {"status": "ready", "bid": debit - 0.2, "ask": debit},
+        "economics": {
+            "width_points": width,
+            "max_gain_points": width - debit,
+            "max_loss_points": debit,
+            "debit_fraction_of_width": debit / width,
+            "breakeven_low": center - (width - debit),
+            "breakeven_high": center + (width - debit),
+        },
+        "quote_valid_until": "2026-08-06T19:00:30+00:00",
+        "opportunity_valid_until": "2026-08-06T19:05:00+00:00",
+        "automatic_ordering": False,
+        "manual_action_only": True,
+    }
+
+
+def _rank_stable_pin_butterfly(facts: dict[str, object], butterfly: dict) -> object:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    return rank_candidates(
+        [butterfly],
+        _ranker_pin_facts(facts),
+        {
+            "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
+            "terminal_state": "PIN_STABLE",
+        },
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+
+
+def test_butterfly_spot_outside_wings_fails_ranker_hard_gate() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {"spot": {"spx": 7792.0}, "minutes_to_close": 44},
+        _stable_pin_butterfly(center=7785.0, width=5.0, right="P", debit=0.9),
+    )
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_spot_outside_wings" in gates
+
+
+def test_butterfly_entry_too_early_blocks_midday_five_wide() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7793.0},
+            "minutes_to_close": 90,
+            "volatility": {"expected_move_points": 6.3},
+            "structure": {"q_mode": 7790.0, "put_wall": 7780.0, "call_wall": 7780.0},
+            "value_center": {"spx_30m": 7791.0},
+        },
+        _stable_pin_butterfly(center=7790.0, width=5.0, right="P", debit=1.3),
+    )
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_entry_too_early" in gates
+
+
+def test_butterfly_unresolved_nearby_wall_blocks_cage_that_is_not_a_pin() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7793.0},
+            "minutes_to_close": 44,
+            "volatility": {"expected_move_points": 6.3},
+            "structure": {"q_mode": 7790.0, "put_wall": 7790.0, "call_wall": 7800.0},
+            "value_center": {"spx_30m": 7792.0},
+        },
+        _stable_pin_butterfly(center=7790.0, width=5.0, right="P", debit=1.3),
+    )
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_unresolved_nearby_wall" in gates
+
+
+def test_late_pin_at_call_wall_still_authorizes_five_wide_butterfly() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7801.2},
+            "minutes_to_close": 44,
+            "volatility": {"expected_move_points": 6.3},
+            "structure": {"q_mode": 7800.0, "put_wall": 7800.0, "call_wall": 7800.0},
+            "value_center": {"spx_30m": 7802.0},
+        },
+        _stable_pin_butterfly(center=7800.0, width=5.0, right="P", debit=1.3),
+    )
+    assert [row["center"] for row in rank.passed] == [7800.0]
 
 
 def test_rth_vertical_uses_fresh_atomic_ibkr_fallback_when_schwab_is_stale() -> None:
@@ -2014,12 +2123,14 @@ def test_historical_gth_record_uses_same_stop_atr_and_trend_gates() -> None:
 def _ranker_pin_facts(facts: dict[str, object]) -> dict[str, object]:
     merged = deepcopy(facts)
     merged["spot"] = {"spx": 7710.0, **dict(merged.get("spot") or {})}
+    merged["minutes_to_close"] = merged.get("minutes_to_close", 60)
     merged["path"] = {
         "breadth_above_vwap": 0.5,
         **dict(merged.get("path") or {}),
     }
     merged["volatility"] = {
         "vix_return_15m_pct": -0.005,
+        "expected_move_points": 8.0,
         **dict(merged.get("volatility") or {}),
     }
     merged["value_center"] = {
@@ -2028,6 +2139,8 @@ def _ranker_pin_facts(facts: dict[str, object]) -> dict[str, object]:
     }
     merged["structure"] = {
         "q_mode": 7710.0,
+        "put_wall": 7700.0,
+        "call_wall": 7720.0,
         **dict(merged.get("structure") or {}),
     }
     merged["shock"] = {"state": "NONE", **dict(merged.get("shock") or {})}

@@ -481,6 +481,65 @@ def _butterfly_hard_gates(
     risk_usd = debit * 100.0 if debit is not None else None
     if risk_usd is None or risk_usd > policy.butterfly_max_risk_usd:
         gates.append({"gate": "butterfly_risk_budget", "actual": risk_usd, "threshold": policy.butterfly_max_risk_usd})
+    gates.extend(
+        _rth_butterfly_pin_location_gates(
+            facts, policy=policy, center=center, spot=spot, width=width
+        )
+    )
+    return gates
+
+
+def _rth_butterfly_pin_location_gates(
+    facts: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+    center: float | None,
+    spot: float | None,
+    width: float | None,
+) -> list[dict[str, Any]]:
+    """Block pin flies whose tent is already behind spot or still a wall cage.
+
+    GTH width scans do not call this. Missing minutes/EM fail closed.
+    """
+
+    gates: list[dict[str, Any]] = []
+    if center is None or spot is None or width is None or width <= 0:
+        gates.append({"gate": "butterfly_spot_outside_wings", "actual": None, "threshold": "inside_wings"})
+    elif not (center - width <= spot <= center + width):
+        gates.append({
+            "gate": "butterfly_spot_outside_wings",
+            "actual": round(spot - center, 4),
+            "threshold": width,
+        })
+    minutes = _number(facts.get("minutes_to_close"))
+    max_minutes = None if width is None or width <= 0 else width * policy.butterfly_minutes_per_width_point
+    if minutes is None or max_minutes is None or minutes > max_minutes:
+        gates.append({
+            "gate": "butterfly_entry_too_early",
+            "actual": minutes,
+            "threshold": max_minutes,
+        })
+    remaining = _number(_map(facts.get("volatility")).get("expected_move_points"))
+    structure = _map(facts.get("structure"))
+    if remaining is None or remaining <= 0 or center is None or width is None or width <= 0 or spot is None:
+        gates.append({
+            "gate": "butterfly_unresolved_nearby_wall",
+            "actual": None,
+            "threshold": "remaining_em_and_wings",
+        })
+        return gates
+    reach = remaining * policy.butterfly_unresolved_wall_em_multiple
+    unresolved = [
+        wall
+        for wall in (_number(structure.get("put_wall")), _number(structure.get("call_wall")))
+        if wall is not None and abs(spot - wall) <= reach and abs(center - wall) > width
+    ]
+    if unresolved:
+        gates.append({
+            "gate": "butterfly_unresolved_nearby_wall",
+            "actual": unresolved,
+            "threshold": round(reach, 4),
+        })
     return gates
 
 

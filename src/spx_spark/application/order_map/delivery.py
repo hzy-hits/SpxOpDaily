@@ -133,6 +133,32 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "## 目标",
             f"短腿中点 {target} · 收到权利金即最大收益",
         ]
+    elif str(candidate.get("strategy_type") or "").endswith("_BUTTERFLY"):
+        ask = quote.get("ask")
+        invalidation = _range_text(candidate.get("invalidation_spx"))
+        target = _fmt_strike(candidate.get("target_spx") or candidate.get("center"))
+        width = economics.get("width_points") or candidate.get("width")
+        debit_frac = economics.get("debit_fraction_of_width")
+        payoff = ""
+        if isinstance(width, int | float) and isinstance(debit_frac, int | float):
+            payoff = f" · 翼宽 {_fmt_strike(width)} 点 · 借记占 {_percent(debit_frac)}"
+        lines = [
+            f"【{title}】",
+            "",
+            "## 结论",
+            f"{_setup_cn(setup)} · {_direction_cn(candidate.get('direction'))} · 只许限价",
+            "",
+            "## 执行",
+            f"{_butterfly_leg_text(candidate)}",
+            f"净借记 ≤ {_fmt_premium(ask)} · 提交前刷新报价 · 禁止市价",
+            f"有效至 {until}（北京）",
+            "",
+            "## 风险",
+            f"最大亏损 {loss} · SPX 离开 {invalidation} 失效",
+            "",
+            "## 目标",
+            f"SPX {target}{payoff}",
+        ]
     elif setup == "EVENT_SETTLEMENT_THRESHOLD":
         view = candidate.get("view") if isinstance(candidate.get("view"), dict) else {}
         direction = str(candidate.get("direction") or "")
@@ -253,6 +279,8 @@ def _setup_cn(setup: object) -> str:
         "IRON_CONDOR_DELTA": "铁鹰",
         "EVENT_SETTLEMENT_THRESHOLD": "事件结算观点",
         "TREND_PULLBACK": "趋势回踩",
+        "STABLE_PIN": "稳定钉住",
+        "CONFIRMATION_TARGET_PIN": "目标钉住",
     }.get(str(setup or ""), "结构扫描")
 
 
@@ -287,6 +315,31 @@ def _leg_token(leg: object) -> str:
 
 def _vertical_leg_text(candidate: dict[str, Any]) -> str:
     return f"买 {_leg_token(candidate.get('long'))} / 卖 {_leg_token(candidate.get('short'))}"
+
+
+def _butterfly_leg_text(candidate: dict[str, Any]) -> str:
+    legs = candidate.get("legs")
+    if isinstance(legs, list) and len(legs) == 3:
+        tokens = [_leg_token(leg) for leg in legs]
+        if all(token != "-" for token in tokens):
+            return f"买 {tokens[0]} / 卖 2×{tokens[1]} / 买 {tokens[2]}"
+    center = _finite_number(candidate.get("center"))
+    width = _finite_number(candidate.get("width"))
+    right = str(candidate.get("right") or "").upper()
+    if center is None or width is None or right not in {"C", "P"}:
+        return "买 - / 卖 2×- / 买 -"
+    return (
+        f"买 {_fmt_strike(center - width)}{right} / "
+        f"卖 2×{_fmt_strike(center)}{right} / "
+        f"买 {_fmt_strike(center + width)}{right}"
+    )
+
+
+def _range_text(value: object) -> str:
+    pair = _strike_pair(value)
+    if pair is not None:
+        return pair.replace("/", "–")
+    return _fmt_strike(value)
 
 
 def _iron_condor_strike_text(candidate: dict[str, Any]) -> str:
