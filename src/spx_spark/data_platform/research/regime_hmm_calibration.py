@@ -60,6 +60,12 @@ from spx_spark.application.market_features.prior_rth_context import (
 )
 from spx_spark.application.order_map.strategy_regime import assess_regime
 from spx_spark.application.runtime.market_regime_observation import (
+    ES_FEATURE_WEIGHTS,
+    GTH_ES_FEATURE_WEIGHTS,
+    GTH_ES_SCALE_FLOOR,
+    GTH_OBSERVATION_COMPONENT_WEIGHTS,
+    OBSERVATION_COMPONENT_WEIGHTS,
+    RTH_ES_SCALE_FLOOR,
     build_feature_observation,
 )
 from spx_spark.application.runtime.market_regime_signal import (
@@ -72,14 +78,65 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 
 UTC = timezone.utc
 ET = ZoneInfo("America/New_York")
-SCHEMA_VERSION = "regime_hmm_calibration.v3"
+SCHEMA_VERSION = "regime_hmm_calibration.v4"
 FILTER_PROBABILITY_GATES = (0.55, 0.65, 0.70, 0.75)
 IMPROVEMENT_HORIZONS = ("forward_60s_points", "forward_1m_points", "forward_5m_points")
 POLICY_VERSION = "hmm_close_direction_logistic.v1"
 FEATURE_RECONSTRUCTION = "quote_lake_minute_frames.v2+schwab_last_quote_path.v1"
 CASH_INDEX_INSTRUMENTS = ("index:SPX", "index:NDX", "index:DJI", "index:RUT")
 GLOBEX_INDEX_INSTRUMENTS = ("future:ES", "future:NQ", "future:YM", "future:RTY")
-LAKE_INSTRUMENTS = (*GLOBEX_INDEX_INSTRUMENTS, *CASH_INDEX_INSTRUMENTS)
+GTH_LEAD_INSTRUMENTS = ("future:NQ", "index:VIX", "equity:QQQ")
+LAKE_INSTRUMENTS = tuple(
+    dict.fromkeys(
+        (
+            *GLOBEX_INDEX_INSTRUMENTS,
+            *CASH_INDEX_INSTRUMENTS,
+            *GTH_LEAD_INSTRUMENTS,
+        )
+    )
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationRecipe:
+    name: str
+    component_weights: dict[str, float]
+    es_feature_weights: dict[str, float]
+    es_scale_floor: float
+
+
+GTH_OBSERVATION_RECIPES: tuple[ObservationRecipe, ...] = (
+    ObservationRecipe(
+        "legacy_20_70_10",
+        dict(OBSERVATION_COMPONENT_WEIGHTS),
+        dict(ES_FEATURE_WEIGHTS),
+        RTH_ES_SCALE_FLOOR,
+    ),
+    ObservationRecipe(
+        "gth_70_30",
+        dict(GTH_OBSERVATION_COMPONENT_WEIGHTS),
+        dict(ES_FEATURE_WEIGHTS),
+        RTH_ES_SCALE_FLOOR,
+    ),
+    ObservationRecipe(
+        "gth_70_30_fast",
+        dict(GTH_OBSERVATION_COMPONENT_WEIGHTS),
+        dict(GTH_ES_FEATURE_WEIGHTS),
+        GTH_ES_SCALE_FLOOR,
+    ),
+    ObservationRecipe(
+        "gth_80_20_fast",
+        {"es_path": 0.80, "cash_index": 0.20, "prior_rth": 0.0},
+        dict(GTH_ES_FEATURE_WEIGHTS),
+        GTH_ES_SCALE_FLOOR,
+    ),
+    ObservationRecipe(
+        "gth_100_es_fast",
+        {"es_path": 1.0, "cash_index": 0.0, "prior_rth": 0.0},
+        dict(GTH_ES_FEATURE_WEIGHTS),
+        GTH_ES_SCALE_FLOOR,
+    ),
+)
 DECISION_TIMES_ET = tuple(
     time(hour, minute) for hour in range(10, 16) for minute in (0, 30)
 )
@@ -154,6 +211,7 @@ class DecisionEvent:
     cross_index_score: float | None = None
     es_path_direction: str | None = None
     cross_index_direction: str | None = None
+    hmm_recipes: dict[str, dict[str, object]] | None = None
 
 
 def lake_quotes_root(data_root: str | Path) -> Path:
@@ -421,6 +479,113 @@ def _forward_points(
     return later - price_now
 
 
+def _lookback_points(
+    series: Mapping[datetime, float],
+    at: datetime,
+    minutes: int,
+) -> float | None:
+    price_now = series.get(at)
+    past = series.get(at - timedelta(minutes=minutes))
+    if price_now is None or past is None:
+        return None
+    return price_now - past
+
+
+def _posterior_path(
+    posterior: tuple[float, float, float],
+    *,
+    min_trend: float = 0.55,
+    min_balanced: float = 0.50,
+) -> tuple[str, str | None, float]:
+    dominant = max(range(3), key=lambda index: posterior[index])
+    probability = float(posterior[dominant])
+    direction = (None, None, "UP")[dominant] if dominant != 0 else "DOWN"
+    if dominant == 1 and probability >= min_balanced:
+        return "BALANCED", None, probability
+    if direction in {"UP", "DOWN"} and probability >= min_trend:
+        return "TREND", direction, probability
+    return "TRANSITION", direction, probability
+
+
+def _trend_recipe(
+    state: str, direction: str | None, probability: float
+) -> dict[str, object]:
+    return {
+        "state": state,
+        "direction": direction,
+        "probability": round(probability, 4),
+    }
+
+
+def _sign_recipe(direction: str | None) -> dict[str, object]:
+    if direction not in {"UP", "DOWN"}:
+        return {"state": "UNCERTAIN", "direction": None, "probability": None}
+    return {"state": "TREND", "direction": direction, "probability": 1.0}
+
+
+def _gth_recipe_map(
+    *,
+    bucket: str,
+    recipe_posteriors: Mapping[str, tuple[float, float, float]],
+    es_features: Mapping[str, object],
+    lead_by_minute: Mapping[str, Mapping[datetime, float]],
+    minute_at: datetime,
+    cross_direction: str | None,
+    momentum_1m_direction: str | None,
+) -> dict[str, dict[str, object]] | None:
+    if bucket != "gth":
+        return None
+    nq_series = lead_by_minute.get("future:NQ") or {}
+    qqq_series = lead_by_minute.get("equity:QQQ") or {}
+    vix_series = lead_by_minute.get("index:VIX") or {}
+    nq_1m = _signed_direction(_lookback_points(nq_series, minute_at, 1))
+    nq_15m = _signed_direction(_lookback_points(nq_series, minute_at, 15))
+    qqq_15m = _signed_direction(_lookback_points(qqq_series, minute_at, 15))
+    vix_15m = _lookback_points(vix_series, minute_at, 15)
+    vix_fade = _signed_direction(None if vix_15m is None else -vix_15m)
+    recipes: dict[str, dict[str, object]] = {
+        "sign_es_1m": _sign_recipe(momentum_1m_direction),
+        "sign_es_5m": _sign_recipe(
+            _signed_direction(_es_number(es_features, "return_5m_points"))
+        ),
+        "sign_es_gth_move": _sign_recipe(
+            _signed_direction(_es_number(es_features, "gth_move_points"))
+        ),
+        "sign_es_vwap": _sign_recipe(
+            _signed_direction(_es_number(es_features, "vwap_distance_points"))
+        ),
+        "sign_nq_1m": _sign_recipe(nq_1m),
+        "sign_nq_15m": _sign_recipe(nq_15m),
+        "sign_qqq_15m": _sign_recipe(qqq_15m),
+        "sign_vix_fade": _sign_recipe(vix_fade),
+        "sign_cross_follow": _sign_recipe(cross_direction),
+        "sign_cross_fade": _sign_recipe(
+            "DOWN"
+            if cross_direction == "UP"
+            else "UP"
+            if cross_direction == "DOWN"
+            else None
+        ),
+    }
+    for recipe in GTH_OBSERVATION_RECIPES:
+        state, direction, probability = _posterior_path(recipe_posteriors[recipe.name])
+        recipes[recipe.name] = _trend_recipe(state, direction, probability)
+        if state == "TREND" and direction in {"UP", "DOWN"}:
+            if direction == cross_direction:
+                recipes[f"{recipe.name}_confirm_cross"] = _trend_recipe(
+                    state, direction, probability
+                )
+            if direction == nq_1m:
+                recipes[f"{recipe.name}_confirm_nq"] = _trend_recipe(
+                    state, direction, probability
+                )
+            if direction == vix_fade:
+                recipes[f"{recipe.name}_confirm_vix"] = _trend_recipe(
+                    state, direction, probability
+                )
+    return recipes
+
+
 def _observation_component_score(observation: Mapping[str, object], name: str) -> float | None:
     components = observation.get("components")
     payload = components.get(name) if isinstance(components, Mapping) else None
@@ -528,6 +693,9 @@ def build_day_events(
     parsed: list[tuple[datetime, dict[str, object]]] = []
     spx_by_minute: dict[datetime, float] = {}
     es_by_minute: dict[datetime, float] = {}
+    lead_by_minute: dict[str, dict[datetime, float]] = {
+        instrument_id: {} for instrument_id in GTH_LEAD_INSTRUMENTS
+    }
     for sample in samples:
         at = datetime.fromisoformat(str(sample["at"]))
         parsed.append((at, sample))
@@ -537,6 +705,10 @@ def build_day_events(
         es_price = _instrument_price(sample, "future:ES")
         if es_price is not None:
             es_by_minute[at] = es_price
+        for instrument_id in GTH_LEAD_INSTRUMENTS:
+            lead_price = _instrument_price(sample, instrument_id)
+            if lead_price is not None:
+                lead_by_minute[instrument_id][at] = lead_price
     session_rows = [
         (at, sample)
         for at, sample in parsed
@@ -555,6 +727,9 @@ def build_day_events(
     decision_ats = rth_clocks | gth_clocks
     last_decision_at = max(decision_ats)
     posterior = (1 / 3, 1 / 3, 1 / 3)
+    recipe_posteriors = {
+        recipe.name: (1 / 3, 1 / 3, 1 / 3) for recipe in GTH_OBSERVATION_RECIPES
+    }
     events: list[DecisionEvent] = []
     window: list[dict[str, object]] = []
     observed = 0
@@ -588,6 +763,22 @@ def build_day_events(
             prior_context,
             session_day=day,
         )
+        for recipe in GTH_OBSERVATION_RECIPES:
+            recipe_observation = build_feature_observation(
+                market,
+                {},
+                prior_context,
+                session_day=day,
+                component_weights=recipe.component_weights,
+                es_feature_weights=recipe.es_feature_weights,
+                es_scale_floor=recipe.es_scale_floor,
+            )
+            if recipe_observation is None:
+                continue
+            recipe_posteriors[recipe.name] = _online_posterior(
+                float(recipe_observation["direction_score"]),
+                recipe_posteriors[recipe.name],
+            )
         if observation is None:
             continue
         observed += 1
@@ -697,6 +888,15 @@ def build_day_events(
                 cross_index_score=cross_index_score,
                 es_path_direction=_signed_direction(es_path_score),
                 cross_index_direction=_signed_direction(cross_index_score),
+                hmm_recipes=_gth_recipe_map(
+                    bucket=bucket,
+                    recipe_posteriors=recipe_posteriors,
+                    es_features=es_features,
+                    lead_by_minute=lead_by_minute,
+                    minute_at=minute_at,
+                    cross_direction=_signed_direction(cross_index_score),
+                    momentum_1m_direction=_signed_direction(momentum_1),
+                ),
             )
         )
     diagnostics = {
@@ -1281,6 +1481,70 @@ def _day_worker(
     return day_s, events, diagnostics
 
 
+def evaluate_gth_observation_recipes(
+    events: Sequence[DecisionEvent],
+) -> dict[str, object]:
+    """Score GTH HMM weight recipes and extra sign inputs on ES forwards."""
+
+    gth_events = [event for event in events if event.session_bucket == "gth"]
+    names: set[str] = set()
+    for event in gth_events:
+        if isinstance(event.hmm_recipes, dict):
+            names.update(event.hmm_recipes)
+    horizons = ("forward_60s_points", "forward_1m_points", "forward_5m_points")
+    report: dict[str, object] = {
+        "semantics": "research_gth_observation_sweep_not_execution_authority",
+        "n_gth_events": len(gth_events),
+        "recipe_names": sorted(names),
+        "horizons": {},
+    }
+    horizon_rows: dict[str, dict[str, object]] = {}
+    for horizon in horizons:
+        rows: dict[str, object] = {}
+        for name in sorted(names):
+            selected = [
+                event
+                for event in gth_events
+                if isinstance(event.hmm_recipes, dict)
+                and isinstance(event.hmm_recipes.get(name), Mapping)
+                and event.hmm_recipes[name].get("state") == "TREND"
+                and event.hmm_recipes[name].get("direction") in {"UP", "DOWN"}
+            ]
+
+            def direction_of(
+                event: DecisionEvent, recipe_name: str = name
+            ) -> str | None:
+                payload = (
+                    event.hmm_recipes.get(recipe_name)
+                    if isinstance(event.hmm_recipes, dict)
+                    else None
+                )
+                if not isinstance(payload, Mapping):
+                    return None
+                direction = payload.get("direction")
+                return str(direction) if direction in {"UP", "DOWN"} else None
+
+            rows[name] = _skill_row(
+                selected, direction_of=direction_of, horizon=horizon
+            )
+        horizon_rows[horizon] = rows
+    report["horizons"] = horizon_rows
+    sixty = horizon_rows["forward_60s_points"]
+    ranked = sorted(
+        (
+            (name, row)
+            for name, row in sixty.items()
+            if isinstance(row, Mapping) and row.get("n")
+        ),
+        key=lambda item: (
+            -(float(item[1]["hit_rate"]) if isinstance(item[1].get("hit_rate"), int | float) else 0.0),
+            -(int(item[1]["n"]) if isinstance(item[1].get("n"), int) else 0),
+        ),
+    )
+    report["ranked_forward_60s"] = [{"name": name, **dict(row)} for name, row in ranked]
+    return report
+
+
 def build_report(
     data_root: str | Path,
     *,
@@ -1334,6 +1598,11 @@ def build_report(
     filter_slices["sample"] = "in_sample_all_decision_events"
     filter_slices_walk_forward = evaluate_filter_slices(oos_events)
     filter_slices_walk_forward["sample"] = "walk_forward_test_days_only"
+    gth_observation_sweep = evaluate_gth_observation_recipes(all_events)
+    gth_observation_sweep["sample"] = "in_sample_all_decision_events"
+    gth_observation_sweep_walk_forward = evaluate_gth_observation_recipes(oos_events)
+    gth_observation_sweep_walk_forward["sample"] = "walk_forward_test_days_only"
+    gth_observation_sweep_walk_forward["test_days"] = sorted(test_days)
     fitted_policy = None
     if len(rth_events) >= GATE_MIN_TEST_EVENTS:
         intercept, slope = fit_logistic(
@@ -1367,6 +1636,8 @@ def build_report(
         "path_skill_walk_forward": path_skill_walk_forward,
         "filter_slices": filter_slices,
         "filter_slices_walk_forward": filter_slices_walk_forward,
+        "gth_observation_sweep": gth_observation_sweep,
+        "gth_observation_sweep_walk_forward": gth_observation_sweep_walk_forward,
         **gates,
         "fitted_policy": fitted_policy,
         "day_diagnostics": diagnostics,
@@ -1477,6 +1748,33 @@ def _print_filter_slices(payload: Mapping[str, object]) -> None:
                 print(f"  {bucket} {horizon}: " + " | ".join(parts))
 
 
+def _print_gth_observation_sweep(payload: Mapping[str, object]) -> None:
+    ranked = payload.get("ranked_forward_60s")
+    if not isinstance(ranked, list):
+        return
+    print(f"  n_gth_events={payload.get('n_gth_events')} recipes={payload.get('recipe_names')}")
+    one_minute = payload.get("horizons")
+    one_minute_rows = (
+        one_minute.get("forward_1m_points")
+        if isinstance(one_minute, Mapping)
+        else None
+    )
+    for row in ranked[:12]:
+        if not isinstance(row, Mapping):
+            continue
+        name = row.get("name")
+        hit = row.get("hit_rate")
+        mean = row.get("mean_signed_points")
+        n = row.get("n")
+        extra = ""
+        if isinstance(one_minute_rows, Mapping) and isinstance(name, str):
+            later = one_minute_rows.get(name)
+            if isinstance(later, Mapping) and isinstance(later.get("hit_rate"), float):
+                extra = f" | 1m n={later.get('n')} hit={later['hit_rate']:.3f}"
+        if isinstance(hit, float) and isinstance(mean, float):
+            print(f"  60s {name}: n={n} hit={hit:.3f} mean={mean:+.2f}{extra}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     report = build_report(args.data_root, workers=args.workers)
@@ -1514,6 +1812,10 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(slices, Mapping):
         print("filter slices walk-forward:")
         _print_filter_slices(slices)
+    sweep = report.get("gth_observation_sweep_walk_forward")
+    if isinstance(sweep, Mapping):
+        print("gth observation sweep walk-forward:")
+        _print_gth_observation_sweep(sweep)
     return 0
 
 

@@ -22,6 +22,22 @@ OBSERVATION_COMPONENT_WEIGHTS = {
     "cash_index": 0.70,
     "prior_rth": 0.10,
 }
+# Research / GTH-only recipes. Production RTH defaults above stay unchanged
+# until a walk-forward winner is promoted with a model-version bump.
+GTH_OBSERVATION_COMPONENT_WEIGHTS = {
+    "es_path": 0.70,
+    "cash_index": 0.30,
+    "prior_rth": 0.0,
+}
+GTH_ES_FEATURE_WEIGHTS = {
+    "return_1m_points": 0.35,
+    "return_5m_points": 0.30,
+    "return_15m_points": 0.20,
+    "vwap_distance_points": 0.10,
+    "vwap_slope_15m_points": 0.05,
+}
+GTH_ES_SCALE_FLOOR = 2.0
+RTH_ES_SCALE_FLOOR = 10.0
 
 
 def build_feature_observation(
@@ -30,26 +46,34 @@ def build_feature_observation(
     prior_rth_context: Mapping[str, object],
     *,
     session_day: date | None,
+    component_weights: Mapping[str, float] | None = None,
+    es_feature_weights: Mapping[str, float] | None = None,
+    es_scale_floor: float | None = None,
 ) -> dict[str, object] | None:
     es = _mapping(market.get("es"))
     expected_move = _expected_move(options)
-    raw = {name: _number(es.get(name)) for name in ES_FEATURE_WEIGHTS}
+    weights = dict(component_weights or OBSERVATION_COMPONENT_WEIGHTS)
+    es_weights = dict(es_feature_weights or ES_FEATURE_WEIGHTS)
+    scale_floor = RTH_ES_SCALE_FLOOR if es_scale_floor is None else float(es_scale_floor)
+    raw = {name: _number(es.get(name)) for name in es_weights}
     available = {name: value for name, value in raw.items() if value is not None}
     es_score: float | None = None
     scale: float | None = None
     efficiency = _number(es.get("trend_efficiency_60m"))
     if available:
         fallback_scale = max(
-            10.0,
-            abs(available.get("return_60m_points", 0.0)),
-            2.0 * abs(available.get("return_15m_points", 0.0)),
-            2.0 * abs(available.get("vwap_distance_points", 0.0)),
+            scale_floor,
+            abs(available.get("return_60m_points") or 0.0),
+            2.0 * abs(available.get("return_15m_points") or 0.0),
+            2.0 * abs(available.get("vwap_distance_points") or 0.0),
+            4.0 * abs(available.get("return_5m_points") or 0.0),
+            8.0 * abs(available.get("return_1m_points") or 0.0),
         )
         scale = expected_move or fallback_scale
-        total_weight = sum(ES_FEATURE_WEIGHTS[name] for name in available)
+        total_weight = sum(es_weights[name] for name in available)
         es_score = (
             sum(
-                ES_FEATURE_WEIGHTS[name] * max(-2.0, min(2.0, value / scale))
+                es_weights[name] * max(-2.0, min(2.0, value / scale))
                 for name, value in available.items()
             )
             / total_weight
@@ -71,10 +95,12 @@ def build_feature_observation(
     usable_scores = {name: score for name, score in component_scores.items() if score is not None}
     if not usable_scores:
         return None
-    total_weight = sum(OBSERVATION_COMPONENT_WEIGHTS[name] for name in usable_scores)
+    total_weight = sum(weights.get(name, 0.0) for name in usable_scores)
+    if total_weight <= 0:
+        return None
     score = (
         sum(
-            OBSERVATION_COMPONENT_WEIGHTS[name] * component_score
+            weights.get(name, 0.0) * component_score
             for name, component_score in usable_scores.items()
         )
         / total_weight
@@ -82,7 +108,7 @@ def build_feature_observation(
     payload: dict[str, object] = {
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "direction_score": round(max(-2.0, min(2.0, score)), 10),
-        "component_weights": OBSERVATION_COMPONENT_WEIGHTS,
+        "component_weights": {name: weights[name] for name in usable_scores},
         "components": {
             "es_path": {
                 "status": "available" if es_score is not None else "unavailable",
@@ -93,8 +119,9 @@ def build_feature_observation(
                     if expected_move is not None
                     else "bounded_local_fallback"
                 ),
-                "values": {name: raw[name] for name in ES_FEATURE_WEIGHTS},
+                "values": {name: raw[name] for name in es_weights},
                 "trend_efficiency_60m": efficiency,
+                "feature_weights": dict(es_weights),
             },
             "cash_index": cash_payload,
             "prior_rth": prior_payload,
@@ -357,6 +384,10 @@ __all__ = [
     "CROSS_INDEX_FEATURE_SET_VERSION",
     "ES_FEATURE_WEIGHTS",
     "FEATURE_SCHEMA_VERSION",
+    "GTH_ES_FEATURE_WEIGHTS",
+    "GTH_ES_SCALE_FLOOR",
+    "GTH_OBSERVATION_COMPONENT_WEIGHTS",
     "OBSERVATION_COMPONENT_WEIGHTS",
+    "RTH_ES_SCALE_FLOOR",
     "build_feature_observation",
 ]

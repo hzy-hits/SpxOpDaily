@@ -7,6 +7,12 @@ import random
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
 
+from spx_spark.application.runtime.market_regime_observation import (
+    GTH_ES_FEATURE_WEIGHTS,
+    GTH_ES_SCALE_FLOOR,
+    GTH_OBSERVATION_COMPONENT_WEIGHTS,
+    build_feature_observation,
+)
 from spx_spark.data_platform.research.regime_hmm_calibration import (
     ET,
     MIN_TRAIN_DAYS,
@@ -15,6 +21,7 @@ from spx_spark.data_platform.research.regime_hmm_calibration import (
     brier_score,
     evaluate_filter_slices,
     evaluate_gates,
+    evaluate_gth_observation_recipes,
     evaluate_path_skill,
     expected_calibration_error,
     fit_logistic,
@@ -259,3 +266,91 @@ def test_filter_slices_separate_confirmation_from_weak_trend() -> None:
     assert sixty["hmm_trend_agree_1m"]["hit_rate"] == 1.0
     assert sixty["hmm_trend_disagree_1m"]["hit_rate"] == 0.0
     assert report["rth"]["mismatch"]["hmm_vs_es_1m"]["agree_rate"] == 0.5
+
+
+def _globex_market(*, es_up: bool, cross_up: bool) -> dict[str, object]:
+    sign = 1.0 if es_up else -1.0
+    cross_sign = 1.0 if cross_up else -1.0
+    return {
+        "es": {
+            "return_1m_points": 1.5 * sign,
+            "return_5m_points": 2.5 * sign,
+            "return_15m_points": 6.0 * sign,
+            "return_60m_points": 10.0 * sign,
+            "vwap_distance_points": 3.0 * sign,
+            "vwap_slope_15m_points": 0.8 * sign,
+            "trend_efficiency_60m": 0.8,
+        },
+        "cross_asset": {
+            "cross_index": {
+                "source": "globex_index",
+                "status": "ready",
+                "session_open": True,
+                "relative_to_anchor_15m_bps": {
+                    "future:ES": 0.0,
+                    "future:NQ": 40.0 * cross_sign,
+                    "future:YM": 25.0 * cross_sign,
+                    "future:RTY": 30.0 * cross_sign,
+                },
+                "dispersion_15m_bps": 8.0,
+                "breadth_15m": {
+                    "up_count": 3 if cross_up else 1,
+                    "down_count": 1 if cross_up else 3,
+                    "flat_count": 0,
+                },
+                "missing_instruments": [],
+                "reason_codes": [],
+            }
+        },
+        "frame_id": "test-gth-obs",
+        "as_of": "2026-08-05T08:00:00+00:00",
+    }
+
+
+def test_gth_70_30_weights_follow_es_when_cross_disagrees() -> None:
+    market = _globex_market(es_up=True, cross_up=False)
+    legacy = build_feature_observation(market, {}, {}, session_day=None)
+    weighted = build_feature_observation(
+        market,
+        {},
+        {},
+        session_day=None,
+        component_weights=GTH_OBSERVATION_COMPONENT_WEIGHTS,
+        es_feature_weights=GTH_ES_FEATURE_WEIGHTS,
+        es_scale_floor=GTH_ES_SCALE_FLOOR,
+    )
+    assert legacy is not None and weighted is not None
+    assert weighted["direction_score"] > legacy["direction_score"]
+    assert weighted["component_weights"]["es_path"] == 0.7
+    assert weighted["components"]["es_path"]["feature_weights"]["return_1m_points"] == 0.35
+
+
+def test_gth_observation_recipes_rank_named_inputs() -> None:
+    base = _event("2026-08-05", 0, label=1, spread=0.6, session_bucket="gth")
+    event = DecisionEvent(
+        **{
+            **asdict(base),
+            "hmm_recipes": {
+                "gth_70_30_fast": {
+                    "state": "TREND",
+                    "direction": "UP",
+                    "probability": 0.8,
+                },
+                "legacy_20_70_10": {
+                    "state": "TREND",
+                    "direction": "DOWN",
+                    "probability": 0.8,
+                },
+                "sign_nq_1m": {"state": "TREND", "direction": "UP", "probability": 1.0},
+            },
+            "forward_60s_points": 1.0,
+            "forward_1m_points": 1.0,
+            "forward_5m_points": 1.0,
+        }
+    )
+    report = evaluate_gth_observation_recipes([event])
+    sixty = report["horizons"]["forward_60s_points"]
+    assert sixty["gth_70_30_fast"]["hit_rate"] == 1.0
+    assert sixty["legacy_20_70_10"]["hit_rate"] == 0.0
+    assert sixty["sign_nq_1m"]["hit_rate"] == 1.0
+    assert report["ranked_forward_60s"][0]["name"] in {"gth_70_30_fast", "sign_nq_1m"}
