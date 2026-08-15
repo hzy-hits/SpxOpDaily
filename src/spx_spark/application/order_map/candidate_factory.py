@@ -22,6 +22,7 @@ from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.application.market_features.session_quote_selection import provider_quote
 from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
+    pin_blocks_directional_spreads,
     pin_look_trade_widths,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
@@ -453,6 +454,9 @@ def _rth_evidences(
     bases: list[dict[str, Any]] = []
     reasons: list[str] = []
     setup_facts = [_map(row) for row in facts.get("rth_setups") or ()]
+    pin_blocks = pin_blocks_directional_spreads(regime)
+    if pin_blocks:
+        reasons.append("directional_spread_blocked_by_pin_watch")
     for setup in setup_facts:
         if setup.get("state") != "ENTRY_WINDOW_OPEN":
             continue
@@ -467,6 +471,8 @@ def _rth_evidences(
                 reasons.append("trend_pullback_path_not_confirmed")
                 continue
         if direction and setup_kind in {"FAILED_BREAK_RECLAIM", "TREND_PULLBACK"}:
+            if pin_blocks:
+                continue
             bases.append(
                 {
                     "setup_kind": setup_kind,
@@ -496,7 +502,7 @@ def _rth_evidences(
         else:
             reasons.append("price_trigger_not_aligned_with_supported_setup")
             setup = ""
-        if setup:
+        if setup and not pin_blocks:
             bases.append(
                 {
                     "setup_kind": setup,
@@ -507,7 +513,7 @@ def _rth_evidences(
                     "source": "confirmed_level_decision",
                 }
             )
-    elif not bases:
+    elif not bases and not pin_blocks:
         specific = {
             "trend_pullback_path_not_confirmed",
             "trend_pullback_path_unevaluable",

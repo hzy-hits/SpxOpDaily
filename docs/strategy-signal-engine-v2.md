@@ -588,7 +588,7 @@ TRADE（PIN_STABLE）：现有硬栈，进入仍要 2 次 excursion-return
 ```
 
 LOOK 只发观察卡，不过 `butterfly_requires_pin_stable`，不能成为蝶式交易候选。
-TRADE 才允许枚举 STABLE_PIN 蝶。11:00–13:00 TRADE 按中轴质量盒子评 5/10/15/20/50 点蝶，不写死翼宽；质量已堆在 [K−W, K+W] 内（分数 ≥ 0.50）的梯子档才上架，排序先压过价差再取最窄过门帐篷。夜盘两档都不评蝶。
+TRADE 才允许枚举 STABLE_PIN 蝶。11:00–13:00 TRADE 按中轴质量盒子评 5/10/15/20/50 点蝶，不写死翼宽；质量已堆在 [K−W, K+W] 内（分数 ≥ 0.50）的梯子档才上架，排序先压过价差再取最窄过门帐篷。LOOK 或 TRADE 钉住时，RTH 方向价差（失败突破 / 趋势回踩 / 突破接受）不得成为人读卡；PIN_MIGRATING 与 UNCERTAIN 不挡价差。夜盘两档都不评蝶。
 
 硬条件（TRADE / PIN_STABLE）：
 
@@ -802,6 +802,8 @@ VIX未持续扩张
 ### 10.4 上破失败 → Put
 
 完全对称。
+
+LOOK 或 TRADE 钉住与失败突破互斥：中轴观察或稳定钉住时，失败突破价差不得成为人读卡。
 
 ### 10.5 Entry Quality
 

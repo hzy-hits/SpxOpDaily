@@ -24,6 +24,7 @@ from spx_spark.application.order_map.strategy_regime import (
     butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
     look_mass_ready,
+    pin_blocks_directional_spreads,
     pin_look_window,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
@@ -33,6 +34,11 @@ _POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
 _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
+_RTH_DIRECTIONAL_SPREADS = {
+    "FAILED_BREAK_RECLAIM",
+    "TREND_PULLBACK",
+    "BREAKOUT_ACCEPTANCE",
+}
 _GTH_ATM_PIN = "GTH_ATM_PIN"
 _IRON_CONDOR_TYPE = "IRON_CONDOR"
 _EVENT_SETTLEMENT_MAX_DEBIT_FRACTION = 0.50
@@ -360,6 +366,21 @@ def _vertical_hard_gates(
         return _event_settlement_vertical_hard_gates(candidate)
     if candidate.get("setup_kind") in {_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN}:
         return _gth_scan_vertical_hard_gates(candidate, facts, regime, policy=policy)
+    if (
+        candidate.get("setup_kind") in _RTH_DIRECTIONAL_SPREADS
+        and pin_blocks_directional_spreads(regime)
+    ):
+        return [
+            {
+                "gate": "directional_spread_blocked_by_pin_watch",
+                "actual": {
+                    "setup_kind": candidate.get("setup_kind"),
+                    "terminal_state": regime.get("terminal_state"),
+                    "pin_grade": _map(regime.get("pin")).get("grade"),
+                },
+                "threshold": "pin_look_or_trade_blocks_rth_vertical",
+            }
+        ]
     long, short = _map(candidate.get("long")), _map(candidate.get("short"))
     if not long or not short:
         return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]

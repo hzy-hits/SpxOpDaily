@@ -30,6 +30,7 @@ from spx_spark.application.order_map.strategy_regime import (
     butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
     five_wide_look_mass_ready,
+    pin_blocks_directional_spreads,
     pin_look_trade_widths,
     pin_stable_center,
     pin_stable_watch_phase,
@@ -451,7 +452,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v29"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v30"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -829,7 +830,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v29"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v30"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1053,10 +1054,18 @@ def test_degraded_gamma_structure_keeps_vertical_capability_and_blocks_butterfly
     }
     latest = _pin_ladder_state(now)
     facts = build_market_fact_pack(payload, latest, now)
+    regime = assess_regime(facts)
+    # This fixture is the 08-06 PIN_STABLE freeze. Capability under degraded
+    # GEX is the point; LOOK/TRADE pin veto of directional spreads is not.
+    regime = {
+        **regime,
+        "terminal_state": "NONE",
+        "pin": {**dict(regime.get("pin") or {}), "grade": "none"},
+    }
     rows = enumerate_candidates(
         payload,
         facts,
-        assess_regime(facts),
+        regime,
         latest,
         now=now,
         policy=DEFAULT_STRATEGY_POLICY,
@@ -1992,10 +2001,108 @@ def test_look_window_ten_wide_pin_outranks_failed_break_vertical() -> None:
         probability_settings=None,
         now=now,
     )
-    assert [row["candidate_id"] for row in rank.passed][:2] == [
-        fly["candidate_id"],
-        "put-failed-break",
-    ]
+    assert [row["candidate_id"] for row in rank.passed] == [fly["candidate_id"]]
+    assert "put-failed-break" in [row["candidate_id"] for row in rank.near_misses]
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "directional_spread_blocked_by_pin_watch" in gates
+
+
+def test_pin_look_blocks_failed_break_vertical() -> None:
+    now = datetime(2026, 8, 6, 16, 38, tzinfo=timezone.utc)
+    vertical = {
+        "candidate_id": "put-failed-break-look",
+        "strategy_type": "PUT_DEBIT_VERTICAL",
+        "setup_kind": "FAILED_BREAK_RECLAIM",
+        "direction": "DOWN",
+        "selection_score": 9.0,
+        "long": {"strike": 7785.0},
+        "short": {"strike": 7775.0},
+        "quote": {"status": "ready", "bid": 2.8, "ask": 3.0},
+        "economics": {
+            "width_points": 10.0,
+            "max_gain_points": 7.0,
+            "max_loss_points": 3.0,
+            "debit_fraction_of_width": 0.3,
+        },
+        "trigger_level": 7795.0,
+        "target_spx": 7775.0,
+        "invalidation_spx": 7791.0,
+        "quote_valid_until": "2026-08-06T16:38:30+00:00",
+        "opportunity_valid_until": "2026-08-06T16:43:00+00:00",
+        "automatic_ordering": False,
+        "manual_action_only": True,
+    }
+    rank = rank_candidates(
+        [vertical],
+        _ranker_pin_facts(
+            {
+                "spot": {"spx": 7786.0},
+                "minutes_to_close": 201,
+                "path": {"atr_5m": 10.0, "distance_to_vwap_points": 0.0, "impulse_15m_points": 0.0},
+                "volatility": {"expected_move_points": 20.0},
+            }
+        ),
+        {"pin": {"grade": "look", "depin_risk": 0.0}, "terminal_state": "NONE"},
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "directional_spread_blocked_by_pin_watch" in gates
+
+
+def test_pin_migrating_allows_failed_break_vertical() -> None:
+    now = datetime(2026, 8, 6, 16, 38, tzinfo=timezone.utc)
+    vertical = {
+        "candidate_id": "put-failed-break-migrate",
+        "strategy_type": "PUT_DEBIT_VERTICAL",
+        "setup_kind": "FAILED_BREAK_RECLAIM",
+        "direction": "DOWN",
+        "selection_score": 9.0,
+        "long": {"strike": 7785.0},
+        "short": {"strike": 7775.0},
+        "quote": {"status": "ready", "bid": 2.8, "ask": 3.0},
+        "economics": {
+            "width_points": 10.0,
+            "max_gain_points": 7.0,
+            "max_loss_points": 3.0,
+            "debit_fraction_of_width": 0.3,
+        },
+        "trigger_level": 7795.0,
+        "target_spx": 7775.0,
+        "invalidation_spx": 7791.0,
+        "quote_valid_until": "2026-08-06T16:38:30+00:00",
+        "opportunity_valid_until": "2026-08-06T16:43:00+00:00",
+        "automatic_ordering": False,
+        "manual_action_only": True,
+    }
+    rank = rank_candidates(
+        [vertical],
+        _ranker_pin_facts(
+            {
+                "spot": {"spx": 7786.0},
+                "minutes_to_close": 201,
+                "path": {"atr_5m": 10.0, "distance_to_vwap_points": 0.0, "impulse_15m_points": 0.0},
+                "volatility": {"expected_move_points": 20.0},
+            }
+        ),
+        {"pin": {"grade": "migrating", "depin_risk": 0.4}, "terminal_state": "PIN_MIGRATING"},
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert [row["candidate_id"] for row in rank.passed] == ["put-failed-break-migrate"]
+
+
+def test_pin_blocks_directional_spreads_only_for_look_or_trade() -> None:
+    assert pin_blocks_directional_spreads({"terminal_state": "PIN_STABLE", "pin": {"grade": "stable"}})
+    assert pin_blocks_directional_spreads({"terminal_state": "NONE", "pin": {"grade": "look"}})
+    assert not pin_blocks_directional_spreads({"terminal_state": "PIN_MIGRATING", "pin": {"grade": "migrating"}})
+    assert not pin_blocks_directional_spreads({"terminal_state": "UNCERTAIN", "pin": {}})
+    assert not pin_blocks_directional_spreads({"terminal_state": "NONE", "pin": {"grade": "none"}})
 
 
 def test_look_window_tighter_pin_outranks_wider_pin() -> None:

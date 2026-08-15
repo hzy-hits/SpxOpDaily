@@ -254,6 +254,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "no_supported_strategy_candidate": "没有通过门控的可交易候选",
         "gth_butterfly_rth_only": "夜盘不授权蝶式，只在 RTH 稳定钉住评估",
         "gth_vertical_requires_aligned_trend": "夜盘方向价差要求 TREND 且与路径同向",
+        "directional_spread_blocked_by_pin_watch": "中轴观察或稳定钉住时不发方向价差",
         "butterfly_requires_pin_stable": "蝶式要求稳定钉住环境",
         "butterfly_shock_veto": "冲击状态未平复，禁止新开蝶式",
         "butterfly_body_far_from_value_center": "蝶式身体偏离价值中枢过远",

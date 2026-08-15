@@ -28,6 +28,7 @@ __all__ = (
     "butterfly_max_entry_minutes",
     "five_wide_look_mass_ready",
     "look_mass_ready",
+    "pin_blocks_directional_spreads",
     "pin_look_trade_widths",
     "pin_look_window",
     "pin_stable_center",
@@ -39,7 +40,10 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v29"
+    policy_version: str = "strategy_policy.bootstrap.v30"
+    # v30: LOOK or TRADE pin vetoes RTH directional debit verticals
+    # (failed-break, trend-pullback, breakout). Event-settlement and GTH
+    # scans stay. PIN_MIGRATING / UNCERTAIN do not block spreads.
     # v29: 11:00–13:00 TRADE does not bind fly width. The look ladder is
     # 5/10/15/20/50; a width is enumerated when local mass is already piled
     # inside [K−W, K+W]. Rank prefers any pin fly over a vertical, then the
@@ -303,6 +307,15 @@ def pin_stable_center(regime: Mapping[str, Any] | None) -> float | None:
     if payload.get("terminal_state") != "PIN_STABLE":
         return None
     return _pin_top_center(payload)
+
+
+def pin_blocks_directional_spreads(regime: Mapping[str, Any] | None) -> bool:
+    """True when a forming or stable pin forbids RTH directional debit cards."""
+
+    payload = _map(regime)
+    if payload.get("terminal_state") == "PIN_STABLE":
+        return True
+    return str(_map(payload.get("pin")).get("grade") or "") == "look"
 
 
 def pin_watch_center(regime: Mapping[str, Any] | None) -> float | None:
