@@ -4879,6 +4879,21 @@ def test_pin_stable_watch_enqueues_once_per_center_and_clock_phase(
     assert opened["event_id"] == "pin-stable:2026-08-14:7785:clock_open"
 
 
+def test_pin_look_watch_enqueues_without_trade_pin(tmp_path: Path, monkeypatch) -> None:
+    from spx_spark.application.order_map import delivery as delivery_module
+
+    now = datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc)
+    settings = make_settings(str(tmp_path / "pin-look.json"))
+    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
+    look = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
+    look["regime"]["terminal_state"] = "NONE"
+    look["regime"]["pin"]["grade"] = "look"
+    first = delivery_module.enqueue_pin_stable_watch(look, now=now)
+    assert first["accepted"] is True
+    assert first["inserted"] is True
+    assert first["event_id"] == "pin-stable:2026-08-14:7785:look"
+
+
 def test_pin_stable_watch_skips_gth_and_non_stable(tmp_path: Path, monkeypatch) -> None:
     from spx_spark.application.order_map import delivery as delivery_module
 
@@ -4917,6 +4932,23 @@ def test_pin_stable_watch_text_is_observation_not_a_trade() -> None:
     assert "还早" not in text
     assert "14:50 ET" not in text
     assert "人工候选" not in text
+
+
+def test_desk_view_renders_pin_look_observation() -> None:
+    from spx_spark.application.order_map.desk_strategy_view import (
+        strategy_decision_desk_view,
+    )
+
+    now = datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc)
+    decision = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
+    decision["regime"]["terminal_state"] = "NONE"
+    decision["regime"]["pin"]["grade"] = "look"
+    decision["why_not"] = {"reasons": ["stop_distance_outside_atr_band"]}
+    text = strategy_decision_desk_view({"strategy_decision": decision})
+    assert text is not None
+    assert "观察 · 今日中轴 7785" in text
+    assert "11–13 可看今日蝶（观察，未到交易钉）" in text
+    assert "观察 · 稳定钉住" not in text
 
 
 def test_desk_view_renders_pin_stable_observation() -> None:

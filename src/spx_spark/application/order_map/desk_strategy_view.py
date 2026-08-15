@@ -11,6 +11,7 @@ from spx_spark.application.order_map.strategy_regime import (
     pin_stable_center,
     pin_stable_next_step_text,
     pin_stable_watch_phase,
+    pin_watch_center,
 )
 
 
@@ -58,18 +59,26 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     )
     if gth_session:
         return _gth_scan_desk_view(payload, decision, reasons)
-    pin_center = pin_stable_center(_mapping(decision.get("regime")))
+    regime = _mapping(decision.get("regime"))
+    pin_center = pin_watch_center(regime)
+    trade_center = pin_stable_center(regime)
     if watchable:
         conclusion = f"可看 · {strategy_candidate_label(candidate)}"
+    elif trade_center is not None:
+        conclusion = f"观察 · 稳定钉住 {trade_center:g}"
     elif pin_center is not None:
-        conclusion = f"观察 · 稳定钉住 {pin_center:g}"
+        conclusion = f"观察 · 今日中轴 {pin_center:g}"
     else:
         conclusion = "不做"
     primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
     if pin_center is not None and not watchable:
         facts = _mapping(decision.get("market_facts"))
         if pin_stable_watch_phase(finite_float(facts.get("minutes_to_close"))) == "look":
-            primary = "钉住已稳，11–13 可看今日蝶"
+            primary = (
+                "钉住已稳，11–13 可看今日蝶"
+                if trade_center is not None
+                else "11–13 可看今日蝶（观察，未到交易钉）"
+            )
     gth_no_trade = not watchable and gth_session
     nearest_line = (
         "无"

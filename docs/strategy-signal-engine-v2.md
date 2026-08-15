@@ -580,7 +580,17 @@ Transition 默认不交易，除非形成正式 Failed Break。
 
 必须在 11:00 ET 以后评估。
 
-硬条件：
+钉住分两档，不得混用：
+
+```text
+LOOK（观察）：RTH 11:00–13:00，未迁移，输入齐，本地 Q，至少 1 次 excursion-return
+TRADE（PIN_STABLE）：现有硬栈，进入仍要 2 次 excursion-return
+```
+
+LOOK 只发观察卡，不过 `butterfly_requires_pin_stable`，不能成为蝶式交易候选。
+TRADE 才允许枚举 STABLE_PIN 蝶。夜盘两档都不评蝶。
+
+硬条件（TRADE / PIN_STABLE）：
 
 ```text
 ER30 < 0.25
@@ -825,7 +835,8 @@ debit_fraction <= 0.40
 
 ```text
 最早 11:00 ET
-主要 11:00–13:00 与 14:50–15:30 ET
+11:00–13:00：LOOK 观察今日中轴；仅 TRADE（PIN_STABLE）可出 5 点蝶交易卡
+14:50–15:30：TRADE 尾盘窗（5 点 ≤70 分钟）
 15:30 后仅接受高置信、低成本候选
 ```
 

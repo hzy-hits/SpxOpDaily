@@ -29,9 +29,9 @@ from spx_spark.application.order_map.strategy_ranker import (
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     butterfly_max_entry_minutes,
-    pin_stable_center,
     pin_stable_next_step_text,
     pin_stable_watch_phase,
+    pin_watch_center,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.config import NotificationSettings
@@ -48,7 +48,7 @@ from spx_spark.notifier.model import NotificationEnvelope
 def enqueue_pin_stable_watch(
     decision: Mapping[str, Any], *, now: datetime
 ) -> dict[str, Any]:
-    """Send one session-deduped PIN_STABLE observation. Not a trade card."""
+    """Send one session-deduped LOOK/TRADE pin observation. Not a trade card."""
 
     regime = decision.get("regime") if isinstance(decision.get("regime"), dict) else {}
     facts = (
@@ -57,7 +57,7 @@ def enqueue_pin_stable_watch(
         else {}
     )
     session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
-    center = pin_stable_center(regime)
+    center = pin_watch_center(regime)
     session_date = str(decision.get("session_date") or facts.get("session_date") or "")
     if (
         center is None
@@ -92,7 +92,7 @@ def enqueue_pin_stable_watch(
             occurred_at=occurred_at,
             expires_at=expires_at,
         ),
-        title=f"SPX 观察 · 稳定钉住 {center:g}",
+        title=_pin_watch_title(regime, center),
         text=text,
         feishu_text=text,
         friend=True,
@@ -176,6 +176,13 @@ def enqueue_strategy_decision(
     return outcome
 
 
+def _pin_watch_title(regime: Mapping[str, Any], center: float) -> str:
+    pin = regime.get("pin") if isinstance(regime.get("pin"), dict) else {}
+    if str(pin.get("grade") or "") == "look" and regime.get("terminal_state") != "PIN_STABLE":
+        return f"SPX 观察 · 今日中轴 {center:g}"
+    return f"SPX 观察 · 稳定钉住 {center:g}"
+
+
 def _render_pin_stable_watch(
     decision: Mapping[str, Any],
     *,
@@ -210,9 +217,10 @@ def _render_pin_stable_watch(
             else "5 点蝶尾盘门暂缺"
         )
     depin_text = f"{depin:.2f}" if depin is not None else "暂缺"
+    heading = _pin_watch_title(regime, center)
     return "\n".join(
         (
-            f"【SPX 观察 · 稳定钉住 {center:g}】",
+            f"【{heading}】",
             "",
             "## 结论",
             conclusion,

@@ -29,12 +29,16 @@ __all__ = (
     "pin_stable_center",
     "pin_stable_next_step_text",
     "pin_stable_watch_phase",
+    "pin_watch_center",
 )
 
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v26"
+    policy_version: str = "strategy_policy.bootstrap.v27"
+    # v27: PIN splits LOOK vs TRADE. LOOK (11:00–13:00, 1 excursion, not
+    # migrating) is observation only and never authorizes a butterfly card.
+    # TRADE remains PIN_STABLE with the existing hard stack (2 excursions).
     # v26: PIN alignment uses the local 5pt mass peak, not the global density
     # argmax. The previous peak sticks when it is still a top-2 local mass
     # center and within 5 points of the current local peak.
@@ -123,6 +127,7 @@ class StrategyPolicy:
     pin_stable_max_minutes_to_close: float = 300.0
     pin_stable_enter_min_excursions: int = 2
     pin_stable_hold_min_excursions: int = 1
+    pin_look_min_excursions: int = 1
     pin_q_mode_hold_max_distance_points: float = 5.0
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
@@ -216,7 +221,21 @@ def pin_stable_center(regime: Mapping[str, Any] | None) -> float | None:
     payload = _map(regime)
     if payload.get("terminal_state") != "PIN_STABLE":
         return None
-    ranked = _map(payload.get("pin")).get("top_centers") or ()
+    return _pin_top_center(payload)
+
+
+def pin_watch_center(regime: Mapping[str, Any] | None) -> float | None:
+    """Observation body for LOOK or TRADE pin. Never a trade authorization."""
+
+    payload = _map(regime)
+    grade = str(_map(payload.get("pin")).get("grade") or "")
+    if payload.get("terminal_state") != "PIN_STABLE" and grade != "look":
+        return None
+    return _pin_top_center(payload)
+
+
+def _pin_top_center(regime: Mapping[str, Any]) -> float | None:
+    ranked = _map(regime.get("pin")).get("top_centers") or ()
     if not isinstance(ranked, (list, tuple)) or not ranked:
         return None
     return _number(_map(ranked[0]).get("center"))
@@ -543,7 +562,29 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
         and float(vix) <= 0.01 and not extreme and aligned
         and float(decay) > 0 and depin < stable_risk
     )
-    terminal = "PIN_MIGRATING" if migrating or depin >= block_risk else "PIN_STABLE" if stable else "NONE"
+    gth = str(_map(facts.get("session")).get("mode") or "").strip().lower() == "gth"
+    in_look_window = (
+        minutes_to_close is not None
+        and policy.butterfly_five_wide_look_min_minutes
+        <= float(minutes_to_close)
+        <= policy.butterfly_five_wide_look_max_minutes
+    )
+    look = (
+        not gth
+        and not migrating
+        and depin < block_risk
+        and excursions >= policy.pin_look_min_excursions
+        and in_look_window
+        and q_mode is not None
+    )
+    if migrating or depin >= block_risk:
+        terminal, grade = "PIN_MIGRATING", "migrating"
+    elif stable:
+        terminal, grade = "PIN_STABLE", "stable"
+    elif look:
+        terminal, grade = "NONE", "look"
+    else:
+        terminal, grade = "NONE", "none"
     return {
         "terminal_state": terminal,
         "depin_risk": round(depin, 4),
@@ -552,6 +593,7 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
         "recent_extreme_acceptance": extreme,
         "q_mode": q_mode,
         "q_mode_source": q_mode_source,
+        "grade": grade,
         "excursion_held": bool(held and stable and excursions < policy.pin_stable_enter_min_excursions),
         "top_centers": ranked[:3],
     }

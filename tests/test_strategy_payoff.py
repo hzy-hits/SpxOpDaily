@@ -29,7 +29,9 @@ from spx_spark.application.order_map.strategy_regime import (
     assess_regime,
     butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
+    pin_stable_center,
     pin_stable_watch_phase,
+    pin_watch_center,
 )
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
@@ -341,7 +343,78 @@ def test_pin_stable_may_assess_from_1100_et() -> None:
     at_open = {**_frozen_pin_facts("2026-08-06"), "minutes_to_close": 300}
     before_open = {**_frozen_pin_facts("2026-08-06"), "minutes_to_close": 301}
     assert assess_regime(at_open)["terminal_state"] == "PIN_STABLE"
+    assert assess_regime(at_open)["pin"]["grade"] == "stable"
     assert assess_regime(before_open)["terminal_state"] == "NONE"
+
+
+def _look_pin_facts() -> dict[str, object]:
+    base = _frozen_pin_facts("2026-08-06")
+    return {
+        **base,
+        "session": {"mode": "rth", "legal": True},
+        "minutes_to_close": 201,
+        "path": {
+            **base["path"],
+            "efficiency_ratio_30m": 0.33,
+            "pin_path_spx": [7710.0, 7716.0, 7710.2, 7711.0],
+        },
+    }
+
+
+def test_pin_look_survives_er_above_trade_gate() -> None:
+    regime = assess_regime(_look_pin_facts())
+    assert regime["terminal_state"] == "NONE"
+    assert regime["pin"]["grade"] == "look"
+    assert pin_watch_center(regime) == 7710.0
+    assert pin_stable_center(regime) is None
+
+
+def test_pin_look_requires_one_excursion() -> None:
+    facts = _look_pin_facts()
+    facts["path"] = {**facts["path"], "pin_path_spx": [7710.0, 7710.4, 7711.0, 7710.2]}
+    regime = assess_regime(facts)
+    assert regime["terminal_state"] == "NONE"
+    assert regime["pin"]["grade"] == "none"
+    assert pin_watch_center(regime) is None
+
+
+def test_pin_look_skips_gth() -> None:
+    facts = {**_look_pin_facts(), "session": {"mode": "gth", "legal": True}}
+    regime = assess_regime(facts)
+    assert regime["pin"]["grade"] == "none"
+    assert pin_watch_center(regime) is None
+
+
+def test_pin_look_does_not_authorize_butterfly_trade() -> None:
+    now = datetime(2026, 8, 6, 16, 38, tzinfo=timezone.utc)
+    regime = assess_regime(_look_pin_facts())
+    rank = rank_candidates(
+        [_stable_pin_butterfly(center=7710.0, width=5.0, right="P", debit=1.3)],
+        _ranker_pin_facts({"minutes_to_close": 201, "spot": {"spx": 7710.0}}),
+        regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_requires_pin_stable" in gates
+
+
+def test_pin_trade_still_needs_two_excursions_in_look_window() -> None:
+    base = _frozen_pin_facts("2026-08-06")
+    facts = {
+        **base,
+        "minutes_to_close": 201,
+        "path": {
+            **base["path"],
+            "pin_path_spx": [7710.0, 7716.0, 7710.2, 7711.0],
+        },
+    }
+    regime = assess_regime(facts)
+    assert regime["terminal_state"] == "NONE"
+    assert regime["pin"]["grade"] == "look"
 
 
 def test_globex_hmm_publishes_cross_state_not_path() -> None:
@@ -376,7 +449,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v26"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v27"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -754,7 +827,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v26"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v27"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
