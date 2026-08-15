@@ -452,7 +452,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v32"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v33"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -830,7 +830,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v32"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v33"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -2291,6 +2291,90 @@ def test_es_volume_momentum_flip_allowed_when_hmm_trend_aligns() -> None:
 
     assert decision["regime"]["path_state"] == "TREND"
     assert decision["regime"]["path_direction"] == "UP"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+
+
+def test_es_volume_momentum_add_needs_hmm_trend() -> None:
+    now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["session_committed_direction"] = "UP"
+    payload["minute_market_frame"]["es"]["return_5m_points"] = 6.0
+    _attach_cash_hmm(payload, now, state_00=0.22, state_01=0.40, state_02=0.38)
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["path_state"] != "TREND"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert (
+        decision["why_not"]["primary_blocker"]
+        == "es_volume_momentum_add_needs_new_impulse"
+    )
+
+
+def test_es_volume_momentum_add_needs_stronger_5m_impulse() -> None:
+    now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["session_committed_direction"] = "UP"
+    # default |5m|/ATR = 1.2 / 10 = 0.12, below the 0.50 add floor
+    _attach_cash_hmm(payload, now, state_00=0.10, state_01=0.18, state_02=0.72)
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["path_state"] == "TREND"
+    assert decision["regime"]["path_direction"] == "UP"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert (
+        decision["why_not"]["primary_blocker"]
+        == "es_volume_momentum_add_needs_new_impulse"
+    )
+
+
+def test_es_volume_momentum_add_allowed_on_new_impulse() -> None:
+    now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["session_committed_direction"] = "UP"
+    payload["minute_market_frame"]["es"]["return_5m_points"] = 6.0
+    _attach_cash_hmm(payload, now, state_00=0.10, state_01=0.18, state_02=0.72)
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["path_state"] == "TREND"
+    assert decision["regime"]["path_direction"] == "UP"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+
+
+def test_es_volume_momentum_post_event_blocks_after_open_grace() -> None:
+    now = datetime(2026, 8, 13, 13, 39, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["trading_date"] = "2026-08-13"
+    payload["macro_event"] = {
+        "mode": "post_event",
+        "entry_allowed": True,
+        "active_event": {"id": "us-cpi-2026-08-12", "phase": "post_event"},
+    }
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["event_state"] == "POST_EVENT_DISCOVERY"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_post_event"
+
+
+def test_es_volume_momentum_post_event_allows_first_minutes_after_open() -> None:
+    now = datetime(2026, 8, 13, 13, 33, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["trading_date"] = "2026-08-13"
+    payload["macro_event"] = {
+        "mode": "post_event",
+        "entry_allowed": True,
+        "active_event": {"id": "us-ppi-2026-08-13", "phase": "post_event"},
+    }
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["event_state"] == "POST_EVENT_DISCOVERY"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 

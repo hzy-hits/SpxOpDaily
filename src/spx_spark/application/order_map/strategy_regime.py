@@ -41,7 +41,14 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v32"
+    policy_version: str = "strategy_policy.bootstrap.v33"
+    # v33: same-direction RTH adds need a new impulse (cash HMM TREND the
+    # same way and |5m|/ATR5m at least es_momentum_add_min_return_5m_atr).
+    # POST_EVENT_DISCOVERY blocks ES_VOLUME_MOMENTUM after the RTH open
+    # grace, so CPI/PPI leftover fades do not print. The first few minutes
+    # after the cash open may still print a first card (PPI 08-13 09:33
+    # vs CPI 08-12 09:39). entry_allowed stays true in post_event so
+    # event-settlement is not collateral damage.
     # v32: ES_VOLUME_MOMENTUM stays the only RTH directional setup. The first
     # card does not wait for TREND or a pullback. Cash HMM TREND opposite
     # blocks a first print. A session that already printed the opposite RTH
@@ -154,6 +161,8 @@ class StrategyPolicy:
     es_momentum_min_return_5m: float = 1.0
     es_momentum_max_return_5m_atr: float = 1.50
     es_momentum_max_progress: float = 0.50
+    es_momentum_add_min_return_5m_atr: float = 0.50
+    es_momentum_post_event_open_grace_minutes: float = 8.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
     pin_stable_max_minutes_to_close: float = 300.0
     pin_stable_enter_min_excursions: int = 2

@@ -21,6 +21,7 @@ from spx_spark.analytics.options.strategy_payoff import (
 from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.application.market_features.session_quote_selection import provider_quote
 from spx_spark.application.order_map.strategy_regime import (
+    DEFAULT_STRATEGY_POLICY,
     StrategyPolicy,
     hmm_owns_trend_direction,
     pin_blocks_directional_spreads,
@@ -92,7 +93,9 @@ def candidate_generation_reasons(
         capability_reasons = _capability_reasons(facts, "vertical")
         if capability_reasons:
             return capability_reasons
-        _, reasons = _rth_evidences(payload, facts, regime, latest)
+        _, reasons = _rth_evidences(
+            payload, facts, regime, latest, now=now, policy=policy
+        )
         if reasons:
             return reasons
         frame = _map(payload.get("option_structure_frame"))
@@ -146,7 +149,9 @@ def _vertical_candidates(
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         if _capability_reasons(facts, "vertical"):
             return []
-        evidences, _ = _rth_evidences(payload, facts, regime, latest)
+        evidences, _ = _rth_evidences(
+            payload, facts, regime, latest, now=now, policy=policy
+        )
         if not evidences:
             return []
         rows = []
@@ -447,17 +452,52 @@ def _momentum_clarity_block(
     direction: str,
     regime: Mapping[str, Any],
     facts: Mapping[str, Any],
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
 ) -> str | None:
-    """Block unclear first prints and unconfirmed RTH direction flips."""
+    """Block unclear first prints, weak same-way adds, and unconfirmed flips."""
 
     committed = str(facts.get("session_committed_direction") or "").upper()
     hmm_trend = hmm_owns_trend_direction(regime)
     if committed in {"UP", "DOWN"} and committed != direction:
         if hmm_trend != direction:
             return "es_volume_momentum_flip_needs_hmm_trend"
+    if committed in {"UP", "DOWN"} and committed == direction:
+        path = _map(facts.get("path"))
+        ret5 = _number(path.get("return_5m_points"))
+        atr = _number(path.get("atr_5m"))
+        if hmm_trend != direction:
+            return "es_volume_momentum_add_needs_new_impulse"
+        if ret5 is None or atr is None or atr <= 0:
+            return "es_volume_momentum_add_needs_new_impulse"
+        if abs(ret5) / atr < policy.es_momentum_add_min_return_5m_atr:
+            return "es_volume_momentum_add_needs_new_impulse"
     if hmm_trend is not None and hmm_trend != direction:
         return "es_volume_momentum_hmm_opposes"
     return None
+
+
+def _rth_minutes_open(now: datetime) -> float | None:
+    day = DEFAULT_MARKET_CALENDAR.spx_session_date_for(now)
+    if day is None:
+        return None
+    window = DEFAULT_MARKET_CALENDAR.spx_session_window(day)
+    if window is None:
+        return None
+    return (_utc(now) - window.rth_open.astimezone(timezone.utc)).total_seconds() / 60.0
+
+
+def _post_event_blocks_momentum(
+    regime: Mapping[str, Any],
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> bool:
+    if str(regime.get("event_state") or "") != "POST_EVENT_DISCOVERY":
+        return False
+    minutes_open = _rth_minutes_open(now)
+    if minutes_open is None:
+        return True
+    return minutes_open >= policy.es_momentum_post_event_open_grace_minutes
 
 
 def _rth_evidences(
@@ -465,6 +505,9 @@ def _rth_evidences(
     facts: Mapping[str, Any],
     regime: Mapping[str, Any],
     latest: LatestState,
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     bases: list[dict[str, Any]] = []
     reasons: list[str] = []
@@ -475,6 +518,9 @@ def _rth_evidences(
     pin_blocks = pin_blocks_directional_spreads(regime)
     if pin_blocks:
         reasons.append("directional_spread_blocked_by_pin_watch")
+    post_event_blocks = _post_event_blocks_momentum(regime, now=now, policy=policy)
+    if post_event_blocks:
+        reasons.append("es_volume_momentum_post_event")
     clarity_blocks: list[str] = []
     for setup in momentum_setups:
         if setup.get("state") != "ENTRY_WINDOW_OPEN":
@@ -482,9 +528,9 @@ def _rth_evidences(
         direction = _direction(setup.get("direction"))
         if not direction:
             continue
-        if pin_blocks:
+        if pin_blocks or post_event_blocks:
             continue
-        clarity = _momentum_clarity_block(direction, regime, facts)
+        clarity = _momentum_clarity_block(direction, regime, facts, policy)
         if clarity:
             clarity_blocks.append(clarity)
             continue
@@ -498,7 +544,7 @@ def _rth_evidences(
                 "source": setup.get("source") or "es_volume_momentum",
             }
         )
-    if not bases and not pin_blocks:
+    if not bases and not pin_blocks and not post_event_blocks:
         if clarity_blocks:
             reasons.append(clarity_blocks[0])
         elif not momentum_setups:
