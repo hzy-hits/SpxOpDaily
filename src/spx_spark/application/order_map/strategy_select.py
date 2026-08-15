@@ -33,7 +33,7 @@ from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     StrategyPolicy,
     assess_regime,
-    butterfly_max_entry_minutes,
+    pin_stable_next_step_text,
 )
 from spx_spark.application.order_map.strategy_ranker import (
     RankResult,
@@ -330,12 +330,7 @@ def _no_trade_decision(
     )
     refresh = "刷新 SPXW 两腿双边报价后重新计算" if "quote_refresh_required" in reasons else "等待价格触发、结构赔率和执行价格同时通过"
     if regime.get("terminal_state") == "PIN_STABLE":
-        minutes = _number(facts.get("minutes_to_close"))
-        limit = butterfly_max_entry_minutes(5.0, DEFAULT_STRATEGY_POLICY)
-        if minutes is not None and limit is not None and minutes > limit:
-            refresh = f"钉住已观察；等距收盘 ≤{limit:g} 分钟后再评估 5 点限价蝶"
-        else:
-            refresh = "钉住已进入 5 点蝶时钟，等待精确三腿报价与赔率"
+        refresh = pin_stable_next_step_text(_number(facts.get("minutes_to_close")))
     result.update({
         "available_at": available,
         "geometry_source": _decision_geometry_source(shadow),

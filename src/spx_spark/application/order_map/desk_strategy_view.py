@@ -8,9 +8,9 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.state import current_session_is_gth
 from spx_spark.application.order_map.strategy_regime import (
-    DEFAULT_STRATEGY_POLICY,
-    butterfly_max_entry_minutes,
     pin_stable_center,
+    pin_stable_next_step_text,
+    pin_stable_watch_phase,
 )
 
 
@@ -66,8 +66,10 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     else:
         conclusion = "不做"
     primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
-    if pin_center is not None and not watchable and not reasons:
-        primary = "钉住已稳，等待 5 点蝶时钟与精确三腿报价"
+    if pin_center is not None and not watchable:
+        facts = _mapping(decision.get("market_facts"))
+        if pin_stable_watch_phase(finite_float(facts.get("minutes_to_close"))) == "look":
+            primary = "钉住已稳，11–13 可看今日蝶"
     gth_no_trade = not watchable and gth_session
     nearest_line = (
         "无"
@@ -431,11 +433,7 @@ def _pin_stable_next_step(
     if pin_center is None:
         return None
     facts = _mapping(decision.get("market_facts"))
-    minutes = finite_float(facts.get("minutes_to_close"))
-    limit = butterfly_max_entry_minutes(5.0, DEFAULT_STRATEGY_POLICY)
-    if minutes is not None and limit is not None and minutes > limit:
-        return f"等距收盘 ≤{limit:g} 分钟后再评估 5 点限价蝶"
-    return "钉住已进入 5 点蝶时钟，等待精确三腿报价与赔率"
+    return pin_stable_next_step_text(finite_float(facts.get("minutes_to_close")))
 
 
 def _failed_gate_codes(nearest: Mapping[str, Any], reasons: list[str]) -> list[str]:

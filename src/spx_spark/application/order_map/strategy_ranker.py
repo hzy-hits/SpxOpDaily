@@ -21,6 +21,7 @@ from spx_spark.application.market_features.physical_followthrough import (
 )
 from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
+    butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
@@ -663,11 +664,20 @@ def _rth_butterfly_pin_location_gates(
         })
     minutes = _number(facts.get("minutes_to_close"))
     max_minutes = butterfly_max_entry_minutes(width, policy)
-    if minutes is None or max_minutes is None or minutes > max_minutes:
+    if not butterfly_entry_clock_open(width, minutes, policy):
+        threshold: float | dict[str, float | None]
+        if width == 5.0:
+            threshold = {
+                "late_max_minutes": max_minutes,
+                "look_min_minutes": policy.butterfly_five_wide_look_min_minutes,
+                "look_max_minutes": policy.butterfly_five_wide_look_max_minutes,
+            }
+        else:
+            threshold = max_minutes
         gates.append({
             "gate": "butterfly_entry_too_early",
             "actual": minutes,
-            "threshold": max_minutes,
+            "threshold": threshold,
         })
     remaining = _number(_map(facts.get("volatility")).get("expected_move_points"))
     structure = _map(facts.get("structure"))

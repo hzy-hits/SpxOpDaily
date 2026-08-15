@@ -27,6 +27,7 @@ from spx_spark.application.order_map.strategy_facts import build_market_fact_pac
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     assess_regime,
+    butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
     pin_stable_watch_phase,
 )
@@ -243,7 +244,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v22"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v23"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -621,7 +622,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v22"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v23"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1561,9 +1562,31 @@ def test_butterfly_clock_slack_is_five_wide_only() -> None:
     assert butterfly_max_entry_minutes(5.0, policy) == 70.0
     assert butterfly_max_entry_minutes(10.0, policy) == 120.0
     assert butterfly_max_entry_minutes(15.0, policy) == 180.0
-    assert pin_stable_watch_phase(90.0, policy) == "early"
+    assert butterfly_entry_clock_open(5.0, 201.0, policy) is True
+    assert butterfly_entry_clock_open(5.0, 180.0, policy) is True
+    assert butterfly_entry_clock_open(5.0, 300.0, policy) is True
+    assert butterfly_entry_clock_open(5.0, 90.0, policy) is False
+    assert butterfly_entry_clock_open(5.0, 150.0, policy) is False
+    assert butterfly_entry_clock_open(5.0, 66.0, policy) is True
+    assert butterfly_entry_clock_open(10.0, 201.0, policy) is False
+    assert pin_stable_watch_phase(201.0, policy) == "look"
+    assert pin_stable_watch_phase(90.0, policy) == "wait"
     assert pin_stable_watch_phase(66.0, policy) == "clock_open"
     assert pin_stable_watch_phase(70.0, policy) == "clock_open"
+
+
+def test_pin_stable_five_wide_look_window_allows_1238_et() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7786.0},
+            "minutes_to_close": 201,
+            "volatility": {"expected_move_points": 12.0},
+            "structure": {"q_mode": 7785.0, "put_wall": 7785.0, "call_wall": 7785.0},
+            "value_center": {"spx_30m": 7786.0},
+        },
+        _stable_pin_butterfly(center=7785.0, width=5.0, right="P", debit=1.3),
+    )
+    assert [row["center"] for row in rank.passed] == [7785.0]
 
 
 def test_pin_stable_five_wide_allows_ten_minute_clock_slack() -> None:

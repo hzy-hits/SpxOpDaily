@@ -24,23 +24,26 @@ __all__ = (
     "PIN_BUTTERFLY_MANAGEMENT_POLICY",
     "StrategyPolicy",
     "assess_regime",
+    "butterfly_entry_clock_open",
     "butterfly_max_entry_minutes",
     "pin_stable_center",
+    "pin_stable_next_step_text",
     "pin_stable_watch_phase",
 )
 
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v22"
+    policy_version: str = "strategy_policy.bootstrap.v23"
+    # v23: 5-wide PIN_STABLE has two clocks. 11:00–13:00 ET is the look
+    # window (12:38 must not be labeled too-early). 14:50 ET slack (≤70)
+    # remains the late pin window. 14:30 leftover of 90 minutes stays closed.
+    # 10-wide and wider keep 12 min/point. No dwell/hold gate: 2026-08-14
+    # PIN_STABLE flickered as single-cycle hits.
     # v22: FAILED_BREAK_RECLAIM windows close at 50% trigger→target progress
     # (session-episode and entry quality). TREND_PULLBACK Late Chase stays 60%.
     # PIN_STABLE 5-wide flies get 10 minutes of clock slack so 14:50–15:00 ET
     # is not a false early veto; 10-wide and wider keep 12 min/point.
-    # 2026-08-14: PIN_STABLE flickered (single-cycle hits at 12:38 / 14:51 /
-    # 14:53 / 14:55). A dwell/relaxation hold would have blocked the 14:53
-    # 7785 5-wide. Do not add a persist-N-minutes gate. First latch and
-    # clock-open PIN_STABLE are observation cards, not a new payoff.
     # v21: Butterflies are RTH-only (STABLE_PIN). GTH ATM flies are not
     # enumerated or human-authoritative; night path is too hard to pin.
     # v20: GTH winner stick and delivery direction lock only count cards the
@@ -120,6 +123,9 @@ class StrategyPolicy:
     butterfly_max_risk_usd: float = 1000.0
     butterfly_minutes_per_width_point: float = 12.0
     butterfly_five_wide_early_slack_minutes: float = 10.0
+    # 11:00–13:00 ET look window, expressed as minutes remaining to 16:00.
+    butterfly_five_wide_look_max_minutes: float = 300.0
+    butterfly_five_wide_look_min_minutes: float = 180.0
     butterfly_unresolved_wall_em_multiple: float = 1.5
     # v5: debit vertical short strike may not pass the target, and width may
     # not exceed remaining 0DTE expected move. Missing EM fails closed.
@@ -152,11 +158,11 @@ DEFAULT_STRATEGY_POLICY = StrategyPolicy()
 def butterfly_max_entry_minutes(
     width: float | None, policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY
 ) -> float | None:
-    """Latest remaining minutes that may still authorize a pin butterfly.
+    """Late-window remaining minutes that may still authorize a pin butterfly.
 
     5-wide adds ``butterfly_five_wide_early_slack_minutes`` (70 at the
     default 12 min/point). Wider tents stay on the raw 12 min/point clock.
-    Midday leftover of 90 minutes stays closed for a 5-wide.
+    The 11:00–13:00 look window is a separate 5-wide opening, not this cap.
     """
 
     if width is None or width <= 0:
@@ -165,6 +171,32 @@ def butterfly_max_entry_minutes(
     if width == 5.0:
         minutes += policy.butterfly_five_wide_early_slack_minutes
     return minutes
+
+
+def butterfly_entry_clock_open(
+    width: float | None,
+    minutes_to_close: float | None,
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> bool:
+    """True when the pin-fly clock allows this width to be ranked.
+
+    5-wide: 11:00–13:00 ET look window, or the late slack window (≤70).
+    A leftover of 90 minutes (about 14:30 ET) stays closed. Wider tents
+    use only the 12 min/point late clock.
+    """
+
+    if minutes_to_close is None or width is None or width <= 0:
+        return False
+    late = butterfly_max_entry_minutes(width, policy)
+    if late is not None and minutes_to_close <= late:
+        return True
+    if width != 5.0:
+        return False
+    return (
+        policy.butterfly_five_wide_look_min_minutes
+        <= minutes_to_close
+        <= policy.butterfly_five_wide_look_max_minutes
+    )
 
 
 def pin_stable_center(regime: Mapping[str, Any] | None) -> float | None:
@@ -183,12 +215,33 @@ def pin_stable_watch_phase(
     minutes_to_close: float | None,
     policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
 ) -> str:
-    """Split the first PIN_STABLE latch from the 5-wide clock-open reprint."""
+    """Look-window latch, late clock-open, or the 13:00–14:50 wait gap."""
 
-    limit = butterfly_max_entry_minutes(5.0, policy)
-    if minutes_to_close is None or limit is None or minutes_to_close > limit:
-        return "early"
-    return "clock_open"
+    late = butterfly_max_entry_minutes(5.0, policy)
+    if late is not None and minutes_to_close is not None and minutes_to_close <= late:
+        return "clock_open"
+    if minutes_to_close is not None and (
+        policy.butterfly_five_wide_look_min_minutes
+        <= minutes_to_close
+        <= policy.butterfly_five_wide_look_max_minutes
+    ):
+        return "look"
+    return "wait"
+
+
+def pin_stable_next_step_text(
+    minutes_to_close: float | None,
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> str:
+    phase = pin_stable_watch_phase(minutes_to_close, policy)
+    if phase == "look":
+        return "11–13 可看今日蝶；5 点限价已开窗，提交前刷新三腿报价"
+    if phase == "clock_open":
+        return "5 点蝶尾盘时钟已开，等待精确三腿报价与赔率"
+    late = butterfly_max_entry_minutes(5.0, policy)
+    if late is None:
+        return "午盘看蝶窗已过，等待 5 点蝶尾盘时钟"
+    return f"午盘看蝶窗已过；5 点限价等距收盘 ≤{late:g} 分钟（约 14:50 ET）"
 
 
 HMM_STATE_DIRECTION = {

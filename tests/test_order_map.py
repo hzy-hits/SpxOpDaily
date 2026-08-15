@@ -4851,21 +4851,21 @@ def test_pin_stable_watch_enqueues_once_per_center_and_clock_phase(
     now = datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc)
     settings = make_settings(str(tmp_path / "pin-stable.json"))
     monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
-    early = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
-    first = delivery_module.enqueue_pin_stable_watch(early, now=now)
+    look = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
+    first = delivery_module.enqueue_pin_stable_watch(look, now=now)
     second = delivery_module.enqueue_pin_stable_watch(
-        early, now=now + timedelta(seconds=20)
+        look, now=now + timedelta(seconds=20)
     )
     assert first["accepted"] is True
     assert first["inserted"] is True
-    assert first["event_id"] == "pin-stable:2026-08-14:7785:early"
+    assert first["event_id"] == "pin-stable:2026-08-14:7785:look"
     assert first["targets"] == ["feishu"]
     assert second == {
         "accepted": True,
         "inserted": False,
         "duplicate": True,
         "outcome": "outbox_already_accepted",
-        "event_id": "pin-stable:2026-08-14:7785:early",
+        "event_id": "pin-stable:2026-08-14:7785:look",
     }
     clock_at = datetime(2026, 8, 14, 18, 51, tzinfo=timezone.utc)
     clock_open = _pin_stable_decision(
@@ -4910,13 +4910,13 @@ def test_pin_stable_watch_text_is_observation_not_a_trade() -> None:
         ),
         center=7785.0,
         minutes=201.0,
-        phase="early",
+        phase="look",
     )
     assert "【SPX 观察 · 稳定钉住 7785】" in text
-    assert "不授权下单" in text
-    assert "14:50 ET" in text
+    assert "11–13 可看今日蝶" in text
+    assert "还早" not in text
+    assert "14:50 ET" not in text
     assert "人工候选" not in text
-    assert "只许限价" not in text
 
 
 def test_desk_view_renders_pin_stable_observation() -> None:
@@ -4928,20 +4928,20 @@ def test_desk_view_renders_pin_stable_observation() -> None:
     decision = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
     decision["why_not"] = {
         "reasons": ["butterfly_entry_too_early"],
-        "reauthorize_on": "钉住已观察；等距收盘 ≤70 分钟后再评估 5 点限价蝶",
+        "reauthorize_on": "11–13 可看今日蝶；5 点限价已开窗，提交前刷新三腿报价",
         "nearest_candidate": {
             "setup_kind": "STABLE_PIN",
             "strategy_type": "PUT_BUTTERFLY",
             "center": 7785.0,
             "width": 5.0,
-            "failed_gates": [{"gate": "butterfly_entry_too_early"}],
+            "failed_gates": [{"gate": "butterfly_debit_fraction"}],
         },
     }
     text = strategy_decision_desk_view({"strategy_decision": decision})
     assert text is not None
     assert "观察 · 稳定钉住 7785" in text
-    assert "距收盘过早，窄翼蝶式尚未授权" in text
-    assert "等距收盘 ≤70 分钟后再评估 5 点限价蝶" in text
+    assert "11–13 可看今日蝶" in text
+    assert "距收盘过早，窄翼蝶式尚未授权" not in text
 
 
 def _pin_stable_decision(

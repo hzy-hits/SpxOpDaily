@@ -30,6 +30,7 @@ from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     butterfly_max_entry_minutes,
     pin_stable_center,
+    pin_stable_next_step_text,
     pin_stable_watch_phase,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
@@ -191,26 +192,37 @@ def _render_pin_stable_watch(
         if minutes is not None
         else "距收盘暂缺"
     )
-    if phase == "clock_open":
-        next_step = "钉住已进入 5 点蝶时钟，等待精确三腿报价与赔率后再评估限价蝶"
-    elif limit is not None:
-        next_step = f"等距收盘 ≤{limit:g} 分钟（约 14:50 ET）后再评估 5 点限价蝶"
+    if phase == "look":
+        conclusion = f"钉住中心 {center:g} · 11–13 可看今日蝶 · 不自动下单"
+        clock_line = "5 点蝶午盘窗 11:00–13:00 ET"
+    elif phase == "clock_open":
+        conclusion = f"钉住中心 {center:g} · 尾盘 5 点蝶时钟已开 · 不自动下单"
+        clock_line = (
+            f"5 点蝶尾盘门 ≤{limit:g} 分钟"
+            if limit is not None
+            else "5 点蝶尾盘门暂缺"
+        )
     else:
-        next_step = "等待 5 点蝶时钟开门后再评估限价蝶"
+        conclusion = f"钉住中心 {center:g} · 午盘看蝶窗已过 · 不自动下单"
+        clock_line = (
+            f"5 点蝶尾盘门 ≤{limit:g} 分钟（约 14:50 ET）"
+            if limit is not None
+            else "5 点蝶尾盘门暂缺"
+        )
     depin_text = f"{depin:.2f}" if depin is not None else "暂缺"
     return "\n".join(
         (
             f"【SPX 观察 · 稳定钉住 {center:g}】",
             "",
             "## 结论",
-            f"钉住中心 {center:g} · 不授权下单",
+            conclusion,
             "",
             "## 结构",
             f"{clock} · De-pin {depin_text}",
-            f"5 点蝶时钟门 ≤{limit:g} 分钟" if limit is not None else "5 点蝶时钟门暂缺",
+            clock_line,
             "",
             "## 下一步",
-            next_step,
+            pin_stable_next_step_text(minutes, DEFAULT_STRATEGY_POLICY),
             "",
             "## 数据",
             "不下自动单 · 人工观察",
