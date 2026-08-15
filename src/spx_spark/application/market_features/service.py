@@ -645,6 +645,9 @@ def run(
         "experimental_research_signals": load_json(
             latest_root / "experimental_research_signals.json"
         ),
+        "previous_strategy_decision": load_json(
+            latest_root / "strategy_decision.json"
+        ),
         "candidates": [],
     }
     strategy_decision = build_strategy_decision(

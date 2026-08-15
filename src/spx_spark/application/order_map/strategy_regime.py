@@ -34,7 +34,9 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v24"
+    policy_version: str = "strategy_policy.bootstrap.v25"
+    # v25: PIN_STABLE hold does not drop on a 2→1 excursion flicker, and a
+    # far-OTM Q-mode spike is replaced by the local 5pt mass peak.
     # v24: PIN_STABLE may be assessed from 11:00 ET (300 minutes to close),
     # matching the 5-wide look window. The old 12:30 / 210-minute floor is gone.
     # v23: 5-wide PIN_STABLE has two clocks. 11:00–13:00 ET is the look
@@ -116,6 +118,9 @@ class StrategyPolicy:
     late_chase_impulse_atr: float = 1.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
     pin_stable_max_minutes_to_close: float = 300.0
+    pin_stable_enter_min_excursions: int = 2
+    pin_stable_hold_min_excursions: int = 1
+    pin_q_mode_max_center_distance_points: float = 15.0
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
     hmm_trend_min_probability: float = 0.55
@@ -483,6 +488,7 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
     closes = [float(value) for value in path.get("pin_path_spx") or () if isinstance(value, int | float)]
     breadth = _number(path.get("breadth_above_vwap"))
     vix = _number(vol.get("vix_return_15m_pct"))
+    q_mode, q_mode_source = _sanitized_q_mode(q_mode, vc30, mass, policy)
     required = (er, vc15, vc30, vc60, q_mode, decay, breadth, vix)
     if None in required or len(closes) < 4 or not mass:
         return {"terminal_state": "UNCERTAIN", "reason": "pin_inputs_unavailable", "top_centers": []}
@@ -521,17 +527,85 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
     migrating = abs(drift30) > migrate30 or abs(drift60) > migrate60 or float(er) > 0.40 or extreme
     aligned = gamma is not None and max(float(q_mode), float(vc30), gamma) - min(float(q_mode), float(vc30), gamma) <= 5
     minutes_to_close = facts.get("minutes_to_close")
+    excursions = max(returns.values(), default=0)
+    held = _pin_stable_hold(facts, returns, policy)
     stable = (
         minutes_to_close is not None
         and int(minutes_to_close) <= policy.pin_stable_max_minutes_to_close
         and float(er) < er_max and abs(drift30) <= drift30_max and abs(drift60) <= drift60_max
-        and max(returns.values(), default=0) >= 2 and float(vix) <= 0.01 and not extreme and aligned
+        and (
+            excursions >= policy.pin_stable_enter_min_excursions
+            or (held and excursions >= policy.pin_stable_hold_min_excursions)
+        )
+        and float(vix) <= 0.01 and not extreme and aligned
         and float(decay) > 0 and depin < stable_risk
     )
     terminal = "PIN_MIGRATING" if migrating or depin >= block_risk else "PIN_STABLE" if stable else "NONE"
-    return {"terminal_state": terminal, "depin_risk": round(depin, 4), "drift_30m": round(drift30, 2),
-            "drift_60m": round(drift60, 2), "recent_extreme_acceptance": extreme,
-            "top_centers": ranked[:3]}
+    return {
+        "terminal_state": terminal,
+        "depin_risk": round(depin, 4),
+        "drift_30m": round(drift30, 2),
+        "drift_60m": round(drift60, 2),
+        "recent_extreme_acceptance": extreme,
+        "q_mode_source": q_mode_source,
+        "excursion_held": bool(held and stable and excursions < policy.pin_stable_enter_min_excursions),
+        "top_centers": ranked[:3],
+    }
+
+
+def _sanitized_q_mode(
+    q_mode: float | None,
+    value_center: float | None,
+    mass: Mapping[str, Any],
+    policy: StrategyPolicy,
+) -> tuple[float | None, str]:
+    """Replace a far-OTM density spike with the local 5-point mass peak."""
+
+    local = _mass_mode(mass)
+    if q_mode is None:
+        return local, "local_mass" if local is not None else "missing"
+    if (
+        value_center is not None
+        and abs(q_mode - value_center) > policy.pin_q_mode_max_center_distance_points
+    ):
+        return (local, "local_mass") if local is not None else (q_mode, "density_far")
+    return q_mode, "density"
+
+
+def _mass_mode(mass: Mapping[str, Any]) -> float | None:
+    best_center: float | None = None
+    best_weight: float | None = None
+    for key, value in mass.items():
+        try:
+            center = float(key)
+        except (TypeError, ValueError):
+            continue
+        weight = _number(value)
+        if weight is None:
+            continue
+        if best_weight is None or weight > best_weight:
+            best_center, best_weight = center, weight
+    return best_center
+
+
+def _pin_stable_hold(
+    facts: Mapping[str, Any],
+    returns: Mapping[float, int],
+    policy: StrategyPolicy,
+) -> bool:
+    latch = _map(facts.get("pin_latch"))
+    if latch.get("terminal_state") != "PIN_STABLE":
+        return False
+    if str(latch.get("session_date") or "") != str(facts.get("session_date") or ""):
+        return False
+    center = _number(latch.get("center"))
+    if center is None:
+        return False
+    reach = policy.pin_body_max_center_distance_points
+    return any(
+        abs(candidate - center) <= reach and count >= policy.pin_stable_hold_min_excursions
+        for candidate, count in returns.items()
+    )
 
 
 def _excursion_returns(values: list[float], center: float) -> int:

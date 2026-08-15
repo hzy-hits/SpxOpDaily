@@ -212,6 +212,57 @@ def test_frozen_pin_cases_migrate_on_aug5_and_rank_7710_on_aug6() -> None:
     assert [row["center"] for row in aug6["pin"]["top_centers"]][:1] == [7710.0]
 
 
+def test_pin_stable_holds_when_excursion_flickers_to_one() -> None:
+    base = _frozen_pin_facts("2026-08-06")
+    facts = {
+        **base,
+        "session_date": "2026-08-06",
+        "path": {
+            **base["path"],
+            "pin_path_spx": [7710.0, 7716.0, 7710.2, 7711.0, 7710.5],
+        },
+    }
+    assert assess_regime(facts)["terminal_state"] == "NONE"
+    held = assess_regime(
+        {
+            **facts,
+            "pin_latch": {
+                "terminal_state": "PIN_STABLE",
+                "center": 7710.0,
+                "session_date": "2026-08-06",
+            },
+        }
+    )
+    assert held["terminal_state"] == "PIN_STABLE"
+    assert held["pin"]["excursion_held"] is True
+
+
+def test_far_q_mode_uses_local_mass_peak() -> None:
+    base = _frozen_pin_facts("2026-08-06")
+    facts = {**base, "structure": {**base["structure"], "q_mode": 7980.0}}
+    regime = assess_regime(facts)
+    assert regime["terminal_state"] == "PIN_STABLE"
+    assert regime["pin"]["q_mode_source"] == "local_mass"
+
+
+def test_fact_pack_latches_previous_same_session_pin() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    payload["previous_strategy_decision"] = {
+        "session_date": "2026-08-06",
+        "regime": {
+            "terminal_state": "PIN_STABLE",
+            "pin": {"top_centers": [{"center": 7710.0}]},
+        },
+    }
+    facts = build_market_fact_pack(payload, _pin_state(now), now)
+    assert facts["pin_latch"] == {
+        "terminal_state": "PIN_STABLE",
+        "center": 7710.0,
+        "session_date": "2026-08-06",
+    }
+
+
 def test_pin_stable_may_assess_from_1100_et() -> None:
     at_open = {**_frozen_pin_facts("2026-08-06"), "minutes_to_close": 300}
     before_open = {**_frozen_pin_facts("2026-08-06"), "minutes_to_close": 301}
@@ -251,7 +302,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v24"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v25"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -629,7 +680,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v24"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v25"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]

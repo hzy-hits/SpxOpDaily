@@ -9,6 +9,7 @@ from typing import Any
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     StrategyPolicy,
+    pin_stable_center,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.storage import LatestState
@@ -313,6 +314,7 @@ def build_market_fact_pack(
             "phase_at": episode.get("phase_at"),
         },
         "rth_setups": rth_setups,
+        "pin_latch": _pin_latch_fact(payload, session_date=trading_date or None),
         "shock": shock,
         "gth_evidence": _gth_fact(gth_level),
         "gth_dip_reclaim_evidence": _gth_fact(gth_dip_reclaim),
@@ -805,6 +807,23 @@ def _with_setup_window(
         }
     )
     return row
+
+
+def _pin_latch_fact(payload: Mapping[str, Any], *, session_date: str | None) -> dict[str, Any]:
+    previous = _map(payload.get("previous_strategy_decision"))
+    if not previous or not session_date:
+        return {}
+    if str(previous.get("session_date") or "") != session_date:
+        return {}
+    regime = _map(previous.get("regime"))
+    center = pin_stable_center(regime)
+    if regime.get("terminal_state") != "PIN_STABLE" or center is None:
+        return {}
+    return {
+        "terminal_state": "PIN_STABLE",
+        "center": center,
+        "session_date": session_date,
+    }
 
 
 def _cross_index_fact(market: Mapping[str, Any]) -> dict[str, Any]:
