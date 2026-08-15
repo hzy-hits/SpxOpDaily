@@ -26,6 +26,13 @@ from spx_spark.application.order_map.strategy_ranker import (
     gth_direction_lock,
     outbox_accepted_strategy_cards,
 )
+from spx_spark.application.order_map.strategy_regime import (
+    DEFAULT_STRATEGY_POLICY,
+    butterfly_max_entry_minutes,
+    pin_stable_center,
+    pin_stable_watch_phase,
+)
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.config import NotificationSettings
 from spx_spark.notifier.llm_writer import (
     call_hypothesis_critic,
@@ -35,6 +42,69 @@ from spx_spark.notifier.llm_writer import (
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.model import NotificationEnvelope
+
+
+def enqueue_pin_stable_watch(
+    decision: Mapping[str, Any], *, now: datetime
+) -> dict[str, Any]:
+    """Send one session-deduped PIN_STABLE observation. Not a trade card."""
+
+    regime = decision.get("regime") if isinstance(decision.get("regime"), dict) else {}
+    facts = (
+        decision.get("market_facts")
+        if isinstance(decision.get("market_facts"), dict)
+        else {}
+    )
+    session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
+    center = pin_stable_center(regime)
+    session_date = str(decision.get("session_date") or facts.get("session_date") or "")
+    if (
+        center is None
+        or not session_date
+        or str(session.get("mode") or "").strip().lower() == "gth"
+    ):
+        return {"accepted": False, "outcome": "pin_stable_watch_not_applicable"}
+    minutes = _finite_number(facts.get("minutes_to_close"))
+    phase = pin_stable_watch_phase(minutes, DEFAULT_STRATEGY_POLICY)
+    event_id = f"pin-stable:{session_date}:{center:g}:{phase}"
+    occurred_at = _timestamp(decision.get("decision_at")) or now
+    expires_at = _session_close_utc(session_date)
+    if expires_at is None or expires_at <= occurred_at:
+        return {"accepted": False, "outcome": "pin_stable_watch_expired"}
+    settings = NotificationSettings.from_env()
+    if notification_event_exists(settings, event_id):
+        return {
+            "accepted": True,
+            "inserted": False,
+            "duplicate": True,
+            "outcome": "outbox_already_accepted",
+            "event_id": event_id,
+        }
+    text = _render_pin_stable_watch(decision, center=center, minutes=minutes, phase=phase)
+    result = enqueue_notification(
+        settings,
+        NotificationEnvelope(
+            event_id=event_id,
+            source="strategy_decision",
+            kind="pin_stable_watch",
+            lane="strategy_watch",
+            occurred_at=occurred_at,
+            expires_at=expires_at,
+        ),
+        title=f"SPX 观察 · 稳定钉住 {center:g}",
+        text=text,
+        feishu_text=text,
+        friend=True,
+        enqueued_at=now,
+    )
+    return {
+        "accepted": result.accepted,
+        "inserted": result.inserted,
+        "duplicate": result.duplicate,
+        "outcome": result.outcome,
+        "event_id": result.envelope.event_id,
+        "targets": list(result.targets),
+    }
 
 
 def enqueue_strategy_decision(
@@ -103,6 +173,60 @@ def enqueue_strategy_decision(
     if memo is None:
         outcome["idea_memo"] = f"omitted:{memo_error or 'unavailable'}"
     return outcome
+
+
+def _render_pin_stable_watch(
+    decision: Mapping[str, Any],
+    *,
+    center: float,
+    minutes: float | None,
+    phase: str,
+) -> str:
+    regime = decision.get("regime") if isinstance(decision.get("regime"), dict) else {}
+    pin = regime.get("pin") if isinstance(regime.get("pin"), dict) else {}
+    depin = _finite_number(pin.get("depin_risk"))
+    limit = butterfly_max_entry_minutes(5.0, DEFAULT_STRATEGY_POLICY)
+    clock = (
+        f"距收盘 {minutes:g} 分钟"
+        if minutes is not None
+        else "距收盘暂缺"
+    )
+    if phase == "clock_open":
+        next_step = "钉住已进入 5 点蝶时钟，等待精确三腿报价与赔率后再评估限价蝶"
+    elif limit is not None:
+        next_step = f"等距收盘 ≤{limit:g} 分钟（约 14:50 ET）后再评估 5 点限价蝶"
+    else:
+        next_step = "等待 5 点蝶时钟开门后再评估限价蝶"
+    depin_text = f"{depin:.2f}" if depin is not None else "暂缺"
+    return "\n".join(
+        (
+            f"【SPX 观察 · 稳定钉住 {center:g}】",
+            "",
+            "## 结论",
+            f"钉住中心 {center:g} · 不授权下单",
+            "",
+            "## 结构",
+            f"{clock} · De-pin {depin_text}",
+            f"5 点蝶时钟门 ≤{limit:g} 分钟" if limit is not None else "5 点蝶时钟门暂缺",
+            "",
+            "## 下一步",
+            next_step,
+            "",
+            "## 数据",
+            "不下自动单 · 人工观察",
+        )
+    )
+
+
+def _session_close_utc(session_date: str) -> datetime | None:
+    try:
+        session = DEFAULT_MARKET_CALENDAR.session(datetime.fromisoformat(session_date).date())
+    except ValueError:
+        return None
+    if session is None:
+        return None
+    close = session.close_at
+    return close.astimezone(timezone.utc) if close.tzinfo else close.replace(tzinfo=timezone.utc)
 
 
 def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, Any]) -> str:

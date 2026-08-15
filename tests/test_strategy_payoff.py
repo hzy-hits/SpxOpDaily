@@ -27,6 +27,8 @@ from spx_spark.application.order_map.strategy_facts import build_market_fact_pac
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     assess_regime,
+    butterfly_max_entry_minutes,
+    pin_stable_watch_phase,
 )
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
@@ -1552,6 +1554,16 @@ def test_butterfly_entry_too_early_blocks_midday_five_wide() -> None:
     assert rank.passed == []
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
     assert "butterfly_entry_too_early" in gates
+
+
+def test_butterfly_clock_slack_is_five_wide_only() -> None:
+    policy = DEFAULT_STRATEGY_POLICY
+    assert butterfly_max_entry_minutes(5.0, policy) == 70.0
+    assert butterfly_max_entry_minutes(10.0, policy) == 120.0
+    assert butterfly_max_entry_minutes(15.0, policy) == 180.0
+    assert pin_stable_watch_phase(90.0, policy) == "early"
+    assert pin_stable_watch_phase(66.0, policy) == "clock_open"
+    assert pin_stable_watch_phase(70.0, policy) == "clock_open"
 
 
 def test_pin_stable_five_wide_allows_ten_minute_clock_slack() -> None:

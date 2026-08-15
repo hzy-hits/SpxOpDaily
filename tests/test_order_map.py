@@ -4843,6 +4843,133 @@ def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> No
     assert "automatic_ordering" not in text
 
 
+def test_pin_stable_watch_enqueues_once_per_center_and_clock_phase(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from spx_spark.application.order_map import delivery as delivery_module
+
+    now = datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc)
+    settings = make_settings(str(tmp_path / "pin-stable.json"))
+    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
+    early = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
+    first = delivery_module.enqueue_pin_stable_watch(early, now=now)
+    second = delivery_module.enqueue_pin_stable_watch(
+        early, now=now + timedelta(seconds=20)
+    )
+    assert first["accepted"] is True
+    assert first["inserted"] is True
+    assert first["event_id"] == "pin-stable:2026-08-14:7785:early"
+    assert first["targets"] == ["feishu"]
+    assert second == {
+        "accepted": True,
+        "inserted": False,
+        "duplicate": True,
+        "outcome": "outbox_already_accepted",
+        "event_id": "pin-stable:2026-08-14:7785:early",
+    }
+    clock_at = datetime(2026, 8, 14, 18, 51, tzinfo=timezone.utc)
+    clock_open = _pin_stable_decision(
+        clock_at,
+        minutes_to_close=68.0,
+        center=7785.0,
+    )
+    opened = delivery_module.enqueue_pin_stable_watch(clock_open, now=clock_at)
+    assert opened["accepted"] is True
+    assert opened["inserted"] is True
+    assert opened["event_id"] == "pin-stable:2026-08-14:7785:clock_open"
+
+
+def test_pin_stable_watch_skips_gth_and_non_stable(tmp_path: Path, monkeypatch) -> None:
+    from spx_spark.application.order_map import delivery as delivery_module
+
+    now = datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc)
+    settings = make_settings(str(tmp_path / "pin-stable-skip.json"))
+    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
+    gth = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
+    gth["market_facts"]["session"]["mode"] = "gth"
+    assert delivery_module.enqueue_pin_stable_watch(gth, now=now) == {
+        "accepted": False,
+        "outcome": "pin_stable_watch_not_applicable",
+    }
+    migrating = _pin_stable_decision(now, minutes_to_close=66.0, center=7785.0)
+    migrating["regime"]["terminal_state"] = "PIN_MIGRATING"
+    assert delivery_module.enqueue_pin_stable_watch(migrating, now=now) == {
+        "accepted": False,
+        "outcome": "pin_stable_watch_not_applicable",
+    }
+
+
+def test_pin_stable_watch_text_is_observation_not_a_trade() -> None:
+    from spx_spark.application.order_map.delivery import _render_pin_stable_watch
+
+    text = _render_pin_stable_watch(
+        _pin_stable_decision(
+            datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc),
+            minutes_to_close=201.0,
+            center=7785.0,
+        ),
+        center=7785.0,
+        minutes=201.0,
+        phase="early",
+    )
+    assert "【SPX 观察 · 稳定钉住 7785】" in text
+    assert "不授权下单" in text
+    assert "14:50 ET" in text
+    assert "人工候选" not in text
+    assert "只许限价" not in text
+
+
+def test_desk_view_renders_pin_stable_observation() -> None:
+    from spx_spark.application.order_map.desk_strategy_view import (
+        strategy_decision_desk_view,
+    )
+
+    now = datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc)
+    decision = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
+    decision["why_not"] = {
+        "reasons": ["butterfly_entry_too_early"],
+        "reauthorize_on": "钉住已观察；等距收盘 ≤70 分钟后再评估 5 点限价蝶",
+        "nearest_candidate": {
+            "setup_kind": "STABLE_PIN",
+            "strategy_type": "PUT_BUTTERFLY",
+            "center": 7785.0,
+            "width": 5.0,
+            "failed_gates": [{"gate": "butterfly_entry_too_early"}],
+        },
+    }
+    text = strategy_decision_desk_view({"strategy_decision": decision})
+    assert text is not None
+    assert "观察 · 稳定钉住 7785" in text
+    assert "距收盘过早，窄翼蝶式尚未授权" in text
+    assert "等距收盘 ≤70 分钟后再评估 5 点限价蝶" in text
+
+
+def _pin_stable_decision(
+    now: datetime, *, minutes_to_close: float, center: float
+) -> dict[str, object]:
+    return {
+        "decision_id": "strategy:pin-stable-test",
+        "session_date": "2026-08-14",
+        "decision_at": now.isoformat(),
+        "action_authority": "none",
+        "decision_type": "NO_TRADE",
+        "candidate": None,
+        "regime": {
+            "terminal_state": "PIN_STABLE",
+            "path_state": "BALANCED",
+            "pin": {
+                "depin_risk": 0.17,
+                "top_centers": [{"center": center, "score": 0.8}],
+            },
+        },
+        "market_facts": {
+            "session_date": "2026-08-14",
+            "minutes_to_close": minutes_to_close,
+            "session": {"mode": "rth", "legal": True},
+        },
+    }
+
+
 def test_render_strategy_butterfly_prints_three_legs_and_wing_range() -> None:
     from spx_spark.application.order_map.delivery import _render_strategy_candidate
 

@@ -24,6 +24,9 @@ __all__ = (
     "PIN_BUTTERFLY_MANAGEMENT_POLICY",
     "StrategyPolicy",
     "assess_regime",
+    "butterfly_max_entry_minutes",
+    "pin_stable_center",
+    "pin_stable_watch_phase",
 )
 
 
@@ -34,6 +37,10 @@ class StrategyPolicy:
     # (session-episode and entry quality). TREND_PULLBACK Late Chase stays 60%.
     # PIN_STABLE 5-wide flies get 10 minutes of clock slack so 14:50–15:00 ET
     # is not a false early veto; 10-wide and wider keep 12 min/point.
+    # 2026-08-14: PIN_STABLE flickered (single-cycle hits at 12:38 / 14:51 /
+    # 14:53 / 14:55). A dwell/relaxation hold would have blocked the 14:53
+    # 7785 5-wide. Do not add a persist-N-minutes gate. First latch and
+    # clock-open PIN_STABLE are observation cards, not a new payoff.
     # v21: Butterflies are RTH-only (STABLE_PIN). GTH ATM flies are not
     # enumerated or human-authoritative; night path is too hard to pin.
     # v20: GTH winner stick and delivery direction lock only count cards the
@@ -140,6 +147,48 @@ class StrategyPolicy:
 
 
 DEFAULT_STRATEGY_POLICY = StrategyPolicy()
+
+
+def butterfly_max_entry_minutes(
+    width: float | None, policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY
+) -> float | None:
+    """Latest remaining minutes that may still authorize a pin butterfly.
+
+    5-wide adds ``butterfly_five_wide_early_slack_minutes`` (70 at the
+    default 12 min/point). Wider tents stay on the raw 12 min/point clock.
+    Midday leftover of 90 minutes stays closed for a 5-wide.
+    """
+
+    if width is None or width <= 0:
+        return None
+    minutes = float(width) * policy.butterfly_minutes_per_width_point
+    if width == 5.0:
+        minutes += policy.butterfly_five_wide_early_slack_minutes
+    return minutes
+
+
+def pin_stable_center(regime: Mapping[str, Any] | None) -> float | None:
+    """Best PIN_STABLE body, or None when the terminal state is not stable."""
+
+    payload = _map(regime)
+    if payload.get("terminal_state") != "PIN_STABLE":
+        return None
+    ranked = _map(payload.get("pin")).get("top_centers") or ()
+    if not isinstance(ranked, (list, tuple)) or not ranked:
+        return None
+    return _number(_map(ranked[0]).get("center"))
+
+
+def pin_stable_watch_phase(
+    minutes_to_close: float | None,
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> str:
+    """Split the first PIN_STABLE latch from the 5-wide clock-open reprint."""
+
+    limit = butterfly_max_entry_minutes(5.0, policy)
+    if minutes_to_close is None or limit is None or minutes_to_close > limit:
+        return "early"
+    return "clock_open"
 
 
 HMM_STATE_DIRECTION = {

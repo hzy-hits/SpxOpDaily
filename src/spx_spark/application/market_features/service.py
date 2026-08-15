@@ -113,7 +113,10 @@ from spx_spark.application.order_map.level_decision_shadow import (
     run_level_decision_shadow,
 )
 from spx_spark.application.order_map.decision_consistency import coherent_level_decision
-from spx_spark.application.order_map.delivery import enqueue_strategy_decision
+from spx_spark.application.order_map.delivery import (
+    enqueue_pin_stable_watch,
+    enqueue_strategy_decision,
+)
 from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.application.order_map.strategy_outcomes import (
@@ -689,6 +692,21 @@ def run(
             strategy_delivery = {
                 "accepted": False,
                 "outcome": f"error:{type(exc).__name__}:{exc}",
+            }
+        try:
+            strategy_delivery = {
+                **strategy_delivery,
+                "pin_stable_watch": enqueue_pin_stable_watch(
+                    strategy_decision, now=action_now
+                ),
+            }
+        except Exception as exc:  # observation card must not block trade_ready
+            strategy_delivery = {
+                **strategy_delivery,
+                "pin_stable_watch": {
+                    "accepted": False,
+                    "outcome": f"error:{type(exc).__name__}:{exc}",
+                },
             }
     virtual_strategy = process_virtual_strategy(
         storage,

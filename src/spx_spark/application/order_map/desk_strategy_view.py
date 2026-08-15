@@ -7,6 +7,11 @@ from typing import Any, Mapping
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.state import current_session_is_gth
+from spx_spark.application.order_map.strategy_regime import (
+    DEFAULT_STRATEGY_POLICY,
+    butterfly_max_entry_minutes,
+    pin_stable_center,
+)
 
 
 def strategy_candidate_is_watchable(
@@ -53,11 +58,16 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     )
     if gth_session:
         return _gth_scan_desk_view(payload, decision, reasons)
+    pin_center = pin_stable_center(_mapping(decision.get("regime")))
     if watchable:
         conclusion = f"可看 · {strategy_candidate_label(candidate)}"
+    elif pin_center is not None:
+        conclusion = f"观察 · 稳定钉住 {pin_center:g}"
     else:
         conclusion = "不做"
     primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
+    if pin_center is not None and not watchable and not reasons:
+        primary = "钉住已稳，等待 5 点蝶时钟与精确三腿报价"
     gth_no_trade = not watchable and gth_session
     nearest_line = (
         "无"
@@ -66,7 +76,9 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     )
     reauthorize = str(why_not.get("reauthorize_on") or "").strip()
     if not reauthorize or _looks_like_machine_token(reauthorize):
-        reauthorize = "等待价格触发、精确报价与赔率同时通过后再评估"
+        reauthorize = _pin_stable_next_step(decision, pin_center) or (
+            "等待价格触发、精确报价与赔率同时通过后再评估"
+        )
     return "\n".join(
         (
             f"结论  {conclusion}",
@@ -411,6 +423,19 @@ def aligned_expected_move_usage(payload: Mapping[str, Any]) -> tuple[str, float]
         return None
     label = str(day_move.get("em_usage_label") or "matched horizon").strip()
     return label, fraction
+
+
+def _pin_stable_next_step(
+    decision: Mapping[str, Any], pin_center: float | None
+) -> str | None:
+    if pin_center is None:
+        return None
+    facts = _mapping(decision.get("market_facts"))
+    minutes = finite_float(facts.get("minutes_to_close"))
+    limit = butterfly_max_entry_minutes(5.0, DEFAULT_STRATEGY_POLICY)
+    if minutes is not None and limit is not None and minutes > limit:
+        return f"等距收盘 ≤{limit:g} 分钟后再评估 5 点限价蝶"
+    return "钉住已进入 5 点蝶时钟，等待精确三腿报价与赔率"
 
 
 def _failed_gate_codes(nearest: Mapping[str, Any], reasons: list[str]) -> list[str]:

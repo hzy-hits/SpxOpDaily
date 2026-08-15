@@ -19,7 +19,10 @@ from spx_spark.analytics.options.strategy_payoff import (
 from spx_spark.application.market_features.physical_followthrough import (
     estimate_physical_terminal_range,
 )
-from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.application.order_map.strategy_regime import (
+    StrategyPolicy,
+    butterfly_max_entry_minutes,
+)
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 _POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
@@ -659,9 +662,7 @@ def _rth_butterfly_pin_location_gates(
             "threshold": width,
         })
     minutes = _number(facts.get("minutes_to_close"))
-    max_minutes = None if width is None or width <= 0 else width * policy.butterfly_minutes_per_width_point
-    if max_minutes is not None and width == 5.0:
-        max_minutes += policy.butterfly_five_wide_early_slack_minutes
+    max_minutes = butterfly_max_entry_minutes(width, policy)
     if minutes is None or max_minutes is None or minutes > max_minutes:
         gates.append({
             "gate": "butterfly_entry_too_early",
