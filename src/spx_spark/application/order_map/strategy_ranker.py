@@ -606,7 +606,8 @@ def _butterfly_hard_gates(
     center = _number(candidate.get("center"))
     spot = _number(_map(facts.get("spot")).get("spx"))
     value_center = _number(vc.get("spx_30m"))
-    q_mode = _number(structure.get("q_mode"))
+    pin = _map(regime.get("pin")) or _map(candidate.get("pin"))
+    q_mode = _number(pin.get("q_mode")) or _number(structure.get("q_mode"))
     for gate, reference, threshold in (
         ("butterfly_body_value_center_distance", value_center, policy.pin_body_max_center_distance_points),
         ("butterfly_body_q_mode_distance", q_mode, policy.pin_body_max_center_distance_points),
@@ -615,7 +616,6 @@ def _butterfly_hard_gates(
         distance = abs(center - reference) if center is not None and reference is not None else None
         if distance is None or distance > threshold:
             gates.append({"gate": gate, "actual": distance, "threshold": threshold})
-    pin = _map(regime.get("pin")) or _map(candidate.get("pin"))
     depin = _number(pin.get("depin_risk"))
     max_depin = policy.pin_thresholds[5]
     if depin is None or depin >= max_depin:

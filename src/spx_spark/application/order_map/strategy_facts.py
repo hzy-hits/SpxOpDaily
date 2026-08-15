@@ -819,11 +819,15 @@ def _pin_latch_fact(payload: Mapping[str, Any], *, session_date: str | None) -> 
     center = pin_stable_center(regime)
     if regime.get("terminal_state") != "PIN_STABLE" or center is None:
         return {}
-    return {
+    latch = {
         "terminal_state": "PIN_STABLE",
         "center": center,
         "session_date": session_date,
     }
+    q_mode = _number(_map(regime.get("pin")).get("q_mode"))
+    if q_mode is not None:
+        latch["q_mode"] = q_mode
+    return latch
 
 
 def _cross_index_fact(market: Mapping[str, Any]) -> dict[str, Any]:

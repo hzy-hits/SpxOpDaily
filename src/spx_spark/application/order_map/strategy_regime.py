@@ -34,7 +34,10 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v25"
+    policy_version: str = "strategy_policy.bootstrap.v26"
+    # v26: PIN alignment uses the local 5pt mass peak, not the global density
+    # argmax. The previous peak sticks when it is still a top-2 local mass
+    # center and within 5 points of the current local peak.
     # v25: PIN_STABLE hold does not drop on a 2→1 excursion flicker, and a
     # far-OTM Q-mode spike is replaced by the local 5pt mass peak.
     # v24: PIN_STABLE may be assessed from 11:00 ET (300 minutes to close),
@@ -120,7 +123,7 @@ class StrategyPolicy:
     pin_stable_max_minutes_to_close: float = 300.0
     pin_stable_enter_min_excursions: int = 2
     pin_stable_hold_min_excursions: int = 1
-    pin_q_mode_max_center_distance_points: float = 15.0
+    pin_q_mode_hold_max_distance_points: float = 5.0
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
     hmm_trend_min_probability: float = 0.55
@@ -484,11 +487,11 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
     path, vc, structure = _map(facts.get("path")), _map(facts.get("value_center")), _map(facts.get("structure"))
     vol, mass = _map(facts.get("volatility")), _map(structure.get("q_local_mass_5pt"))
     er, vc15, vc30, vc60 = (_number(path.get("efficiency_ratio_30m")), *(_number(vc.get(f"spx_{w}")) for w in ("15m", "30m", "60m")))
-    q_mode, decay = _number(structure.get("q_mode")), _number(vol.get("atm_straddle_decay_15m"))
+    decay = _number(vol.get("atm_straddle_decay_15m"))
     closes = [float(value) for value in path.get("pin_path_spx") or () if isinstance(value, int | float)]
     breadth = _number(path.get("breadth_above_vwap"))
     vix = _number(vol.get("vix_return_15m_pct"))
-    q_mode, q_mode_source = _sanitized_q_mode(q_mode, vc30, mass, policy)
+    q_mode, q_mode_source = _pin_q_mode(mass, _map(facts.get("pin_latch")), policy)
     required = (er, vc15, vc30, vc60, q_mode, decay, breadth, vix)
     if None in required or len(closes) < 4 or not mass:
         return {"terminal_state": "UNCERTAIN", "reason": "pin_inputs_unavailable", "top_centers": []}
@@ -547,34 +550,39 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
         "drift_30m": round(drift30, 2),
         "drift_60m": round(drift60, 2),
         "recent_extreme_acceptance": extreme,
+        "q_mode": q_mode,
         "q_mode_source": q_mode_source,
         "excursion_held": bool(held and stable and excursions < policy.pin_stable_enter_min_excursions),
         "top_centers": ranked[:3],
     }
 
 
-def _sanitized_q_mode(
-    q_mode: float | None,
-    value_center: float | None,
+def _pin_q_mode(
     mass: Mapping[str, Any],
+    latch: Mapping[str, Any],
     policy: StrategyPolicy,
 ) -> tuple[float | None, str]:
-    """Replace a far-OTM density spike with the local 5-point mass peak."""
+    """PIN alignment uses the local 5-point mass peak, with a one-bin hold."""
 
-    local = _mass_mode(mass)
-    if q_mode is None:
-        return local, "local_mass" if local is not None else "missing"
+    ranked = _mass_ranked_centers(mass)
+    local = ranked[0] if ranked else None
+    if local is None:
+        return None, "missing"
+    if latch.get("terminal_state") != "PIN_STABLE":
+        return local, "local_mass"
+    previous = _number(latch.get("q_mode"))
     if (
-        value_center is not None
-        and abs(q_mode - value_center) > policy.pin_q_mode_max_center_distance_points
+        previous is not None
+        and abs(previous - local) <= policy.pin_q_mode_hold_max_distance_points
+        and any(abs(center - previous) <= 0.01 for center in ranked[:2])
+        and abs(previous - local) > 0.01
     ):
-        return (local, "local_mass") if local is not None else (q_mode, "density_far")
-    return q_mode, "density"
+        return previous, "local_mass_held"
+    return local, "local_mass"
 
 
-def _mass_mode(mass: Mapping[str, Any]) -> float | None:
-    best_center: float | None = None
-    best_weight: float | None = None
+def _mass_ranked_centers(mass: Mapping[str, Any]) -> list[float]:
+    ranked: list[tuple[float, float]] = []
     for key, value in mass.items():
         try:
             center = float(key)
@@ -583,9 +591,9 @@ def _mass_mode(mass: Mapping[str, Any]) -> float | None:
         weight = _number(value)
         if weight is None:
             continue
-        if best_weight is None or weight > best_weight:
-            best_center, best_weight = center, weight
-    return best_center
+        ranked.append((center, weight))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return [center for center, _weight in ranked]
 
 
 def _pin_stable_hold(

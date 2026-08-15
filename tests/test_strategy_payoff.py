@@ -242,6 +242,79 @@ def test_far_q_mode_uses_local_mass_peak() -> None:
     facts = {**base, "structure": {**base["structure"], "q_mode": 7980.0}}
     regime = assess_regime(facts)
     assert regime["terminal_state"] == "PIN_STABLE"
+    assert regime["pin"]["q_mode"] == 7710.0
+    assert regime["pin"]["q_mode_source"] == "local_mass"
+
+
+def test_nearby_global_q_mode_still_uses_local_mass_peak() -> None:
+    base = _frozen_pin_facts("2026-08-06")
+    facts = {**base, "structure": {**base["structure"], "q_mode": 7720.0}}
+    regime = assess_regime(facts)
+    assert regime["terminal_state"] == "PIN_STABLE"
+    assert regime["pin"]["q_mode"] == 7710.0
+    assert regime["pin"]["q_mode_source"] == "local_mass"
+
+
+def test_local_q_mode_holds_previous_peak_across_one_bin() -> None:
+    base = _frozen_pin_facts("2026-08-06")
+    mass = {**base["structure"]["q_local_mass_5pt"], "7710": 0.30, "7715": 0.31}
+    facts = {
+        **base,
+        "session_date": "2026-08-06",
+        "structure": {**base["structure"], "q_local_mass_5pt": mass},
+        "pin_latch": {
+            "terminal_state": "PIN_STABLE",
+            "center": 7710.0,
+            "q_mode": 7710.0,
+            "session_date": "2026-08-06",
+        },
+    }
+    regime = assess_regime(facts)
+    assert regime["terminal_state"] == "PIN_STABLE"
+    assert regime["pin"]["q_mode"] == 7710.0
+    assert regime["pin"]["q_mode_source"] == "local_mass_held"
+
+
+def test_local_q_mode_does_not_hold_across_two_bins() -> None:
+    base = _frozen_pin_facts("2026-08-06")
+    mass = {**base["structure"]["q_local_mass_5pt"], "7710": 0.30, "7720": 0.31}
+    facts = {
+        **base,
+        "session_date": "2026-08-06",
+        "structure": {**base["structure"], "q_local_mass_5pt": mass},
+        "pin_latch": {
+            "terminal_state": "PIN_STABLE",
+            "center": 7710.0,
+            "q_mode": 7710.0,
+            "session_date": "2026-08-06",
+        },
+    }
+    regime = assess_regime(facts)
+    assert regime["pin"]["q_mode"] == 7720.0
+    assert regime["pin"]["q_mode_source"] == "local_mass"
+
+
+def test_local_q_mode_does_not_hold_when_previous_leaves_top_two() -> None:
+    base = _frozen_pin_facts("2026-08-06")
+    mass = {
+        **base["structure"]["q_local_mass_5pt"],
+        "7715": 0.10,
+        "7720": 0.31,
+        "7725": 0.20,
+    }
+    facts = {
+        **base,
+        "session_date": "2026-08-06",
+        "structure": {**base["structure"], "q_local_mass_5pt": mass},
+        "pin_latch": {
+            "terminal_state": "PIN_STABLE",
+            "center": 7715.0,
+            "q_mode": 7715.0,
+            "session_date": "2026-08-06",
+        },
+    }
+    regime = assess_regime(facts)
+    assert regime["pin"]["q_mode"] == 7720.0
     assert regime["pin"]["q_mode_source"] == "local_mass"
 
 
@@ -252,13 +325,14 @@ def test_fact_pack_latches_previous_same_session_pin() -> None:
         "session_date": "2026-08-06",
         "regime": {
             "terminal_state": "PIN_STABLE",
-            "pin": {"top_centers": [{"center": 7710.0}]},
+            "pin": {"top_centers": [{"center": 7710.0}], "q_mode": 7710.0},
         },
     }
     facts = build_market_fact_pack(payload, _pin_state(now), now)
     assert facts["pin_latch"] == {
         "terminal_state": "PIN_STABLE",
         "center": 7710.0,
+        "q_mode": 7710.0,
         "session_date": "2026-08-06",
     }
 
@@ -302,7 +376,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v25"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v26"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -680,7 +754,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v25"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v26"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1675,6 +1749,35 @@ def test_butterfly_unresolved_nearby_wall_blocks_cage_that_is_not_a_pin() -> Non
     assert rank.passed == []
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
     assert "butterfly_unresolved_nearby_wall" in gates
+
+
+def test_butterfly_body_uses_pin_q_mode_not_global_density() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    rank = rank_candidates(
+        [_stable_pin_butterfly(center=7800.0, width=5.0, right="P", debit=1.3)],
+        _ranker_pin_facts(
+            {
+                "spot": {"spx": 7801.2},
+                "minutes_to_close": 44,
+                "volatility": {"expected_move_points": 6.3},
+                "structure": {"q_mode": 7980.0, "put_wall": 7800.0, "call_wall": 7800.0},
+                "value_center": {"spx_30m": 7802.0},
+            }
+        ),
+        {
+            "pin": {
+                "depin_risk": 0.0,
+                "recent_extreme_acceptance": False,
+                "q_mode": 7800.0,
+            },
+            "terminal_state": "PIN_STABLE",
+        },
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert [row["center"] for row in rank.passed] == [7800.0]
 
 
 def test_late_pin_at_call_wall_still_authorizes_five_wide_butterfly() -> None:

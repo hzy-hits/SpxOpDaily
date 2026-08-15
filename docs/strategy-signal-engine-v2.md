@@ -590,6 +590,8 @@ abs(value_center_drift_60m) <= 5.0 SPX points
 VIX 15m 不持续扩张
 最近20分钟无持续新高/新低接受
 Gamma center、Value Center、Q mode 三者 max-min <= 5 points
+PIN 对齐用的 Q mode 是现价 ±30 的本地 5 点质量峰，不是全链密度 argmax。
+上一拍峰值若仍在本地质量前两名、且距当前本地峰不超过 5 点，则保持上一拍。
 ATM straddle 15m decay > 0
 ```
 
