@@ -29,7 +29,11 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v21"
+    policy_version: str = "strategy_policy.bootstrap.v22"
+    # v22: FAILED_BREAK_RECLAIM windows close at 50% trigger→target progress
+    # (session-episode and entry quality). TREND_PULLBACK Late Chase stays 60%.
+    # PIN_STABLE 5-wide flies get 10 minutes of clock slack so 14:50–15:00 ET
+    # is not a false early veto; 10-wide and wider keep 12 min/point.
     # v21: Butterflies are RTH-only (STABLE_PIN). GTH ATM flies are not
     # enumerated or human-authoritative; night path is too hard to pin.
     # v20: GTH winner stick and delivery direction lock only count cards the
@@ -108,6 +112,7 @@ class StrategyPolicy:
     butterfly_max_debit_fraction: float = 0.35
     butterfly_max_risk_usd: float = 1000.0
     butterfly_minutes_per_width_point: float = 12.0
+    butterfly_five_wide_early_slack_minutes: float = 10.0
     butterfly_unresolved_wall_em_multiple: float = 1.5
     # v5: debit vertical short strike may not pass the target, and width may
     # not exceed remaining 0DTE expected move. Missing EM fails closed.
@@ -120,6 +125,7 @@ class StrategyPolicy:
     # Confirmation bar plus this many subsequent 5m bars remain ENTRY_WINDOW_OPEN.
     rth_setup_hold_bars: int = 2
     max_trigger_target_progress: float = 0.60
+    failed_break_max_trigger_target_progress: float = 0.50
 
     def entry_quality_kwargs(self) -> dict[str, float]:
         names = (
@@ -127,6 +133,8 @@ class StrategyPolicy:
             "max_debit_fraction", "failed_break_max_debit_fraction",
             "min_stop_atr", "max_stop_atr", "late_chase_distance_atr",
             "late_chase_impulse_atr",
+            "failed_break_max_trigger_target_progress",
+            "max_trigger_target_progress",
         )
         return {name: getattr(self, name) for name in names}
 

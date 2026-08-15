@@ -182,6 +182,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "entry_too_late": "入场窗口已过，继续追价不合规",
         "rth_entry_window_not_open": "结构已出现，正在等待下一根 5 分钟确认",
         "rth_entry_window_too_late": "入场窗口已过，继续追价不合规",
+        "session_episode_reclaim_progress_too_late": "失败突破已走完过半，不再追价",
         "rth_setup_invalidated": "结构已被下一根 5 分钟否定",
         "trend_pullback_path_not_confirmed": "回踩成立，但趋势背景尚未确认",
         "trend_pullback_path_unevaluable": "回踩成立，但趋势向量不完整，不能评估",

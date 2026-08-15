@@ -241,7 +241,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v21"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v22"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -619,7 +619,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v21"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v22"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1053,7 +1053,35 @@ def test_session_episode_reclaim_expires_after_chase_progress() -> None:
 
     assert episode["state"] == "ENTRY_TOO_LATE"
     assert episode["blocked_by"] == "session_episode_reclaim_progress_too_late"
-    assert episode["trigger_target_progress"] >= 0.60
+    assert episode["trigger_target_progress"] >= 0.50
+    assert decision["decision_type"] == "NO_TRADE"
+
+
+def test_session_episode_reclaim_closes_at_half_trigger_progress() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["underlier"] = {"price": 7718.0, "source": "index:SPX"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    payload["level_decision"] = {"phase": "far"}
+    payload["session_episode"] = {
+        "phase": "V_REVERSAL_CONFIRMED",
+        "break_direction": "down",
+        "break_level": 7705.0,
+        "break_level_kind": "flip_high",
+        "episode_id": "episode:failed-down-break-half",
+    }
+
+    decision = build_strategy_decision(payload, _vertical_chain_state(now), now)
+    episode = next(
+        row
+        for row in decision["market_facts"]["rth_setups"]
+        if row["setup_variant"] == "SESSION_EPISODE"
+    )
+
+    assert 0.50 <= episode["trigger_target_progress"] < 0.60
+    assert episode["state"] == "ENTRY_TOO_LATE"
+    assert episode["blocked_by"] == "session_episode_reclaim_progress_too_late"
     assert decision["decision_type"] == "NO_TRADE"
 
 
@@ -1524,6 +1552,20 @@ def test_butterfly_entry_too_early_blocks_midday_five_wide() -> None:
     assert rank.passed == []
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
     assert "butterfly_entry_too_early" in gates
+
+
+def test_pin_stable_five_wide_allows_ten_minute_clock_slack() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7801.2},
+            "minutes_to_close": 66,
+            "volatility": {"expected_move_points": 6.3},
+            "structure": {"q_mode": 7800.0, "put_wall": 7800.0, "call_wall": 7800.0},
+            "value_center": {"spx_30m": 7802.0},
+        },
+        _stable_pin_butterfly(center=7800.0, width=5.0, right="P", debit=1.3),
+    )
+    assert [row["center"] for row in rank.passed] == [7800.0]
 
 
 def test_butterfly_unresolved_nearby_wall_blocks_cage_that_is_not_a_pin() -> None:

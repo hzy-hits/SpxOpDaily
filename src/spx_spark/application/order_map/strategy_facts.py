@@ -444,7 +444,10 @@ def _episode_reclaim_setup(
 ) -> dict[str, Any]:
     target = call_wall if direction == "UP" else put_wall
     progress = _trigger_target_progress(spot, trigger_level, target)
-    late = progress is not None and progress >= policy.max_trigger_target_progress
+    late = (
+        progress is not None
+        and progress >= policy.failed_break_max_trigger_target_progress
+    )
     return _with_setup_window(
         {
             "setup_kind": "FAILED_BREAK_RECLAIM",

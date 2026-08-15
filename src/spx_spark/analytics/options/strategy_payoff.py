@@ -273,6 +273,9 @@ def vertical_entry_quality(
     failed_break = setup_kind == "FAILED_BREAK_RECLAIM"
     min_ratio = thresholds["failed_break_min_target_room_ratio" if failed_break else "min_target_room_ratio"]
     max_debit = thresholds["failed_break_max_debit_fraction" if failed_break else "max_debit_fraction"]
+    max_progress = thresholds[
+        "failed_break_max_trigger_target_progress" if failed_break else "max_trigger_target_progress"
+    ]
     result = {
         "distance_to_vwap_atr": round(distance_atr, 4), "impulse_15m_atr": round(impulse_atr, 4),
         "target_room_points": round(target_distance, 4), "stop_distance_points": round(stop_distance, 4),
@@ -282,7 +285,7 @@ def vertical_entry_quality(
     late = (
         distance_atr > thresholds["late_chase_distance_atr"]
         and impulse_atr > thresholds["late_chase_impulse_atr"]
-    ) or ratio < min_ratio or debit_fraction > max_debit or progress >= 0.60
+    ) or ratio < min_ratio or debit_fraction > max_debit or progress >= max_progress
     if late:
         return result, ["direction_valid_but_entry_too_late"]
     if not thresholds["min_stop_atr"] <= stop_atr <= thresholds["max_stop_atr"]:

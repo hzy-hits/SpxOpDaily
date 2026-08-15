@@ -394,7 +394,15 @@ def _vertical_hard_gates(
     candidate["entry_quality"] = entry_quality
     if "direction_valid_but_entry_too_late" in reasons:
         candidate["setup_state"] = "ENTRY_TOO_LATE"
-    return [_gate_from_entry_reason(reason, entry_quality, policy) for reason in reasons]
+    return [
+        _gate_from_entry_reason(
+            reason,
+            entry_quality,
+            policy,
+            setup_kind=str(candidate.get("setup_kind") or ""),
+        )
+        for reason in reasons
+    ]
 
 
 def _gth_scan_vertical_hard_gates(
@@ -652,6 +660,8 @@ def _rth_butterfly_pin_location_gates(
         })
     minutes = _number(facts.get("minutes_to_close"))
     max_minutes = None if width is None or width <= 0 else width * policy.butterfly_minutes_per_width_point
+    if max_minutes is not None and width == 5.0:
+        max_minutes += policy.butterfly_five_wide_early_slack_minutes
     if minutes is None or max_minutes is None or minutes > max_minutes:
         gates.append({
             "gate": "butterfly_entry_too_early",
@@ -1049,8 +1059,11 @@ def _gate_from_entry_reason(
     reason: str,
     entry_quality: Mapping[str, Any],
     policy: StrategyPolicy,
+    *,
+    setup_kind: str = "",
 ) -> dict[str, Any]:
     if reason == "direction_valid_but_entry_too_late":
+        failed_break = setup_kind == "FAILED_BREAK_RECLAIM"
         return {
             "gate": reason,
             "actual": {
@@ -1059,9 +1072,21 @@ def _gate_from_entry_reason(
                 "trigger_target_progress": entry_quality.get("trigger_target_progress"),
             },
             "threshold": {
-                "min_target_room_ratio": policy.min_target_room_ratio,
-                "max_debit_fraction": policy.max_debit_fraction,
-                "max_progress": 0.6,
+                "min_target_room_ratio": (
+                    policy.failed_break_min_target_room_ratio
+                    if failed_break
+                    else policy.min_target_room_ratio
+                ),
+                "max_debit_fraction": (
+                    policy.failed_break_max_debit_fraction
+                    if failed_break
+                    else policy.max_debit_fraction
+                ),
+                "max_progress": (
+                    policy.failed_break_max_trigger_target_progress
+                    if failed_break
+                    else policy.max_trigger_target_progress
+                ),
             },
         }
     if reason == "stop_distance_outside_atr_band":
