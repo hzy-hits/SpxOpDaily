@@ -452,7 +452,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v30"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v31"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -650,7 +650,7 @@ def test_fact_pack_reads_index_hmm_from_research_signals() -> None:
     }
     facts = build_market_fact_pack(payload, _state(now), now)
     regime = assess_regime(facts)
-    assert facts["path"]["return_1m_points"] == pytest.approx(0.4)
+    assert facts["path"]["return_1m_points"] == pytest.approx(0.8)
     assert facts["path"]["return_5m_points"] == pytest.approx(1.2)
     assert facts["hmm"]["status"] == "available"
     assert facts["cross_index"]["source"] == "cash_index"
@@ -830,11 +830,11 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v30"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v31"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
-    assert decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["probability_evidence"] == {
         "q": 0.85, "p_empirical": 0.9, "p_interval_low": 0.8,
         "n_raw": 40, "n_effective": 40.0, "shrinkage_weight": 0.666667,
@@ -851,16 +851,14 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     )
 
     late = deepcopy(payload)
-    late["minute_market_frame"]["es"]["vwap_distance_points"] = 12.0
-    late["minute_market_frame"]["es"]["return_15m_points"] = 11.0
+    late["minute_market_frame"]["es"]["return_5m_points"] = 16.0
     rejected = build_strategy_decision(late, _state(now), now)
 
     assert rejected["decision_type"] == "NO_TRADE"
     assert rejected["regime"]["entry_state"] == "LATE_CHASE"
     assert rejected["shadow_candidates"] == []
     assert rejected["shadow_candidates_skipped"] == []
-    assert "direction_valid_but_entry_too_late" in rejected["why_not"]["reasons"]
-    assert rejected["why_not"]["nearest_candidates"]
+    assert "es_volume_momentum_too_late" in rejected["why_not"]["reasons"]
 
 
 def test_selected_decision_carries_shadow_candidates_and_skips_incomplete_quotes(
@@ -916,7 +914,7 @@ def test_rth_confirmed_breakout_can_compete_when_path_is_transitional() -> None:
 
     assert decision["regime"]["path_state"] == "TRANSITION"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
-    assert decision["candidate"]["setup_kind"] == "BREAKOUT_ACCEPTANCE"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_rth_confirmed_breakout_is_blocked_by_opposite_established_trend() -> None:
@@ -933,8 +931,9 @@ def test_rth_confirmed_breakout_is_blocked_by_opposite_established_trend() -> No
 
     assert decision["regime"]["path_state"] == "TREND"
     assert decision["regime"]["path_direction"] == "DOWN"
-    assert decision["decision_type"] == "NO_TRADE"
-    assert "price_trigger_conflicts_with_established_path" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert "price_trigger_conflicts_with_established_path" not in decision["why_not"]["reasons"]
 
 
 def test_rth_confirmed_trigger_reuses_fresh_exact_snapshot_for_pricing_only() -> None:
@@ -953,9 +952,7 @@ def test_rth_confirmed_trigger_reuses_fresh_exact_snapshot_for_pricing_only() ->
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
-    assert decision["candidate"]["source"] == (
-        "rth_confirmed_trigger_exact_spread_snapshot"
-    )
+    assert decision["candidate"]["source"] == "es_volume_momentum"
     assert decision["candidate"]["long"]["contract_id"].endswith(":7710:C")
     assert decision["candidate"]["short"]["contract_id"].endswith(":7720:C")
     assert decision["execution"]["limit"] == pytest.approx(3.0)
@@ -1052,6 +1049,9 @@ def test_degraded_gamma_structure_keeps_vertical_capability_and_blocks_butterfly
         "level": 7710.0,
         "event_id": "level:7710:up",
     }
+    payload["es_volume"] = _es_volume_signal(direction="up")
+    payload["minute_market_frame"]["es"]["return_1m_points"] = 0.8
+    payload["minute_market_frame"]["es"]["return_5m_points"] = 1.2
     latest = _pin_ladder_state(now)
     facts = build_market_fact_pack(payload, latest, now)
     regime = assess_regime(facts)
@@ -1194,7 +1194,7 @@ def test_failed_break_does_not_select_call_vertical_past_target_or_remaining_mov
 
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     candidate = decision["candidate"]
-    assert candidate["setup_kind"] == "FAILED_BREAK_RECLAIM"
+    assert candidate["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert candidate["long"]["strike"] == 7755.0
     assert candidate["short"]["strike"] == 7760.0
     assert candidate["economics"]["width_points"] == 5.0
@@ -1243,7 +1243,7 @@ def test_confirmed_session_episode_maps_to_failed_break_reclaim_vertical() -> No
     )
     assert decision["market_facts"]["session_episode"]["setup_direction"] == "UP"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
-    assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["candidate"]["direction"] == "UP"
     assert decision["rejection_funnel"]["setup_detected"] == 1
 
@@ -1252,6 +1252,7 @@ def test_session_episode_reclaim_expires_after_chase_progress() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload.pop("call_skew_spread_shadow")
+    payload.pop("es_volume")
     payload["underlier"] = {"price": 7724.0, "source": "index:SPX"}
     payload["option_structure_frame"]["front_expiry"] = "20260807"
     payload["level_decision"] = {"phase": "far"}
@@ -1280,6 +1281,7 @@ def test_session_episode_reclaim_closes_at_half_trigger_progress() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload.pop("call_skew_spread_shadow")
+    payload.pop("es_volume")
     payload["underlier"] = {"price": 7718.0, "source": "index:SPX"}
     payload["option_structure_frame"]["front_expiry"] = "20260807"
     payload["level_decision"] = {"phase": "far"}
@@ -1333,13 +1335,14 @@ def test_vwap_pullback_stays_open_for_two_bars_after_confirmation() -> None:
 
     assert pullback["state"] == "ENTRY_WINDOW_OPEN"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
-    assert decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_vwap_pullback_closes_after_hold_bars_elapse() -> None:
     now = datetime(2026, 8, 7, 15, 10, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload.pop("call_skew_spread_shadow")
+    payload.pop("es_volume")
     payload["level_decision"] = {"phase": "far"}
     payload["option_structure_frame"]["front_expiry"] = "20260807"
     bars = [
@@ -1422,13 +1425,18 @@ def test_opening_range_failed_break_opens_symmetric_vertical_entry_window(
         now, event_kind
     )
     _attach_rth_setup_path(payload, _or_failed_break_bars(now, break_side), structure)
-
+    payload["es_volume"] = _es_volume_signal(direction=direction.lower())
+    payload["minute_market_frame"]["es"]["return_1m_points"] = (
+        0.8 if direction == "UP" else -0.8
+    )
+    payload["minute_market_frame"]["es"]["return_5m_points"] = (
+        1.2 if direction == "UP" else -1.2
+    )
     latest = _two_sided_vertical_chain(now, right=right)
     decision = build_strategy_decision(payload, latest, now)
 
     assert decision["decision_type"] == f"{'CALL' if right == 'C' else 'PUT'}_DEBIT_VERTICAL", decision["why_not"]
-    assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
-    assert decision["candidate"]["setup_variant"] == "OR_FAILED_BREAK"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["candidate"]["setup_state"] == "ENTRY_WINDOW_OPEN"
     assert decision["candidate"]["direction"] == direction
     assert decision["rejection_funnel"]["entry_window_open"] == 1
@@ -1443,8 +1451,8 @@ def test_vwap_trend_pullback_opens_call_vertical_before_prior_high_break() -> No
     )
 
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
-    assert decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
-    assert decision["candidate"]["setup_variant"] == "VWAP_PULLBACK"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["candidate"]["setup_variant"] == "ES_PACE_1M5M"
     assert decision["candidate"]["setup_state"] == "ENTRY_WINDOW_OPEN"
     assert decision["rejection_funnel"]["entry_window_open"] == 1
 
@@ -1452,6 +1460,7 @@ def test_vwap_trend_pullback_opens_call_vertical_before_prior_high_break() -> No
 def test_pending_5m_confirmation_is_the_desk_primary_blocker() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _vwap_pullback_payload(now)
+    payload.pop("es_volume")
     bars = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
         "input_lineage"
     ]["diagnostics"]["rth_bar_path"]
@@ -1468,8 +1477,8 @@ def test_pending_5m_confirmation_is_the_desk_primary_blocker() -> None:
     assert pullback["blocked_by"] == "next_5m_confirmation_pending"
     assert pullback["detected_at"]
     assert pullback["window_opens_at"] is None
-    assert decision["desk_view"]["reason"] == "rth_entry_window_not_open"
-    assert decision["why_not"]["primary_blocker"] == "rth_entry_window_not_open"
+    assert decision["desk_view"]["reason"] == "es_volume_momentum_unavailable"
+    assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_unavailable"
     assert not str(decision["desk_view"]["reason"]).startswith("surface_shape_")
     assert decision["rejection_funnel"]["setup_detected"] == 1
     assert decision["rejection_funnel"]["entry_window_open"] == 0
@@ -1495,9 +1504,9 @@ def test_incomplete_trend_vector_is_unevaluable_not_transition() -> None:
     assert facts["capabilities"]["vertical"]["ready"] is True
     assert regime["path_state"] == "UNCERTAIN"
     assert "path_inputs_unavailable" in regime["reasons"]
-    assert decision["decision_type"] == "NO_TRADE"
-    assert decision["desk_view"]["reason"] == "trend_pullback_path_unevaluable"
-    assert decision["regime"]["entry_state"] == "INSUFFICIENT_DATA"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert "trend_pullback_path_unevaluable" not in decision["why_not"]["reasons"]
     assert "vertical_path_inputs_unavailable" not in decision["why_not"]["reasons"]
 
 
@@ -1520,6 +1529,7 @@ def test_invalidated_only_setups_are_not_counted_as_detected() -> None:
         for index, close in enumerate(closes)
     ]
     _attach_rth_setup_path(payload, bars, "LH_LL")
+    payload.pop("es_volume")
     payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
         "input_lineage"
     ]["diagnostics"]["rth_bar_vwaps"] = {}
@@ -1535,7 +1545,7 @@ def test_invalidated_only_setups_are_not_counted_as_detected() -> None:
     assert failed_break["state"] == "INVALIDATED"
     assert failed_break["blocked_by"] == "next_5m_reaccepted_breakout"
     assert decision["decision_type"] == "NO_TRADE"
-    assert decision["desk_view"]["reason"] == "rth_setup_invalidated"
+    assert decision["desk_view"]["reason"] == "es_volume_momentum_unavailable"
     assert decision["rejection_funnel"]["setup_detected"] == 0
     assert decision["rejection_funnel"]["pending_confirmation"] == 0
 
@@ -1543,6 +1553,7 @@ def test_invalidated_only_setups_are_not_counted_as_detected() -> None:
 def test_event_settlement_reason_is_trace_not_exclusive_rth_blocker() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _vwap_pullback_payload(now)
+    payload.pop("es_volume")
     bars = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
         "input_lineage"
     ]["diagnostics"]["rth_bar_path"]
@@ -1562,7 +1573,7 @@ def test_event_settlement_reason_is_trace_not_exclusive_rth_blocker() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["decision_type"] == "NO_TRADE"
-    assert decision["why_not"]["primary_blocker"] == "rth_entry_window_not_open"
+    assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_unavailable"
     assert "event_settlement_exact_two_leg_quote_unavailable" in decision["why_not"]["reasons"]
     assert decision["rejection_funnel"]["event_settlement_considered"] == 1
 
@@ -2105,6 +2116,84 @@ def test_pin_blocks_directional_spreads_only_for_look_or_trade() -> None:
     assert not pin_blocks_directional_spreads({"terminal_state": "NONE", "pin": {"grade": "none"}})
 
 
+def test_es_volume_momentum_authorizes_put_without_trend_or_pullback() -> None:
+    now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    payload["es_volume"] = _es_volume_signal(direction="down", pace_ratio=2.1)
+    payload["minute_market_frame"]["es"].update(
+        {
+            "vwap_distance_points": -0.8,
+            "return_1m_points": -1.2,
+            "return_5m_points": -3.0,
+            "return_15m_points": -0.75,
+        }
+    )
+    payload["minute_market_frame"]["diagnostics"]["rth_market_state"]["D"] = 2.0
+    payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["values"].update(
+        {
+            "efficiency_ratio": 0.28,
+            "vwap_cross_count": 3,
+            "price_vs_vwap": "below",
+            "breadth_above_vwap": 0.40,
+            "market_structure": "HH_HL",
+        }
+    )
+    payload["option_structure_frame"]["structure"]["put_wall"] = 7680.0
+    payload["strategy_distribution_forecast"] = _probability_forecast(
+        now, "terminal_below"
+    )
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="P"), now
+    )
+
+    assert decision["regime"]["path_state"] != "TREND"
+    assert decision["decision_type"] == "PUT_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["candidate"]["direction"] == "DOWN"
+
+
+def test_es_volume_momentum_ignores_vwap_impulse_late_chase() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["minute_market_frame"]["es"]["vwap_distance_points"] = 12.0
+    payload["minute_market_frame"]["es"]["return_15m_points"] = 11.0
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+
+
+def test_quiet_es_volume_does_not_authorize_rth_vertical() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["es_volume"] = _es_volume_signal(direction="up", label="quiet", pace_ratio=0.4)
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == "es_volume_not_elevated"
+
+
+def test_es_volume_and_1m_5m_disagree_does_not_authorize() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["es_volume"] = _es_volume_signal(direction="down")
+    payload["minute_market_frame"]["es"]["return_1m_points"] = 0.8
+    payload["minute_market_frame"]["es"]["return_5m_points"] = 1.2
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_not_aligned"
+
+
 def test_look_window_tighter_pin_outranks_wider_pin() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     tight = _stable_pin_butterfly(center=7785.0, width=10.0, right="P", debit=3.2)
@@ -2341,6 +2430,7 @@ def test_rolling_path_atr_keeps_vertical_capability_when_sma_atr_is_missing() ->
 def test_missing_path_inputs_do_not_count_as_setup_detected() -> None:
     now = datetime(2026, 8, 12, 16, 19, tzinfo=timezone.utc)
     payload = _decision_payload(now)
+    payload.pop("es_volume")
     payload["level_decision"] = {"phase": "far"}
     lineage = payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
         "input_lineage"
@@ -2837,8 +2927,8 @@ def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     late = deepcopy(payload)
-    late["minute_market_frame"]["es"]["vwap_distance_points"] = 12.0
-    late["minute_market_frame"]["es"]["return_15m_points"] = 11.0
+    late["es_volume"] = _es_volume_signal(direction="up", price_delta=20.0)
+    late["underlier"] = {"price": 7726.0, "source": "index:SPX"}
 
     decision = build_strategy_decision(late, _state(now), now)
 
@@ -3257,6 +3347,23 @@ def _failed_break_20260812_chain(now: datetime) -> LatestState:
     return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
 
 
+def _es_volume_signal(
+    *,
+    direction: str = "up",
+    label: str = "elevated",
+    pace_ratio: float = 1.8,
+    price_delta: float | None = None,
+) -> dict[str, object]:
+    signed = 4.0 if direction == "up" else -4.0
+    return {
+        "label": label,
+        "direction": direction,
+        "pace_ratio": pace_ratio,
+        "price_delta": signed if price_delta is None else price_delta,
+        "event_id": "elevated_move" if label == "elevated" else label,
+    }
+
+
 def _decision_payload(now: datetime) -> dict[str, object]:
     observed = now - timedelta(seconds=1)
     long_leg = {
@@ -3288,7 +3395,7 @@ def _decision_payload(now: datetime) -> dict[str, object]:
                 "price": 7735.0,
                 "vwap": 7733.0,
                 "vwap_distance_points": 2.0,
-                "return_1m_points": 0.4,
+                "return_1m_points": 0.8,
                 "return_5m_points": 1.2,
                 "return_15m_points": 3.0,
                 "return_60m_points": 8.0,
@@ -3321,6 +3428,7 @@ def _decision_payload(now: datetime) -> dict[str, object]:
             },
         },
         "macro_event": {"mode": "normal", "entry_allowed": True},
+        "es_volume": _es_volume_signal(direction="up"),
         "expected_move_points": 40.0,
         "level_decision": {
             "phase": "confirmed",

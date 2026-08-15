@@ -552,7 +552,8 @@ VWAP slope >= +0.05 ATR
 sector breadth >= 0.55
 ```
 
-空头反向。趋势判断只代表**允许寻找顺势回踩**，不代表立即交易。
+空头反向。趋势判断只代表路径背景，不代表立即交易。RTH 人读方向卡由
+`ES_VOLUME_MOMENTUM`（ES 量比 + 1m/5m 动量）授权，不再等 TREND + 回踩。
 
 ### 7.2 BALANCED
 
@@ -574,7 +575,7 @@ abs(existing D) <= 3
 - 突破刚失败但尚未完成 retest；
 - 跨市场宽度正在翻转。
 
-Transition 默认不交易，除非形成正式 Failed Break。
+Transition 不挡短周期 ES 量比动量。Failed Break 仍记事实，但不再授权 RTH 人读卡。
 
 ### 7.4 PIN_STABLE
 
@@ -588,7 +589,7 @@ TRADE（PIN_STABLE）：现有硬栈，进入仍要 2 次 excursion-return
 ```
 
 LOOK 只发观察卡，不过 `butterfly_requires_pin_stable`，不能成为蝶式交易候选。
-TRADE 才允许枚举 STABLE_PIN 蝶。11:00–13:00 TRADE 按中轴质量盒子评 5/10/15/20/50 点蝶，不写死翼宽；质量已堆在 [K−W, K+W] 内（分数 ≥ 0.50）的梯子档才上架，排序先压过价差再取最窄过门帐篷。LOOK 或 TRADE 钉住时，RTH 方向价差（失败突破 / 趋势回踩 / 突破接受）不得成为人读卡；PIN_MIGRATING 与 UNCERTAIN 不挡价差。夜盘两档都不评蝶。
+TRADE 才允许枚举 STABLE_PIN 蝶。11:00–13:00 TRADE 按中轴质量盒子评 5/10/15/20/50 点蝶，不写死翼宽；质量已堆在 [K−W, K+W] 内（分数 ≥ 0.50）的梯子档才上架，排序先压过价差再取最窄过门帐篷。LOOK 或 TRADE 钉住时，RTH 方向价差（`ES_VOLUME_MOMENTUM` 以及遗留的失败突破 / 趋势回踩 / 突破接受）不得成为人读卡；PIN_MIGRATING 与 UNCERTAIN 不挡价差。夜盘两档都不评蝶。
 
 硬条件（TRADE / PIN_STABLE）：
 
@@ -658,16 +659,20 @@ minutes_to_close
 
 ### 8.2 LATE_CHASE 硬条件
 
-任一满足：
+TREND_PULLBACK / FAILED_BREAK（审计与 GTH 标签）任一满足：
 
 ```text
 abs(distance_to_vwap_atr) > 1.0 且 abs(impulse_15m_atr) > 1.0
 或 target_room_ratio < 1.5
 或 vertical debit_fraction > 0.45
-或 当前价已完成 trigger->target 路径的 60% 以上
+或 当前价已完成 trigger->target 路径的 60% 以上（失败突破 50%）
 或 Call/Put 长腿 IV 在5分钟内上升 > 2 vol points
 或 剩余持有时间不足以覆盖规则的最短观察窗口
 ```
+
+`ES_VOLUME_MOMENTUM` 不用 VWAP 距离 + 15 分钟冲动判追价（那会把第一脚本身杀掉）。
+短周期过晚：`abs(return_5m) / ATR5m > 1.5`，或 trigger→target 路程 ≥ 50%，
+或借记/空间门与上表相同。
 
 LATE_CHASE 输出：
 
@@ -681,51 +686,40 @@ reason = direction_valid_but_entry_too_late
 
 ---
 
-## 9. 策略一：Trend Pullback Vertical
+## 9. 策略一：ES Volume Momentum Vertical
+
+RTH 人读方向卡的唯一 setup。`TREND_PULLBACK` 仍可出现在 `rth_setups` 审计里，
+不再经过 `build_strategy_decision` 授权。GTH 仍可把夜盘证据标成该旧名。
 
 ### 9.1 交易假设
 
-已确认趋势在第一次或第二次受控回踩后继续，现实延续概率高于当前 Vertical 借记隐含的概率。
+ES 短窗口放量，且 1 分钟与 5 分钟动量同向，这一脚会继续走到墙/目标，
+现实延续概率高于当前 Vertical 借记隐含的概率。不要求日间 TREND，不等回踩。
 
 ### 9.2 Setup
 
-多头：
-
 ```text
-path_state = TREND
-direction = UP
+es_volume.label = elevated
+es_volume.direction ∈ {up, down}
+sign(return_1m) = sign(return_5m) = volume direction
+abs(return_1m) >= 0.35
+abs(return_5m) >= 1.0
+abs(return_5m) / ATR5m <= 1.5
 event_state = NORMAL
-entry_state != LATE_CHASE
+LOOK/TRADE pin 不挡
 ```
 
-空头反向。
+空头：volume down + 1m/5m 为负。不要求 `path_state = TREND`。
 
-### 9.3 允许的回踩位置
+### 9.3 量价输入
 
-按优先级：
-
-1. RTH VWAP；
-2. Opening Range High/Low 的已接受突破位；
-3. 冻结 Flip/Wall 的 retest；
-4. 最近趋势腿的 25%–50% 回撤；
-5. 最近 Higher Low / Lower High。
-
-禁止仅因当前价继续创新高就触发。
+复用已有 `es_volume_signal`（量比、放量/缩量、窗口方向）和 market-frame ES
+`return_1m_points` / `return_5m_points`。缺量比或动量则失效关闭。
 
 ### 9.4 Trigger
 
-多头示例：
-
-```text
-价格进入 pullback zone
--> 未出现趋势结构失效
--> 一根5m拒绝下方
--> 下一根5m不再创新低
--> breadth 未翻为空头
--> 才生成 Call Vertical
-```
-
-无需等待价格再次突破前高；否则又会追价。
+触发位 = 本窗起点（spot − es_volume.price_delta）。
+目标/失效仍走现有墙位几何。禁止只因 TREND 或 OR 假突破就发卡。
 
 ### 9.5 合约枚举
 
@@ -775,6 +769,8 @@ stop distance <= 1.0 ATR5m
 ---
 
 ## 10. 策略二：Failed Break / Reclaim Vertical
+
+RTH 不再用本 setup 授权人读卡；`rth_setups` 仍计算供审计。GTH 证据仍可映射此名。
 
 ### 10.1 交易假设
 

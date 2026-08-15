@@ -118,6 +118,7 @@ from spx_spark.application.order_map.delivery import (
     enqueue_strategy_decision,
 )
 from spx_spark.application.order_map.models import level_decision_play
+from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.application.order_map.strategy_outcomes import (
     observe_due_strategy_outcomes,
@@ -650,6 +651,13 @@ def run(
         ),
         "candidates": [],
     }
+    attach_es_volume_signal(
+        strategy_payload,
+        action_latest,
+        sample_path=str(Path(storage.data_root) / "latest" / "es_volume_samples.json"),
+        now=action_now,
+        persist=False,
+    )
     strategy_decision = build_strategy_decision(
         strategy_payload,
         action_latest,

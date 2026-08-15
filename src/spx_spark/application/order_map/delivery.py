@@ -427,6 +427,7 @@ def _setup_cn(setup: object) -> str:
         "IRON_CONDOR_DELTA": "铁鹰",
         "EVENT_SETTLEMENT_THRESHOLD": "事件结算观点",
         "TREND_PULLBACK": "趋势回踩",
+        "ES_VOLUME_MOMENTUM": "ES量比动量",
         "STABLE_PIN": "稳定钉住",
         "CONFIRMATION_TARGET_PIN": "目标钉住",
     }.get(str(setup or ""), "结构扫描")

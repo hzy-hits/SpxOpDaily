@@ -384,7 +384,10 @@ def _entry_state(
     rank: RankResult,
 ) -> str:
     reason_set = {str(reason) for reason in reasons}
-    if "direction_valid_but_entry_too_late" in reason_set:
+    if reason_set & {
+        "direction_valid_but_entry_too_late",
+        "es_volume_momentum_too_late",
+    }:
         return "LATE_CHASE"
     if rows and not rank.passed:
         return "POOR_ASYMMETRY"
@@ -392,6 +395,7 @@ def _entry_state(
         "spx_price_unavailable",
         "vertical_path_inputs_unavailable",
         "trend_pullback_path_unevaluable",
+        "es_volume_momentum_unevaluable",
         "path_inputs_unavailable",
         "market_frame_not_ready",
     }
@@ -428,6 +432,13 @@ def _rejection_funnel(
         "rth_setup_invalidated",
         "trend_pullback_path_not_confirmed",
         "trend_pullback_path_unevaluable",
+        "es_volume_momentum_unavailable",
+        "es_volume_not_elevated",
+        "es_volume_momentum_direction_flat",
+        "es_volume_momentum_not_aligned",
+        "es_volume_momentum_too_weak",
+        "es_volume_momentum_unevaluable",
+        "es_volume_momentum_too_late",
         "event_settlement_exact_two_leg_quote_unavailable",
         "vertical_path_inputs_unavailable",
         "spx_price_unavailable",

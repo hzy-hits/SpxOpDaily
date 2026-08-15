@@ -448,89 +448,59 @@ def _rth_evidences(
     regime: Mapping[str, Any],
     latest: LatestState,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    trigger = _map(facts.get("trigger"))
-    path_state = str(regime.get("path_state") or "")
-    path_direction = str(regime.get("path_direction") or "")
     bases: list[dict[str, Any]] = []
     reasons: list[str] = []
     setup_facts = [_map(row) for row in facts.get("rth_setups") or ()]
+    momentum_setups = [
+        row for row in setup_facts if str(row.get("setup_kind") or "") == "ES_VOLUME_MOMENTUM"
+    ]
     pin_blocks = pin_blocks_directional_spreads(regime)
     if pin_blocks:
         reasons.append("directional_spread_blocked_by_pin_watch")
-    for setup in setup_facts:
+    for setup in momentum_setups:
         if setup.get("state") != "ENTRY_WINDOW_OPEN":
             continue
         direction = _direction(setup.get("direction"))
-        setup_kind = str(setup.get("setup_kind") or "")
-        if setup_kind == "TREND_PULLBACK":
-            path_capability = _map(_map(facts.get("capabilities")).get("path"))
-            if path_capability.get("trend_evaluable") is not True:
-                reasons.append("trend_pullback_path_unevaluable")
-                continue
-            if (path_state, path_direction) != ("TREND", direction):
-                reasons.append("trend_pullback_path_not_confirmed")
-                continue
-        if direction and setup_kind in {"FAILED_BREAK_RECLAIM", "TREND_PULLBACK"}:
-            if pin_blocks:
-                continue
-            bases.append(
-                {
-                    "setup_kind": setup_kind,
-                    "setup_variant": setup.get("setup_variant"),
-                    "setup_state": setup.get("state"),
-                    "direction": direction,
-                    "trigger_level": _number(setup.get("trigger_level")),
-                    "source": setup.get("source"),
-                }
-            )
-    direction = _direction(trigger.get("direction"))
-    if str(trigger.get("phase") or "").lower() == "confirmed" and direction:
-        thesis = str(trigger.get("thesis") or "").lower()
-        trigger_level = _number(trigger.get("level"))
-        if thesis == "fade":
-            setup = "FAILED_BREAK_RECLAIM"
-        elif thesis == "breakout":
-            if path_state == "TREND" and path_direction != direction:
-                reasons.append("price_trigger_conflicts_with_established_path")
-                setup = ""
-            else:
-                setup = (
-                    "TREND_PULLBACK"
-                    if (path_state, path_direction) == ("TREND", direction)
-                    else "BREAKOUT_ACCEPTANCE"
-                )
+        if not direction:
+            continue
+        if pin_blocks:
+            continue
+        bases.append(
+            {
+                "setup_kind": "ES_VOLUME_MOMENTUM",
+                "setup_variant": setup.get("setup_variant") or "ES_PACE_1M5M",
+                "setup_state": setup.get("state"),
+                "direction": direction,
+                "trigger_level": _number(setup.get("trigger_level")),
+                "source": setup.get("source") or "es_volume_momentum",
+            }
+        )
+    if not bases and not pin_blocks:
+        if not momentum_setups:
+            reasons.append("es_volume_momentum_unavailable")
         else:
-            reasons.append("price_trigger_not_aligned_with_supported_setup")
-            setup = ""
-        if setup and not pin_blocks:
-            bases.append(
-                {
-                    "setup_kind": setup,
-                    "setup_variant": "CONFIRMED_LEVEL",
-                    "setup_state": "ENTRY_WINDOW_OPEN",
-                    "direction": direction,
-                    "trigger_level": trigger_level,
-                    "source": "confirmed_level_decision",
-                }
-            )
-    elif not bases and not pin_blocks:
-        specific = {
-            "trend_pullback_path_not_confirmed",
-            "trend_pullback_path_unevaluable",
-            "price_trigger_conflicts_with_established_path",
-            "price_trigger_not_aligned_with_supported_setup",
-        }.intersection(reasons)
-        if not specific:
-            states = {str(row.get("state") or "") for row in setup_facts}
-            reasons.append(
-                "rth_entry_window_too_late"
-                if "ENTRY_TOO_LATE" in states
-                else "rth_setup_invalidated"
-                if states == {"INVALIDATED"}
-                else "rth_entry_window_not_open"
-                if states
-                else "confirmed_price_trigger_unavailable"
-            )
+            blocked = [
+                str(row.get("blocked_by") or row.get("reason") or "")
+                for row in momentum_setups
+            ]
+            states = {str(row.get("state") or "") for row in momentum_setups}
+            if "es_volume_momentum_too_late" in blocked or "ENTRY_TOO_LATE" in states:
+                reasons.append("es_volume_momentum_too_late")
+            elif any(code in blocked for code in (
+                "es_volume_not_elevated",
+                "es_volume_momentum_direction_flat",
+                "es_volume_momentum_not_aligned",
+                "es_volume_momentum_too_weak",
+                "es_volume_momentum_unevaluable",
+                "es_volume_unavailable",
+            )):
+                reasons.append(next(
+                    code
+                    for code in blocked
+                    if code
+                ))
+            else:
+                reasons.append("es_volume_momentum_unavailable")
     evidences: list[dict[str, Any]] = []
     for base in bases:
         direction = str(base["direction"])

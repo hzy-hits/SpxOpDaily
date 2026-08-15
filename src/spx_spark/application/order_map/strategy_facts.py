@@ -196,6 +196,7 @@ def build_market_fact_pack(
         for key, value in _map(diagnostics.get("rth_bar_vwaps")).items()
         if (adjusted := _spx_level(value, basis)) is not None
     }
+    es_volume = dict(_map(payload.get("es_volume")))
     rth_setups = _rth_setup_facts(
         rth_bars,
         rth_bar_vwaps,
@@ -212,6 +213,17 @@ def build_market_fact_pack(
         put_wall=_number(structure.get("put_wall")),
         policy=DEFAULT_STRATEGY_POLICY,
     )
+    momentum_setup = _es_volume_momentum_setup(
+        es_volume,
+        return_1m=_number(es.get("return_1m_points")),
+        return_5m=_number(es.get("return_5m_points")),
+        atr=atr,
+        spot=spx,
+        now=decision_at,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    if momentum_setup:
+        rth_setups.append(momentum_setup)
     failed_break_evaluable = opening_range_ready and bool(rth_bars)
     shock = _shock_fact(
         shock_state,
@@ -314,6 +326,7 @@ def build_market_fact_pack(
             "phase_at": episode.get("phase_at"),
         },
         "rth_setups": rth_setups,
+        "es_volume": es_volume,
         "pin_latch": _pin_latch_fact(payload, session_date=trading_date or None),
         "shock": shock,
         "gth_evidence": _gth_fact(gth_level),
@@ -381,6 +394,140 @@ def build_market_fact_pack(
                     "options": option.get("quality") or "unavailable",
                     "l1": l1.get("quality") or "unavailable"},
     }
+
+
+def _es_volume_momentum_setup(
+    es_volume: Mapping[str, Any],
+    *,
+    return_1m: float | None,
+    return_5m: float | None,
+    atr: float | None,
+    spot: float | None,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> dict[str, Any] | None:
+    """RTH short-cycle setup: elevated ES pace plus aligned 1m/5m momentum."""
+
+    if not es_volume:
+        return None
+    label = str(es_volume.get("label") or "")
+    vol_dir = str(es_volume.get("direction") or "").lower()
+    price_delta = _number(es_volume.get("price_delta"))
+    trigger = None
+    if spot is not None and price_delta is not None:
+        trigger = spot - price_delta
+    elif spot is not None:
+        trigger = spot
+    detected_at = now.isoformat()
+    base = {
+        "setup_kind": "ES_VOLUME_MOMENTUM",
+        "setup_variant": "ES_PACE_1M5M",
+        "source": "es_volume_momentum",
+        "trigger_level": trigger,
+        "pace_label": label,
+        "pace_ratio": _number(es_volume.get("pace_ratio")),
+        "volume_direction": vol_dir or None,
+        "return_1m_points": return_1m,
+        "return_5m_points": return_5m,
+    }
+    if label in {"", "no_baseline", "session_reset"}:
+        return _with_setup_window(
+            {**base, "state": "SETUP_DETECTED", "direction": None, "reason": "es_volume_unavailable"},
+            detected_at=detected_at,
+            blocked_by="es_volume_unavailable",
+        )
+    if label != "elevated":
+        return _with_setup_window(
+            {**base, "state": "SETUP_DETECTED", "direction": None, "reason": "es_volume_not_elevated"},
+            detected_at=detected_at,
+            blocked_by="es_volume_not_elevated",
+        )
+    if vol_dir not in {"up", "down"}:
+        return _with_setup_window(
+            {
+                **base,
+                "state": "SETUP_DETECTED",
+                "direction": None,
+                "reason": "es_volume_momentum_direction_flat",
+            },
+            detected_at=detected_at,
+            blocked_by="es_volume_momentum_direction_flat",
+        )
+    direction = "UP" if vol_dir == "up" else "DOWN"
+    if return_1m is None or return_5m is None:
+        return _with_setup_window(
+            {
+                **base,
+                "state": "SETUP_DETECTED",
+                "direction": direction,
+                "reason": "es_volume_momentum_unevaluable",
+            },
+            detected_at=detected_at,
+            blocked_by="es_volume_momentum_unevaluable",
+        )
+    want = 1 if direction == "UP" else -1
+    sign_1m = 0 if return_1m == 0 else (1 if return_1m > 0 else -1)
+    sign_5m = 0 if return_5m == 0 else (1 if return_5m > 0 else -1)
+    if sign_1m != want or sign_5m != want:
+        return _with_setup_window(
+            {
+                **base,
+                "state": "SETUP_DETECTED",
+                "direction": direction,
+                "reason": "es_volume_momentum_not_aligned",
+            },
+            detected_at=detected_at,
+            blocked_by="es_volume_momentum_not_aligned",
+        )
+    if abs(return_1m) < policy.es_momentum_min_return_1m or abs(return_5m) < policy.es_momentum_min_return_5m:
+        return _with_setup_window(
+            {
+                **base,
+                "state": "SETUP_DETECTED",
+                "direction": direction,
+                "reason": "es_volume_momentum_too_weak",
+            },
+            detected_at=detected_at,
+            blocked_by="es_volume_momentum_too_weak",
+        )
+    if atr is None or atr <= 0:
+        return _with_setup_window(
+            {
+                **base,
+                "state": "SETUP_DETECTED",
+                "direction": direction,
+                "reason": "es_volume_momentum_unevaluable",
+            },
+            detected_at=detected_at,
+            blocked_by="es_volume_momentum_unevaluable",
+        )
+    exhausted = (
+        atr is not None
+        and atr > 0
+        and abs(return_5m) / atr > policy.es_momentum_max_return_5m_atr
+    )
+    if exhausted:
+        return _with_setup_window(
+            {
+                **base,
+                "state": "ENTRY_TOO_LATE",
+                "direction": direction,
+                "reason": "es_volume_momentum_too_late",
+            },
+            detected_at=detected_at,
+            window_opens_at=detected_at,
+            blocked_by="es_volume_momentum_too_late",
+        )
+    return _with_setup_window(
+        {
+            **base,
+            "state": "ENTRY_WINDOW_OPEN",
+            "direction": direction,
+            "reason": "es_volume_momentum_aligned",
+        },
+        detected_at=detected_at,
+        window_opens_at=detected_at,
+    )
 
 
 def _rth_setup_facts(

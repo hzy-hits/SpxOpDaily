@@ -40,7 +40,13 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v30"
+    policy_version: str = "strategy_policy.bootstrap.v31"
+    # v31: RTH human directional cards come from ES_VOLUME_MOMENTUM only
+    # (elevated ES pace + 1m/5m momentum). TREND_PULLBACK / FAILED_BREAK /
+    # BREAKOUT_ACCEPTANCE stay as audit facts and GTH labels; they no longer
+    # authorize an RTH card. Short-cycle Late Chase ignores VWAP+15m impulse
+    # and uses 5m ATR exhaustion plus 50% progress. Pin LOOK/TRADE still
+    # vetoes the new setup. Event-settlement and GTH scans stay.
     # v30: LOOK or TRADE pin vetoes RTH directional debit verticals
     # (failed-break, trend-pullback, breakout). Event-settlement and GTH
     # scans stay. PIN_MIGRATING / UNCERTAIN do not block spreads.
@@ -138,6 +144,10 @@ class StrategyPolicy:
     max_stop_atr: float = 1.0
     late_chase_distance_atr: float = 1.0
     late_chase_impulse_atr: float = 1.0
+    es_momentum_min_return_1m: float = 0.35
+    es_momentum_min_return_5m: float = 1.0
+    es_momentum_max_return_5m_atr: float = 1.50
+    es_momentum_max_progress: float = 0.50
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
     pin_stable_max_minutes_to_close: float = 300.0
     pin_stable_enter_min_excursions: int = 2
@@ -181,6 +191,7 @@ class StrategyPolicy:
             "late_chase_impulse_atr",
             "failed_break_max_trigger_target_progress",
             "max_trigger_target_progress",
+            "es_momentum_max_progress",
         )
         return {name: getattr(self, name) for name in names}
 

@@ -35,6 +35,7 @@ _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _RTH_DIRECTIONAL_SPREADS = {
+    "ES_VOLUME_MOMENTUM",
     "FAILED_BREAK_RECLAIM",
     "TREND_PULLBACK",
     "BREAKOUT_ACCEPTANCE",
@@ -1127,6 +1128,7 @@ def _gate_from_entry_reason(
 ) -> dict[str, Any]:
     if reason == "direction_valid_but_entry_too_late":
         failed_break = setup_kind == "FAILED_BREAK_RECLAIM"
+        short_cycle = setup_kind == "ES_VOLUME_MOMENTUM"
         return {
             "gate": reason,
             "actual": {
@@ -1146,7 +1148,9 @@ def _gate_from_entry_reason(
                     else policy.max_debit_fraction
                 ),
                 "max_progress": (
-                    policy.failed_break_max_trigger_target_progress
+                    policy.es_momentum_max_progress
+                    if short_cycle
+                    else policy.failed_break_max_trigger_target_progress
                     if failed_break
                     else policy.max_trigger_target_progress
                 ),

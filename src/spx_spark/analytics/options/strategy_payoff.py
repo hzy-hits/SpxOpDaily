@@ -271,21 +271,33 @@ def vertical_entry_quality(
     impulse_atr, stop_atr = abs(impulse_15m_points or 0.0) / atr, stop_distance / atr
     progress = max(0.0, (spot - trigger) / (target - trigger)) if trigger is not None and target != trigger else 0.0
     failed_break = setup_kind == "FAILED_BREAK_RECLAIM"
+    short_cycle = setup_kind == "ES_VOLUME_MOMENTUM"
     min_ratio = thresholds["failed_break_min_target_room_ratio" if failed_break else "min_target_room_ratio"]
     max_debit = thresholds["failed_break_max_debit_fraction" if failed_break else "max_debit_fraction"]
-    max_progress = thresholds[
-        "failed_break_max_trigger_target_progress" if failed_break else "max_trigger_target_progress"
-    ]
+    if short_cycle:
+        max_progress = thresholds["es_momentum_max_progress"]
+    elif failed_break:
+        max_progress = thresholds["failed_break_max_trigger_target_progress"]
+    else:
+        max_progress = thresholds["max_trigger_target_progress"]
     result = {
         "distance_to_vwap_atr": round(distance_atr, 4), "impulse_15m_atr": round(impulse_atr, 4),
         "target_room_points": round(target_distance, 4), "stop_distance_points": round(stop_distance, 4),
         "target_room_ratio": round(ratio, 4), "debit_fraction_of_width": round(debit_fraction, 4),
         "stop_distance_atr": round(stop_atr, 4), "trigger_target_progress": round(progress, 4),
     }
-    late = (
+    # First-impulse shorts die if VWAP distance + 15m impulse count as chase.
+    # Short-cycle cards use 5m ATR exhaustion in setup facts instead.
+    impulse_chase = (not short_cycle) and (
         distance_atr > thresholds["late_chase_distance_atr"]
         and impulse_atr > thresholds["late_chase_impulse_atr"]
-    ) or ratio < min_ratio or debit_fraction > max_debit or progress >= max_progress
+    )
+    late = (
+        impulse_chase
+        or ratio < min_ratio
+        or debit_fraction > max_debit
+        or progress >= max_progress
+    )
     if late:
         return result, ["direction_valid_but_entry_too_late"]
     if not thresholds["min_stop_atr"] <= stop_atr <= thresholds["max_stop_atr"]:
