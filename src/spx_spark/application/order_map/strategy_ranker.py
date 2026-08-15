@@ -23,6 +23,8 @@ from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
     butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
+    five_wide_look_mass_ready,
+    pin_look_window,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
@@ -240,8 +242,10 @@ def rank_candidates(
     # Deterministic structure/friction score picks the winner. The uncalibrated
     # research utility (P/Q bootstrap) is display and tie-break only until the
     # ManagementPolicy EV model passes its promotion gate.
+    look_window = pin_look_window(facts.get("minutes_to_close"), policy)
     passed.sort(
         key=lambda item: (
+            _look_window_pin_priority(item, look_window=look_window),
             float(item.get("selection_score") or 0.0),
             float(_map(item.get("utility")).get("utility") or 0.0),
         ),
@@ -249,6 +253,19 @@ def rank_candidates(
     )
     misses.sort(key=_miss_sort_key, reverse=True)
     return RankResult(passed=passed, near_misses=misses[:3], gate_audit=audit)
+
+
+def _look_window_pin_priority(candidate: Mapping[str, Any], *, look_window: bool) -> int:
+    """11–13 TRADE prefers a 10-wide pin fly over a competing vertical."""
+
+    if not look_window or candidate.get("setup_kind") != "STABLE_PIN":
+        return 0
+    width = _number(candidate.get("width"))
+    if width == 10.0:
+        return 2
+    if width == 5.0:
+        return 1
+    return 0
 
 
 def _apply_surface_shape_prior(
@@ -666,7 +683,7 @@ def _rth_butterfly_pin_location_gates(
     max_minutes = butterfly_max_entry_minutes(width, policy)
     if not butterfly_entry_clock_open(width, minutes, policy):
         threshold: float | dict[str, float | None]
-        if width == 5.0:
+        if width in policy.butterfly_look_clock_widths:
             threshold = {
                 "late_max_minutes": max_minutes,
                 "look_min_minutes": policy.butterfly_five_wide_look_min_minutes,
@@ -678,6 +695,21 @@ def _rth_butterfly_pin_location_gates(
             "gate": "butterfly_entry_too_early",
             "actual": minutes,
             "threshold": threshold,
+        })
+    elif (
+        width == 5.0
+        and pin_look_window(minutes, policy)
+        and (max_minutes is None or minutes > max_minutes)
+        and not five_wide_look_mass_ready(
+            _map(_map(facts.get("structure")).get("q_local_mass_5pt")),
+            float(center),
+            policy,
+        )
+    ):
+        gates.append({
+            "gate": "butterfly_five_wide_look_mass_not_concentrated",
+            "actual": center,
+            "threshold": policy.pin_five_wide_look_min_mass_fraction,
         })
     remaining = _number(_map(facts.get("volatility")).get("expected_move_points"))
     structure = _map(facts.get("structure"))

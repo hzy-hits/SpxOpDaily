@@ -20,7 +20,10 @@ from spx_spark.analytics.options.strategy_payoff import (
 )
 from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.application.market_features.session_quote_selection import provider_quote
-from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.application.order_map.strategy_regime import (
+    StrategyPolicy,
+    pin_look_trade_widths,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import InstrumentId, Provider
 from spx_spark.storage import LatestState
@@ -671,7 +674,10 @@ def _butterfly_candidates(
             center = _number(_map(ranked).get("center"))
             if center is None:
                 continue
-            for width in WIDTHS:
+            mass = _map(_map(facts.get("structure")).get("q_local_mass_5pt"))
+            for width in pin_look_trade_widths(
+                facts.get("minutes_to_close"), center, mass, policy
+            ):
                 for right in ("C", "P"):
                     row = _butterfly_candidate(
                         facts,

@@ -5,7 +5,7 @@
 目标路径：`docs/strategy-signal-engine-v2.md`
 自动下单：禁止
 生产接入方式：历史因果回放通过后，直接进入人工可见的 Manual Candidate，不再额外等待 20 个交易日 Shadow
-最后更新：2026-08-07
+最后更新：2026-08-15
 
 > **协同基线**：本文档与架构简化工作的排期、依赖白名单、配置与 Rust 边界裁决见
 > `docs/architecture-simplification-execution-plan-v1.md` 第 2 节（协同裁决 11–15）与第 4 节 S-track 任务卡。
@@ -588,7 +588,7 @@ TRADE（PIN_STABLE）：现有硬栈，进入仍要 2 次 excursion-return
 ```
 
 LOOK 只发观察卡，不过 `butterfly_requires_pin_stable`，不能成为蝶式交易候选。
-TRADE 才允许枚举 STABLE_PIN 蝶。夜盘两档都不评蝶。
+TRADE 才允许枚举 STABLE_PIN 蝶。11:00–13:00 TRADE 默认评 10 点蝶；5 点仅当本地 5 点质量已堆在中轴 ±5 内（质量分数 ≥ 0.50）才上架。夜盘两档都不评蝶。
 
 硬条件（TRADE / PIN_STABLE）：
 
@@ -835,7 +835,8 @@ debit_fraction <= 0.40
 
 ```text
 最早 11:00 ET
-11:00–13:00：LOOK 观察今日中轴；仅 TRADE（PIN_STABLE）可出 5 点蝶交易卡
+11:00–13:00：LOOK 观察今日中轴；TRADE（PIN_STABLE）默认评 10 点蝶
+5 点蝶仅在本地质量已堆在中轴 ±5 内时才在看窗上架
 14:50–15:30：TRADE 尾盘窗（5 点 ≤70 分钟）
 15:30 后仅接受高置信、低成本候选
 ```

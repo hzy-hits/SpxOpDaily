@@ -29,6 +29,8 @@ from spx_spark.application.order_map.strategy_regime import (
     assess_regime,
     butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
+    five_wide_look_mass_ready,
+    pin_look_trade_widths,
     pin_stable_center,
     pin_stable_watch_phase,
     pin_watch_center,
@@ -449,7 +451,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v27"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v28"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -827,7 +829,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v27"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v28"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1768,19 +1770,47 @@ def test_butterfly_clock_slack_is_five_wide_only() -> None:
     assert butterfly_max_entry_minutes(10.0, policy) == 120.0
     assert butterfly_max_entry_minutes(15.0, policy) == 180.0
     assert butterfly_entry_clock_open(5.0, 201.0, policy) is True
+    assert butterfly_entry_clock_open(10.0, 201.0, policy) is True
     assert butterfly_entry_clock_open(5.0, 180.0, policy) is True
     assert butterfly_entry_clock_open(5.0, 300.0, policy) is True
     assert butterfly_entry_clock_open(5.0, 90.0, policy) is False
     assert butterfly_entry_clock_open(5.0, 150.0, policy) is False
+    assert butterfly_entry_clock_open(10.0, 150.0, policy) is False
+    assert butterfly_entry_clock_open(15.0, 201.0, policy) is False
     assert butterfly_entry_clock_open(5.0, 66.0, policy) is True
-    assert butterfly_entry_clock_open(10.0, 201.0, policy) is False
     assert pin_stable_watch_phase(201.0, policy) == "look"
     assert pin_stable_watch_phase(90.0, policy) == "wait"
     assert pin_stable_watch_phase(66.0, policy) == "clock_open"
     assert pin_stable_watch_phase(70.0, policy) == "clock_open"
 
 
-def test_pin_stable_five_wide_look_window_allows_1238_et() -> None:
+def test_pin_look_trade_widths_default_to_ten_in_look_window() -> None:
+    spread = {"7760": 0.20, "7770": 0.20, "7785": 0.20, "7800": 0.20, "7810": 0.20}
+    piled = {"7780": 0.25, "7785": 0.30, "7790": 0.20, "7760": 0.10, "7810": 0.15}
+    assert five_wide_look_mass_ready(spread, 7785.0) is False
+    assert five_wide_look_mass_ready(piled, 7785.0) is True
+    assert pin_look_trade_widths(201.0, 7785.0, {}) == (10.0,)
+    assert pin_look_trade_widths(201.0, 7785.0, spread) == (10.0,)
+    assert pin_look_trade_widths(201.0, 7785.0, piled) == (10.0, 5.0)
+    assert pin_look_trade_widths(90.0, 7785.0, piled) == (5.0, 10.0, 15.0, 20.0)
+
+
+def test_pin_stable_ten_wide_look_window_allows_1238_et() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7786.0},
+            "minutes_to_close": 201,
+            "volatility": {"expected_move_points": 12.0},
+            "structure": {"q_mode": 7785.0, "put_wall": 7785.0, "call_wall": 7785.0},
+            "value_center": {"spx_30m": 7786.0},
+        },
+        _stable_pin_butterfly(center=7785.0, width=10.0, right="P", debit=3.2),
+    )
+    assert [row["center"] for row in rank.passed] == [7785.0]
+    assert rank.passed[0]["width"] == 10.0
+
+
+def test_pin_stable_five_wide_look_window_needs_local_mass() -> None:
     rank = _rank_stable_pin_butterfly(
         {
             "spot": {"spx": 7786.0},
@@ -1791,7 +1821,89 @@ def test_pin_stable_five_wide_look_window_allows_1238_et() -> None:
         },
         _stable_pin_butterfly(center=7785.0, width=5.0, right="P", debit=1.3),
     )
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_five_wide_look_mass_not_concentrated" in gates
+
+
+def test_pin_stable_five_wide_look_window_passes_when_mass_is_local() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7786.0},
+            "minutes_to_close": 201,
+            "volatility": {"expected_move_points": 12.0},
+            "structure": {
+                "q_mode": 7785.0,
+                "put_wall": 7785.0,
+                "call_wall": 7785.0,
+                "q_local_mass_5pt": {
+                    "7780": 0.25,
+                    "7785": 0.30,
+                    "7790": 0.20,
+                    "7760": 0.10,
+                    "7810": 0.15,
+                },
+            },
+            "value_center": {"spx_30m": 7786.0},
+        },
+        _stable_pin_butterfly(center=7785.0, width=5.0, right="P", debit=1.3),
+    )
     assert [row["center"] for row in rank.passed] == [7785.0]
+    assert rank.passed[0]["width"] == 5.0
+
+
+def test_look_window_ten_wide_pin_outranks_failed_break_vertical() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    fly = _stable_pin_butterfly(center=7785.0, width=10.0, right="P", debit=3.2)
+    fly["selection_score"] = 0.4
+    vertical = {
+        "candidate_id": "put-failed-break",
+        "strategy_type": "PUT_DEBIT_VERTICAL",
+        "setup_kind": "FAILED_BREAK_RECLAIM",
+        "direction": "DOWN",
+        "selection_score": 9.0,
+        "long": {"strike": 7785.0},
+        "short": {"strike": 7775.0},
+        "quote": {"status": "ready", "bid": 2.8, "ask": 3.0},
+        "economics": {
+            "width_points": 10.0,
+            "max_gain_points": 7.0,
+            "max_loss_points": 3.0,
+            "debit_fraction_of_width": 0.3,
+        },
+        "trigger_level": 7795.0,
+        "target_spx": 7775.0,
+        "invalidation_spx": 7791.0,
+        "quote_valid_until": "2026-08-06T19:00:30+00:00",
+        "opportunity_valid_until": "2026-08-06T19:05:00+00:00",
+        "automatic_ordering": False,
+        "manual_action_only": True,
+    }
+    rank = rank_candidates(
+        [vertical, fly],
+        _ranker_pin_facts(
+            {
+                "spot": {"spx": 7786.0},
+                "minutes_to_close": 201,
+                "path": {"atr_5m": 10.0, "distance_to_vwap_points": 0.0, "impulse_15m_points": 0.0},
+                "volatility": {"expected_move_points": 20.0},
+                "structure": {"q_mode": 7785.0, "put_wall": 7785.0, "call_wall": 7785.0},
+                "value_center": {"spx_30m": 7786.0},
+            }
+        ),
+        {
+            "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
+            "terminal_state": "PIN_STABLE",
+        },
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert [row["candidate_id"] for row in rank.passed][:2] == [
+        fly["candidate_id"],
+        "put-failed-break",
+    ]
 
 
 def test_pin_stable_five_wide_allows_ten_minute_clock_slack() -> None:

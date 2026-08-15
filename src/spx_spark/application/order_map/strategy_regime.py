@@ -26,6 +26,9 @@ __all__ = (
     "assess_regime",
     "butterfly_entry_clock_open",
     "butterfly_max_entry_minutes",
+    "five_wide_look_mass_ready",
+    "pin_look_trade_widths",
+    "pin_look_window",
     "pin_stable_center",
     "pin_stable_next_step_text",
     "pin_stable_watch_phase",
@@ -35,7 +38,10 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v27"
+    policy_version: str = "strategy_policy.bootstrap.v28"
+    # v28: 11:00–13:00 TRADE evaluates 10-wide flies by default. 5-wide in
+    # that window only when local 5pt mass is concentrated within ±5 of the
+    # body. The look clock opens 5 and 10; 15/20 stay on 12 min/point.
     # v27: PIN splits LOOK vs TRADE. LOOK (11:00–13:00, 1 excursion, not
     # migrating) is observation only and never authorizes a butterfly card.
     # TRADE remains PIN_STABLE with the existing hard stack (2 excursions).
@@ -128,6 +134,8 @@ class StrategyPolicy:
     pin_stable_enter_min_excursions: int = 2
     pin_stable_hold_min_excursions: int = 1
     pin_look_min_excursions: int = 1
+    butterfly_look_clock_widths: tuple[float, ...] = (10.0, 5.0)
+    pin_five_wide_look_min_mass_fraction: float = 0.50
     pin_q_mode_hold_max_distance_points: float = 5.0
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
@@ -178,7 +186,7 @@ def butterfly_max_entry_minutes(
 
     5-wide adds ``butterfly_five_wide_early_slack_minutes`` (70 at the
     default 12 min/point). Wider tents stay on the raw 12 min/point clock.
-    The 11:00–13:00 look window is a separate 5-wide opening, not this cap.
+    The 11:00–13:00 look window is a separate 5/10 opening, not this cap.
     """
 
     if width is None or width <= 0:
@@ -196,9 +204,9 @@ def butterfly_entry_clock_open(
 ) -> bool:
     """True when the pin-fly clock allows this width to be ranked.
 
-    5-wide: 11:00–13:00 ET look window, or the late slack window (≤70).
-    A leftover of 90 minutes (about 14:30 ET) stays closed. Wider tents
-    use only the 12 min/point late clock.
+    5-wide and 10-wide: 11:00–13:00 ET look window, or their late clocks.
+    A leftover of 90 minutes (about 14:30 ET) stays closed for 5-wide.
+    15-wide and wider use only the 12 min/point late clock.
     """
 
     if minutes_to_close is None or width is None or width <= 0:
@@ -206,13 +214,62 @@ def butterfly_entry_clock_open(
     late = butterfly_max_entry_minutes(width, policy)
     if late is not None and minutes_to_close <= late:
         return True
-    if width != 5.0:
+    if width not in policy.butterfly_look_clock_widths:
         return False
+    return pin_look_window(minutes_to_close, policy)
+
+
+def pin_look_window(
+    minutes_to_close: float | None,
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> bool:
+    """True during the 11:00–13:00 ET look window."""
+
     return (
-        policy.butterfly_five_wide_look_min_minutes
-        <= minutes_to_close
+        minutes_to_close is not None
+        and policy.butterfly_five_wide_look_min_minutes
+        <= float(minutes_to_close)
         <= policy.butterfly_five_wide_look_max_minutes
     )
+
+
+def pin_look_trade_widths(
+    minutes_to_close: float | None,
+    center: float | None,
+    mass: Mapping[str, Any],
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> tuple[float, ...]:
+    """Widths enumerated for a STABLE_PIN body. Look window defaults to 10."""
+
+    if not pin_look_window(minutes_to_close, policy):
+        return (5.0, 10.0, 15.0, 20.0)
+    widths = [10.0]
+    if center is not None and five_wide_look_mass_ready(mass, center, policy):
+        widths.append(5.0)
+    return tuple(widths)
+
+
+def five_wide_look_mass_ready(
+    mass: Mapping[str, Any],
+    center: float,
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> bool:
+    """True when local 5-point mass is piled inside [K−5, K+5]."""
+
+    total = 0.0
+    near = 0.0
+    for key, value in mass.items():
+        weight = _number(value)
+        if weight is None:
+            continue
+        try:
+            strike = float(key)
+        except (TypeError, ValueError):
+            continue
+        total += weight
+        if abs(strike - center) <= 5.0:
+            near += weight
+    return total > 0 and near / total >= policy.pin_five_wide_look_min_mass_fraction
 
 
 def pin_stable_center(regime: Mapping[str, Any] | None) -> float | None:
@@ -563,11 +620,9 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
         and float(decay) > 0 and depin < stable_risk
     )
     gth = str(_map(facts.get("session")).get("mode") or "").strip().lower() == "gth"
-    in_look_window = (
-        minutes_to_close is not None
-        and policy.butterfly_five_wide_look_min_minutes
-        <= float(minutes_to_close)
-        <= policy.butterfly_five_wide_look_max_minutes
+    in_look_window = pin_look_window(
+        float(minutes_to_close) if isinstance(minutes_to_close, int | float) else None,
+        policy,
     )
     look = (
         not gth
