@@ -27,6 +27,7 @@ __all__ = (
     "butterfly_entry_clock_open",
     "butterfly_max_entry_minutes",
     "five_wide_look_mass_ready",
+    "look_mass_ready",
     "pin_look_trade_widths",
     "pin_look_window",
     "pin_stable_center",
@@ -38,7 +39,11 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v28"
+    policy_version: str = "strategy_policy.bootstrap.v29"
+    # v29: 11:00–13:00 TRADE does not bind fly width. The look ladder is
+    # 5/10/15/20/50; a width is enumerated when local mass is already piled
+    # inside [K−W, K+W]. Rank prefers any pin fly over a vertical, then the
+    # tightest passing tent. Late RTH still uses 5/10/15/20 on 12 min/point.
     # v28: 11:00–13:00 TRADE evaluates 10-wide flies by default. 5-wide in
     # that window only when local 5pt mass is concentrated within ±5 of the
     # body. The look clock opens 5 and 10; 15/20 stay on 12 min/point.
@@ -134,8 +139,8 @@ class StrategyPolicy:
     pin_stable_enter_min_excursions: int = 2
     pin_stable_hold_min_excursions: int = 1
     pin_look_min_excursions: int = 1
-    butterfly_look_clock_widths: tuple[float, ...] = (10.0, 5.0)
-    pin_five_wide_look_min_mass_fraction: float = 0.50
+    butterfly_look_clock_widths: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 50.0)
+    pin_look_min_mass_fraction: float = 0.50
     pin_q_mode_hold_max_distance_points: float = 5.0
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
@@ -186,7 +191,7 @@ def butterfly_max_entry_minutes(
 
     5-wide adds ``butterfly_five_wide_early_slack_minutes`` (70 at the
     default 12 min/point). Wider tents stay on the raw 12 min/point clock.
-    The 11:00–13:00 look window is a separate 5/10 opening, not this cap.
+    The 11:00–13:00 look window is a separate width-ladder opening, not this cap.
     """
 
     if width is None or width <= 0:
@@ -204,9 +209,8 @@ def butterfly_entry_clock_open(
 ) -> bool:
     """True when the pin-fly clock allows this width to be ranked.
 
-    5-wide and 10-wide: 11:00–13:00 ET look window, or their late clocks.
+    Look-ladder widths (5/10/15/20/50): 11:00–13:00 ET, or their late clocks.
     A leftover of 90 minutes (about 14:30 ET) stays closed for 5-wide.
-    15-wide and wider use only the 12 min/point late clock.
     """
 
     if minutes_to_close is None or width is None or width <= 0:
@@ -239,23 +243,33 @@ def pin_look_trade_widths(
     mass: Mapping[str, Any],
     policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
 ) -> tuple[float, ...]:
-    """Widths enumerated for a STABLE_PIN body. Look window defaults to 10."""
+    """Widths enumerated for a STABLE_PIN body.
+
+    Look window follows the mass box on the 5/10/15/20/50 ladder. Late RTH
+    keeps the 5/10/15/20 scan; 50 is look-window only.
+    """
 
     if not pin_look_window(minutes_to_close, policy):
         return (5.0, 10.0, 15.0, 20.0)
-    widths = [10.0]
-    if center is not None and five_wide_look_mass_ready(mass, center, policy):
-        widths.append(5.0)
-    return tuple(widths)
+    if center is None:
+        return ()
+    return tuple(
+        width
+        for width in policy.butterfly_look_clock_widths
+        if look_mass_ready(mass, center, width, policy)
+    )
 
 
-def five_wide_look_mass_ready(
+def look_mass_ready(
     mass: Mapping[str, Any],
     center: float,
+    width: float,
     policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
 ) -> bool:
-    """True when local 5-point mass is piled inside [K−5, K+5]."""
+    """True when local mass is piled inside [K−W, K+W]."""
 
+    if width <= 0:
+        return False
     total = 0.0
     near = 0.0
     for key, value in mass.items():
@@ -267,9 +281,19 @@ def five_wide_look_mass_ready(
         except (TypeError, ValueError):
             continue
         total += weight
-        if abs(strike - center) <= 5.0:
+        if abs(strike - center) <= width:
             near += weight
-    return total > 0 and near / total >= policy.pin_five_wide_look_min_mass_fraction
+    return total > 0 and near / total >= policy.pin_look_min_mass_fraction
+
+
+def five_wide_look_mass_ready(
+    mass: Mapping[str, Any],
+    center: float,
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> bool:
+    """True when local 5-point mass is piled inside [K−5, K+5]."""
+
+    return look_mass_ready(mass, center, 5.0, policy)
 
 
 def pin_stable_center(regime: Mapping[str, Any] | None) -> float | None:

@@ -23,7 +23,7 @@ from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
     butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
-    five_wide_look_mass_ready,
+    look_mass_ready,
     pin_look_window,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
@@ -255,17 +255,13 @@ def rank_candidates(
     return RankResult(passed=passed, near_misses=misses[:3], gate_audit=audit)
 
 
-def _look_window_pin_priority(candidate: Mapping[str, Any], *, look_window: bool) -> int:
-    """11–13 TRADE prefers a 10-wide pin fly over a competing vertical."""
+def _look_window_pin_priority(candidate: Mapping[str, Any], *, look_window: bool) -> tuple[int, float]:
+    """11–13 TRADE prefers any pin fly over a vertical, then the tightest tent."""
 
     if not look_window or candidate.get("setup_kind") != "STABLE_PIN":
-        return 0
-    width = _number(candidate.get("width"))
-    if width == 10.0:
-        return 2
-    if width == 5.0:
-        return 1
-    return 0
+        return (0, 0.0)
+    width = _number(candidate.get("width")) or 0.0
+    return (1, -width)
 
 
 def _apply_surface_shape_prior(
@@ -697,19 +693,22 @@ def _rth_butterfly_pin_location_gates(
             "threshold": threshold,
         })
     elif (
-        width == 5.0
+        width in policy.butterfly_look_clock_widths
         and pin_look_window(minutes, policy)
-        and (max_minutes is None or minutes > max_minutes)
-        and not five_wide_look_mass_ready(
+        and not look_mass_ready(
             _map(_map(facts.get("structure")).get("q_local_mass_5pt")),
             float(center),
+            float(width),
             policy,
         )
     ):
         gates.append({
-            "gate": "butterfly_five_wide_look_mass_not_concentrated",
+            "gate": "butterfly_look_mass_not_concentrated",
             "actual": center,
-            "threshold": policy.pin_five_wide_look_min_mass_fraction,
+            "threshold": {
+                "width": width,
+                "min_mass_fraction": policy.pin_look_min_mass_fraction,
+            },
         })
     remaining = _number(_map(facts.get("volatility")).get("expected_move_points"))
     structure = _map(facts.get("structure"))

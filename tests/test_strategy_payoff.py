@@ -451,7 +451,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v28"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v29"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -829,7 +829,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v28"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v29"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -1776,7 +1776,9 @@ def test_butterfly_clock_slack_is_five_wide_only() -> None:
     assert butterfly_entry_clock_open(5.0, 90.0, policy) is False
     assert butterfly_entry_clock_open(5.0, 150.0, policy) is False
     assert butterfly_entry_clock_open(10.0, 150.0, policy) is False
-    assert butterfly_entry_clock_open(15.0, 201.0, policy) is False
+    assert butterfly_entry_clock_open(15.0, 201.0, policy) is True
+    assert butterfly_entry_clock_open(20.0, 201.0, policy) is True
+    assert butterfly_entry_clock_open(50.0, 201.0, policy) is True
     assert butterfly_entry_clock_open(5.0, 66.0, policy) is True
     assert pin_stable_watch_phase(201.0, policy) == "look"
     assert pin_stable_watch_phase(90.0, policy) == "wait"
@@ -1784,14 +1786,26 @@ def test_butterfly_clock_slack_is_five_wide_only() -> None:
     assert pin_stable_watch_phase(70.0, policy) == "clock_open"
 
 
-def test_pin_look_trade_widths_default_to_ten_in_look_window() -> None:
+def test_pin_look_trade_widths_follow_mass_box() -> None:
     spread = {"7760": 0.20, "7770": 0.20, "7785": 0.20, "7800": 0.20, "7810": 0.20}
     piled = {"7780": 0.25, "7785": 0.30, "7790": 0.20, "7760": 0.10, "7810": 0.15}
+    ten_box = {
+        "7775": 0.14,
+        "7780": 0.12,
+        "7785": 0.16,
+        "7790": 0.12,
+        "7795": 0.14,
+        "7760": 0.16,
+        "7810": 0.16,
+    }
+    fifty_box = {"7735": 0.30, "7785": 0.20, "7835": 0.30, "7700": 0.10, "7870": 0.10}
     assert five_wide_look_mass_ready(spread, 7785.0) is False
     assert five_wide_look_mass_ready(piled, 7785.0) is True
-    assert pin_look_trade_widths(201.0, 7785.0, {}) == (10.0,)
-    assert pin_look_trade_widths(201.0, 7785.0, spread) == (10.0,)
-    assert pin_look_trade_widths(201.0, 7785.0, piled) == (10.0, 5.0)
+    assert pin_look_trade_widths(201.0, 7785.0, {}) == ()
+    assert pin_look_trade_widths(201.0, 7785.0, spread) == (15.0, 20.0, 50.0)
+    assert pin_look_trade_widths(201.0, 7785.0, piled) == (5.0, 10.0, 15.0, 20.0, 50.0)
+    assert pin_look_trade_widths(201.0, 7785.0, ten_box) == (10.0, 15.0, 20.0, 50.0)
+    assert pin_look_trade_widths(201.0, 7785.0, fifty_box) == (50.0,)
     assert pin_look_trade_widths(90.0, 7785.0, piled) == (5.0, 10.0, 15.0, 20.0)
 
 
@@ -1801,13 +1815,78 @@ def test_pin_stable_ten_wide_look_window_allows_1238_et() -> None:
             "spot": {"spx": 7786.0},
             "minutes_to_close": 201,
             "volatility": {"expected_move_points": 12.0},
-            "structure": {"q_mode": 7785.0, "put_wall": 7785.0, "call_wall": 7785.0},
+            "structure": {
+                "q_mode": 7785.0,
+                "put_wall": 7785.0,
+                "call_wall": 7785.0,
+                "q_local_mass_5pt": {
+                    "7775": 0.14,
+                    "7780": 0.12,
+                    "7785": 0.16,
+                    "7790": 0.12,
+                    "7795": 0.14,
+                    "7760": 0.16,
+                    "7810": 0.16,
+                },
+            },
             "value_center": {"spx_30m": 7786.0},
         },
         _stable_pin_butterfly(center=7785.0, width=10.0, right="P", debit=3.2),
     )
     assert [row["center"] for row in rank.passed] == [7785.0]
     assert rank.passed[0]["width"] == 10.0
+
+
+def test_pin_stable_fifteen_wide_look_window_allows_spread_mass() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7786.0},
+            "minutes_to_close": 201,
+            "volatility": {"expected_move_points": 20.0},
+            "structure": {
+                "q_mode": 7785.0,
+                "put_wall": 7785.0,
+                "call_wall": 7785.0,
+                "q_local_mass_5pt": {
+                    "7760": 0.20,
+                    "7770": 0.20,
+                    "7785": 0.20,
+                    "7800": 0.20,
+                    "7810": 0.20,
+                },
+            },
+            "value_center": {"spx_30m": 7786.0},
+        },
+        _stable_pin_butterfly(center=7785.0, width=15.0, right="P", debit=4.0),
+    )
+    assert [row["center"] for row in rank.passed] == [7785.0]
+    assert rank.passed[0]["width"] == 15.0
+
+
+def test_pin_stable_fifty_wide_look_window_allows_wide_mass() -> None:
+    rank = _rank_stable_pin_butterfly(
+        {
+            "spot": {"spx": 7786.0},
+            "minutes_to_close": 201,
+            "volatility": {"expected_move_points": 40.0},
+            "structure": {
+                "q_mode": 7785.0,
+                "put_wall": 7785.0,
+                "call_wall": 7785.0,
+                "q_local_mass_5pt": {
+                    "7735": 0.30,
+                    "7785": 0.20,
+                    "7835": 0.30,
+                    "7700": 0.10,
+                    "7870": 0.10,
+                },
+            },
+            "value_center": {"spx_30m": 7786.0},
+        },
+        _stable_pin_butterfly(center=7785.0, width=50.0, right="P", debit=8.0),
+    )
+    assert [row["center"] for row in rank.passed] == [7785.0]
+    assert rank.passed[0]["width"] == 50.0
 
 
 def test_pin_stable_five_wide_look_window_needs_local_mass() -> None:
@@ -1823,7 +1902,7 @@ def test_pin_stable_five_wide_look_window_needs_local_mass() -> None:
     )
     assert rank.passed == []
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
-    assert "butterfly_five_wide_look_mass_not_concentrated" in gates
+    assert "butterfly_look_mass_not_concentrated" in gates
 
 
 def test_pin_stable_five_wide_look_window_passes_when_mass_is_local() -> None:
@@ -1887,7 +1966,20 @@ def test_look_window_ten_wide_pin_outranks_failed_break_vertical() -> None:
                 "minutes_to_close": 201,
                 "path": {"atr_5m": 10.0, "distance_to_vwap_points": 0.0, "impulse_15m_points": 0.0},
                 "volatility": {"expected_move_points": 20.0},
-                "structure": {"q_mode": 7785.0, "put_wall": 7785.0, "call_wall": 7785.0},
+                "structure": {
+                    "q_mode": 7785.0,
+                    "put_wall": 7785.0,
+                    "call_wall": 7785.0,
+                    "q_local_mass_5pt": {
+                        "7775": 0.14,
+                        "7780": 0.12,
+                        "7785": 0.16,
+                        "7790": 0.12,
+                        "7795": 0.14,
+                        "7760": 0.16,
+                        "7810": 0.16,
+                    },
+                },
                 "value_center": {"spx_30m": 7786.0},
             }
         ),
@@ -1904,6 +1996,49 @@ def test_look_window_ten_wide_pin_outranks_failed_break_vertical() -> None:
         fly["candidate_id"],
         "put-failed-break",
     ]
+
+
+def test_look_window_tighter_pin_outranks_wider_pin() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    tight = _stable_pin_butterfly(center=7785.0, width=10.0, right="P", debit=3.2)
+    tight["selection_score"] = 0.4
+    wide = _stable_pin_butterfly(center=7785.0, width=20.0, right="P", debit=5.0)
+    wide["selection_score"] = 9.0
+    facts = _ranker_pin_facts(
+        {
+            "spot": {"spx": 7786.0},
+            "minutes_to_close": 201,
+            "volatility": {"expected_move_points": 20.0},
+            "structure": {
+                "q_mode": 7785.0,
+                "put_wall": 7785.0,
+                "call_wall": 7785.0,
+                "q_local_mass_5pt": {
+                    "7775": 0.14,
+                    "7780": 0.12,
+                    "7785": 0.16,
+                    "7790": 0.12,
+                    "7795": 0.14,
+                    "7760": 0.16,
+                    "7810": 0.16,
+                },
+            },
+            "value_center": {"spx_30m": 7786.0},
+        }
+    )
+    rank = rank_candidates(
+        [wide, tight],
+        facts,
+        {
+            "pin": {"depin_risk": 0.0, "recent_extreme_acceptance": False},
+            "terminal_state": "PIN_STABLE",
+        },
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=None,
+        probability_settings=None,
+        now=now,
+    )
+    assert [row["width"] for row in rank.passed][:2] == [10.0, 20.0]
 
 
 def test_pin_stable_five_wide_allows_ten_minute_clock_slack() -> None:
