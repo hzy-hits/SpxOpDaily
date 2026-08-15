@@ -22,6 +22,7 @@ from spx_spark.application.market_features.market import quote_source_at
 from spx_spark.application.market_features.session_quote_selection import provider_quote
 from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
+    hmm_owns_trend_direction,
     pin_blocks_directional_spreads,
     pin_look_trade_widths,
 )
@@ -442,6 +443,23 @@ def _vertical_candidate_from_evidence(
     }
 
 
+def _momentum_clarity_block(
+    direction: str,
+    regime: Mapping[str, Any],
+    facts: Mapping[str, Any],
+) -> str | None:
+    """Block unclear first prints and unconfirmed RTH direction flips."""
+
+    committed = str(facts.get("session_committed_direction") or "").upper()
+    hmm_trend = hmm_owns_trend_direction(regime)
+    if committed in {"UP", "DOWN"} and committed != direction:
+        if hmm_trend != direction:
+            return "es_volume_momentum_flip_needs_hmm_trend"
+    if hmm_trend is not None and hmm_trend != direction:
+        return "es_volume_momentum_hmm_opposes"
+    return None
+
+
 def _rth_evidences(
     payload: Mapping[str, Any],
     facts: Mapping[str, Any],
@@ -457,6 +475,7 @@ def _rth_evidences(
     pin_blocks = pin_blocks_directional_spreads(regime)
     if pin_blocks:
         reasons.append("directional_spread_blocked_by_pin_watch")
+    clarity_blocks: list[str] = []
     for setup in momentum_setups:
         if setup.get("state") != "ENTRY_WINDOW_OPEN":
             continue
@@ -464,6 +483,10 @@ def _rth_evidences(
         if not direction:
             continue
         if pin_blocks:
+            continue
+        clarity = _momentum_clarity_block(direction, regime, facts)
+        if clarity:
+            clarity_blocks.append(clarity)
             continue
         bases.append(
             {
@@ -476,7 +499,9 @@ def _rth_evidences(
             }
         )
     if not bases and not pin_blocks:
-        if not momentum_setups:
+        if clarity_blocks:
+            reasons.append(clarity_blocks[0])
+        elif not momentum_setups:
             reasons.append("es_volume_momentum_unavailable")
         else:
             blocked = [

@@ -575,7 +575,8 @@ abs(existing D) <= 3
 - 突破刚失败但尚未完成 retest；
 - 跨市场宽度正在翻转。
 
-Transition 不挡短周期 ES 量比动量。Failed Break 仍记事实，但不再授权 RTH 人读卡。
+Transition 不挡**第一张**短周期 ES 量比动量卡。Failed Break 仍记事实，但不再授权 RTH 人读卡。
+本 session 已有反向 RTH 人读卡时，翻向必须等 cash HMM 同向 TREND，不能只靠 5 分钟反弹。
 
 ### 7.4 PIN_STABLE
 
@@ -707,9 +708,14 @@ abs(return_5m) >= 1.0
 abs(return_5m) / ATR5m <= 1.5
 event_state = NORMAL
 LOOK/TRADE pin 不挡
+第一张卡：cash HMM BALANCED / TRANSITION / UNCERTAIN / 不可用 不挡
+第一张卡：cash HMM 已是反向 TREND → 挡（es_volume_momentum_hmm_opposes）
+翻向：本 session 已有反向 RTH 人读卡时，必须 cash HMM 同向 TREND
+RTH winner stick = 900s；stick 内 rank/delivery 不得改方向
 ```
 
-空头：volume down + 1m/5m 为负。不要求 `path_state = TREND`。
+空头：volume down + 1m/5m 为负。不要求 `path_state = TREND`，也不等回踩。
+清晰度看的是「这一脚是否同向、HMM 有没有反向 TREND」，不是突破回踩操作。
 
 ### 9.3 量价输入
 

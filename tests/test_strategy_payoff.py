@@ -452,7 +452,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v31"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v32"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -830,7 +830,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v31"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v32"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
@@ -2194,6 +2194,107 @@ def test_es_volume_and_1m_5m_disagree_does_not_authorize() -> None:
     assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_not_aligned"
 
 
+def test_es_volume_momentum_first_card_survives_hmm_balanced() -> None:
+    now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    payload["es_volume"] = _es_volume_signal(direction="down", pace_ratio=2.1)
+    payload["minute_market_frame"]["es"].update(
+        {
+            "vwap_distance_points": -0.8,
+            "return_1m_points": -1.2,
+            "return_5m_points": -3.0,
+            "return_15m_points": -0.75,
+        }
+    )
+    payload["minute_market_frame"]["diagnostics"]["rth_market_state"]["D"] = 2.0
+    payload["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["values"].update(
+        {
+            "efficiency_ratio": 0.28,
+            "vwap_cross_count": 3,
+            "price_vs_vwap": "below",
+            "breadth_above_vwap": 0.40,
+            "market_structure": "HH_HL",
+        }
+    )
+    payload["option_structure_frame"]["structure"]["put_wall"] = 7680.0
+    payload["strategy_distribution_forecast"] = _probability_forecast(
+        now, "terminal_below"
+    )
+    _attach_cash_hmm(payload, now, state_00=0.04, state_01=0.94, state_02=0.02)
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="P"), now
+    )
+
+    assert decision["regime"]["path_state"] == "BALANCED"
+    assert decision["decision_type"] == "PUT_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+
+
+def test_es_volume_momentum_hmm_trend_opposite_blocks_first_card() -> None:
+    now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+    payload["es_volume"] = _es_volume_signal(direction="down", pace_ratio=2.1)
+    payload["minute_market_frame"]["es"].update(
+        {
+            "return_1m_points": -1.2,
+            "return_5m_points": -3.0,
+        }
+    )
+    payload["strategy_distribution_forecast"] = _probability_forecast(
+        now, "terminal_below"
+    )
+    _attach_cash_hmm(payload, now, state_00=0.10, state_01=0.18, state_02=0.72)
+
+    decision = build_strategy_decision(
+        payload, _two_sided_vertical_chain(now, right="P"), now
+    )
+
+    assert decision["regime"]["path_state"] == "TREND"
+    assert decision["regime"]["path_direction"] == "UP"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_hmm_opposes"
+
+
+def test_es_volume_momentum_flip_needs_hmm_trend() -> None:
+    now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["session_committed_direction"] = "DOWN"
+    # 08-14 12:00-style: bounce 1m/5m is UP, but cash HMM is not TREND UP.
+    _attach_cash_hmm(payload, now, state_00=0.22, state_01=0.40, state_02=0.38)
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["hmm"]["owns_path"] is True
+    assert decision["regime"]["path_state"] != "TREND"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert (
+        decision["why_not"]["primary_blocker"]
+        == "es_volume_momentum_flip_needs_hmm_trend"
+    )
+
+
+def test_es_volume_momentum_flip_allowed_when_hmm_trend_aligns() -> None:
+    now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["session_committed_direction"] = "DOWN"
+    _attach_cash_hmm(payload, now, state_00=0.10, state_01=0.18, state_02=0.72)
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["path_state"] == "TREND"
+    assert decision["regime"]["path_direction"] == "UP"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+
+
 def test_look_window_tighter_pin_outranks_wider_pin() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     tight = _stable_pin_butterfly(center=7785.0, width=10.0, right="P", debit=3.2)
@@ -3345,6 +3446,40 @@ def _failed_break_20260812_chain(now: datetime) -> LatestState:
         )
     )
     return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
+
+
+def _attach_cash_hmm(
+    payload: dict[str, object],
+    now: datetime,
+    *,
+    state_00: float,
+    state_01: float,
+    state_02: float,
+) -> None:
+    market = payload.setdefault("minute_market_frame", {})
+    if not isinstance(market, dict):
+        raise TypeError("minute_market_frame")
+    market["cross_asset"] = {
+        "cross_index": {
+            "source": "cash_index",
+            "status": "ready",
+            "session_open": True,
+            "anchor": "index:SPX",
+        }
+    }
+    payload["experimental_research_signals"] = {
+        "schema_version": "research_context.v2",
+        "action_authority": "none",
+        "generated_at": (now - timedelta(seconds=5)).isoformat(),
+        "regime": {
+            "observed_through": (now - timedelta(seconds=5)).isoformat(),
+            "posterior": [
+                {"state_id": "state_00", "probability": state_00},
+                {"state_id": "state_01", "probability": state_01},
+                {"state_id": "state_02", "probability": state_02},
+            ],
+        },
+    }
 
 
 def _es_volume_signal(

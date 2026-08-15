@@ -27,6 +27,7 @@ __all__ = (
     "butterfly_entry_clock_open",
     "butterfly_max_entry_minutes",
     "five_wide_look_mass_ready",
+    "hmm_owns_trend_direction",
     "look_mass_ready",
     "pin_blocks_directional_spreads",
     "pin_look_trade_widths",
@@ -40,7 +41,12 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v31"
+    policy_version: str = "strategy_policy.bootstrap.v32"
+    # v32: ES_VOLUME_MOMENTUM stays the only RTH directional setup. The first
+    # card does not wait for TREND or a pullback. Cash HMM TREND opposite
+    # blocks a first print. A session that already printed the opposite RTH
+    # human card may flip only when cash HMM owns TREND the new way.
+    # Rank/delivery also stick the RTH winner for rth_winner_stick_seconds.
     # v31: RTH human directional cards come from ES_VOLUME_MOMENTUM only
     # (elevated ES pace + 1m/5m momentum). TREND_PULLBACK / FAILED_BREAK /
     # BREAKOUT_ACCEPTANCE stay as audit facts and GTH labels; they no longer
@@ -178,6 +184,9 @@ class StrategyPolicy:
     # GTH hysteresis from the start of the current direction streak, not a
     # sliding window: reprinting the same winner must not refresh the lock.
     gth_winner_stick_seconds: float = 180.0
+    # RTH same-direction hold after an accepted human card. Flip after this
+    # window still needs cash HMM TREND the new way (see v32).
+    rth_winner_stick_seconds: float = 900.0
     # Confirmation bar plus this many subsequent 5m bars remain ENTRY_WINDOW_OPEN.
     rth_setup_hold_bars: int = 2
     max_trigger_target_progress: float = 0.60
@@ -384,6 +393,18 @@ HMM_STATE_DIRECTION = {
     "state_01": None,
     "state_02": "UP",
 }
+
+
+def hmm_owns_trend_direction(regime: Mapping[str, Any]) -> str | None:
+    """Return UP/DOWN when cash HMM owns a TREND path; else None."""
+
+    hmm = _map(regime.get("hmm"))
+    if hmm.get("owns_path") is not True:
+        return None
+    if str(regime.get("path_state") or "") != "TREND":
+        return None
+    direction = str(regime.get("path_direction") or "").upper()
+    return direction if direction in {"UP", "DOWN"} else None
 
 
 def assess_regime(

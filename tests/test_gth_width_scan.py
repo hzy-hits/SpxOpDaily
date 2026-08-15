@@ -11,9 +11,12 @@ from spx_spark.application.order_map.operator_status import build_desk_message_s
 from spx_spark.application.order_map.strategy_ranker import (
     GthDirectionLock,
     apply_gth_winner_stick,
+    apply_winner_stick,
     gth_direction_lock,
     outbox_accepted_strategy_cards,
     rank_candidates,
+    session_committed_direction,
+    session_direction_lock,
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
@@ -252,7 +255,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v31"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v32"
     assert ranked.passed == []
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
@@ -511,3 +514,49 @@ def test_gth_winner_stick_blocks_opposite_direction_when_none_remain() -> None:
 
     assert stuck == []
     assert reason == "gth_winner_stick_direction_locked"
+
+
+def test_rth_winner_stick_blocks_opposite_direction() -> None:
+    lock = GthDirectionLock(
+        direction="DOWN",
+        opportunity_id="strategy-opportunity:old-put",
+        started_at=NOW,
+    )
+    passed = [
+        {
+            "opportunity_id": "strategy-opportunity:call",
+            "direction": "UP",
+            "selection_score": 2.07,
+        }
+    ]
+
+    stuck, reason = apply_winner_stick(passed, lock, session_mode="rth")
+
+    assert stuck == []
+    assert reason == "rth_winner_stick_direction_locked"
+
+
+def test_rth_session_lock_expires_but_committed_direction_remains() -> None:
+    start = NOW
+    cards = (
+        {
+            "session_mode": "rth",
+            "direction": "DOWN",
+            "opportunity_id": "strategy-opportunity:put",
+            "decision_at": start,
+        },
+    )
+
+    assert session_direction_lock(
+        cards,
+        now=start + timedelta(seconds=899),
+        stick_seconds=900.0,
+        session_mode="rth",
+    ) is not None
+    assert session_direction_lock(
+        cards,
+        now=start + timedelta(seconds=900),
+        stick_seconds=900.0,
+        session_mode="rth",
+    ) is None
+    assert session_committed_direction(cards, session_mode="rth") == "DOWN"

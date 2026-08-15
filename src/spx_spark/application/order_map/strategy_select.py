@@ -36,11 +36,14 @@ from spx_spark.application.order_map.strategy_regime import (
     pin_stable_next_step_text,
 )
 from spx_spark.application.order_map.strategy_ranker import (
+    GthDirectionLock,
     RankResult,
-    apply_gth_winner_stick,
+    apply_winner_stick,
     gth_direction_lock,
     outbox_accepted_strategy_cards,
     rank_candidates,
+    session_committed_direction,
+    session_direction_lock,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 from spx_spark.storage import LatestState
@@ -53,6 +56,13 @@ def build_strategy_decision(
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
     regime = assess_regime(facts)
+    committed = _rth_committed_direction(
+        facts,
+        payload=payload,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    if committed:
+        facts["session_committed_direction"] = committed
     reasons = _gate_reasons(facts, regime)
     generation_reasons: list[str] = []
     rows: list[dict[str, Any]] = []
@@ -101,13 +111,16 @@ def build_strategy_decision(
             )
             stick_reason: str | None = None
             if rank.passed:
-                stuck, stick_reason = apply_gth_winner_stick(
+                session_mode = str(_map(facts.get("session")).get("mode") or "")
+                stuck, stick_reason = apply_winner_stick(
                     rank.passed,
-                    _gth_direction_lock(
+                    _session_direction_lock(
                         facts,
                         now=_utc(now),
                         policy=DEFAULT_STRATEGY_POLICY,
+                        payload=payload,
                     ),
+                    session_mode=session_mode,
                 )
                 rank = RankResult(
                     passed=stuck,
@@ -667,6 +680,26 @@ def _attach_iron_condor_only_paths(
     )
 
 
+def _session_direction_lock(
+    facts: Mapping[str, Any],
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+    payload: Mapping[str, Any],
+):
+    session_mode = str(_map(facts.get("session")).get("mode") or "")
+    if session_mode == "gth":
+        return _gth_direction_lock(facts, now=now, policy=policy)
+    if session_mode == "rth":
+        return _rth_direction_lock(
+            facts,
+            now=now,
+            policy=policy,
+            payload=payload,
+        )
+    return None
+
+
 def _gth_direction_lock(
     facts: Mapping[str, Any],
     *,
@@ -678,6 +711,93 @@ def _gth_direction_lock(
     session_date = str(facts.get("session_date") or "")
     if not session_date or policy.gth_winner_stick_seconds <= 0:
         return None
+    rows = _accepted_session_cards(session_date)
+    if rows is None:
+        return None
+    return gth_direction_lock(
+        rows,
+        now=now,
+        stick_seconds=policy.gth_winner_stick_seconds,
+    )
+
+
+def _rth_direction_lock(
+    facts: Mapping[str, Any],
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+    payload: Mapping[str, Any],
+):
+    injected = _injected_direction_lock(payload.get("session_direction_lock"))
+    if injected is not None:
+        return injected
+    if str(_map(facts.get("session")).get("mode") or "") != "rth":
+        return None
+    session_date = str(facts.get("session_date") or "")
+    if not session_date or policy.rth_winner_stick_seconds <= 0:
+        return None
+    rows = _accepted_session_cards(session_date)
+    if rows is None:
+        return None
+    return session_direction_lock(
+        rows,
+        now=now,
+        stick_seconds=policy.rth_winner_stick_seconds,
+        session_mode="rth",
+    )
+
+
+def _rth_committed_direction(
+    facts: Mapping[str, Any],
+    *,
+    payload: Mapping[str, Any],
+    policy: StrategyPolicy,
+) -> str | None:
+    del policy
+    injected = str(payload.get("session_committed_direction") or "").upper()
+    if injected in {"UP", "DOWN"}:
+        return injected
+    if str(_map(facts.get("session")).get("mode") or "") != "rth":
+        return None
+    session_date = str(facts.get("session_date") or "")
+    if not session_date:
+        return None
+    rows = _accepted_session_cards(session_date)
+    if rows is None:
+        return None
+    return session_committed_direction(rows, session_mode="rth")
+
+
+def _injected_direction_lock(raw: object) -> GthDirectionLock | None:
+    item = _map(raw)
+    direction = str(item.get("direction") or "").upper()
+    opportunity_id = str(item.get("opportunity_id") or "").strip()
+    started_at = item.get("started_at")
+    if direction not in {"UP", "DOWN"} or not opportunity_id:
+        return None
+    if isinstance(started_at, datetime):
+        started = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        return GthDirectionLock(
+            direction=direction,
+            opportunity_id=opportunity_id,
+            started_at=started.astimezone(timezone.utc),
+        )
+    if isinstance(started_at, str) and started_at:
+        try:
+            parsed = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return GthDirectionLock(
+            direction=direction,
+            opportunity_id=opportunity_id,
+            started_at=parsed.astimezone(timezone.utc),
+        )
+    return None
+
+
+def _accepted_session_cards(session_date: str):
     # Unit tests pin this flag and must not read the host operational sqlite.
     isolated = os.getenv("SPX_SPARK_DISABLE_RUNTIME_OVERRIDES", "").strip().lower()
     if isolated in {"1", "true", "yes"}:
@@ -689,19 +809,14 @@ def _gth_direction_lock(
 
         rows = recent_selected_strategy_cards(session_date=session_date)
         settings = NotificationSettings.from_env()
-        rows = outbox_accepted_strategy_cards(
+        return outbox_accepted_strategy_cards(
             rows,
             event_exists=lambda event_id: notification_event_exists(settings, event_id),
         )
     except (OSError, ValueError):
         return None
-    except Exception:  # noqa: BLE001 - unmigrated sqlite must not block GTH ranking
+    except Exception:  # noqa: BLE001 - unmigrated sqlite must not block ranking
         return None
-    return gth_direction_lock(
-        rows,
-        now=now,
-        stick_seconds=policy.gth_winner_stick_seconds,
-    )
 
 
 def _with_iron_condor_map(

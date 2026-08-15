@@ -59,44 +59,49 @@ class GthDirectionLock:
     started_at: datetime
 
 
-def gth_direction_lock(
+def session_direction_lock(
     cards: Sequence[Mapping[str, Any]],
     *,
     now: datetime,
     stick_seconds: float,
+    session_mode: str,
 ) -> GthDirectionLock | None:
-    """Return the active GTH direction lock, or None once hysteresis expires.
+    """Return the active same-session direction lock, or None once it expires.
 
-    The lock starts at the earliest card in the latest same-direction GTH
-    streak. Later reprints of the same winner do not extend it.
+    The lock starts at the earliest card in the latest same-direction streak.
+    Later reprints of the same winner do not extend it. GTH may lock
+    UP/DOWN/NEUTRAL. RTH only locks UP/DOWN so a pin fly cannot freeze
+    the next momentum card.
     """
 
-    if stick_seconds <= 0:
+    mode = str(session_mode or "").strip().lower()
+    if stick_seconds <= 0 or mode not in {"gth", "rth"}:
         return None
+    allowed = {"UP", "DOWN", "NEUTRAL"} if mode == "gth" else {"UP", "DOWN"}
     now = _utc(now)
-    gth_cards = []
+    matched: list[dict[str, Any]] = []
     for row in cards:
-        mode = str(row.get("session_mode") or "").strip().lower()
+        row_mode = str(row.get("session_mode") or "").strip().lower()
         direction = str(row.get("direction") or "").strip().upper()
         opportunity_id = str(row.get("opportunity_id") or "").strip()
         decision_at = row.get("decision_at")
-        if mode != "gth" or not direction or not opportunity_id:
+        if row_mode != mode or direction not in allowed or not opportunity_id:
             continue
         if not isinstance(decision_at, datetime):
             continue
-        gth_cards.append(
+        matched.append(
             {
                 "direction": direction,
                 "opportunity_id": opportunity_id,
                 "decision_at": _utc(decision_at),
             }
         )
-    if not gth_cards:
+    if not matched:
         return None
-    gth_cards.sort(key=lambda item: item["decision_at"], reverse=True)
-    latest = gth_cards[0]
+    matched.sort(key=lambda item: item["decision_at"], reverse=True)
+    latest = matched[0]
     started_at = latest["decision_at"]
-    for row in gth_cards[1:]:
+    for row in matched[1:]:
         if row["direction"] != latest["direction"]:
             break
         started_at = row["decision_at"]
@@ -107,6 +112,46 @@ def gth_direction_lock(
         opportunity_id=str(latest["opportunity_id"]),
         started_at=started_at,
     )
+
+
+def gth_direction_lock(
+    cards: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+    stick_seconds: float,
+) -> GthDirectionLock | None:
+    """Return the active GTH direction lock, or None once hysteresis expires."""
+
+    return session_direction_lock(
+        cards,
+        now=now,
+        stick_seconds=stick_seconds,
+        session_mode="gth",
+    )
+
+
+def session_committed_direction(
+    cards: Sequence[Mapping[str, Any]],
+    *,
+    session_mode: str,
+) -> str | None:
+    """Latest accepted UP/DOWN card in this session, with no stick expiry."""
+
+    mode = str(session_mode or "").strip().lower()
+    if mode not in {"gth", "rth"}:
+        return None
+    latest: dict[str, Any] | None = None
+    for row in cards:
+        row_mode = str(row.get("session_mode") or "").strip().lower()
+        direction = str(row.get("direction") or "").strip().upper()
+        decision_at = row.get("decision_at")
+        if row_mode != mode or direction not in {"UP", "DOWN"}:
+            continue
+        if not isinstance(decision_at, datetime):
+            continue
+        if latest is None or _utc(decision_at) > latest["decision_at"]:
+            latest = {"direction": direction, "decision_at": _utc(decision_at)}
+    return None if latest is None else str(latest["direction"])
 
 
 def outbox_accepted_strategy_cards(
@@ -137,11 +182,13 @@ def outbox_accepted_strategy_cards(
     return tuple(accepted.values())
 
 
-def apply_gth_winner_stick(
+def apply_winner_stick(
     passed: list[dict[str, Any]],
     lock: GthDirectionLock | None,
+    *,
+    session_mode: str,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Keep the GTH winner/direction during the stick window.
+    """Keep the session winner/direction during the stick window.
 
     Prefer the locked opportunity if it still passes. Otherwise keep the best
     remaining candidate in that direction. Opposite directions wait until the
@@ -175,7 +222,22 @@ def apply_gth_winner_stick(
             if str(row.get("direction") or "").upper() != locked_direction
         ]
         return [*same_direction, *others], None
-    return [], "gth_winner_stick_direction_locked"
+    mode = str(session_mode or "").strip().lower()
+    reason = (
+        "gth_winner_stick_direction_locked"
+        if mode == "gth"
+        else "rth_winner_stick_direction_locked"
+    )
+    return [], reason
+
+
+def apply_gth_winner_stick(
+    passed: list[dict[str, Any]],
+    lock: GthDirectionLock | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Keep the GTH winner/direction during the stick window."""
+
+    return apply_winner_stick(passed, lock, session_mode="gth")
 
 
 def rank_candidates(

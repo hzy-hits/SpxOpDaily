@@ -5311,6 +5311,62 @@ def test_gth_flood_control_blocks_opposite_direction_during_winner_stick(
     assert later is None
 
 
+def test_rth_flood_control_blocks_opposite_direction_during_stick(monkeypatch) -> None:
+    from spx_spark.application.order_map.delivery import _flood_control_block
+    from spx_spark.config import NotificationSettings
+
+    now = datetime(2026, 8, 14, 14, 20, tzinfo=timezone.utc)
+    prior = (
+        {
+            "decision_id": "strategy:put",
+            "decision_at": now - timedelta(seconds=60),
+            "opportunity_id": "strategy-opportunity:put",
+            "direction": "DOWN",
+            "setup_kind": "ES_VOLUME_MOMENTUM",
+            "trigger_level": 7800.0,
+            "session_mode": "rth",
+        },
+    )
+    monkeypatch.setattr(
+        "spx_spark.infrastructure.operational_db.recent_selected_strategy_cards",
+        lambda **_kwargs: prior,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.delivery.notification_event_exists",
+        lambda _settings, _event_id: True,
+    )
+    call_decision = {
+        "session_date": "2026-08-14",
+        "decision_id": "strategy:call",
+        "market_facts": {"session": {"mode": "rth"}},
+        "candidate": {
+            "opportunity_id": "strategy-opportunity:call",
+            "setup_kind": "ES_VOLUME_MOMENTUM",
+            "direction": "UP",
+            "trigger_level": 7790.0,
+        },
+    }
+
+    blocked = _flood_control_block(
+        call_decision,
+        call_decision["candidate"],
+        NotificationSettings.from_env(),
+        now=now,
+    )
+
+    assert blocked is not None
+    assert blocked["outcome"] == "flood_control_rth_direction_lock"
+    assert blocked["counts"]["locked_direction"] == "DOWN"
+
+    later = _flood_control_block(
+        call_decision,
+        call_decision["candidate"],
+        NotificationSettings.from_env(),
+        now=now + timedelta(seconds=900),
+    )
+    assert later is None
+
+
 def test_gth_flood_control_ignores_selected_cards_that_never_reached_outbox(
     monkeypatch,
 ) -> None:

@@ -23,8 +23,8 @@ from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.render import render_template
 from spx_spark.application.order_map.strategy_ranker import (
-    gth_direction_lock,
     outbox_accepted_strategy_cards,
+    session_direction_lock,
 )
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
@@ -610,16 +610,26 @@ def _flood_control_block(
         elif abs(float(stored_trigger) - float(trigger_level)) <= 0.01:
             cooldown_hits += 1
     counts = {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
-    if session_mode == "gth":
-        lock = gth_direction_lock(
+    if session_mode in {"gth", "rth"}:
+        stick_seconds = (
+            DEFAULT_STRATEGY_POLICY.gth_winner_stick_seconds
+            if session_mode == "gth"
+            else DEFAULT_STRATEGY_POLICY.rth_winner_stick_seconds
+        )
+        lock = session_direction_lock(
             accepted,
             now=now,
-            stick_seconds=DEFAULT_STRATEGY_POLICY.gth_winner_stick_seconds,
+            stick_seconds=stick_seconds,
+            session_mode=session_mode,
         )
         if lock is not None and direction.upper() != lock.direction.upper():
             return {
                 "accepted": False,
-                "outcome": "flood_control_gth_direction_lock",
+                "outcome": (
+                    "flood_control_gth_direction_lock"
+                    if session_mode == "gth"
+                    else "flood_control_rth_direction_lock"
+                ),
                 "counts": {
                     **counts,
                     "locked_direction": lock.direction,
