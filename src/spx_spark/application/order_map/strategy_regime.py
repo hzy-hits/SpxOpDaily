@@ -34,7 +34,9 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v23"
+    policy_version: str = "strategy_policy.bootstrap.v24"
+    # v24: PIN_STABLE may be assessed from 11:00 ET (300 minutes to close),
+    # matching the 5-wide look window. The old 12:30 / 210-minute floor is gone.
     # v23: 5-wide PIN_STABLE has two clocks. 11:00–13:00 ET is the look
     # window (12:38 must not be labeled too-early). 14:50 ET slack (≤70)
     # remains the late pin window. 14:30 leftover of 90 minutes stays closed.
@@ -113,6 +115,7 @@ class StrategyPolicy:
     late_chase_distance_atr: float = 1.0
     late_chase_impulse_atr: float = 1.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
+    pin_stable_max_minutes_to_close: float = 300.0
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
     hmm_trend_min_probability: float = 0.55
@@ -517,10 +520,14 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
     er_max, drift30_max, drift60_max, migrate30, migrate60, stable_risk, block_risk = policy.pin_thresholds
     migrating = abs(drift30) > migrate30 or abs(drift60) > migrate60 or float(er) > 0.40 or extreme
     aligned = gamma is not None and max(float(q_mode), float(vc30), gamma) - min(float(q_mode), float(vc30), gamma) <= 5
-    stable = (facts.get("minutes_to_close") is not None and int(facts["minutes_to_close"]) <= 210
-              and float(er) < er_max and abs(drift30) <= drift30_max and abs(drift60) <= drift60_max
-              and max(returns.values(), default=0) >= 2 and float(vix) <= 0.01 and not extreme and aligned
-              and float(decay) > 0 and depin < stable_risk)
+    minutes_to_close = facts.get("minutes_to_close")
+    stable = (
+        minutes_to_close is not None
+        and int(minutes_to_close) <= policy.pin_stable_max_minutes_to_close
+        and float(er) < er_max and abs(drift30) <= drift30_max and abs(drift60) <= drift60_max
+        and max(returns.values(), default=0) >= 2 and float(vix) <= 0.01 and not extreme and aligned
+        and float(decay) > 0 and depin < stable_risk
+    )
     terminal = "PIN_MIGRATING" if migrating or depin >= block_risk else "PIN_STABLE" if stable else "NONE"
     return {"terminal_state": terminal, "depin_risk": round(depin, 4), "drift_30m": round(drift30, 2),
             "drift_60m": round(drift60, 2), "recent_extreme_acceptance": extreme,

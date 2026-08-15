@@ -212,6 +212,13 @@ def test_frozen_pin_cases_migrate_on_aug5_and_rank_7710_on_aug6() -> None:
     assert [row["center"] for row in aug6["pin"]["top_centers"]][:1] == [7710.0]
 
 
+def test_pin_stable_may_assess_from_1100_et() -> None:
+    at_open = {**_frozen_pin_facts("2026-08-06"), "minutes_to_close": 300}
+    before_open = {**_frozen_pin_facts("2026-08-06"), "minutes_to_close": 301}
+    assert assess_regime(at_open)["terminal_state"] == "PIN_STABLE"
+    assert assess_regime(before_open)["terminal_state"] == "NONE"
+
+
 def test_globex_hmm_publishes_cross_state_not_path() -> None:
     regime = assess_regime(
         {
@@ -244,7 +251,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v23"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v24"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -622,7 +629,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v23"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v24"
     assert decision["geometry_source"] == "facts_wall_ladder_fallback"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["candidate_id"]
