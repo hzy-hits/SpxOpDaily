@@ -132,7 +132,7 @@ def prepare_level_transition_delivery(
         "expires_at": (_utc(now) + timedelta(minutes=15)).isoformat(),
         "operator_opportunity_id": str(state.get("event_id") or event_id),
         "operator_generation": max(generation, 0),
-        "title": "SPX SETUP TRANSITION",
+        "title": "SPX 结构状态 · 非交易卡",
         "text": text,
         "friend": True,
         "feishu_text": text,
@@ -241,7 +241,7 @@ def flush_pending_level_transition_notifications(
                     ),
                     operator_generation=_operator_generation(item),
                 ),
-                title=str(item.get("title") or "SPX SETUP TRANSITION"),
+                title=str(item.get("title") or "SPX 结构状态 · 非交易卡"),
                 text=str(item.get("text") or ""),
                 friend=item.get("friend") is True,
                 feishu_text=str(item.get("feishu_text") or item.get("text") or ""),
@@ -303,21 +303,21 @@ def render_level_transition(
     phase = transition.current_phase
     coordinate = str(state.get("trigger_coordinate_kind") or "unknown")
     spot_label = "SPX" if coordinate == "official_spx" else "SPX代理"
-    generation = state.get("reentry_generation", 0)
     quality = str(state.get("quality_status") or "ready").upper()
     desk_lines = [
-        f"Opportunity  {state.get('event_id') or '-'} · generation {generation}",
+        "结论  不做",
+        f"含义  {_transition_meaning(phase)}",
         (
-            f"State  {transition.previous_phase.value.upper()} → {phase.value.upper()}"
+            f"状态  {transition.previous_phase.value.upper()} → {phase.value.upper()}"
             f" · {_path_label(state)}"
         ),
         (
-            f"Structure  {_level_kind_label(state.get('level_kind'))} "
+            f"结构  {_level_kind_label(state.get('level_kind'))} "
             f"{_format_level(_number(state.get('spx_level', state.get('level'))))}"
-            "（本机会武装时冻结；实时墙位以结构卡为准）"
+            "（武装时冻结；实时墙位以结构卡为准）"
         ),
         (
-            f"Location  {spot_label} {_format_level(observation.spx_spot)}"
+            f"位置  {spot_label} {_format_level(observation.spx_spot)}"
             f" · ES {_format_level(observation.es)}"
         ),
     ]
@@ -326,14 +326,14 @@ def render_level_transition(
     desk_view = "\n".join(desk_lines)
     execution = "\n".join(
         (
-            f"SPX Setup Transition · {phase.value.upper()}",
-            f"Next  {_phase_instruction(phase)}",
-            "执行  尚未生成精确合约、NBBO 与入场上限；仅人工执行，等待独立 MANUAL READY。",
+            f"本条  结构状态 · {phase.value.upper()}",
+            f"下一步  {_phase_instruction(phase)}",
+            "执行  不含合约、NBBO 与入场上限；不得按本条挂单",
         )
     )
     risk = "\n".join(
         (
-            "失效  状态机离开本事件、本代过期或结构 reset 后，本机会不可继续执行。",
+            "失效  状态机离开本事件、本代过期或结构 reset 后，本条作废。",
             "期权风险  尚未生成；不得把结构确认当作已挂单、已成交或已持仓。",
         )
     )
@@ -343,7 +343,7 @@ def render_level_transition(
         risk=risk,
         targets="尚未生成结构目标；关键触发位不是获利目标。",
         data_quality=(
-            f"坐标质量  {quality}（指价格坐标可用性，非机会状态）· 坐标 {coordinate} · "
+            f"坐标质量  {quality}（指价格坐标可用性，非交易状态）· 坐标 {coordinate} · "
             f"{spot_label} {_format_level(observation.spx_spot)} · "
             f"ES {_format_level(observation.es)}"
         ),
@@ -384,10 +384,20 @@ def _phase_instruction(phase: LevelPhase) -> str:
         LevelPhase.BREAK_PENDING: "已越过突破缓冲，等待保持与 ES 同向确认",
         LevelPhase.REJECT_PENDING: "关键位出现拒绝，等待保持与 ES 同向确认",
         LevelPhase.RETEST: "已回踩关键位，等待重新站稳并完成确认",
-        LevelPhase.CONFIRMED: "方向结构已确认；继续等待合约、NBBO、R/R 与时效门控",
-        LevelPhase.INVALIDATED: "本代机会已失效；离开 reset band 前不得重新武装",
-        LevelPhase.EXPIRED: "本代机会已过期；离开 reset band 前不得重新武装",
+        LevelPhase.CONFIRMED: "结构已确认；本条不是入场。可做只看之后的「SPX 人工候选」。",
+        LevelPhase.INVALIDATED: "本代结构已失效；离开 reset band 前不会重新武装。",
+        LevelPhase.EXPIRED: "本代结构已过期；离开 reset band 前不会重新武装。",
     }.get(phase, "继续观察结构状态")
+
+
+def _transition_meaning(phase: LevelPhase) -> str:
+    if phase is LevelPhase.CONFIRMED:
+        return "墙位路径确认；不是入场，不含合约，谈不上贵或晚做"
+    if phase is LevelPhase.INVALIDATED:
+        return "本代结构结束；不是平仓指令"
+    if phase is LevelPhase.EXPIRED:
+        return "本代结构过期；不是平仓指令"
+    return "墙位路径状态变化；不是买卖指令"
 
 
 def _path_label(state: Mapping[str, object]) -> str:

@@ -107,27 +107,6 @@ def _gth_scan_desk_view(
 ) -> str:
     del payload
     ic_line = iron_condor_desk_line(_mapping(decision.get("iron_condor_map")))
-    funnel = _mapping(decision.get("rejection_funnel"))
-    scanned = funnel.get("candidate_enumerated")
-    scan_text = f"扫描 {int(scanned)} 组" if isinstance(scanned, int | float) else "扫描进行中"
-    candidate = _mapping(decision.get("candidate"))
-    decision_type = str(decision.get("decision_type") or "NO_TRADE")
-    setup = str(candidate.get("setup_kind") or "")
-    gth_scan_winner = decision_type != "NO_TRADE" and setup in {
-        "GTH_WIDTH_SCAN",
-        "GTH_DELTA_SCAN",
-        "GTH_ATM_PIN",
-        "IRON_CONDOR_DELTA",
-    }
-    if gth_scan_winner:
-        conclusion = f"扫描赢家已推送 · {strategy_candidate_label(candidate)}"
-        path_text = path_distribution_desk_text(
-            _mapping(_mapping(candidate.get("edge")).get("path_distribution"))
-        )
-        if path_text:
-            conclusion = f"{conclusion} · {path_text}"
-    else:
-        conclusion = f"无过门赢家 · {scan_text}"
     quality = _mapping(decision.get("data_quality"))
     quality_reasons = [
         str(reason)
@@ -142,10 +121,10 @@ def _gth_scan_desk_view(
         primary = "1 分钟报价持续重算 5–50 点价差与 5–20Δ 10 点翼宽铁鹰"
     return "\n".join(
         (
-            f"结论  {conclusion}",
+            "结论  不做",
             f"主因  {primary}",
             f"铁鹰  {ic_line}",
-            "下一步  过门赢家单独推送交易卡；铁鹰随 delta 每周期重算，未过门价差不是可看",
+            "下一步  仅「SPX 人工候选」可做",
         )
     )
 
@@ -170,7 +149,7 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
         return None
     candidate = _mapping(decision.get("candidate"))
     if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-        return "原因  夜盘 Desk Map 展示 5–20Δ 卖权 10 点翼宽铁鹰与宽度扫描；交易卡只推过门赢家"
+        return "原因  本图不是交易卡"
     if strategy_candidate_is_watchable(payload, decision):
         return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
     reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]

@@ -656,7 +656,7 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
     assert "7750/7745" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
-    assert "扫描中 · 铁鹰已标位" in sections.execution
+    assert "扫描中 · 仅人工候选可做" in sections.execution
 
 
 @pytest.mark.parametrize(

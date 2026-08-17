@@ -897,7 +897,7 @@ def _execution_line(
                 f"机会 {short_opportunity}"
             )
         if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-            return "Execution  扫描中 · 铁鹰已标位 · 仅过门赢家可推"
+            return "Execution  扫描中 · 仅人工候选可做"
         reasons = list(_mapping(strategy_decision.get("why_not")).get("reasons") or ())
         blocker = humanize_strategy_reason(
             str(reasons[0]) if reasons else "no_supported_strategy_candidate"
