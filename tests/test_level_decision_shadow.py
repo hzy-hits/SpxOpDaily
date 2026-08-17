@@ -800,9 +800,12 @@ def test_meaningful_level_path_transitions_send_idempotent_non_executable_cards(
     ]
     assert enqueued[0][0].expires_at == NOW + timedelta(seconds=56, minutes=15)
     confirmed_text = enqueued[-1][1]
-    assert "State  RETEST → CONFIRMED" in confirmed_text
-    assert "继续等待合约、NBBO、R/R 与时效门控" in confirmed_text
-    assert "独立 MANUAL READY" in confirmed_text
+    assert "结论  不做" in confirmed_text
+    assert "状态  RETEST → CONFIRMED" in confirmed_text
+    assert "墙位路径确认；不是入场，不含合约，谈不上贵或晚做" in confirmed_text
+    assert "本条不是入场" in confirmed_text
+    assert "不得按本条挂单" in confirmed_text
+    assert "独立 MANUAL READY" not in confirmed_text
 
 
 def test_level_transition_notification_retries_after_state_commit_enqueue_crash(
@@ -1251,6 +1254,9 @@ def test_pathful_invalidation_still_pushes_and_explains_reason(monkeypatch) -> N
     )
     assert result is not None
     assert intent is not None
+    assert intent["title"] == "SPX 结构状态 · 非交易卡"
     text = str(intent["text"])
+    assert "结论  不做" in text
+    assert "本代结构结束；不是平仓指令" in text
     assert "Reason  structure_drift" in text
     assert "Drift  冻结 Call Wall 7775.00 → 实时 7800.00（+25.00pt）" in text
