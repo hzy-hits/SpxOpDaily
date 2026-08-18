@@ -84,6 +84,19 @@ class QuoteStore:
             / f"provider={provider}/hour=*/quotes.parquet"
         )
 
+    def _fetch_with_optional_implied_vol(
+        self, query: str, parameters: list[object]
+    ) -> list[tuple]:
+        """Read newer IV fields while retaining older schema=v1 fixtures/files."""
+
+        try:
+            return self._con.execute(query, parameters).fetchall()
+        except duckdb.BinderException as exc:
+            if 'column "implied_vol" not found' not in str(exc):
+                raise
+            compatible = query.replace("implied_vol", "NULL::DOUBLE AS implied_vol")
+            return self._con.execute(compatible, parameters).fetchall()
+
     def option_series(
         self,
         *,
@@ -113,7 +126,7 @@ class QuoteStore:
         for day, hours in windows:
             hour_list = ",".join(f"'{hour}'" for hour in hours)
             query = (
-                "SELECT received_at, bid, ask, mid, source_at, delta "
+                "SELECT received_at, bid, ask, mid, source_at, delta, implied_vol "
                 "FROM read_parquet(?, hive_partitioning=true) "
                 "WHERE trading_class='SPXW' AND expiry=? AND strike=? "
                 f"AND {KNOWLEDGE_TIME_GUARD_SQL} "
@@ -121,9 +134,9 @@ class QuoteStore:
                 "AND received_at BETWEEN ? AND ? ORDER BY received_at, source_at"
             )
             try:
-                rows = self._con.execute(
+                rows = self._fetch_with_optional_implied_vol(
                     query, [self._glob(day, provider), expiry, strike, right, start, end]
-                ).fetchall()
+                )
             except duckdb.IOException:
                 continue  # missing partition (provider gap or holiday)
             ticks.extend(
@@ -134,6 +147,7 @@ class QuoteStore:
                     mid=row[3],
                     source_at=row[4],
                     delta=row[5],
+                    implied_vol=row[6],
                 )
                 for row in rows
             )
@@ -165,7 +179,7 @@ class QuoteStore:
             )
             query = (
                 'SELECT provider, strike, "right", received_at, bid, ask, mid, '
-                "source_at, delta "
+                "source_at, delta, implied_vol "
                 "FROM read_parquet(?, hive_partitioning=true) "
                 "WHERE trading_class='SPXW' AND expiry=? "
                 "AND provider IN ('schwab', 'ibkr') "
@@ -176,13 +190,24 @@ class QuoteStore:
                 'ORDER BY provider, strike, "right", received_at, source_at'
             )
             try:
-                rows = self._con.execute(
+                rows = self._fetch_with_optional_implied_vol(
                     query,
                     [glob, expiry, strike_min, strike_max, start, end],
-                ).fetchall()
+                )
             except duckdb.IOException:
                 continue
-            for provider, strike, right, received_at, bid, ask, mid, source_at, delta in rows:
+            for (
+                provider,
+                strike,
+                right,
+                received_at,
+                bid,
+                ask,
+                mid,
+                source_at,
+                delta,
+                implied_vol,
+            ) in rows:
                 grouped[(str(provider), float(strike), str(right))].append(
                     OptionTick(
                         at=received_at,
@@ -191,6 +216,7 @@ class QuoteStore:
                         mid=mid,
                         source_at=source_at,
                         delta=delta,
+                        implied_vol=implied_vol,
                     )
                 )
         self._options.clear()
@@ -203,6 +229,39 @@ class QuoteStore:
         )
         self._option_window = dict(grouped)
         return sum(len(ticks) for ticks in grouped.values())
+
+    def option_expiry_providers(
+        self,
+        *,
+        expiry: date,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[str, ...]:
+        """Providers with SPXW parquet rows for an expiry in a session window."""
+
+        found: set[str] = set()
+        for day, hours in self._day_hours(start, end):
+            hour_list = ",".join(f"'{hour}'" for hour in hours)
+            glob = str(
+                self._root
+                / "lake/quotes/schema=v1"
+                / f"date={day.isoformat()}"
+                / "provider=*/hour=*/quotes.parquet"
+            )
+            query = (
+                "SELECT DISTINCT provider "
+                "FROM read_parquet(?, hive_partitioning=true) "
+                "WHERE trading_class='SPXW' AND expiry=? "
+                "AND provider IN ('schwab', 'ibkr') "
+                f"AND hour IN ({hour_list}) "
+                "AND received_at BETWEEN ? AND ?"
+            )
+            try:
+                rows = self._con.execute(query, [glob, expiry, start, end]).fetchall()
+            except duckdb.IOException:
+                continue
+            found.update(str(row[0]) for row in rows)
+        return tuple(provider for provider in PROVIDERS if provider in found)
 
     def option_snapshot(
         self,

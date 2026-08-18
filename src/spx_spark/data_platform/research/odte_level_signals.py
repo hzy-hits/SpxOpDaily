@@ -155,6 +155,7 @@ class OptionTick(NamedTuple):
     mid: float | None
     source_at: datetime | None = None
     delta: float | None = None
+    implied_vol: float | None = None
 
 
 class UnderlierTick(NamedTuple):
