@@ -29,7 +29,10 @@ from spx_spark.application.order_map.strategy_regime import (
 )
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
-from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
+from spx_spark.data_platform.research.odte_level_quotes import (
+    QuoteStore,
+    latest_state_from_lake,
+)
 from spx_spark.data_platform.research.strategy_policy_backfill import (
     mark_duplicate_opportunities,
     outcome_censor_distribution,
@@ -152,15 +155,27 @@ def _frozen_pin_facts(day: str) -> dict[str, object]:
             "vwap_slope": 0.0,
             "price_vs_vwap": "above",
             "pin_path_spx": (
-                [7710.75, 7709.62, 7712.71, 7718.41, 7715.24, 7709.41, 7712.85,
-                 7712.70, 7712.85, 7713.11, 7712.75]
-                if aug6 else
-                [7741.36, 7742.71, 7741.63, 7739.13, 7738.26, 7738.47, 7738.94, 7732.72]
+                [
+                    7710.75,
+                    7709.62,
+                    7712.71,
+                    7718.41,
+                    7715.24,
+                    7709.41,
+                    7712.85,
+                    7712.70,
+                    7712.85,
+                    7713.11,
+                    7712.75,
+                ]
+                if aug6
+                else [7741.36, 7742.71, 7741.63, 7739.13, 7738.26, 7738.47, 7738.94, 7732.72]
             ),
         },
         "value_center": (
             {"spx_15m": 7712.56, "spx_30m": 7712.69, "spx_60m": 7714.18}
-            if aug6 else {"spx_15m": 7736.65, "spx_30m": 7737.36, "spx_60m": 7738.68}
+            if aug6
+            else {"spx_15m": 7736.65, "spx_30m": 7737.36, "spx_60m": 7738.68}
         ),
         "volatility": {
             "vix_return_15m_pct": -0.005 if aug6 else 0.004,
@@ -169,9 +184,16 @@ def _frozen_pin_facts(day: str) -> dict[str, object]:
         "structure": {
             "q_mode": 7710.0 if aug6 else 7730.0,
             "q_local_mass_5pt": (
-                {"7700": 0.0766, "7705": 0.1100, "7710": 0.3033, "7715": 0.05,
-                 "7720": 0.1483, "7725": 0.1053}
-                if aug6 else {"7725": 0.05, "7730": 0.521, "7735": 0.224, "7740": 0.17}
+                {
+                    "7700": 0.0766,
+                    "7705": 0.1100,
+                    "7710": 0.3033,
+                    "7715": 0.05,
+                    "7720": 0.1483,
+                    "7725": 0.1053,
+                }
+                if aug6
+                else {"7725": 0.05, "7730": 0.521, "7735": 0.224, "7740": 0.17}
             ),
             "zero_gamma": 7709.0 if aug6 else 7740.0,
             "flip_zone": [7705.0, 7710.0] if aug6 else [7735.0, 7740.0],
@@ -258,7 +280,9 @@ def _pin_state(now: datetime) -> LatestState:
         )
         for strike, bid, ask in ((7700, 15.1, 15.3), (7710, 7.3, 7.5), (7720, 2.5, 2.6))
     )
-    return LatestState(created_at=now, as_of=now - timedelta(seconds=1), quotes=quotes, best_quotes=quotes)
+    return LatestState(
+        created_at=now, as_of=now - timedelta(seconds=1), quotes=quotes, best_quotes=quotes
+    )
 
 
 def _pass_b_session(
@@ -276,9 +300,7 @@ def _pass_b_session(
         for row in decisions
         if str(_map(_map(row.get("market_facts")).get("trigger")).get("phase") or "") == "confirmed"
     ]
-    unique_confirmed = [
-        row for row in confirmed if row.get("duplicate_of") is None
-    ]
+    unique_confirmed = [row for row in confirmed if row.get("duplicate_of") is None]
     # Prefer the historical failure mode the contract cares about.
     focus = [
         row
@@ -312,9 +334,7 @@ def _pass_b_session(
 
     session = {
         "decision_rows": len(decisions),
-        "unique_opportunities": sum(
-            1 for row in decisions if row.get("duplicate_of") is None
-        ),
+        "unique_opportunities": sum(1 for row in decisions if row.get("duplicate_of") is None),
         "confirmed_rows": len(confirmed),
         "confirmed_unique_opportunities": len(unique_confirmed),
         "reason_counts": dict(reasons),
@@ -327,16 +347,10 @@ def _pass_b_session(
         "pass_b_candidates": candidates,
         "vertical_exact_spread_reappear": still_unavailable,
         "labeled": len(labels),
-        "control_no_trade": all(
-            str(row.get("status") or "") == "no_trade" for row in decisions
-        )
+        "control_no_trade": all(str(row.get("status") or "") == "no_trade" for row in decisions)
         if decisions
         else True,
-        "pass": (
-            still_unavailable == 0
-            if session_date == "2026-08-07" and focus
-            else True
-        ),
+        "pass": (still_unavailable == 0 if session_date == "2026-08-07" and focus else True),
     }
     return labels, session
 
@@ -362,7 +376,7 @@ def _rebuild_one(
     if not direction or level is None or spot is None or expiry is None:
         return None
 
-    latest = _latest_from_lake(
+    latest = latest_state_from_lake(
         store,
         expiry=expiry,
         spot=spot,
@@ -372,7 +386,7 @@ def _rebuild_one(
     if latest is None:
         return None
 
-    payload = _payload_stub(
+    payload = build_pass_b_payload_stub(
         row=row,
         facts=facts,
         expiry=expiry,
@@ -383,14 +397,18 @@ def _rebuild_one(
         spot=spot,
         data_root=data_root,
     )
-    regime = assess_regime(facts) if facts.get("path") else {
-        "path_state": "UNCERTAIN",
-        "path_direction": direction,
-        "terminal_state": "UNCERTAIN",
-        "pin": {},
-        "entry_state": "UNKNOWN",
-        "event_state": "NORMAL",
-    }
+    regime = (
+        assess_regime(facts)
+        if facts.get("path")
+        else {
+            "path_state": "UNCERTAIN",
+            "path_direction": direction,
+            "terminal_state": "UNCERTAIN",
+            "pin": {},
+            "entry_state": "UNKNOWN",
+            "event_state": "NORMAL",
+        }
+    )
     # Ensure pin structure for butterfly enumeration if missing.
     if "pin" not in regime:
         regime = {**regime, "pin": {"top_centers": [], "depin_risk": 0.0}}
@@ -452,20 +470,39 @@ def _rebuild_one(
     }
 
 
-def _payload_stub(
+def build_pass_b_payload_stub(
     *,
     row: Mapping[str, Any],
     facts: Mapping[str, Any],
     expiry: str,
     latest: LatestState,
     decision_at: datetime,
-    direction: str,
-    level: float,
+    direction: str | None,
+    level: float | None,
     spot: float,
     data_root: Path,
+    trade_intent: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    intent = _nearest_trade_intent(data_root, session_date=str(row.get("session_date") or ""), decision_at=decision_at)
-    shadow = _synthetic_shadow(latest, expiry=expiry, direction=direction, spot=spot, trigger=level)
+    intent = (
+        _nearest_trade_intent(
+            data_root,
+            session_date=str(row.get("session_date") or ""),
+            decision_at=decision_at,
+        )
+        if trade_intent is None
+        else dict(trade_intent)
+    )
+    shadow = (
+        _synthetic_shadow(
+            latest,
+            expiry=expiry,
+            direction=direction,
+            spot=spot,
+            trigger=level if level is not None else spot,
+        )
+        if direction in {"UP", "DOWN"}
+        else {}
+    )
     observed = (decision_at - timedelta(seconds=1)).isoformat()
     structure = _map(facts.get("structure"))
     return {
@@ -478,8 +515,11 @@ def _payload_stub(
             "es": {
                 "price": spot,
                 "vwap": spot,
-                "trend_efficiency_30m": _number(_map(facts.get("path")).get("efficiency_ratio_30m")) or 0.0,
-                "vwap_distance_points": _number(_map(facts.get("path")).get("distance_to_vwap_points")),
+                "trend_efficiency_30m": _number(_map(facts.get("path")).get("efficiency_ratio_30m"))
+                or 0.0,
+                "vwap_distance_points": _number(
+                    _map(facts.get("path")).get("distance_to_vwap_points")
+                ),
                 "return_15m_points": _number(_map(facts.get("path")).get("impulse_15m_points")),
                 "vwap_slope_15m_points": _number(_map(facts.get("path")).get("vwap_slope")) or 0.0,
             },
@@ -487,10 +527,16 @@ def _payload_stub(
                 "rth_market_state": {
                     "input_lineage": {
                         "values": {
-                            "efficiency_ratio": _number(_map(facts.get("path")).get("efficiency_ratio_30m")),
-                            "vwap_cross_count": _number(_map(facts.get("path")).get("vwap_crosses_30m")),
+                            "efficiency_ratio": _number(
+                                _map(facts.get("path")).get("efficiency_ratio_30m")
+                            ),
+                            "vwap_cross_count": _number(
+                                _map(facts.get("path")).get("vwap_crosses_30m")
+                            ),
                             "price_vs_vwap": _map(facts.get("path")).get("price_vs_vwap"),
-                            "breadth_above_vwap": _number(_map(facts.get("path")).get("breadth_above_vwap")),
+                            "breadth_above_vwap": _number(
+                                _map(facts.get("path")).get("breadth_above_vwap")
+                            ),
                         },
                         "diagnostics": {
                             "moving_averages": {
@@ -512,7 +558,9 @@ def _payload_stub(
                 "local_mass_5pt": structure.get("q_local_mass_5pt") or {},
             },
             "volatility": {
-                "atm_straddle_decay_15m": _number(_map(facts.get("volatility")).get("atm_straddle_decay_15m"))
+                "atm_straddle_decay_15m": _number(
+                    _map(facts.get("volatility")).get("atm_straddle_decay_15m")
+                )
             },
         },
         "macro_event": {
@@ -521,7 +569,7 @@ def _payload_stub(
         },
         "level_decision": {
             "phase": trigger_phase(facts),
-            "direction": direction.lower(),
+            "direction": direction.lower() if direction else None,
             "thesis": _map(facts.get("trigger")).get("thesis"),
             "level_kind": _map(facts.get("trigger")).get("level_kind"),
             "level": level,
@@ -584,77 +632,6 @@ def _leg_from_latest(latest: LatestState, expiry: str, strike: float, right: str
     }
 
 
-def _latest_from_lake(
-    store: QuoteStore,
-    *,
-    expiry: str,
-    spot: float,
-    trigger: float,
-    decision_at: datetime,
-) -> LatestState | None:
-    day = date.fromisoformat(f"{expiry[:4]}-{expiry[4:6]}-{expiry[6:8]}")
-    centers = sorted(
-        {
-            round(value / 5.0) * 5.0
-            for value in (
-                spot - 20,
-                spot - 10,
-                spot,
-                spot + 10,
-                spot + 20,
-                trigger - 20,
-                trigger - 10,
-                trigger,
-                trigger + 10,
-                trigger + 20,
-            )
-        }
-    )
-    quotes: list[Quote] = []
-    start = decision_at - timedelta(seconds=20)
-    for strike in centers:
-        for right in ("C", "P"):
-            ticks = store.option_series(
-                provider="schwab",
-                expiry=day,
-                strike=float(strike),
-                right=right,
-                start=start,
-                end=decision_at,
-            )
-            if not ticks:
-                continue
-            tick = ticks[-1]
-            at = tick.at if tick.at.tzinfo else tick.at.replace(tzinfo=timezone.utc)
-            if at > decision_at:
-                continue
-            quotes.append(
-                Quote(
-                    instrument=InstrumentId.option(
-                        "SPX",
-                        expiry=expiry,
-                        strike=float(strike),
-                        right=right,
-                        trading_class="SPXW",
-                    ),
-                    provider=Provider.SCHWAB,
-                    received_at=at,
-                    quote_time=at,
-                    quality=MarketDataQuality.LIVE,
-                    bid=tick.bid,
-                    ask=tick.ask,
-                )
-            )
-    if len(quotes) < 4:
-        return None
-    return LatestState(
-        created_at=decision_at,
-        as_of=decision_at,
-        quotes=tuple(quotes),
-        best_quotes=tuple(quotes),
-    )
-
-
 def _label_candidate(
     candidate: Mapping[str, Any],
     *,
@@ -689,9 +666,7 @@ def _label_candidate(
             decision_at,
             policy,
             session_date=session,
-            lookforward_minutes=(
-                None if policy.time_stop_minutes is None else lookforward_minutes
-            ),
+            lookforward_minutes=(None if policy.time_stop_minutes is None else lookforward_minutes),
         ),
     )
     if not marks:
@@ -882,7 +857,9 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "## 8/7 生产原因基线（重建前）",
         "",
         "```json",
-        json.dumps(s["2026-08-07"].get("reason_counts"), ensure_ascii=False, indent=2, sort_keys=True),
+        json.dumps(
+            s["2026-08-07"].get("reason_counts"), ensure_ascii=False, indent=2, sort_keys=True
+        ),
         "```",
         "",
         "## 删失分布",
@@ -934,14 +911,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             encoding="utf-8",
         )
     print(json.dumps(report["summary"], ensure_ascii=False, sort_keys=True))
-    return 0 if all(
-        [
-            report["summary"]["aug5_pass"],
-            report["summary"]["aug6_pass"],
-            report["sessions"]["2026-08-07"]["pass"],
-            report["sessions"]["2026-08-08"].get("control_no_trade", False),
-        ]
-    ) else 1
+    return (
+        0
+        if all(
+            [
+                report["summary"]["aug5_pass"],
+                report["summary"]["aug6_pass"],
+                report["sessions"]["2026-08-07"]["pass"],
+                report["sessions"]["2026-08-08"].get("control_no_trade", False),
+            ]
+        )
+        else 1
+    )
 
 
 def _map(value: object) -> Mapping[str, Any]:
@@ -956,8 +937,10 @@ def _time(value: object) -> datetime | None:
     if not isinstance(value, (str, datetime)):
         return None
     try:
-        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
-            str(value).replace("Z", "+00:00")
+        parsed = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         )
     except ValueError:
         return None

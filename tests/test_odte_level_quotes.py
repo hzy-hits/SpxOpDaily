@@ -5,7 +5,10 @@ from pathlib import Path
 
 import duckdb
 
-from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
+from spx_spark.data_platform.research.odte_level_quotes import (
+    QuoteStore,
+    latest_state_from_lake,
+)
 
 
 EXPIRY = date(2026, 7, 15)
@@ -71,16 +74,17 @@ def _option_row(
     source_at: datetime,
     strike: float,
     delta: float,
+    right: str = "C",
 ) -> tuple[object, ...]:
     return (
         received_at,
         source_at,
         None,
-        f"option:SPX:SPXW:20260715:{strike:.0f}:C",
+        f"option:SPX:SPXW:20260715:{strike:.0f}:{right}",
         "SPXW",
         EXPIRY,
         strike,
-        "C",
+        right,
         9.8,
         10.0,
         9.9,
@@ -280,10 +284,70 @@ def test_delta_selection_excludes_quotes_received_after_decision(
     )
     store = QuoteStore(tmp_path)
     try:
-        assert store.select_delta_strike(
+        assert (
+            store.select_delta_strike(
+                expiry=EXPIRY,
+                right="C",
+                t0=DECISION_AT,
+            )
+            == 7545.0
+        )
+    finally:
+        store.close()
+
+
+def test_batched_option_window_builds_causal_provider_fallback_snapshot(
+    tmp_path: Path,
+) -> None:
+    schwab_at = DECISION_AT - timedelta(seconds=5)
+    ibkr_at = DECISION_AT - timedelta(seconds=1)
+    for provider, received_at in (("schwab", schwab_at), ("ibkr", ibkr_at)):
+        _write_quote_partition(
+            tmp_path,
+            provider=provider,
+            rows=[
+                _option_row(
+                    received_at=received_at,
+                    source_at=received_at,
+                    strike=strike,
+                    delta=0.45 if right == "C" else -0.45,
+                    right=right,
+                )
+                for strike in (7545.0, 7550.0)
+                for right in ("C", "P")
+            ],
+        )
+    store = QuoteStore(tmp_path)
+    try:
+        loaded = store.load_option_window(
             expiry=EXPIRY,
-            right="C",
-            t0=DECISION_AT,
-        ) == 7545.0
+            strike_min=7540.0,
+            strike_max=7560.0,
+            start=DECISION_AT - timedelta(seconds=10),
+            end=DECISION_AT,
+        )
+        latest = latest_state_from_lake(
+            store,
+            expiry="20260715",
+            spot=7550.0,
+            trigger=7545.0,
+            decision_at=DECISION_AT,
+        )
+
+        assert loaded == 8
+        assert latest is not None
+        assert len(latest.quotes) == 8
+        assert {quote.provider.value for quote in latest.best_quotes} == {"schwab"}
+        assert (
+            store.option_series(
+                provider="ibkr",
+                expiry=EXPIRY,
+                strike=7550.0,
+                right="C",
+                start=DECISION_AT - timedelta(seconds=2),
+                end=DECISION_AT,
+            )[0].at
+            == ibkr_at
+        )
     finally:
         store.close()

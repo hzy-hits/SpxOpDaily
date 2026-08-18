@@ -83,16 +83,12 @@ def test_candidate_loader_expands_hard_gate_universe_and_dedupes_by_geometry(
 
     payloads = [
         {
-            "candidate": full_candidate(
-                "call-a", "CALL_DEBIT_VERTICAL", (6000.0, 6005.0)
-            ),
+            "candidate": full_candidate("call-a", "CALL_DEBIT_VERTICAL", (6000.0, 6005.0)),
             "market_facts": facts,
             "regime": {},
         },
         {
-            "candidate": full_candidate(
-                "call-b", "CALL_DEBIT_VERTICAL", (6010.0, 6015.0)
-            ),
+            "candidate": full_candidate("call-b", "CALL_DEBIT_VERTICAL", (6010.0, 6015.0)),
             "market_facts": facts,
             "regime": {},
         },
@@ -100,9 +96,7 @@ def test_candidate_loader_expands_hard_gate_universe_and_dedupes_by_geometry(
             "candidate": {},
             "why_not": {},
             "shadow_candidates": [
-                full_candidate(
-                    "put-shadow", "PUT_DEBIT_VERTICAL", (6045.0, 6040.0)
-                )
+                full_candidate("put-shadow", "PUT_DEBIT_VERTICAL", (6045.0, 6040.0))
             ],
             "candidates_considered": [
                 {
@@ -121,6 +115,13 @@ def test_candidate_loader_expands_hard_gate_universe_and_dedupes_by_geometry(
             "market_facts": facts,
             "regime": {},
         },
+        {
+            "candidate": full_candidate(
+                "call-sticky-reprint", "CALL_DEBIT_VERTICAL", (6000.0, 6005.0)
+            ),
+            "market_facts": facts,
+            "regime": {},
+        },
     ]
     for index, payload in enumerate(payloads):
         at = datetime(2026, 8, 17, 14, index, tzinfo=timezone.utc)
@@ -132,7 +133,7 @@ def test_candidate_loader_expands_hard_gate_universe_and_dedupes_by_geometry(
                 session,
                 "strategy_signal_engine_v2",
                 at.isoformat(),
-                "selected" if index < 2 else "no_trade",
+                "selected" if index in {0, 1, 3} else "no_trade",
                 json.dumps(payload),
             ),
         )
@@ -172,13 +173,184 @@ def test_candidate_loader_expands_hard_gate_universe_and_dedupes_by_geometry(
         "put-shadow",
     }
     assert funnel["candidate_occurrences"] == {
-        "primary_debit": 2,
+        "primary_debit": 3,
         "shadow_debit": 1,
         "considered_debit_passed_hard_gates": 1,
     }
     assert funnel["considered"]["debit_vertical_gate_failed"] == 1
     assert funnel["unique_candidate_geometries"] == 4
+    assert funnel["duplicate_candidate_occurrences_dropped"] == 1
     assert funnel["labeling"]["labeled_rows"] == 4
+
+
+class _FakeLakeQuoteStore:
+    def __init__(self, data_root: Path) -> None:
+        del data_root
+
+    def close(self) -> None:
+        return None
+
+    def load_option_window(self, **kwargs) -> int:
+        del kwargs
+        return 40
+
+    def option_snapshot(self, **kwargs) -> dict[tuple[str, float, str], OptionTick]:
+        at = kwargs["as_of"] - timedelta(seconds=1)
+        ticks = {}
+        for strike in range(5940, 6065, 5):
+            for right in ("C", "P"):
+                bid, ask = self._prices(float(strike), right)
+                ticks[("schwab", float(strike), right)] = OptionTick(
+                    at=at,
+                    bid=bid,
+                    ask=ask,
+                    mid=(bid + ask) / 2.0,
+                    source_at=at,
+                    delta=0.45 if right == "C" else -0.45,
+                )
+        return ticks
+
+    def option_series(self, **kwargs) -> list[OptionTick]:
+        start, end = kwargs["start"], kwargs["end"]
+        bid, ask = self._prices(float(kwargs["strike"]), str(kwargs["right"]))
+        times = [start, min(end, start + timedelta(minutes=1))]
+        return [
+            OptionTick(
+                at=at,
+                bid=bid,
+                ask=ask,
+                mid=(bid + ask) / 2.0,
+                source_at=at,
+                delta=0.45 if kwargs["right"] == "C" else -0.45,
+            )
+            for at in dict.fromkeys(times)
+        ]
+
+    @staticmethod
+    def _prices(strike: float, right: str) -> tuple[float, float]:
+        distance = (strike - 6000.0) / 5.0
+        bid = max(0.25, 5.0 - distance * 0.75) if right == "C" else max(0.25, 5.0 + distance * 0.75)
+        return bid, bid + 0.10
+
+
+def _heartbeat_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE decisions (
+            decision_id TEXT,
+            event_key TEXT,
+            session_date TEXT,
+            strategy_name TEXT,
+            decision_at TEXT,
+            status TEXT,
+            attributes_json TEXT
+        )
+        """
+    )
+    facts = {
+        "session_date": "2026-08-17",
+        "quality": {"status": "ready"},
+        "spot": {"spx": 6000.0},
+        "path": {},
+        "event": {"state": "normal", "entry_allowed": True},
+        "structure": {
+            "put_wall": 5970.0,
+            "flip_zone": [5990.0, 5995.0],
+            "zero_gamma": 5995.0,
+            "call_wall": 6030.0,
+        },
+        "volatility": {"expected_move_points": 30.0},
+        "trigger": {"phase": "far", "level": 6000.0},
+        "rth_setups": [
+            {
+                "setup_kind": "ES_VOLUME_MOMENTUM",
+                "state": "ENTRY_WINDOW_OPEN",
+                "direction": "UP",
+                "trigger_level": 6000.0,
+                "source": "test",
+            }
+        ],
+    }
+    payload = {
+        "candidate": {},
+        "why_not": {},
+        "market_facts": facts,
+        "regime": {
+            "path_state": "TREND",
+            "path_direction": "UP",
+            "terminal_state": "UNCERTAIN",
+            "pin": {},
+        },
+    }
+    connection.execute(
+        "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            "heartbeat",
+            "heartbeat-event",
+            "2026-08-17",
+            "strategy_signal_engine_v2",
+            "2026-08-17T14:30:00+00:00",
+            "no_trade",
+            json.dumps(payload),
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_empty_heartbeat_lake_snapshot_adds_debit_geometries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "spx.sqlite"
+    _heartbeat_database(database)
+    monkeypatch.setattr(
+        "spx_spark.data_platform.research.strategy_edge_train.QuoteStore",
+        _FakeLakeQuoteStore,
+    )
+    funnel: dict[str, object] = {}
+
+    rows = load_candidate_labels(
+        database_path=database,
+        data_root=tmp_path,
+        start_date="2026-08-17",
+        end_date="2026-08-17",
+        enumerate_from_lake=True,
+        funnel=funnel,
+    )
+
+    assert rows, json.dumps(funnel, sort_keys=True)
+    assert {row["candidate_source"] for row in rows} == {"lake_enumeration"}
+    assert {row["strategy_type"] for row in rows} == {"CALL_DEBIT_VERTICAL"}
+    assert funnel["empty_candidate_heartbeats"] == 1
+    assert funnel["lake_enumeration"]["sampled_unique_utc_minutes"] == 1
+    assert funnel["lake_enumeration"]["unique_candidate_geometries_added"] > 0
+
+
+def test_enumerate_from_lake_off_preserves_empty_heartbeat_behavior(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "spx.sqlite"
+    _heartbeat_database(database)
+    monkeypatch.setattr(
+        "spx_spark.data_platform.research.strategy_edge_train.QuoteStore",
+        _FakeLakeQuoteStore,
+    )
+    funnel: dict[str, object] = {}
+
+    rows = load_candidate_labels(
+        database_path=database,
+        data_root=tmp_path,
+        start_date="2026-08-17",
+        end_date="2026-08-17",
+        funnel=funnel,
+    )
+
+    assert rows == []
+    assert funnel["empty_candidate_heartbeats"] == 1
+    assert "lake_enumeration" not in funnel
 
 
 def _rows() -> list[dict[str, object]]:
@@ -194,8 +366,7 @@ def _rows() -> list[dict[str, object]]:
                 {
                     "session_date": session,
                     "decision_at": (
-                        start
-                        + timedelta(days=session_index, minutes=candidate_index)
+                        start + timedelta(days=session_index, minutes=candidate_index)
                     ).isoformat(),
                     "model_key": "rth|vertical",
                     "features": features,

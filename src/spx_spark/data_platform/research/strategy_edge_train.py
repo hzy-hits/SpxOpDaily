@@ -41,13 +41,24 @@ from spx_spark.application.order_map.strategy_edge_model import (
     edge_model_key,
     feature_vector,
 )
-from spx_spark.application.order_map.strategy_regime import DEFAULT_STRATEGY_POLICY
-from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
+from spx_spark.application.order_map.candidate_factory import enumerate_candidates
+from spx_spark.application.order_map.strategy_regime import (
+    DEFAULT_STRATEGY_POLICY,
+    assess_regime,
+)
+from spx_spark.data_platform.research.odte_level_quotes import (
+    QuoteStore,
+    latest_state_from_lake,
+)
 from spx_spark.data_platform.research.strategy_policy_backfill import (
     _candidate_legs,
     _combo_bid_marks,
     _entry_ask,
 )
+from spx_spark.data_platform.research.strategy_v3_freeze_acceptance import (
+    build_pass_b_payload_stub,
+)
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
 ENTRY_EDGE_POLICY = DEFAULT_MANAGEMENT_POLICY
@@ -76,14 +87,16 @@ def load_candidate_labels(
     start_date: str | None = None,
     end_date: str | None = None,
     lookforward_minutes: int | None = None,
+    enumerate_from_lake: bool = False,
     funnel: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Label the earliest causal print of every persisted debit geometry."""
+    """Label the earliest causal print of every eligible debit geometry."""
 
     decisions = _read_candidate_decisions(
         database_path,
         start_date=start_date,
         end_date=end_date,
+        include_all_statuses=enumerate_from_lake,
     )
     counts: dict[str, Any] = {
         "raw_decisions": len(decisions),
@@ -120,53 +133,67 @@ def load_candidate_labels(
                 counts.setdefault("invalid_candidate_geometries", 0)
                 counts["invalid_candidate_geometries"] += 1
                 continue
-            observation = {
-                **dict(decision),
-                "candidate": dict(candidate),
-                "candidate_source": source,
-                "candidate_source_priority": source_priority,
-            }
-            known = deduped.get(key)
-            order = (
-                str(observation.get("decision_at") or ""),
-                source_priority,
-                str(observation.get("decision_id") or ""),
+            _keep_earliest_geometry(
+                deduped,
+                key=key,
+                decision=decision,
+                candidate=candidate,
+                source=source,
+                source_priority=source_priority,
             )
-            known_order = (
-                str(known.get("decision_at") or ""),
-                int(known.get("candidate_source_priority") or 0),
-                str(known.get("decision_id") or ""),
-            ) if known is not None else None
-            if known_order is None or order < known_order:
-                deduped[key] = observation
 
     occurrences = sum(counts["candidate_occurrences"].values())
     invalid_geometries = int(counts.get("invalid_candidate_geometries") or 0)
+    persisted_geometries = len(deduped)
     counts["eligible_candidate_occurrences"] = occurrences
-    counts["unique_candidate_geometries"] = len(deduped)
+    counts["persisted_candidate_geometries"] = persisted_geometries
     counts["duplicate_candidate_occurrences_dropped"] = (
-        occurrences - invalid_geometries - len(deduped)
+        occurrences - invalid_geometries - persisted_geometries
     )
 
     store = QuoteStore(data_root)
     rows: list[dict[str, Any]] = []
     label_drops: defaultdict[str, int] = defaultdict(int)
     try:
-        for decision in sorted(
-            deduped.values(),
-            key=lambda item: (
-                str(item.get("session_date") or ""),
-                str(item.get("decision_at") or ""),
-            ),
-        ):
-            row = _label_decision(
-                decision,
+        if enumerate_from_lake:
+            counts["lake_enumeration"] = _enumerate_lake_geometries(
+                decisions,
+                deduped=deduped,
                 store=store,
-                lookforward_minutes=lookforward_minutes,
-                drop_counts=label_drops,
+                data_root=data_root,
             )
-            if row is not None:
-                rows.append(row)
+        counts["unique_candidate_geometries"] = len(deduped)
+        by_session: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for decision in deduped.values():
+            by_session[str(decision.get("session_date") or "")].append(decision)
+        source_by_session: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for decision in decisions:
+            source_by_session[str(decision.get("session_date") or "")].append(decision)
+        for session, session_decisions in sorted(by_session.items()):
+            if enumerate_from_lake:
+                window = _load_session_option_window(
+                    store,
+                    session=session,
+                    decisions=source_by_session.get(session, ()),
+                    candidates=session_decisions,
+                )
+                lake_session = counts["lake_enumeration"]["sessions"].setdefault(
+                    session,
+                    {},
+                )
+                lake_session["label_window_rows"] = window[1] if window else 0
+            for decision in sorted(
+                session_decisions,
+                key=lambda item: str(item.get("decision_at") or ""),
+            ):
+                row = _label_decision(
+                    decision,
+                    store=store,
+                    lookforward_minutes=lookforward_minutes,
+                    drop_counts=label_drops,
+                )
+                if row is not None:
+                    rows.append(row)
     finally:
         store.close()
     labeled_by_source: defaultdict[str, int] = defaultdict(int)
@@ -187,13 +214,316 @@ def load_candidate_labels(
         "labeled_by_source": dict(sorted(labeled_by_source.items())),
         "labeled_by_model": dict(sorted(labeled_by_model.items())),
         "sessions_by_model": {
-            key: sorted(value)
-            for key, value in sorted(labeled_sessions_by_model.items())
+            key: sorted(value) for key, value in sorted(labeled_sessions_by_model.items())
         },
     }
     if funnel is not None:
         funnel.update(counts)
     return rows
+
+
+def _keep_earliest_geometry(
+    deduped: dict[tuple[str, str, tuple[float, float]], dict[str, Any]],
+    *,
+    key: tuple[str, str, tuple[float, float]],
+    decision: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    source: str,
+    source_priority: int,
+) -> str:
+    observation = {
+        **dict(decision),
+        "candidate": dict(candidate),
+        "candidate_source": source,
+        "candidate_source_priority": source_priority,
+    }
+    order = (
+        str(observation.get("decision_at") or ""),
+        source_priority,
+        str(observation.get("decision_id") or ""),
+    )
+    known = deduped.get(key)
+    if known is None:
+        deduped[key] = observation
+        return "added"
+    known_order = (
+        str(known.get("decision_at") or ""),
+        int(known.get("candidate_source_priority") or 0),
+        str(known.get("decision_id") or ""),
+    )
+    if order < known_order:
+        deduped[key] = observation
+        return "replaced"
+    return "duplicate"
+
+
+def _enumerate_lake_geometries(
+    decisions: Sequence[Mapping[str, Any]],
+    *,
+    deduped: dict[tuple[str, str, tuple[float, float]], dict[str, Any]],
+    store: QuoteStore,
+    data_root: Path,
+) -> dict[str, Any]:
+    counts: dict[str, Any] = {
+        "enabled": True,
+        "facts_source": "decisions.market_facts",
+        "pre_v2_quote_only_history_excluded": True,
+        "pre_v2_exclusion_reason": "market_facts_unavailable",
+        "decisions_with_market_facts": 0,
+        "invalid_decision_times": 0,
+        "sampled_unique_utc_minutes": 0,
+        "snapshots_ready": 0,
+        "snapshots_unavailable": 0,
+        "enumerated_candidates": 0,
+        "debit_vertical_occurrences": 0,
+        "unique_candidate_geometries_added": 0,
+        "earlier_causal_geometries_replaced": 0,
+        "duplicate_geometries_dropped": 0,
+        "sessions": {},
+    }
+    sampled_by_session: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    seen_minutes: set[datetime] = set()
+    for decision in decisions:
+        facts = _map(decision.get("market_facts"))
+        if not facts:
+            continue
+        counts["decisions_with_market_facts"] += 1
+        at = _time(decision.get("decision_at"))
+        if at is None:
+            counts["invalid_decision_times"] += 1
+            continue
+        minute = at.replace(second=0, microsecond=0)
+        if minute in seen_minutes:
+            continue
+        seen_minutes.add(minute)
+        sampled_by_session[str(decision.get("session_date") or "")].append(decision)
+    counts["sampled_unique_utc_minutes"] = len(seen_minutes)
+
+    for session, sampled in sorted(sampled_by_session.items()):
+        persisted = [decision for key, decision in deduped.items() if key[0] == session]
+        window = _load_session_option_window(
+            store,
+            session=session,
+            decisions=sampled,
+            candidates=persisted,
+        )
+        session_counts = {
+            "sampled_minutes": len(sampled),
+            "expiry": window[0] if window else None,
+            "enumeration_window_rows": window[1] if window else 0,
+            "snapshots_ready": 0,
+            "snapshots_unavailable": 0,
+            "enumerated_candidates": 0,
+            "debit_vertical_occurrences": 0,
+            "unique_candidate_geometries_added": 0,
+        }
+        counts["sessions"][session] = session_counts
+        if window is None:
+            counts["snapshots_unavailable"] += len(sampled)
+            session_counts["snapshots_unavailable"] = len(sampled)
+            continue
+        expiry, _window_rows = window
+        for decision in sampled:
+            decision_at = _time(decision.get("decision_at"))
+            facts = _map(decision.get("market_facts"))
+            spot = _number(_map(facts.get("spot")).get("spx"))
+            if decision_at is None or spot is None:
+                counts["snapshots_unavailable"] += 1
+                session_counts["snapshots_unavailable"] += 1
+                continue
+            trigger = _map(facts.get("trigger"))
+            level = _number(trigger.get("level"))
+            mode = "gth" if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(decision_at) else "rth"
+            max_age = (
+                DEFAULT_STRATEGY_POLICY.gth_quote_max_age_seconds
+                if mode == "gth"
+                else DEFAULT_STRATEGY_POLICY.quote_max_age_seconds
+            )
+            latest = latest_state_from_lake(
+                store,
+                expiry=expiry,
+                spot=spot,
+                trigger=level,
+                decision_at=decision_at,
+                max_age_seconds=max_age,
+            )
+            if latest is None:
+                counts["snapshots_unavailable"] += 1
+                session_counts["snapshots_unavailable"] += 1
+                continue
+            counts["snapshots_ready"] += 1
+            session_counts["snapshots_ready"] += 1
+            regime = _map(decision.get("regime"))
+            if not regime:
+                regime = assess_regime(facts)
+            if "pin" not in regime:
+                regime = {**regime, "pin": {"top_centers": [], "depin_risk": 0.0}}
+            direction = _enumeration_direction(facts, regime)
+            if level is None:
+                level = _enumeration_trigger_level(facts, spot=spot)
+            payload = build_pass_b_payload_stub(
+                row=decision,
+                facts=facts,
+                expiry=expiry,
+                latest=latest,
+                decision_at=decision_at,
+                direction=direction,
+                level=level,
+                spot=spot,
+                data_root=data_root,
+                trade_intent={},
+            )
+            candidates = enumerate_candidates(
+                payload,
+                facts,
+                regime,
+                latest,
+                now=decision_at,
+                policy=DEFAULT_STRATEGY_POLICY,
+            )
+            counts["enumerated_candidates"] += len(candidates)
+            session_counts["enumerated_candidates"] += len(candidates)
+            for candidate in candidates:
+                if not _is_debit_vertical(candidate):
+                    continue
+                counts["debit_vertical_occurrences"] += 1
+                session_counts["debit_vertical_occurrences"] += 1
+                key = _candidate_geometry_key(decision, candidate)
+                if key is None:
+                    continue
+                result = _keep_earliest_geometry(
+                    deduped,
+                    key=key,
+                    decision=decision,
+                    candidate=candidate,
+                    source="lake_enumeration",
+                    source_priority=3,
+                )
+                if result == "added":
+                    counts["unique_candidate_geometries_added"] += 1
+                    session_counts["unique_candidate_geometries_added"] += 1
+                elif result == "replaced":
+                    counts["earlier_causal_geometries_replaced"] += 1
+                else:
+                    counts["duplicate_geometries_dropped"] += 1
+    return counts
+
+
+def _load_session_option_window(
+    store: QuoteStore,
+    *,
+    session: str,
+    decisions: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]],
+) -> tuple[str, int] | None:
+    timestamps: list[datetime] = []
+    anchors: list[float] = []
+    expiries: list[date] = []
+    for decision in (*decisions, *candidates):
+        at = _time(decision.get("decision_at"))
+        if at is not None:
+            timestamps.append(at)
+        facts = _map(decision.get("market_facts"))
+        candidate = _candidate(decision)
+        expiry = _candidate_expiry(candidate, facts)
+        if expiry is not None:
+            expiries.append(expiry)
+        structure = _map(facts.get("structure"))
+        raw_flip = structure.get("flip_zone")
+        if isinstance(raw_flip, Sequence) and not isinstance(raw_flip, (str, bytes)):
+            flip_values = tuple(raw_flip)
+        else:
+            flip_map = _map(raw_flip)
+            flip_values = (flip_map.get("low"), flip_map.get("high"))
+        for value in (
+            _map(facts.get("spot")).get("spx"),
+            _map(facts.get("trigger")).get("level"),
+            structure.get("put_wall"),
+            structure.get("zero_gamma"),
+            structure.get("call_wall"),
+            *flip_values,
+            *_candidate_strikes(candidate),
+        ):
+            number = _number(value)
+            if number is not None:
+                anchors.append(number)
+    if not timestamps or not anchors:
+        return None
+    if expiries:
+        expiry_day = min(expiries)
+    else:
+        session_day = _date(session)
+        if session_day is not None and DEFAULT_MARKET_CALENDAR.is_trading_day(session_day):
+            expiry_day = session_day
+        else:
+            expiry_day = DEFAULT_MARKET_CALENDAR.research_expiry(min(timestamps))
+    max_width = max(DEFAULT_STRATEGY_POLICY.gth_widths or (20.0,))
+    max_offset = max(
+        (abs(value) for value in DEFAULT_STRATEGY_POLICY.gth_long_offsets),
+        default=0.0,
+    )
+    margin = max_width + max_offset + 5.0
+    strike_min = math.floor((min(anchors) - margin) / 5.0) * 5.0
+    strike_max = math.ceil((max(anchors) + margin) / 5.0) * 5.0
+    start = min(timestamps) - timedelta(seconds=DEFAULT_STRATEGY_POLICY.gth_quote_max_age_seconds)
+    end = max(timestamps)
+    session_day = _date(session)
+    if session_day is not None:
+        for candidate in candidates:
+            at = _time(candidate.get("decision_at"))
+            if at is not None:
+                end = max(
+                    end,
+                    policy_mark_horizon_end(
+                        at,
+                        ENTRY_EDGE_POLICY,
+                        session_date=session_day,
+                        lookforward_minutes=None,
+                    ),
+                )
+    row_count = store.load_option_window(
+        expiry=expiry_day,
+        strike_min=strike_min,
+        strike_max=strike_max,
+        start=start,
+        end=end,
+    )
+    return expiry_day.strftime("%Y%m%d"), row_count
+
+
+def _enumeration_direction(
+    facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
+) -> str | None:
+    sources = [
+        _map(facts.get("trigger")).get("direction"),
+        _map(facts.get("gth_evidence")).get("direction"),
+        _map(facts.get("gth_dip_reclaim_evidence")).get("direction"),
+        regime.get("path_direction"),
+    ]
+    sources.extend(_map(value).get("direction") for value in facts.get("rth_setups") or ())
+    for value in sources:
+        direction = str(value or "").upper()
+        if direction in {"UP", "DOWN"}:
+            return direction
+    return None
+
+
+def _enumeration_trigger_level(
+    facts: Mapping[str, Any],
+    *,
+    spot: float,
+) -> float:
+    sources = [
+        _map(facts.get("gth_evidence")).get("trigger_level"),
+        _map(facts.get("gth_dip_reclaim_evidence")).get("trigger_level"),
+    ]
+    sources.extend(_map(value).get("trigger_level") for value in facts.get("rth_setups") or ())
+    for value in sources:
+        level = _number(value)
+        if level is not None:
+            return level
+    return spot
 
 
 def _label_decision(
@@ -206,11 +536,7 @@ def _label_decision(
     candidate = _candidate(decision)
     decision_at = _time(decision.get("decision_at"))
     strategy_type = str(candidate.get("strategy_type") or "").upper()
-    if (
-        not candidate
-        or decision_at is None
-        or not strategy_type.endswith("_DEBIT_VERTICAL")
-    ):
+    if not candidate or decision_at is None or not strategy_type.endswith("_DEBIT_VERTICAL"):
         return _label_drop(drop_counts, "invalid_candidate_or_decision_time")
     facts = _map(decision.get("market_facts"))
     regime = _map(decision.get("regime"))
@@ -238,9 +564,7 @@ def _label_decision(
         ENTRY_EDGE_POLICY,
         session_date=session_date,
         lookforward_minutes=(
-            None
-            if ENTRY_EDGE_POLICY.time_stop_minutes is None
-            else lookforward_minutes
+            None if ENTRY_EDGE_POLICY.time_stop_minutes is None else lookforward_minutes
         ),
     )
     marks = _combo_bid_marks(
@@ -267,9 +591,7 @@ def _label_decision(
         now=decision_at,
     )
     exit_seconds = (
-        (label.exit_at - decision_at).total_seconds()
-        if label.exit_at is not None
-        else None
+        (label.exit_at - decision_at).total_seconds() if label.exit_at is not None else None
     )
     max_loss = _number(_map(candidate.get("economics")).get("max_loss_points"))
     return {
@@ -348,9 +670,7 @@ def _candidate_observations(
             if failures:
                 counts["considered"]["debit_vertical_gate_failed"] += 1
                 continue
-            counts["candidate_occurrences"][
-                "considered_debit_passed_hard_gates"
-            ] += 1
+            counts["candidate_occurrences"]["considered_debit_passed_hard_gates"] += 1
             observations.append((candidate, "candidates_considered", 2))
     return observations
 
@@ -492,7 +812,12 @@ def _candidate_expiry(
     facts: Mapping[str, Any],
 ) -> date | None:
     values: list[object] = [candidate.get("expiry")]
-    values.extend(leg.get("expiry") for leg in _candidate_legs(candidate))
+    legs = _candidate_legs(candidate)
+    values.extend(leg.get("expiry") for leg in legs)
+    for leg in legs:
+        parts = str(leg.get("contract_id") or "").split(":")
+        if len(parts) >= 6 and parts[0] == "option":
+            values.append(parts[-3])
     structure = _map(facts.get("structure"))
     differential = _map(structure.get("strike_differential_context"))
     values.extend(
@@ -644,9 +969,7 @@ def _train_group(
         train_set = set(development_sessions[:index])
         validation_session = development_sessions[index]
         train_rows = [row for row in ordered if row["session_date"] in train_set]
-        validation_rows = [
-            row for row in ordered if row["session_date"] == validation_session
-        ]
+        validation_rows = [row for row in ordered if row["session_date"] == validation_session]
         if len(train_rows) < 30 or not validation_rows:
             continue
         fitted = _fit_models(train_rows)
@@ -664,10 +987,7 @@ def _train_group(
     residual_q10 = float(
         np.quantile(
             np.asarray(
-                [
-                    row["policy_pnl_points"] - row["expected_pnl_points"]
-                    for row in oof
-                ],
+                [row["policy_pnl_points"] - row["expected_pnl_points"] for row in oof],
                 dtype=float,
             ),
             0.10,
@@ -679,9 +999,7 @@ def _train_group(
         thresholds=thresholds,
     )
 
-    development_rows = [
-        row for row in ordered if row["session_date"] in set(development_sessions)
-    ]
+    development_rows = [row for row in ordered if row["session_date"] in set(development_sessions)]
     holdout_rows = [row for row in ordered if row["session_date"] in holdout_set]
     development_fit = _fit_models(development_rows)
     holdout_predictions = _predict_rows(development_fit, holdout_rows)
@@ -800,9 +1118,7 @@ def _predict_rows(
     z = (x - mean) / scale
     expected = _linear_predictions(z, _map(fitted.get("pnl")))
     p_profit = _sigmoid_array(_linear_predictions(z, _map(fitted.get("profit"))))
-    p_stop = _sigmoid_array(
-        _linear_predictions(z, _map(fitted.get("stop_first_5m")))
-    )
+    p_stop = _sigmoid_array(_linear_predictions(z, _map(fitted.get("stop_first_5m"))))
     result = []
     for row, pnl, profit, stop in zip(
         rows,
@@ -850,22 +1166,17 @@ def _selection_metrics(
             expected >= float(thresholds["min_expected_pnl_points"])
             and lower >= float(thresholds["min_expected_pnl_lcb_points"])
             and float(row["p_profit"]) >= float(thresholds["min_p_profit"])
-            and float(row["p_stop_first_5m"])
-            <= float(thresholds["max_p_stop_first_5m"])
+            and float(row["p_stop_first_5m"]) <= float(thresholds["max_p_stop_first_5m"])
             and return_on_risk >= float(thresholds["min_return_on_risk"])
         ):
             row["expected_pnl_lcb_points"] = lower
             row["return_on_risk"] = return_on_risk
             selected.append(row)
-    selected.sort(
-        key=lambda item: (str(item["session_date"]), str(item["decision_at"]))
-    )
+    selected.sort(key=lambda item: (str(item["session_date"]), str(item["decision_at"])))
     pnl = [float(row["policy_pnl_points"]) for row in selected]
     gains = sum(value for value in pnl if value > 0)
     losses = -sum(value for value in pnl if value < 0)
-    profit_factor = gains / losses if losses > 0 else (
-        float("inf") if gains > 0 else 0.0
-    )
+    profit_factor = gains / losses if losses > 0 else (float("inf") if gains > 0 else 0.0)
     by_session: dict[str, float] = defaultdict(float)
     equity_r = 0.0
     peak_r = 0.0
@@ -878,9 +1189,7 @@ def _selection_metrics(
         peak_r = max(peak_r, equity_r)
         max_drawdown_r = max(max_drawdown_r, peak_r - equity_r)
     positive_sessions = [value for value in by_session.values() if value > 0]
-    positive_session_ratio = (
-        len(positive_sessions) / len(by_session) if by_session else 0.0
-    )
+    positive_session_ratio = len(positive_sessions) / len(by_session) if by_session else 0.0
     total_positive_session_pnl = sum(positive_sessions)
     concentration = (
         max(positive_sessions) / total_positive_session_pnl
@@ -892,17 +1201,9 @@ def _selection_metrics(
         "trades": len(selected),
         "sessions_traded": len(by_session),
         "net_pnl_points": round(sum(pnl), 8),
-        "average_pnl_points": (
-            round(sum(pnl) / len(pnl), 8) if pnl else 0.0
-        ),
-        "hit_rate": (
-            round(sum(value > 0 for value in pnl) / len(pnl), 8)
-            if pnl
-            else 0.0
-        ),
-        "profit_factor": (
-            "inf" if math.isinf(profit_factor) else round(profit_factor, 8)
-        ),
+        "average_pnl_points": (round(sum(pnl) / len(pnl), 8) if pnl else 0.0),
+        "hit_rate": (round(sum(value > 0 for value in pnl) / len(pnl), 8) if pnl else 0.0),
+        "profit_factor": ("inf" if math.isinf(profit_factor) else round(profit_factor, 8)),
         "positive_session_ratio": round(positive_session_ratio, 8),
         "max_drawdown_r": round(max_drawdown_r, 8),
         "top_session_profit_concentration": round(concentration, 8),
@@ -916,8 +1217,7 @@ def _promotion_decision(
     promotion_gates: Mapping[str, float],
 ) -> dict[str, Any]:
     checks = {
-        "oof_trade_count": int(oof.get("trades") or 0)
-        >= int(promotion_gates["min_oof_trades"]),
+        "oof_trade_count": int(oof.get("trades") or 0) >= int(promotion_gates["min_oof_trades"]),
         "holdout_trade_count": int(holdout.get("trades") or 0)
         >= int(promotion_gates["min_holdout_trades"]),
         "oof_positive_pnl": float(oof.get("net_pnl_points") or 0.0) > 0.0,
@@ -932,9 +1232,7 @@ def _promotion_decision(
         >= float(promotion_gates["min_average_pnl_points"]),
         "oof_positive_sessions": float(oof.get("positive_session_ratio") or 0.0)
         >= float(promotion_gates["min_positive_session_ratio"]),
-        "holdout_positive_sessions": float(
-            holdout.get("positive_session_ratio") or 0.0
-        )
+        "holdout_positive_sessions": float(holdout.get("positive_session_ratio") or 0.0)
         >= float(promotion_gates["min_positive_session_ratio"]),
         "oof_drawdown": _metric_value(oof, "max_drawdown_r", float("inf"))
         <= float(promotion_gates["max_drawdown_r"]),
@@ -970,6 +1268,7 @@ def _read_candidate_decisions(
     *,
     start_date: str | None,
     end_date: str | None,
+    include_all_statuses: bool = False,
 ) -> list[dict[str, Any]]:
     connection = sqlite3.connect(database_path)
     try:
@@ -978,12 +1277,18 @@ def _read_candidate_decisions(
             SELECT decision_id, event_key, session_date, decision_at, status, attributes_json
             FROM decisions
             WHERE strategy_name = 'strategy_signal_engine_v2'
-              AND status IN ('selected', 'no_trade', 'shadow_candidate')
+              AND (? OR status IN ('selected', 'no_trade', 'shadow_candidate'))
               AND (? IS NULL OR session_date >= ?)
               AND (? IS NULL OR session_date <= ?)
             ORDER BY decision_at, decision_id
             """,
-            (start_date, start_date, end_date, end_date),
+            (
+                include_all_statuses,
+                start_date,
+                start_date,
+                end_date,
+                end_date,
+            ),
         ).fetchall()
     finally:
         connection.close()
@@ -1056,9 +1361,7 @@ def _metric_float(value: object) -> float:
     return float(value or 0.0)
 
 
-def _metric_value(
-    metrics: Mapping[str, Any], key: str, default: float
-) -> float:
+def _metric_value(metrics: Mapping[str, Any], key: str, default: float) -> float:
     value = metrics.get(key)
     return default if value is None else float(value)
 
@@ -1118,9 +1421,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Optional quote-window cap in minutes. Omitted by default so labels "
         "follow the production 15:45 ET hard close instead of a 20-minute flatten.",
     )
+    parser.add_argument(
+        "--enumerate-from-lake",
+        action="store_true",
+        help="Reconstruct debit candidates from batched causal quote-lake snapshots.",
+    )
     parser.add_argument("--artifact", type=Path, default=None)
     parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args(argv)
+
+    if args.enumerate_from_lake:
+        output_root = Path("/tmp/strategy-edge-backtest")
+        if args.artifact is None or args.report is None:
+            parser.error(
+                "--enumerate-from-lake requires explicit --artifact and --report paths "
+                "under /tmp/strategy-edge-backtest"
+            )
+        if not all(
+            path.resolve().is_relative_to(output_root) for path in (args.artifact, args.report)
+        ):
+            parser.error(
+                "lake-enumerated training outputs must stay under /tmp/strategy-edge-backtest"
+            )
 
     funnel: dict[str, Any] = {}
     rows = load_candidate_labels(
@@ -1129,6 +1451,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         start_date=args.start_date,
         end_date=args.end_date,
         lookforward_minutes=args.lookforward_minutes,
+        enumerate_from_lake=args.enumerate_from_lake,
         funnel=funnel,
     )
     artifact, report = train_edge_artifact(
@@ -1139,10 +1462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     report["candidate_funnel"] = funnel
     artifact_path = args.artifact or args.data_root.joinpath(*ARTIFACT_RELATIVE_PATH)
-    report_path = (
-        args.report
-        or args.data_root / "research" / "strategy_edge_model.v1.report.json"
-    )
+    report_path = args.report or args.data_root / "research" / "strategy_edge_model.v1.report.json"
     write_artifact(artifact, artifact_path)
     write_artifact(report, report_path)
     print(
