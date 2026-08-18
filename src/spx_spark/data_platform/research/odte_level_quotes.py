@@ -88,7 +88,7 @@ class QuoteStore:
         for day, hours in windows:
             hour_list = ",".join(f"'{hour}'" for hour in hours)
             query = (
-                "SELECT received_at, bid, ask, mid "
+                "SELECT received_at, bid, ask, mid, source_at, delta "
                 "FROM read_parquet(?, hive_partitioning=true) "
                 "WHERE trading_class='SPXW' AND expiry=? AND strike=? "
                 f"AND {KNOWLEDGE_TIME_GUARD_SQL} "
@@ -101,7 +101,17 @@ class QuoteStore:
                 ).fetchall()
             except duckdb.IOException:
                 continue  # missing partition (provider gap or holiday)
-            ticks.extend(OptionTick(at=row[0], bid=row[1], ask=row[2], mid=row[3]) for row in rows)
+            ticks.extend(
+                OptionTick(
+                    at=row[0],
+                    bid=row[1],
+                    ask=row[2],
+                    mid=row[3],
+                    source_at=row[4],
+                    delta=row[5],
+                )
+                for row in rows
+            )
         ticks.sort(key=lambda tick: tick.at)
         self._options[key] = ticks
         return ticks

@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import math
 from pathlib import Path
@@ -27,8 +27,10 @@ import numpy as np
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    conservative_vertical_bbo,
     policy_mark_horizon_end,
     simulate_management_policy,
+    vertical_economics,
 )
 from spx_spark.application.order_map.strategy_edge_model import (
     ARTIFACT_RELATIVE_PATH,
@@ -39,6 +41,7 @@ from spx_spark.application.order_map.strategy_edge_model import (
     edge_model_key,
     feature_vector,
 )
+from spx_spark.application.order_map.strategy_regime import DEFAULT_STRATEGY_POLICY
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
 from spx_spark.data_platform.research.strategy_policy_backfill import (
     _candidate_legs,
@@ -73,34 +76,81 @@ def load_candidate_labels(
     start_date: str | None = None,
     end_date: str | None = None,
     lookforward_minutes: int | None = None,
+    funnel: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Label all persisted candidate-bearing decisions from existing history."""
+    """Label the earliest causal print of every persisted debit geometry."""
 
     decisions = _read_candidate_decisions(
         database_path,
         start_date=start_date,
         end_date=end_date,
     )
-    # One causal row per candidate opportunity. Reprints of the same option
-    # geometry on later ticks otherwise inflate both sample size and confidence.
-    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    counts: dict[str, Any] = {
+        "raw_decisions": len(decisions),
+        "malformed_payloads": 0,
+        "empty_candidate_heartbeats": 0,
+        "decisions_with_candidate_or_nearest": 0,
+        "primary_non_debit_rows": 0,
+        "candidate_occurrences": {
+            "primary_debit": 0,
+            "shadow_debit": 0,
+            "considered_debit_passed_hard_gates": 0,
+        },
+        "considered": {
+            "items": 0,
+            "debit_vertical_items": 0,
+            "debit_vertical_gate_failed": 0,
+            "debit_vertical_gate_audit_missing": 0,
+        },
+    }
+
+    # A sticky winner may reuse one opportunity_id for thousands of cycles.
+    # Geometry is the training identity: session + type + ordered strikes.
+    deduped: dict[tuple[str, str, tuple[float, float]], dict[str, Any]] = {}
     for decision in decisions:
-        candidate = _candidate(decision)
-        if not candidate:
+        if decision.get("_malformed_payload") is True:
+            counts["malformed_payloads"] += 1
             continue
-        session = str(decision.get("session_date") or "")
-        identity = str(candidate.get("opportunity_id") or candidate.get("candidate_id") or "")
-        if not identity:
-            identity = str(decision.get("decision_id") or "")
-        key = (session, identity)
-        known = deduped.get(key)
-        if known is None or str(decision.get("decision_at") or "") < str(
-            known.get("decision_at") or ""
+        for candidate, source, source_priority in _candidate_observations(
+            decision,
+            counts=counts,
         ):
-            deduped[key] = decision
+            key = _candidate_geometry_key(decision, candidate)
+            if key is None:
+                counts.setdefault("invalid_candidate_geometries", 0)
+                counts["invalid_candidate_geometries"] += 1
+                continue
+            observation = {
+                **dict(decision),
+                "candidate": dict(candidate),
+                "candidate_source": source,
+                "candidate_source_priority": source_priority,
+            }
+            known = deduped.get(key)
+            order = (
+                str(observation.get("decision_at") or ""),
+                source_priority,
+                str(observation.get("decision_id") or ""),
+            )
+            known_order = (
+                str(known.get("decision_at") or ""),
+                int(known.get("candidate_source_priority") or 0),
+                str(known.get("decision_id") or ""),
+            ) if known is not None else None
+            if known_order is None or order < known_order:
+                deduped[key] = observation
+
+    occurrences = sum(counts["candidate_occurrences"].values())
+    invalid_geometries = int(counts.get("invalid_candidate_geometries") or 0)
+    counts["eligible_candidate_occurrences"] = occurrences
+    counts["unique_candidate_geometries"] = len(deduped)
+    counts["duplicate_candidate_occurrences_dropped"] = (
+        occurrences - invalid_geometries - len(deduped)
+    )
 
     store = QuoteStore(data_root)
     rows: list[dict[str, Any]] = []
+    label_drops: defaultdict[str, int] = defaultdict(int)
     try:
         for decision in sorted(
             deduped.values(),
@@ -113,11 +163,36 @@ def load_candidate_labels(
                 decision,
                 store=store,
                 lookforward_minutes=lookforward_minutes,
+                drop_counts=label_drops,
             )
             if row is not None:
                 rows.append(row)
     finally:
         store.close()
+    labeled_by_source: defaultdict[str, int] = defaultdict(int)
+    labeled_by_model: defaultdict[str, int] = defaultdict(int)
+    labeled_sessions_by_model: defaultdict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        source = str(row.get("candidate_source") or "unknown")
+        model_key = str(row.get("model_key") or "unknown")
+        session = str(row.get("session_date") or "")
+        labeled_by_source[source] += 1
+        labeled_by_model[model_key] += 1
+        if session:
+            labeled_sessions_by_model[model_key].add(session)
+    counts["labeling"] = {
+        "geometries_attempted": len(deduped),
+        "dropped": dict(sorted(label_drops.items())),
+        "labeled_rows": len(rows),
+        "labeled_by_source": dict(sorted(labeled_by_source.items())),
+        "labeled_by_model": dict(sorted(labeled_by_model.items())),
+        "sessions_by_model": {
+            key: sorted(value)
+            for key, value in sorted(labeled_sessions_by_model.items())
+        },
+    }
+    if funnel is not None:
+        funnel.update(counts)
     return rows
 
 
@@ -126,6 +201,7 @@ def _label_decision(
     *,
     store: QuoteStore,
     lookforward_minutes: int | None,
+    drop_counts: defaultdict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     candidate = _candidate(decision)
     decision_at = _time(decision.get("decision_at"))
@@ -135,18 +211,27 @@ def _label_decision(
         or decision_at is None
         or not strategy_type.endswith("_DEBIT_VERTICAL")
     ):
-        return None
+        return _label_drop(drop_counts, "invalid_candidate_or_decision_time")
     facts = _map(decision.get("market_facts"))
     regime = _map(decision.get("regime"))
     session_date = _date(decision.get("session_date"))
     if session_date is None:
-        return None
+        return _label_drop(drop_counts, "invalid_session_date")
+    rebuilt, failure = _rebuild_candidate_at_decision(
+        candidate,
+        facts=facts,
+        decision_at=decision_at,
+        store=store,
+    )
+    if rebuilt is None:
+        return _label_drop(drop_counts, failure or "entry_bbo_unavailable")
+    candidate = rebuilt
     legs = _candidate_legs(candidate)
     if len(legs) < 2:
-        return None
+        return _label_drop(drop_counts, "candidate_legs_unavailable")
     entry_ask = _entry_ask(legs)
     if entry_ask is None:
-        return None
+        return _label_drop(drop_counts, "conservative_entry_ask_unavailable")
     provider = str(legs[0].get("provider") or "schwab")
     end = policy_mark_horizon_end(
         decision_at,
@@ -166,7 +251,7 @@ def _label_decision(
         end=end,
     )
     if not marks:
-        return None
+        return _label_drop(drop_counts, "exit_marks_unavailable")
     label = simulate_management_policy(
         marks,
         entry_ask=entry_ask,
@@ -198,6 +283,7 @@ def _label_decision(
         "direction": candidate.get("direction"),
         "candidate_id": candidate.get("candidate_id"),
         "opportunity_id": candidate.get("opportunity_id"),
+        "candidate_source": decision.get("candidate_source"),
         "entry_ask": entry_ask,
         "max_loss_points": max_loss if max_loss is not None else entry_ask,
         "features": features,
@@ -214,6 +300,253 @@ def _label_decision(
         "mae_points": label.mae_points,
         "policy_version": label.policy_version,
     }
+
+
+def _candidate_observations(
+    decision: Mapping[str, Any],
+    *,
+    counts: dict[str, Any],
+) -> list[tuple[Mapping[str, Any], str, int]]:
+    observations: list[tuple[Mapping[str, Any], str, int]] = []
+    selected = _map(decision.get("candidate"))
+    nearest = _map(_map(decision.get("why_not")).get("nearest_candidate"))
+    primary = selected or nearest
+    if primary:
+        counts["decisions_with_candidate_or_nearest"] += 1
+        if _is_debit_vertical(primary):
+            counts["candidate_occurrences"]["primary_debit"] += 1
+            observations.append((primary, "candidate" if selected else "nearest_candidate", 0))
+        else:
+            counts["primary_non_debit_rows"] += 1
+    else:
+        counts["empty_candidate_heartbeats"] += 1
+
+    raw_shadows = decision.get("shadow_candidates")
+    if isinstance(raw_shadows, Sequence) and not isinstance(raw_shadows, (str, bytes)):
+        for raw in raw_shadows:
+            candidate = _map(raw)
+            if not _is_debit_vertical(candidate):
+                continue
+            counts["candidate_occurrences"]["shadow_debit"] += 1
+            observations.append((candidate, "shadow_candidate", 1))
+
+    raw_considered = decision.get("candidates_considered")
+    if isinstance(raw_considered, Sequence) and not isinstance(
+        raw_considered,
+        (str, bytes),
+    ):
+        for raw in raw_considered:
+            counts["considered"]["items"] += 1
+            candidate = _map(raw)
+            if not _is_debit_vertical(candidate):
+                continue
+            counts["considered"]["debit_vertical_items"] += 1
+            failures = candidate.get("gate_failures")
+            if not isinstance(failures, Sequence) or isinstance(failures, (str, bytes)):
+                counts["considered"]["debit_vertical_gate_audit_missing"] += 1
+                continue
+            if failures:
+                counts["considered"]["debit_vertical_gate_failed"] += 1
+                continue
+            counts["candidate_occurrences"][
+                "considered_debit_passed_hard_gates"
+            ] += 1
+            observations.append((candidate, "candidates_considered", 2))
+    return observations
+
+
+def _candidate_geometry_key(
+    decision: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> tuple[str, str, tuple[float, float]] | None:
+    session = str(decision.get("session_date") or "").strip()
+    strategy_type = str(candidate.get("strategy_type") or "").upper()
+    strikes = _candidate_strikes(candidate)
+    if not session or not strategy_type.endswith("_DEBIT_VERTICAL") or len(strikes) != 2:
+        return None
+    return session, strategy_type, (strikes[0], strikes[1])
+
+
+def _rebuild_candidate_at_decision(
+    candidate: Mapping[str, Any],
+    *,
+    facts: Mapping[str, Any],
+    decision_at: datetime,
+    store: QuoteStore,
+) -> tuple[dict[str, Any] | None, str | None]:
+    strategy_type = str(candidate.get("strategy_type") or "").upper()
+    if strategy_type == "CALL_DEBIT_VERTICAL":
+        right, direction = "C", "UP"
+    elif strategy_type == "PUT_DEBIT_VERTICAL":
+        right, direction = "P", "DOWN"
+    else:
+        return None, "strategy_type_not_supported"
+    strikes = _candidate_strikes(candidate)
+    if len(strikes) != 2:
+        return None, "ordered_strikes_unavailable"
+    expiry = _candidate_expiry(candidate, facts)
+    if expiry is None:
+        return None, "front_expiry_unavailable"
+    provider = _candidate_provider(candidate, facts)
+    if provider is None:
+        return None, "entry_provider_unavailable"
+    mode = str(_map(facts.get("session")).get("mode") or "").lower()
+    max_age = (
+        DEFAULT_STRATEGY_POLICY.gth_quote_max_age_seconds
+        if mode == "gth"
+        else DEFAULT_STRATEGY_POLICY.quote_max_age_seconds
+    )
+    max_skew = (
+        DEFAULT_STRATEGY_POLICY.gth_quote_max_skew_seconds
+        if mode == "gth"
+        else DEFAULT_STRATEGY_POLICY.quote_max_skew_seconds
+    )
+    existing_legs = _candidate_legs(candidate)
+    rebuilt_legs: list[dict[str, Any]] = []
+    for index, (strike, quantity) in enumerate(zip(strikes, (1.0, -1.0), strict=True)):
+        ticks = store.option_series(
+            provider=provider,
+            expiry=expiry,
+            strike=strike,
+            right=right,
+            start=decision_at - timedelta(seconds=max_age),
+            end=decision_at,
+        )
+        tick = next(
+            (
+                value
+                for value in reversed(ticks)
+                if _number(value.bid) is not None
+                and float(value.bid) >= 0.0
+                and _number(value.ask) is not None
+                and float(value.ask) > 0.0
+            ),
+            None,
+        )
+        if tick is None:
+            return None, "entry_leg_live_nbbo_unavailable"
+        base = dict(existing_legs[index]) if index < len(existing_legs) else {}
+        rebuilt_legs.append(
+            {
+                **base,
+                "expiry": expiry.isoformat(),
+                "strike": strike,
+                "right": right,
+                "quantity": quantity,
+                "provider": provider,
+                "bid": float(tick.bid),
+                "ask": float(tick.ask),
+                "source_at": (tick.source_at or tick.at).isoformat(),
+                "received_at": tick.at.isoformat(),
+                "delta": tick.delta if tick.delta is not None else base.get("delta"),
+                "implied_vol": base.get("implied_vol"),
+            }
+        )
+    quote = conservative_vertical_bbo(
+        rebuilt_legs[0],
+        rebuilt_legs[1],
+        now=decision_at,
+        max_quote_age_seconds=max_age,
+        max_source_skew_seconds=max_skew,
+    )
+    if quote.get("status") != "ready":
+        reasons = {str(value) for value in quote.get("reasons") or ()}
+        if "spread_leg_time_skew_exceeded" in reasons:
+            return None, "entry_leg_time_skew_exceeded"
+        return None, "conservative_entry_bbo_unavailable"
+    try:
+        economics = vertical_economics(
+            long_strike=strikes[0],
+            short_strike=strikes[1],
+            net_debit=float(quote["ask"]),
+            right=right,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None, "vertical_economics_unavailable"
+    rebuilt = {
+        **dict(candidate),
+        "strategy_type": strategy_type,
+        "direction": str(candidate.get("direction") or direction),
+        "right": right,
+        "long": rebuilt_legs[0],
+        "short": rebuilt_legs[1],
+        "legs": rebuilt_legs,
+        "quote": dict(quote),
+        "economics": economics,
+    }
+    return rebuilt, None
+
+
+def _candidate_strikes(candidate: Mapping[str, Any]) -> tuple[float, ...]:
+    raw = candidate.get("strikes")
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        values = tuple(_number(value) for value in raw)
+    else:
+        legs = _candidate_legs(candidate)
+        values = tuple(_number(leg.get("strike")) for leg in legs)
+    return tuple(float(value) for value in values if value is not None)
+
+
+def _candidate_expiry(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+) -> date | None:
+    values: list[object] = [candidate.get("expiry")]
+    values.extend(leg.get("expiry") for leg in _candidate_legs(candidate))
+    structure = _map(facts.get("structure"))
+    differential = _map(structure.get("strike_differential_context"))
+    values.extend(
+        (
+            facts.get("front_expiry"),
+            differential.get("front_expiry"),
+            differential.get("expiry"),
+        )
+    )
+    for value in values:
+        parsed = _date(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _candidate_provider(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+) -> str | None:
+    providers = {
+        str(leg.get("provider") or "").lower()
+        for leg in _candidate_legs(candidate)
+        if str(leg.get("provider") or "").strip()
+    }
+    quote_provider = str(_map(candidate.get("quote")).get("provider") or "").lower()
+    if quote_provider:
+        providers.add(quote_provider)
+    if len(providers) == 1:
+        return next(iter(providers))
+    if len(providers) > 1:
+        return None
+    mode = str(_map(facts.get("session")).get("mode") or "").lower()
+    if mode == "gth":
+        return "ibkr"
+    if mode == "rth":
+        return "schwab"
+    return None
+
+
+def _is_debit_vertical(candidate: Mapping[str, Any]) -> bool:
+    return str(candidate.get("strategy_type") or "").upper() in {
+        "CALL_DEBIT_VERTICAL",
+        "PUT_DEBIT_VERTICAL",
+    }
+
+
+def _label_drop(
+    counts: defaultdict[str, int] | None,
+    reason: str,
+) -> None:
+    if counts is not None:
+        counts[reason] += 1
+    return None
 
 
 def train_edge_artifact(
@@ -659,6 +992,16 @@ def _read_candidate_decisions(
         try:
             payload = json.loads(attributes_json)
         except (TypeError, json.JSONDecodeError):
+            result.append(
+                {
+                    "decision_id": decision_id,
+                    "event_key": event_key,
+                    "session_date": session_date,
+                    "decision_at": decision_at,
+                    "status": status,
+                    "_malformed_payload": True,
+                }
+            )
             continue
         result.append(
             {
@@ -779,12 +1122,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args(argv)
 
+    funnel: dict[str, Any] = {}
     rows = load_candidate_labels(
         database_path=args.database,
         data_root=args.data_root,
         start_date=args.start_date,
         end_date=args.end_date,
         lookforward_minutes=args.lookforward_minutes,
+        funnel=funnel,
     )
     artifact, report = train_edge_artifact(
         rows,
@@ -792,6 +1137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         holdout_sessions=args.holdout_sessions,
         min_train_sessions=args.min_train_sessions,
     )
+    report["candidate_funnel"] = funnel
     artifact_path = args.artifact or args.data_root.joinpath(*ARTIFACT_RELATIVE_PATH)
     report_path = (
         args.report
