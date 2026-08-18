@@ -35,6 +35,13 @@ _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
 _UNEVIDENCED_DEBIT_GATE = "unevidenced_debit_not_human_authorized"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
+_GTH_HUMAN_DEBIT_SETUPS = frozenset({_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN})
+_GTH_HUMAN_DEBIT_SOURCES = frozenset(
+    {
+        "gth_level_manual_candidate",
+        "gth_dip_reclaim_evidence",
+    }
+)
 _RTH_DIRECTIONAL_SPREADS = {
     "ES_VOLUME_MOMENTUM",
     "FAILED_BREAK_RECLAIM",
@@ -423,14 +430,22 @@ def _unevidenced_debit_human_gate(candidate: Mapping[str, Any]) -> dict[str, Any
     return {
         "gate": _UNEVIDENCED_DEBIT_GATE,
         "actual": candidate.get("setup_kind"),
-        "threshold": "EVENT_SETTLEMENT_THRESHOLD_only",
+        "threshold": "EVENT_SETTLEMENT_or_GTH_human_debit",
     }
+
+
+def _gth_human_debit(candidate: Mapping[str, Any]) -> bool:
+    if candidate.get("setup_kind") in _GTH_HUMAN_DEBIT_SETUPS:
+        return True
+    return str(candidate.get("source") or "") in _GTH_HUMAN_DEBIT_SOURCES
 
 
 def _block_unevidenced_debit(
     candidate: Mapping[str, Any],
     gates: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    if _gth_human_debit(candidate):
+        return list(gates)
     return [_unevidenced_debit_human_gate(candidate), *gates]
 
 

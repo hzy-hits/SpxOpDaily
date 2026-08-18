@@ -203,7 +203,7 @@ A change that increases process count, active languages, mutable stores or owner
 `docs/architecture-simplification-execution-plan-v1.md` 第 2 节第 11–16 条与 S1–S6 任务卡。要点：
 
 1. 人类可见交易候选只能来自 `payload["strategy_decision"]`（`build_strategy_decision` 唯一出口）；旧 candidates、GTH direct green-card、radar lane 排名在对应 S 卡落地后必须删除或降级，不得双写两套“最终候选”。
-2. 策略候选第一版固定五类（NO_TRADE、Call/Put Debit Vertical、Call/Put Butterfly）；v4 仅新增 setup `EVENT_SETTLEMENT_THRESHOLD`，仍复用 Call/Put Debit Vertical，不新增 payoff 类型。v34 起人读 Debit 仅 `EVENT_SETTLEMENT_THRESHOLD`；`ES_VOLUME_MOMENTUM`、GTH 宽链/delta 扫描、`TREND_PULLBACK` / `FAILED_BREAK_RECLAIM` / `BREAKOUT_ACCEPTANCE` 以及 GTH level path 仍枚举供地图与 funnel，但硬门 `unevidenced_debit_not_human_authorized`，不得成为人读卡。RTH pin TRADE 仍可出蝶。量比 setup 的 HMM/冲动/开盘宽限规则仍约束枚举，不授权方向。扩大候选空间需用户批准。
+2. 策略候选第一版固定五类（NO_TRADE、Call/Put Debit Vertical、Call/Put Butterfly）；v4 仅新增 setup `EVENT_SETTLEMENT_THRESHOLD`，仍复用 Call/Put Debit Vertical，不新增 payoff 类型。v35 起 RTH 人读 Debit 仅 `EVENT_SETTLEMENT_THRESHOLD`；`ES_VOLUME_MOMENTUM` 与 RTH 失败突破/回踩/突破仍枚举供 funnel，硬门 `unevidenced_debit_not_human_authorized`。GTH 人读 Debit 仍走 TREND 同向宽链/delta 扫描，以及确认水平 / 回踩收复（`gth_level_manual_candidate` / `gth_dip_reclaim_evidence`）；Desk Map 文案仍是不做，赢家走 `trade_ready`。RTH pin TRADE 仍可出蝶。扩大候选空间需用户批准。
 3. bootstrap 阈值是带 `policy_version` 的冻结代码常量，不进 `runtime.yaml`、不进 AppSettings；改阈值 = 改代码 + 版本递增 + replay 对照。
 4. `strategy_decision` 不得进入 `contracts/golden/` 或任何 Rust 消费的投影；候选卡走现有 Python `trade_ready` lane。
 5. 不为策略新增 service、timer、数据库、队列、状态机或 Rust；v4 新增生产文件上限为 `event_settlement_vertical.py` 一个组合模块。

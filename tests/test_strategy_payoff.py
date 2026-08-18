@@ -452,7 +452,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v34"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v35"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -835,7 +835,7 @@ def test_rth_vertical_enumerates_but_is_not_a_human_card() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v34"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v35"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
@@ -3183,7 +3183,7 @@ def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
     assert "direction_valid_but_entry_too_late" in decision["why_not"]["reasons"]
 
 
-def test_gth_level_path_does_not_authorize_manual_candidate_and_trend_background_cannot() -> None:
+def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cannot() -> None:
     now = datetime(2026, 8, 7, 3, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload["gth_level_manual_candidate"] = _gth_candidate(now, "upper_acceptance_call")
@@ -3191,9 +3191,9 @@ def test_gth_level_path_does_not_authorize_manual_candidate_and_trend_background
 
     decision = build_strategy_decision(payload, _state(now), now)
 
-    assert decision["decision_type"] == "NO_TRADE"
-    assert decision["action_authority"] == "none"
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["candidate"]["source"] == "gth_level_manual_candidate"
+    assert decision["action_authority"] == "manual"
 
     payload["gth_level_manual_candidate"] = _gth_candidate(now, "trend_transition_call")
     rejected = build_strategy_decision(payload, _state(now), now)
@@ -3203,8 +3203,9 @@ def test_gth_level_path_does_not_authorize_manual_candidate_and_trend_background
 
     payload["gth_level_manual_candidate"] = _gth_candidate(now, "trend_advance_call")
     advanced = build_strategy_decision(payload, _state(now), now)
-    assert advanced["decision_type"] == "NO_TRADE", advanced["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in advanced["why_not"]["reasons"]
+    assert advanced["decision_type"] == "CALL_DEBIT_VERTICAL", advanced["why_not"]
+    assert advanced["candidate"]["source"] == "gth_level_manual_candidate"
+    assert advanced["candidate"]["setup_kind"] == "TREND_PULLBACK"
 
 
 def test_gth_selector_evidence_can_compete_while_operator_edge_authority_is_unavailable() -> None:
@@ -3227,8 +3228,8 @@ def test_gth_selector_evidence_can_compete_while_operator_edge_authority_is_unav
 
     decision = build_strategy_decision(payload, _state(now), now)
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "gth_level_manual_candidate"
     evidence = decision["market_facts"]["gth_evidence"]
     assert evidence["selector_evidence_eligible"] is True
     assert evidence["edge_authority_reason"] == (
@@ -3265,8 +3266,9 @@ def test_fresh_dip_reclaim_evidence_overrides_trend_only_background() -> None:
 
     decision = build_strategy_decision(payload, _state(now), now)
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "gth_dip_reclaim_evidence"
+    assert decision["candidate"]["setup_kind"] == "FAILED_BREAK_RECLAIM"
     assert decision["automatic_ordering"] is False
 
 

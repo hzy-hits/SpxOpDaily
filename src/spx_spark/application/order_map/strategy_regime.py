@@ -41,7 +41,12 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v34"
+    policy_version: str = "strategy_policy.bootstrap.v35"
+    # v35: GTH can still print a human debit. TREND-aligned width/delta
+    # scans and confirmed GTH level / dip-reclaim verticals remain
+    # manual candidates. Desk Map copy stays 不做; winners still go
+    # through trade_ready. RTH ES_VOLUME_MOMENTUM and leftover RTH
+    # directionals stay blocked by unevidenced_debit_not_human_authorized.
     # v34: unevidenced debit verticals no longer authorize a human card.
     # GTH width/delta scans, RTH ES_VOLUME_MOMENTUM, failed-break, trend
     # pullback, breakout, and GTH level-path verticals stay enumerated for
