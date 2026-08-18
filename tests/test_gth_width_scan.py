@@ -255,7 +255,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v36"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v37"
     assert ranked.passed == []
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
@@ -297,9 +297,10 @@ def test_gth_decision_keeps_locked_direction_instead_of_best_vertical(
     assert "gth_winner_stick_direction_locked" in (decision.get("why_not") or {}).get("reasons", [])
 
 
-def test_gth_directional_verticals_require_aligned_trend() -> None:
+def test_gth_directional_verticals_require_aligned_path() -> None:
     uncertain = _rank(_regime())
-    transition = _rank(_regime(path_state="TRANSITION", path_direction="UP"))
+    transition_up = _rank(_regime(path_state="TRANSITION", path_direction="UP"))
+    transition_down = _rank(_regime(path_state="TRANSITION", path_direction="DOWN"))
     trend_up = _rank(_regime(path_state="TREND", path_direction="UP"))
     trend_down = _rank(_regime(path_state="TREND", path_direction="DOWN"))
 
@@ -318,11 +319,14 @@ def test_gth_directional_verticals_require_aligned_trend() -> None:
 
     assert "CALL_DEBIT_VERTICAL" not in _types(uncertain)
     assert "PUT_DEBIT_VERTICAL" not in _types(uncertain)
-    assert "CALL_DEBIT_VERTICAL" not in _types(transition)
-    assert "PUT_DEBIT_VERTICAL" not in _types(transition)
     assert _gated(uncertain, "CALL_DEBIT_VERTICAL")
     assert _gated(uncertain, "PUT_DEBIT_VERTICAL")
-    assert _gated(transition, "PUT_DEBIT_VERTICAL")
+    assert "CALL_DEBIT_VERTICAL" in _types(transition_up)
+    assert "PUT_DEBIT_VERTICAL" not in _types(transition_up)
+    assert _gated(transition_up, "PUT_DEBIT_VERTICAL")
+    assert "PUT_DEBIT_VERTICAL" in _types(transition_down)
+    assert "CALL_DEBIT_VERTICAL" not in _types(transition_down)
+    assert _gated(transition_down, "CALL_DEBIT_VERTICAL")
     assert "CALL_DEBIT_VERTICAL" in _types(trend_up)
     assert "PUT_DEBIT_VERTICAL" not in _types(trend_up)
     assert "CALL_BUTTERFLY" not in _types(trend_up)
@@ -358,6 +362,77 @@ def test_gth_trend_aligned_width_scan_is_manual_candidate(monkeypatch) -> None:
     assert decision["candidate"]["setup_kind"] in {GTH_WIDTH_SCAN, "GTH_DELTA_SCAN"}
     assert decision["candidate"]["direction"] == "UP"
     assert decision["automatic_ordering"] is False
+
+
+def test_gth_transition_aligned_put_is_manual_candidate(monkeypatch) -> None:
+    facts = _facts()
+    regime = _regime(path_state="TRANSITION", path_direction="DOWN")
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+        lambda payload, latest, at: facts,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.assess_regime",
+        lambda supplied: regime,
+    )
+
+    decision = build_strategy_decision(
+        _payload(),
+        _state(NOW),
+        NOW,
+        data_root=None,
+        probability_settings=None,
+    )
+
+    assert decision["decision_type"] == "PUT_DEBIT_VERTICAL", decision.get("why_not")
+    assert decision["action_authority"] == "manual"
+    assert decision["candidate"]["setup_kind"] in {GTH_WIDTH_SCAN, "GTH_DELTA_SCAN"}
+    assert decision["candidate"]["direction"] == "DOWN"
+    assert decision["automatic_ordering"] is False
+
+
+def test_gth_scan_uses_higher_debit_fraction_cap() -> None:
+    regime = _regime(path_state="TRANSITION", path_direction="DOWN")
+    facts = _facts()
+    rows = enumerate_candidates(
+        _payload(),
+        facts,
+        regime,
+        _state(NOW),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+    put = next(row for row in rows if row.get("strategy_type") == "PUT_DEBIT_VERTICAL")
+    at_live_cap = {
+        **dict(put),
+        "economics": {**dict(put.get("economics") or {}), "debit_fraction_of_width": 0.52},
+    }
+    above_gth_cap = {
+        **dict(put),
+        "economics": {**dict(put.get("economics") or {}), "debit_fraction_of_width": 0.56},
+    }
+
+    def _rank_one(row: dict[str, object]):
+        return rank_candidates(
+            [row],
+            facts,
+            regime,
+            policy=StrategyPolicy(),
+            data_root=None,
+            probability_settings=None,
+            now=NOW,
+        )
+
+    passed = _rank_one(at_live_cap)
+    blocked = _rank_one(above_gth_cap)
+    assert passed.passed
+    assert passed.passed[0]["strategy_type"] == "PUT_DEBIT_VERTICAL"
+    assert blocked.passed == []
+    assert any(
+        str(gate.get("gate")) == "max_debit_fraction_exceeded"
+        and gate.get("threshold") == 0.55
+        for gate in (blocked.near_misses[0].get("failed_gates") or ())
+    )
 
 
 def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> None:

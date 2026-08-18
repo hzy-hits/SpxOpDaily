@@ -588,12 +588,12 @@ def _gth_scan_vertical_hard_gates(
     path_state = str(regime.get("path_state") or "")
     path_direction = str(regime.get("path_direction") or "").upper()
     direction = str(candidate.get("direction") or "").upper()
-    if path_state != "TREND" or path_direction != direction:
+    if path_state not in {"TREND", "TRANSITION"} or path_direction != direction:
         gates.append(
             {
                 "gate": "gth_vertical_requires_aligned_trend",
                 "actual": f"{path_state}:{path_direction or 'none'}",
-                "threshold": f"TREND:{direction or 'directional'}",
+                "threshold": f"TREND_or_TRANSITION:{direction or 'directional'}",
             }
         )
     remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
@@ -648,12 +648,12 @@ def _gth_scan_vertical_hard_gates(
             )
             for reason in path_reasons
         )
-    if float(debit_fraction) > policy.max_debit_fraction:
+    if float(debit_fraction) > policy.gth_max_debit_fraction:
         gates.append(
             {
                 "gate": "max_debit_fraction_exceeded",
                 "actual": debit_fraction,
-                "threshold": policy.max_debit_fraction,
+                "threshold": policy.gth_max_debit_fraction,
             }
         )
     return gates

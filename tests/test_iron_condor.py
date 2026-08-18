@@ -288,8 +288,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v36"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v36"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v37"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v37"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None

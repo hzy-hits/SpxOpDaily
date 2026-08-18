@@ -41,12 +41,18 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v36"
+    policy_version: str = "strategy_policy.bootstrap.v37"
+    # v37: GTH width/delta debit prints on TREND or TRANSITION when the
+    # ES path direction matches. 2026-08-18 GTH dumped in TRANSITION DOWN
+    # (efficiency 0.33, below trend_efficiency 0.45); the 7730/7725 put
+    # outscored the iron condor but died on TREND-only plus 0.45 debit
+    # cap (0.52). GTH debit cap is 0.55. UNCERTAIN / opposite side stay
+    # closed. RTH ES_VOLUME_MOMENTUM stays unevidenced.
     # v36: iron condor stays on the desk map and does not print a human
     # card. Geometry-ready 5–20Δ 10-wide condors were winning every GTH
     # cycle after unevidenced debit was gated, and the winner overlay
     # reused the 20-minute debit management policy. Human debit is still
-    # GTH TREND-aligned width/delta plus confirmed level / dip-reclaim.
+    # GTH direction-aligned width/delta plus confirmed level / dip-reclaim.
     # v35: GTH can still print a human debit. TREND-aligned width/delta
     # scans and confirmed GTH level / dip-reclaim verticals remain
     # manual candidates. Desk Map copy stays 不做; winners still go
@@ -168,6 +174,7 @@ class StrategyPolicy:
     min_target_room_ratio: float = 1.5
     failed_break_min_target_room_ratio: float = 1.8
     max_debit_fraction: float = 0.45
+    gth_max_debit_fraction: float = 0.55
     failed_break_max_debit_fraction: float = 0.40
     min_stop_atr: float = 0.25
     max_stop_atr: float = 1.0
