@@ -20,6 +20,7 @@ from spx_spark.application.order_map.event_settlement_vertical import (
     event_settlement_generation_reason,
 )
 from spx_spark.application.order_map.iron_condor import (
+    IRON_CONDOR_TYPE,
     build_iron_condor_map,
     enumerate_iron_condor_candidates,
 )
@@ -633,21 +634,25 @@ def _attach_winner_path_distributions(
     probability_settings: StrategyDistributionSettings | None,
     now: datetime,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    paths, clock_mode = load_decision_spot_paths(
-        facts,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=now,
-    )
-    winner = attach_path_distribution(
-        passed[0],
-        facts,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=now,
-        paths=paths,
-        clock_mode=clock_mode,
-    )
+    first = dict(passed[0])
+    if str(first.get("strategy_type") or "") == IRON_CONDOR_TYPE:
+        winner = first
+    else:
+        paths, clock_mode = load_decision_spot_paths(
+            facts,
+            data_root=data_root,
+            probability_settings=probability_settings,
+            now=now,
+        )
+        winner = attach_path_distribution(
+            first,
+            facts,
+            data_root=data_root,
+            probability_settings=probability_settings,
+            now=now,
+            paths=paths,
+            clock_mode=clock_mode,
+        )
     # First slice: winner + iron-condor map only. Shadow cards stay rank-only.
     shadows = [dict(row) for row in passed[1:3]]
     return (

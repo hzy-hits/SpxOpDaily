@@ -151,7 +151,9 @@ def estimate_path_distribution(
     strategy_type = str(candidate.get("strategy_type") or "")
     if strategy_type.endswith("_BUTTERFLY"):
         return _unavailable("butterfly_path_not_in_v1")
-    if strategy_type not in SUPPORTED_VERTICALS and strategy_type != IRON_CONDOR_TYPE:
+    if strategy_type == IRON_CONDOR_TYPE:
+        return _unavailable("iron_condor_uses_clearing_overlay")
+    if strategy_type not in SUPPORTED_VERTICALS:
         return _unavailable("unsupported_strategy_type")
 
     spot = _number(_map(facts.get("spot")).get("spx"))

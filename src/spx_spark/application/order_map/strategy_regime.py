@@ -41,7 +41,12 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v35"
+    policy_version: str = "strategy_policy.bootstrap.v36"
+    # v36: iron condor stays on the desk map and does not print a human
+    # card. Geometry-ready 5–20Δ 10-wide condors were winning every GTH
+    # cycle after unevidenced debit was gated, and the winner overlay
+    # reused the 20-minute debit management policy. Human debit is still
+    # GTH TREND-aligned width/delta plus confirmed level / dip-reclaim.
     # v35: GTH can still print a human debit. TREND-aligned width/delta
     # scans and confirmed GTH level / dip-reclaim verticals remain
     # manual candidates. Desk Map copy stays 不做; winners still go

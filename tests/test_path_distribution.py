@@ -240,6 +240,22 @@ def test_gth_iron_condor_clearing_paths_are_one_overnight_session(tmp_path: Path
     assert len(rows[0].prices) == 181
 
 
+def test_iron_condor_does_not_reuse_twenty_minute_debit_policy() -> None:
+    distribution = estimate_path_distribution(
+        _iron_condor(),
+        _facts(now=GTH_NOW, spot=7750.0),
+        data_root=None,
+        probability_settings=None,
+        now=GTH_NOW,
+    )
+
+    assert distribution["status"] == "unavailable"
+    assert "iron_condor_uses_clearing_overlay" in distribution["reason_codes"]
+    assert distribution["p10_pnl_points"] is None
+    assert distribution["p50_pnl_points"] is None
+    assert distribution["p90_pnl_points"] is None
+
+
 def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) -> None:
     _write_open_to_clear(tmp_path, "2026-08-04", open_px=7750.0, clear_px=7751.0)
     _write_open_to_clear(tmp_path, "2026-08-05", open_px=7751.0, clear_px=7752.0)

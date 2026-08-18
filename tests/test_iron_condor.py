@@ -14,6 +14,7 @@ from spx_spark.application.order_map.iron_condor import (
     enumerate_iron_condor_candidates,
 )
 from spx_spark.application.order_map.operator_status import build_desk_message_sections
+from spx_spark.application.order_map.strategy_ranker import rank_candidates
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.marketdata import (
@@ -287,9 +288,53 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v35"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v36"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v36"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["action_authority"] == "none"
+    assert decision["candidate"] is None
     assert decision["iron_condor_map"]["status"] == "ready"
     assert decision["iron_condor_map"]["setup_kind"] == IRON_CONDOR_DELTA
+
+
+def test_ready_iron_condor_is_map_only_not_a_human_winner() -> None:
+    facts = _facts()
+    rows = enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _state(NOW),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+    ranked = rank_candidates(
+        rows,
+        facts,
+        {
+            "schema_version": "regime_assessment.v1",
+            "policy_version": StrategyPolicy().policy_version,
+            "path_state": "UNCERTAIN",
+            "path_direction": None,
+            "terminal_state": "NONE",
+            "event_state": "NORMAL",
+            "entry_state": "INSUFFICIENT_DATA",
+            "confidence": 0.0,
+            "reasons": [],
+            "contradictions": [],
+            "pin": {},
+        },
+        policy=StrategyPolicy(),
+        data_root=None,
+        probability_settings=None,
+        now=NOW,
+    )
+
+    assert rows
+    assert rows[0]["strategy_type"] == "IRON_CONDOR"
+    assert ranked.passed == []
+    assert ranked.near_misses
+    miss = ranked.near_misses[0]
+    assert miss["strategy_type"] == "IRON_CONDOR"
+    assert "iron_condor_not_human_authorized" in miss["rejection_reasons"]
 
 
 def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:

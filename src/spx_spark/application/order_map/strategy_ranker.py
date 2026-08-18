@@ -33,6 +33,7 @@ _POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
 _POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
 _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
 _UNEVIDENCED_DEBIT_GATE = "unevidenced_debit_not_human_authorized"
+_IRON_CONDOR_HUMAN_GATE = "iron_condor_not_human_authorized"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _GTH_HUMAN_DEBIT_SETUPS = frozenset({_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN})
@@ -392,6 +393,13 @@ def _hard_gate_candidate(
         gates.extend(_butterfly_hard_gates(candidate, facts, regime, policy=policy))
     elif strategy_type == _IRON_CONDOR_TYPE:
         gates.extend(_iron_condor_hard_gates(candidate, facts))
+        gates.append(
+            {
+                "gate": _IRON_CONDOR_HUMAN_GATE,
+                "actual": candidate.get("setup_kind"),
+                "threshold": "iron_condor_map_only",
+            }
+        )
     else:
         gates.append({"gate": "unsupported_strategy_type", "actual": strategy_type, "threshold": "approved_strategy"})
     if candidate.get("automatic_ordering") is not False or candidate.get("manual_action_only") is not True:
