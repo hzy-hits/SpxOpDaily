@@ -51,6 +51,35 @@ def pytest_configure() -> None:
         pass
 
 
+@pytest.fixture(autouse=True)
+def isolate_strategy_edge_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep legacy fixtures independent of a host model artifact.
+
+    Dedicated strategy-edge tests call the public scorer directly or replace
+    this seam inside the test. Production always uses the real fail-closed
+    authority path from ``strategy_select``.
+    """
+
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_edge_model import (
+        EdgeAuthorityResult,
+    )
+
+    def passthrough(candidates, *_args, **_kwargs):
+        return EdgeAuthorityResult(
+            passed=[dict(candidate) for candidate in candidates],
+            rejected=[],
+        )
+
+    monkeypatch.setattr(
+        strategy_select,
+        "apply_strategy_edge_authority",
+        passthrough,
+    )
+
+
 @pytest.fixture
 def migrate_operational_database(
     monkeypatch: pytest.MonkeyPatch,

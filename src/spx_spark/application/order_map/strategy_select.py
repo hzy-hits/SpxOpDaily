@@ -29,6 +29,9 @@ from spx_spark.application.order_map.path_distribution import (
     attach_path_distribution,
     load_decision_spot_paths,
 )
+from spx_spark.application.order_map.strategy_edge_model import (
+    apply_strategy_edge_authority,
+)
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
@@ -109,6 +112,18 @@ def build_strategy_decision(
                 data_root=data_root,
                 probability_settings=probability_settings,
                 now=_utc(now),
+            )
+            edge_authority = apply_strategy_edge_authority(
+                rank.passed,
+                facts,
+                regime,
+                data_root=data_root,
+                now=_utc(now),
+            )
+            rank = RankResult(
+                passed=edge_authority.passed,
+                near_misses=[*edge_authority.rejected, *rank.near_misses][:3],
+                gate_audit=rank.gate_audit,
             )
             stick_reason: str | None = None
             if rank.passed:
@@ -569,6 +584,11 @@ def _candidate_strikes(candidate: Mapping[str, Any]) -> list[float]:
 
 
 def _candidate_score(candidate: Mapping[str, Any]) -> float:
+    edge = _map(_map(candidate.get("edge")).get("strategy_edge"))
+    lower = _number(edge.get("expected_pnl_lcb_points"))
+    loss = _number(_map(candidate.get("economics")).get("max_loss_points"))
+    if lower is not None and loss is not None and loss > 0:
+        return round(lower / loss, 6)
     utility = _number(_map(candidate.get("utility")).get("utility"))
     if utility is not None:
         return round(utility, 6)
