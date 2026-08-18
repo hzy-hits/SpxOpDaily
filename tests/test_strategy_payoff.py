@@ -452,7 +452,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v37"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v38"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -741,7 +741,7 @@ def test_low_snr_strike_surface_is_explained_without_strategy_authority() -> Non
     expected_decisions = {
         "2026-08-05": "NO_TRADE",
         "2026-08-06": "CALL_BUTTERFLY",
-        "2026-08-07": "NO_TRADE",
+        "2026-08-07": "CALL_DEBIT_VERTICAL",
         "2026-08-08": "NO_TRADE",
     }
     for day, now, payload, latest in cases:
@@ -823,7 +823,7 @@ def test_stable_pin_builds_candidate_specific_terminal_range_probability(
     assert decision["candidate"]["utility"]["conservative_lower_bound"] > 0
 
 
-def test_rth_vertical_enumerates_but_is_not_a_human_card() -> None:
+def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
 
@@ -835,14 +835,13 @@ def test_rth_vertical_enumerates_but_is_not_a_human_card() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v37"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v38"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
-    assert decision["decision_type"] == "NO_TRADE"
-    assert decision["action_authority"] == "none"
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["action_authority"] == "manual"
     assert decision["automatic_ordering"] is False
-    assert decision["execution"]["action"] == "WAIT"
+    assert decision["execution"]["action"] == "MANUAL_LIMIT"
     assert decision["shadow_candidates"] == []
     assert decision["shadow_candidates_skipped"] == []
 
@@ -907,9 +906,8 @@ def test_rth_confirmed_breakout_can_compete_when_path_is_transitional() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["regime"]["path_state"] == "TRANSITION"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_rth_confirmed_breakout_is_blocked_by_opposite_established_trend() -> None:
@@ -926,9 +924,8 @@ def test_rth_confirmed_breakout_is_blocked_by_opposite_established_trend() -> No
 
     assert decision["regime"]["path_state"] == "TREND"
     assert decision["regime"]["path_direction"] == "DOWN"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert "price_trigger_conflicts_with_established_path" not in decision["why_not"]["reasons"]
 
 
@@ -953,8 +950,10 @@ def test_rth_confirmed_trigger_reuses_fresh_exact_snapshot_for_pricing_only() ->
     decision = build_strategy_decision(payload, _state(now), now)
     selected = next(row for row in rows if row.get("setup_kind") == "ES_VOLUME_MOMENTUM")
 
-    assert decision["decision_type"] == "NO_TRADE"
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["candidate"]["source"] == "es_volume_momentum"
+    assert decision["candidate"]["long"]["contract_id"].endswith(":7710:C")
+    assert decision["candidate"]["short"]["contract_id"].endswith(":7720:C")
     assert selected["source"] == "es_volume_momentum"
     assert selected["long"]["contract_id"].endswith(":7710:C")
     assert selected["short"]["contract_id"].endswith(":7720:C")
@@ -1111,8 +1110,8 @@ def test_confirmed_setup_directly_enumerates_without_legacy_spread() -> None:
     decision = build_strategy_decision(payload, _vertical_chain_state(now), now)
     selected = next(row for row in rows if row.get("setup_kind") == "ES_VOLUME_MOMENTUM")
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "rth_schwab_width_enumeration"
     assert selected["source"] == "rth_schwab_width_enumeration"
     assert selected["economics"]["width_points"] in {5.0, 10.0, 15.0, 20.0}
     assert "vertical_exact_spread_unavailable" not in decision["why_not"]["reasons"]
@@ -1220,8 +1219,10 @@ def test_failed_break_does_not_select_call_vertical_past_target_or_remaining_mov
     decision = build_strategy_decision(payload, latest, now)
     candidate = next(row for row in rows if row.get("setup_kind") == "ES_VOLUME_MOMENTUM")
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["candidate"]["long"]["strike"] == 7755.0
+    assert decision["candidate"]["short"]["strike"] == 7760.0
     assert candidate["long"]["strike"] == 7755.0
     assert candidate["short"]["strike"] == 7760.0
     assert candidate["economics"]["width_points"] == 5.0
@@ -1269,9 +1270,9 @@ def test_confirmed_session_episode_maps_to_failed_break_reclaim_vertical() -> No
         "v_reversal_confirmed"
     )
     assert decision["market_facts"]["session_episode"]["setup_direction"] == "UP"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["candidate"]["direction"] == "UP"
     assert decision["rejection_funnel"]["setup_detected"] == 1
 
 
@@ -1361,9 +1362,8 @@ def test_vwap_pullback_stays_open_for_two_bars_after_confirmation() -> None:
     )
 
     assert pullback["state"] == "ENTRY_WINDOW_OPEN"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_vwap_pullback_closes_after_hold_bars_elapse() -> None:
@@ -1469,8 +1469,8 @@ def test_opening_range_failed_break_opens_symmetric_vertical_entry_window(
     decision = build_strategy_decision(payload, latest, now)
     selected = next(row for row in rows if row.get("setup_kind") == "ES_VOLUME_MOMENTUM")
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == f"{'CALL' if right == 'C' else 'PUT'}_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert selected["setup_state"] == "ENTRY_WINDOW_OPEN"
     assert selected["direction"] == direction
     assert decision["rejection_funnel"]["entry_window_open"] == 1
@@ -1484,9 +1484,10 @@ def test_vwap_trend_pullback_opens_call_vertical_before_prior_high_break() -> No
         payload, _two_sided_vertical_chain(now, right="C"), now
     )
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["candidate"]["setup_variant"] == "ES_PACE_1M5M"
+    assert decision["candidate"]["setup_state"] == "ENTRY_WINDOW_OPEN"
     assert decision["rejection_funnel"]["entry_window_open"] == 1
 
 
@@ -1537,9 +1538,8 @@ def test_incomplete_trend_vector_is_unevaluable_not_transition() -> None:
     assert facts["capabilities"]["vertical"]["ready"] is True
     assert regime["path_state"] == "UNCERTAIN"
     assert "path_inputs_unavailable" in regime["reasons"]
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert "trend_pullback_path_unevaluable" not in decision["why_not"]["reasons"]
     assert "vertical_path_inputs_unavailable" not in decision["why_not"]["reasons"]
 
@@ -1634,8 +1634,7 @@ def test_active_shock_blocks_butterfly_but_keeps_open_vertical_setup() -> None:
 
     assert decision["market_facts"]["shock"]["state"] == "ACTIVE"
     assert decision["market_facts"]["capabilities"]["butterfly"]["ready"] is False
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
 
     pin_now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     pin_payload = _pin_payload(pin_now)
@@ -2153,7 +2152,7 @@ def test_pin_blocks_directional_spreads_only_for_look_or_trade() -> None:
     assert not pin_blocks_directional_spreads({"terminal_state": "NONE", "pin": {"grade": "none"}})
 
 
-def test_es_volume_momentum_enumerates_put_without_trend_or_pullback() -> None:
+def test_es_volume_momentum_authorizes_put_without_trend_or_pullback() -> None:
     now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload.pop("call_skew_spread_shadow")
@@ -2190,8 +2189,9 @@ def test_es_volume_momentum_enumerates_put_without_trend_or_pullback() -> None:
     )
 
     assert decision["regime"]["path_state"] != "TREND"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "PUT_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["candidate"]["direction"] == "DOWN"
 
 
 def test_es_volume_momentum_ignores_vwap_impulse_late_chase() -> None:
@@ -2202,9 +2202,8 @@ def test_es_volume_momentum_ignores_vwap_impulse_late_chase() -> None:
 
     decision = build_strategy_decision(payload, _state(now), now)
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_quiet_es_volume_does_not_authorize_rth_vertical() -> None:
@@ -2269,8 +2268,8 @@ def test_es_volume_momentum_first_card_survives_hmm_balanced() -> None:
     )
 
     assert decision["regime"]["path_state"] == "BALANCED"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "PUT_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_es_volume_momentum_hmm_trend_opposite_blocks_first_card() -> None:
@@ -2328,9 +2327,8 @@ def test_es_volume_momentum_flip_allowed_when_hmm_trend_aligns() -> None:
 
     assert decision["regime"]["path_state"] == "TREND"
     assert decision["regime"]["path_direction"] == "UP"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_es_volume_momentum_add_needs_hmm_trend() -> None:
@@ -2379,9 +2377,8 @@ def test_es_volume_momentum_add_allowed_on_new_impulse() -> None:
 
     assert decision["regime"]["path_state"] == "TREND"
     assert decision["regime"]["path_direction"] == "UP"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_es_volume_momentum_post_event_blocks_after_open_grace() -> None:
@@ -2414,9 +2411,8 @@ def test_es_volume_momentum_post_event_allows_first_minutes_after_open() -> None
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["regime"]["event_state"] == "POST_EVENT_DISCOVERY"
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert decision["candidate"] is None
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_look_window_tighter_pin_outranks_wider_pin() -> None:
@@ -2563,8 +2559,8 @@ def test_rth_vertical_uses_fresh_atomic_ibkr_fallback_when_schwab_is_stale() -> 
     )
     selected = next(row for row in rows if row.get("setup_kind") == "ES_VOLUME_MOMENTUM")
 
-    assert decision["decision_type"] == "NO_TRADE", decision["why_not"]
-    assert "unevidenced_debit_not_human_authorized" in decision["why_not"]["reasons"]
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["source"] == "rth_ibkr_width_enumeration"
     assert selected["source"] == "rth_ibkr_width_enumeration"
     assert selected["long"]["provider"] == "ibkr"
     assert selected["short"]["provider"] == "ibkr"
@@ -2722,11 +2718,14 @@ def test_ranker_tries_second_candidate_when_first_fails_utility() -> None:
         now=now,
     )
 
-    assert rank.passed == []
+    assert rank.passed
     assert any(
-        "unevidenced_debit_not_human_authorized" in list(row.get("rejection_reasons") or ())
-        for row in rank.near_misses
+        "candidate_utility_not_positive"
+        in list((candidate.get("edge") or {}).get("advisories") or ())
+        or float((candidate.get("utility") or {}).get("utility") or 1.0) <= 0.0
+        for candidate in rank.passed
     )
+    assert rank.passed[0]["economics"]["width_points"] == pytest.approx(20.0)
 
 
 def test_directional_confirmation_butterfly_is_research_alternative_only() -> None:

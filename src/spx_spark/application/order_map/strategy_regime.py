@@ -41,13 +41,18 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v37"
+    policy_version: str = "strategy_policy.bootstrap.v38"
+    # v38: RTH ES_VOLUME_MOMENTUM is a human debit again. Failed-break,
+    # trend-pullback, and breakout stay funnel-only. Existing momentum
+    # gates stay: post-event after open grace, opposite cash HMM TREND,
+    # add needs a new impulse, flip needs HMM TREND, 20-minute v1
+    # management. User authorized the candidate-space expansion.
     # v37: GTH width/delta debit prints on TREND or TRANSITION when the
     # ES path direction matches. 2026-08-18 GTH dumped in TRANSITION DOWN
     # (efficiency 0.33, below trend_efficiency 0.45); the 7730/7725 put
     # outscored the iron condor but died on TREND-only plus 0.45 debit
     # cap (0.52). GTH debit cap is 0.55. UNCERTAIN / opposite side stay
-    # closed. RTH ES_VOLUME_MOMENTUM stays unevidenced.
+    # closed.
     # v36: iron condor stays on the desk map and does not print a human
     # card. Geometry-ready 5–20Δ 10-wide condors were winning every GTH
     # cycle after unevidenced debit was gated, and the winner overlay

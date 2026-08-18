@@ -552,9 +552,9 @@ VWAP slope >= +0.05 ATR
 sector breadth >= 0.55
 ```
 
-空头反向。趋势判断只代表路径背景，不代表立即交易。v35 起 RTH 方向 Debit
-（`ES_VOLUME_MOMENTUM`、失败突破、趋势回踩）不再授权人读卡，只记结构事实；
-人读 Debit 为 `EVENT_SETTLEMENT_THRESHOLD`。GTH 在 TREND 同向时可出宽链/delta
+空头反向。趋势判断只代表路径背景，不代表立即交易。v38 起 RTH 人读 Debit
+为 `EVENT_SETTLEMENT_THRESHOLD` 与 `ES_VOLUME_MOMENTUM`；失败突破、趋势回踩、
+突破接受只记结构事实。GTH 在 TREND 或 TRANSITION 同向时可出宽链/delta
 价差，确认水平 / 回踩收复也可出人读卡。Desk Map 仍写不做。
 
 ### 7.2 BALANCED
@@ -692,7 +692,7 @@ reason = direction_valid_but_entry_too_late
 
 ## 9. 策略一：ES Volume Momentum Vertical
 
-v34/v35 起不再授权 RTH 人读卡，只保留枚举、审计与 funnel。`TREND_PULLBACK` 仍可出现在
+v38 起重新授权 RTH 人读卡。`TREND_PULLBACK` 仍只出现在
 `rth_setups` 审计里。GTH 仍可把夜盘证据标成该旧名，且 GTH 人读 Debit 不走本 setup。
 
 ### 9.1 交易假设

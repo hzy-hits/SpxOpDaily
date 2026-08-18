@@ -37,6 +37,7 @@ _IRON_CONDOR_HUMAN_GATE = "iron_condor_not_human_authorized"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _GTH_HUMAN_DEBIT_SETUPS = frozenset({_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN})
+_RTH_HUMAN_DEBIT_SETUPS = frozenset({"ES_VOLUME_MOMENTUM"})
 _GTH_HUMAN_DEBIT_SOURCES = frozenset(
     {
         "gth_level_manual_candidate",
@@ -438,12 +439,13 @@ def _unevidenced_debit_human_gate(candidate: Mapping[str, Any]) -> dict[str, Any
     return {
         "gate": _UNEVIDENCED_DEBIT_GATE,
         "actual": candidate.get("setup_kind"),
-        "threshold": "EVENT_SETTLEMENT_or_GTH_human_debit",
+        "threshold": "EVENT_SETTLEMENT_GTH_or_ES_VOLUME_MOMENTUM",
     }
 
 
-def _gth_human_debit(candidate: Mapping[str, Any]) -> bool:
-    if candidate.get("setup_kind") in _GTH_HUMAN_DEBIT_SETUPS:
+def _human_authorized_debit(candidate: Mapping[str, Any]) -> bool:
+    setup = candidate.get("setup_kind")
+    if setup in _GTH_HUMAN_DEBIT_SETUPS or setup in _RTH_HUMAN_DEBIT_SETUPS:
         return True
     return str(candidate.get("source") or "") in _GTH_HUMAN_DEBIT_SOURCES
 
@@ -452,7 +454,7 @@ def _block_unevidenced_debit(
     candidate: Mapping[str, Any],
     gates: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    if _gth_human_debit(candidate):
+    if _human_authorized_debit(candidate):
         return list(gates)
     return [_unevidenced_debit_human_gate(candidate), *gates]
 
