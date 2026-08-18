@@ -598,11 +598,15 @@ def _censored_decision_ids(
     database_path: Path,
     session_date: str | None,
 ) -> set[str]:
-    """Decisions censored at the ManagementPolicy time-stop horizon (20m).
+    """Decisions censored at the ManagementPolicy time-stop horizon.
 
-    Shorter-horizon transient quote gaps do not count toward n_censored.
+    v2 debit policy has no time stop, so this set is empty. Shorter-horizon
+    transient quote gaps do not count toward n_censored.
     """
 
+    horizon = DEFAULT_MANAGEMENT_POLICY.time_stop_minutes
+    if horizon is None or horizon <= 0:
+        return set()
     connection = sqlite3.connect(database_path)
     try:
         rows = connection.execute(
@@ -613,7 +617,7 @@ def _censored_decision_ids(
             WHERE o.horizon_minutes = ?
               AND (? IS NULL OR d.session_date = ?)
             """,
-            (DEFAULT_MANAGEMENT_POLICY.time_stop_minutes, session_date, session_date),
+            (horizon, session_date, session_date),
         ).fetchall()
     finally:
         connection.close()

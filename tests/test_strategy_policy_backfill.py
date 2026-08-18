@@ -261,7 +261,7 @@ def test_build_policy_ev_table_groups_values_and_counts_censored(tmp_path: Path)
         "ev_points": 9.5,
         "p25": 4.75,
         "p75": 14.25,
-        "n_censored": 1,
+        "n_censored": 0,
         "reason": None,
     }
 
@@ -318,6 +318,6 @@ def test_build_policy_ev_table_uses_low_sample_reason_and_legacy_censor_mapping(
         "ev_points": None,
         "p25": None,
         "p75": None,
-        "n_censored": 1,
+        "n_censored": 0,
         "reason": "low_sample",
     }
