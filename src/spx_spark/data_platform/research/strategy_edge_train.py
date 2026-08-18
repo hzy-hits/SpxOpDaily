@@ -65,11 +65,15 @@ ENTRY_EDGE_POLICY = DEFAULT_MANAGEMENT_POLICY
 GeometryKey = tuple[str, str, str, tuple[float, float]]
 DEFAULT_THRESHOLDS = {
     "min_expected_pnl_points": 0.25,
-    "min_expected_pnl_lcb_points": 0.10,
+    "min_expected_pnl_lcb_points": 0.0,
     "min_p_profit": 0.58,
     "max_p_stop_first_5m": 0.30,
     "min_return_on_risk": 0.08,
 }
+# Empirical q10 on ~10 OOF rows is the worst residual and can exceed a 10-wide
+# debit. Until OOF coverage reaches promotion size, haircut at most 1 SPX point.
+SMALL_OOF_RESIDUAL_FLOOR_POINTS = -1.0
+SMALL_OOF_RESIDUAL_ROWS = 60
 DEFAULT_PROMOTION_GATES = {
     "min_oof_trades": 60,
     "min_holdout_trades": 15,
@@ -1006,7 +1010,7 @@ def _train_group(
             "rows": len(ordered),
             "oof_rows": len(oof),
         }
-    residual_q10 = float(
+    residual_q10_empirical = float(
         np.quantile(
             np.asarray(
                 [row["policy_pnl_points"] - row["expected_pnl_points"] for row in oof],
@@ -1014,6 +1018,10 @@ def _train_group(
             ),
             0.10,
         )
+    )
+    residual_q10, residual_clip_reason = _bounded_residual_q10(
+        residual_q10_empirical,
+        oof_rows=len(oof),
     )
     oof_metrics = _selection_metrics(
         oof,
@@ -1045,6 +1053,8 @@ def _train_group(
         "promotion": promotion,
         "thresholds": dict(thresholds),
         "residual_q10_points": round(residual_q10, 8),
+        "residual_q10_empirical_points": round(residual_q10_empirical, 8),
+        "residual_clip_reason": residual_clip_reason,
         "trained_from": sessions[0],
         "trained_through": sessions[-1],
         "training_rows": len(ordered),
@@ -1062,8 +1072,12 @@ def _train_group(
         "development_sessions": development_sessions,
         "holdout_sessions": sorted(holdout_set),
         "residual_q10_points": round(residual_q10, 8),
+        "residual_q10_empirical_points": round(residual_q10_empirical, 8),
+        "residual_clip_reason": residual_clip_reason,
         "oof_metrics": oof_metrics,
+        "oof_unfiltered": _unfiltered_pnl_metrics(oof),
         "holdout_metrics": holdout_metrics,
+        "holdout_unfiltered": _unfiltered_pnl_metrics(holdout_predictions),
     }
     return model, report
 
@@ -1171,6 +1185,26 @@ def _sigmoid_array(values: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-clipped))
 
 
+def _bounded_residual_q10(
+    empirical: float,
+    *,
+    oof_rows: int,
+) -> tuple[float, str | None]:
+    if oof_rows < SMALL_OOF_RESIDUAL_ROWS and empirical < SMALL_OOF_RESIDUAL_FLOOR_POINTS:
+        return SMALL_OOF_RESIDUAL_FLOOR_POINTS, "small_oof_residual_floor"
+    return empirical, None
+
+
+def _unfiltered_pnl_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    pnl = [float(row["policy_pnl_points"]) for row in rows]
+    return {
+        "rows": len(pnl),
+        "net_pnl_points": round(sum(pnl), 8) if pnl else 0.0,
+        "average_pnl_points": round(sum(pnl) / len(pnl), 8) if pnl else 0.0,
+        "hit_rate": round(sum(value > 0 for value in pnl) / len(pnl), 8) if pnl else 0.0,
+    }
+
+
 def _selection_metrics(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -1178,22 +1212,37 @@ def _selection_metrics(
     thresholds: Mapping[str, float],
 ) -> dict[str, Any]:
     selected: list[dict[str, Any]] = []
+    gate_failures: dict[str, int] = {
+        "expected_pnl": 0,
+        "lcb": 0,
+        "p_profit": 0,
+        "stop_first_5m": 0,
+        "return_on_risk": 0,
+    }
     for raw in rows:
         row = dict(raw)
         expected = float(row["expected_pnl_points"])
         lower = expected + residual_q10
         max_loss = max(float(row.get("max_loss_points") or 0.0), 1e-9)
         return_on_risk = lower / max_loss
-        if (
-            expected >= float(thresholds["min_expected_pnl_points"])
-            and lower >= float(thresholds["min_expected_pnl_lcb_points"])
-            and float(row["p_profit"]) >= float(thresholds["min_p_profit"])
-            and float(row["p_stop_first_5m"]) <= float(thresholds["max_p_stop_first_5m"])
-            and return_on_risk >= float(thresholds["min_return_on_risk"])
-        ):
-            row["expected_pnl_lcb_points"] = lower
-            row["return_on_risk"] = return_on_risk
-            selected.append(row)
+        if expected < float(thresholds["min_expected_pnl_points"]):
+            gate_failures["expected_pnl"] += 1
+            continue
+        if lower < float(thresholds["min_expected_pnl_lcb_points"]):
+            gate_failures["lcb"] += 1
+            continue
+        if float(row["p_profit"]) < float(thresholds["min_p_profit"]):
+            gate_failures["p_profit"] += 1
+            continue
+        if float(row["p_stop_first_5m"]) > float(thresholds["max_p_stop_first_5m"]):
+            gate_failures["stop_first_5m"] += 1
+            continue
+        if return_on_risk < float(thresholds["min_return_on_risk"]):
+            gate_failures["return_on_risk"] += 1
+            continue
+        row["expected_pnl_lcb_points"] = lower
+        row["return_on_risk"] = return_on_risk
+        selected.append(row)
     selected.sort(key=lambda item: (str(item["session_date"]), str(item["decision_at"])))
     pnl = [float(row["policy_pnl_points"]) for row in selected]
     gains = sum(value for value in pnl if value > 0)
@@ -1229,6 +1278,7 @@ def _selection_metrics(
         "positive_session_ratio": round(positive_session_ratio, 8),
         "max_drawdown_r": round(max_drawdown_r, 8),
         "top_session_profit_concentration": round(concentration, 8),
+        "gate_failures": gate_failures,
     }
 
 

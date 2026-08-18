@@ -12,6 +12,7 @@ from spx_spark.data_platform.research.strategy_edge_train import (
     ENTRY_EDGE_POLICY,
     load_candidate_labels,
     train_edge_artifact,
+    _bounded_residual_q10,
 )
 
 
@@ -535,3 +536,15 @@ def test_five_session_history_fits_models_without_changing_promotion_gates() -> 
     assert len(model["feature_mean"]) == len(FEATURE_NAMES)
     assert model["promoted"] is False
     assert report["promoted_models"] == []
+
+
+def test_small_oof_residual_haircut_is_capped_at_one_point() -> None:
+    clipped, reason = _bounded_residual_q10(-19.38, oof_rows=11)
+    assert clipped == -1.0
+    assert reason == "small_oof_residual_floor"
+    unclipped, none_reason = _bounded_residual_q10(-0.40, oof_rows=11)
+    assert unclipped == -0.40
+    assert none_reason is None
+    wide, wide_reason = _bounded_residual_q10(-19.38, oof_rows=60)
+    assert wide == -19.38
+    assert wide_reason is None

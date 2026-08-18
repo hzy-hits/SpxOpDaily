@@ -99,6 +99,16 @@ The expected-PnL lower bound is:
 predicted expected PnL + 10th percentile walk-forward residual
 ```
 
+On small OOF samples (fewer than 60 rows) the empirical 10th percentile is
+essentially the worst residual and can exceed a 10-wide debit. Training then
+floors that haircut at −1.0 SPX point and requires only a non-negative LCB.
+The unclipped empirical residual remains in the report. Promotion coverage
+gates are unchanged.
+
+v2 `market_facts` exist in sqlite only from 2026-08-07. The quote lake from
+2026-07-04 is used to rebuild conservative BBOs and 15:45 marks, but July
+cannot enter the feature contract without inventing path/wall/HMM facts.
+
 The runtime artifact stores only means, scales, coefficients, intercepts, the residual bound, domain limit, thresholds, training window, and validation metrics.
 
 ## Walk-forward validation
