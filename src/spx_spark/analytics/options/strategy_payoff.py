@@ -15,19 +15,20 @@ NEW_YORK = ZoneInfo("America/New_York")
 class ManagementPolicy:
     """Real exit rules for candidate evaluation (v3); not settlement binary payoff.
 
-    Default v1 keeps the 20-minute debit time stop and 50% premium stop.
+    Default v2 keeps the 50% premium stop, trail, and 15:45 ET hard close.
+    The v1 20-minute debit time stop is off (``time_stop_minutes`` is None).
     ``premium_stop_fraction`` / ``time_stop_minutes`` of None or <= 0 disable
     that exit. Changing these constants requires a version bump.
     """
 
-    policy_version: str = "management_policy.v1"
+    policy_version: str = "management_policy.v2"
     entry_basis: str = "conservative_combo_ask"
     valuation_basis: str = "conservative_combo_bid"
     profit_arm_return_on_debit: float = 0.50
     trail_after_arm_fraction: float = 0.75
     trail_floor_is_entry_debit: bool = True
     premium_stop_fraction: float | None = 0.50
-    time_stop_minutes: int | None = 20
+    time_stop_minutes: int | None = None
     hard_exit_et: str = "15:45"
     fees_per_leg_per_side: float = 1.32
 
@@ -494,7 +495,7 @@ def simulate_management_policy(
 
 
 def management_policy_for_candidate(candidate: Mapping[str, Any] | None) -> ManagementPolicy:
-    """Select the frozen exit policy for one structure. Verticals stay on v1."""
+    """Select the frozen exit policy for one structure. Verticals use v2."""
 
     row = candidate or {}
     if str(row.get("setup_kind") or "") == "STABLE_PIN":

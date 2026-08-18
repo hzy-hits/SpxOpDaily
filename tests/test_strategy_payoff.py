@@ -452,7 +452,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v38"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v39"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -835,7 +835,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v38"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v39"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -2381,7 +2381,7 @@ def test_es_volume_momentum_add_allowed_on_new_impulse() -> None:
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
-def test_es_volume_momentum_post_event_blocks_after_open_grace() -> None:
+def test_es_volume_momentum_prints_after_open_during_post_event() -> None:
     now = datetime(2026, 8, 13, 13, 39, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload["trading_date"] = "2026-08-13"
@@ -2394,8 +2394,8 @@ def test_es_volume_momentum_post_event_blocks_after_open_grace() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["regime"]["event_state"] == "POST_EVENT_DISCOVERY"
-    assert decision["decision_type"] == "NO_TRADE"
-    assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_post_event"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_es_volume_momentum_post_event_allows_first_minutes_after_open() -> None:
@@ -3944,10 +3944,10 @@ def test_pin_butterfly_policy_holds_past_default_time_and_premium_stop() -> None
     assert pin.exit_at == start + timedelta(minutes=44)
     assert pin.exit_at > default.exit_at
     assert pin.policy_version == "management_policy.pin_butterfly.hold_1545.v1"
-    assert default.policy_version == "management_policy.v1"
+    assert default.policy_version == "management_policy.v2"
 
 
-def test_management_policy_for_candidate_keeps_verticals_on_v1() -> None:
+def test_management_policy_for_candidate_keeps_verticals_on_v2() -> None:
     assert (
         management_policy_for_candidate(
             {"setup_kind": "STABLE_PIN", "strategy_type": "PUT_BUTTERFLY"}
@@ -3960,8 +3960,25 @@ def test_management_policy_for_candidate_keeps_verticals_on_v1() -> None:
         )
         is DEFAULT_MANAGEMENT_POLICY
     )
-    assert DEFAULT_MANAGEMENT_POLICY.time_stop_minutes == 20
+    assert DEFAULT_MANAGEMENT_POLICY.time_stop_minutes is None
     assert DEFAULT_MANAGEMENT_POLICY.premium_stop_fraction == pytest.approx(0.50)
+    assert DEFAULT_MANAGEMENT_POLICY.policy_version == "management_policy.v2"
+
+
+def test_default_debit_policy_does_not_time_stop_at_twenty_minutes() -> None:
+    start = datetime(2026, 8, 6, 14, 0, tzinfo=timezone.utc)
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=10), combo_bid=1.05),
+        PolicyMark(at=start + timedelta(minutes=20), combo_bid=1.08),
+        PolicyMark(at=start + timedelta(minutes=40), combo_bid=1.10),
+        PolicyMark(at=start + timedelta(minutes=345), combo_bid=1.12),
+    ]
+    label = simulate_management_policy(
+        marks, entry_ask=1.0, leg_count=2, entry_at=start
+    )
+    assert label.exit_reason == "hard_close"
+    assert label.exit_at == start + timedelta(minutes=345)
+    assert label.policy_version == "management_policy.v2"
 
 
 @given(

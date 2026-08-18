@@ -133,11 +133,13 @@ def test_gth_falls_back_to_rth_session_shapes(tmp_path: Path) -> None:
     assert all(row.session_date == date(2026, 8, 5) for row in rows)
 
 
+def _full_rth_prices(start: float, step: float) -> list[float]:
+    return [start + offset * step for offset in range(391)]
+
+
 def test_winner_path_distribution_is_ordered_and_does_not_change_score(tmp_path: Path) -> None:
-    up = [7750.0 + offset * 0.8 for offset in range(50)]
-    down = [7750.0 - offset * 0.8 for offset in range(50)]
-    _write_session(tmp_path, "2026-08-04", start_et=time(10, 0), prices=up)
-    _write_session(tmp_path, "2026-08-05", start_et=time(10, 0), prices=down)
+    _write_session(tmp_path, "2026-08-04", start_et=time(9, 30), prices=_full_rth_prices(7750.0, 0.8))
+    _write_session(tmp_path, "2026-08-05", start_et=time(9, 30), prices=_full_rth_prices(7750.0, -0.8))
 
     candidate = _call_vertical()
     distribution = estimate_path_distribution(
@@ -154,15 +156,18 @@ def test_winner_path_distribution_is_ordered_and_does_not_change_score(tmp_path:
     assert distribution["n_paths"] >= 30
     assert distribution["p10_pnl_points"] <= distribution["p50_pnl_points"] <= distribution["p90_pnl_points"]
     assert candidate["selection_score"] == 1.25
+    assert distribution["method"] == "physical_path_management_policy.v2"
+    assert distribution["horizon_minutes"] > 20
     assert "invalidation_not_protective" not in distribution["reason_codes"]
     text = path_distribution_desk_text(distribution)
     assert text is not None
-    assert text.startswith("路径 P10/P50/P90 $")
+    assert text.startswith("持有至15:45ET 路径 P10/P50/P90 $")
 
 
 def test_trigger_level_is_not_counted_as_a_protective_stop(tmp_path: Path) -> None:
-    prices = [7750.0 + offset * 0.1 for offset in range(50)]
-    _write_session(tmp_path, "2026-08-05", start_et=time(10, 0), prices=prices)
+    _write_session(
+        tmp_path, "2026-08-05", start_et=time(9, 30), prices=_full_rth_prices(7750.0, 0.1)
+    )
     candidate = _call_vertical()
     candidate["invalidation_spx"] = 7800.0
     distribution = estimate_path_distribution(

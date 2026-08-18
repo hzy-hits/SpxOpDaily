@@ -254,7 +254,7 @@ def test_build_policy_ev_table_groups_values_and_counts_censored(tmp_path: Path)
 
     bucket = table["buckets"]["TREND_PULLBACK|UP|TREND_UP"]
     assert table["schema_version"] == "policy_ev_table.v1"
-    assert table["management_policy_version"] == "management_policy.v1"
+    assert table["management_policy_version"] == "management_policy.v2"
     assert table["source_sessions"] == ["2026-08-07"]
     assert bucket == {
         "n": 20,

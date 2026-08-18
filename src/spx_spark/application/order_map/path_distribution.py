@@ -25,6 +25,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
     IRON_CONDOR_MANAGEMENT_POLICY,
     PolicyMark,
+    policy_mark_horizon_end,
     simulate_management_policy,
 )
 from spx_spark.application.market_features.physical_followthrough import (
@@ -37,7 +38,7 @@ from spx_spark.application.market_features.physical_followthrough import (
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
-METHOD = "physical_path_management_policy.v1"
+METHOD = "physical_path_management_policy.v2"
 IRON_CONDOR_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v1"
 SUPPORTED_VERTICALS = {"CALL_DEBIT_VERTICAL", "PUT_DEBIT_VERTICAL"}
 IRON_CONDOR_TYPE = "IRON_CONDOR"
@@ -118,7 +119,14 @@ def load_decision_spot_paths(
     if session_date is None:
         return (), "unavailable"
     settings = probability_settings or StrategyDistributionSettings()
-    horizon = DEFAULT_MANAGEMENT_POLICY.time_stop_minutes
+    horizon_end = policy_mark_horizon_end(
+        _utc(now),
+        DEFAULT_MANAGEMENT_POLICY,
+        session_date=session_date,
+    )
+    horizon = int((horizon_end - _utc(now)).total_seconds() // 60)
+    if horizon <= 0:
+        return (), "unavailable"
     try:
         return load_physical_spot_paths(
             Path(data_root).expanduser() / "features",
@@ -546,6 +554,8 @@ def path_distribution_desk_text(distribution: Mapping[str, Any] | None) -> str |
     prefix = (
         "持有至12:30ET "
         if distribution.get("method") == IRON_CONDOR_CLEARING_METHOD
+        else "持有至15:45ET "
+        if distribution.get("method") == METHOD
         else ""
     )
     return f"{prefix}路径 P10/P50/P90 ${float(p10):.0f}/${float(p50):.0f}/${float(p90):.0f}{sample}"

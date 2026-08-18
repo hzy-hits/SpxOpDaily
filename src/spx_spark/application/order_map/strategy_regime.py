@@ -41,12 +41,14 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v38"
+    policy_version: str = "strategy_policy.bootstrap.v39"
+    # v39: POST_EVENT_DISCOVERY no longer blocks ES_VOLUME_MOMENTUM after
+    # the RTH open. Debit management drops the v1 20-minute time stop;
+    # verticals keep the 50% premium stop, trail, and 15:45 ET hard close.
+    # Opposite cash HMM TREND, add-needs-new-impulse, and flip-needs-HMM
+    # TREND stay. User named the two gates to delete.
     # v38: RTH ES_VOLUME_MOMENTUM is a human debit again. Failed-break,
-    # trend-pullback, and breakout stay funnel-only. Existing momentum
-    # gates stay: post-event after open grace, opposite cash HMM TREND,
-    # add needs a new impulse, flip needs HMM TREND, 20-minute v1
-    # management. User authorized the candidate-space expansion.
+    # trend-pullback, and breakout stay funnel-only.
     # v37: GTH width/delta debit prints on TREND or TRANSITION when the
     # ES path direction matches. 2026-08-18 GTH dumped in TRANSITION DOWN
     # (efficiency 0.33, below trend_efficiency 0.45); the 7730/7725 put
@@ -71,11 +73,9 @@ class StrategyPolicy:
     # no edge in width-scan / volume-momentum debit under v1 management.
     # v33: same-direction RTH adds need a new impulse (cash HMM TREND the
     # same way and |5m|/ATR5m at least es_momentum_add_min_return_5m_atr).
-    # POST_EVENT_DISCOVERY blocks ES_VOLUME_MOMENTUM after the RTH open
-    # grace, so CPI/PPI leftover fades do not print. The first few minutes
-    # after the cash open may still print a first card (PPI 08-13 09:33
-    # vs CPI 08-12 09:39). entry_allowed stays true in post_event so
-    # event-settlement is not collateral damage.
+    # v33 also blocked ES_VOLUME_MOMENTUM in POST_EVENT_DISCOVERY after
+    # the RTH open grace; v39 removes that gate. entry_allowed stays
+    # true in post_event so event-settlement is not collateral damage.
     # v32: ES_VOLUME_MOMENTUM stays the only RTH directional setup. The first
     # card does not wait for TREND or a pullback. Cash HMM TREND opposite
     # blocks a first print. A session that already printed the opposite RTH
@@ -134,8 +134,8 @@ class StrategyPolicy:
     # globex-futures (GTH) basket is ready. ES path remains the fallback and
     # a VWAP direction check. HMM still cannot skip hard gates or order.
     # v15: RTH pin butterflies no longer require OI-GEX as a capability gate.
-    # STABLE_PIN management holds to 15:45 ET with trail; debit verticals keep
-    # the v1 20-minute time stop and 50% premium stop.
+    # STABLE_PIN management holds to 15:45 ET with trail; debit verticals
+    # used the v1 20-minute time stop until v39.
     # v14: RTH pin butterflies must keep spot inside the tent, wait until
     # minutes_to_close <= 12 per width point (5-wide from 15:00 ET), and not
     # pin a body while a wall still sits inside 1.5x remaining EM outside the
@@ -190,7 +190,6 @@ class StrategyPolicy:
     es_momentum_max_return_5m_atr: float = 1.50
     es_momentum_max_progress: float = 0.50
     es_momentum_add_min_return_5m_atr: float = 0.50
-    es_momentum_post_event_open_grace_minutes: float = 8.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
     pin_stable_max_minutes_to_close: float = 300.0
     pin_stable_enter_min_excursions: int = 2

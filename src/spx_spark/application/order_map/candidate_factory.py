@@ -476,30 +476,6 @@ def _momentum_clarity_block(
     return None
 
 
-def _rth_minutes_open(now: datetime) -> float | None:
-    day = DEFAULT_MARKET_CALENDAR.spx_session_date_for(now)
-    if day is None:
-        return None
-    window = DEFAULT_MARKET_CALENDAR.spx_session_window(day)
-    if window is None:
-        return None
-    return (_utc(now) - window.rth_open.astimezone(timezone.utc)).total_seconds() / 60.0
-
-
-def _post_event_blocks_momentum(
-    regime: Mapping[str, Any],
-    *,
-    now: datetime,
-    policy: StrategyPolicy,
-) -> bool:
-    if str(regime.get("event_state") or "") != "POST_EVENT_DISCOVERY":
-        return False
-    minutes_open = _rth_minutes_open(now)
-    if minutes_open is None:
-        return True
-    return minutes_open >= policy.es_momentum_post_event_open_grace_minutes
-
-
 def _rth_evidences(
     payload: Mapping[str, Any],
     facts: Mapping[str, Any],
@@ -509,6 +485,7 @@ def _rth_evidences(
     now: datetime,
     policy: StrategyPolicy,
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    del now
     bases: list[dict[str, Any]] = []
     reasons: list[str] = []
     setup_facts = [_map(row) for row in facts.get("rth_setups") or ()]
@@ -518,9 +495,6 @@ def _rth_evidences(
     pin_blocks = pin_blocks_directional_spreads(regime)
     if pin_blocks:
         reasons.append("directional_spread_blocked_by_pin_watch")
-    post_event_blocks = _post_event_blocks_momentum(regime, now=now, policy=policy)
-    if post_event_blocks:
-        reasons.append("es_volume_momentum_post_event")
     clarity_blocks: list[str] = []
     for setup in momentum_setups:
         if setup.get("state") != "ENTRY_WINDOW_OPEN":
@@ -528,7 +502,7 @@ def _rth_evidences(
         direction = _direction(setup.get("direction"))
         if not direction:
             continue
-        if pin_blocks or post_event_blocks:
+        if pin_blocks:
             continue
         clarity = _momentum_clarity_block(direction, regime, facts, policy)
         if clarity:
@@ -544,7 +518,7 @@ def _rth_evidences(
                 "source": setup.get("source") or "es_volume_momentum",
             }
         )
-    if not bases and not pin_blocks and not post_event_blocks:
+    if not bases and not pin_blocks:
         if clarity_blocks:
             reasons.append(clarity_blocks[0])
         elif not momentum_setups:

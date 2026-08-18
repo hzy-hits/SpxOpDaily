@@ -709,9 +709,7 @@ sign(return_1m) = sign(return_5m) = volume direction
 abs(return_1m) >= 0.35
 abs(return_5m) >= 1.0
 abs(return_5m) / ATR5m <= 1.5
-event_state = NORMAL
-POST_EVENT_DISCOVERY：RTH 开盘后超过 open-grace（8 分钟）挡量比卡
-  （es_volume_momentum_post_event）；不改 post_event.entry_allowed
+POST_EVENT_DISCOVERY 不挡量比卡；不改 post_event.entry_allowed
 LOOK/TRADE pin 不挡
 第一张卡：cash HMM BALANCED / TRANSITION / UNCERTAIN / 不可用 不挡
 第一张卡：cash HMM 已是反向 TREND → 挡（es_volume_momentum_hmm_opposes）
@@ -719,6 +717,7 @@ LOOK/TRADE pin 不挡
   （es_volume_momentum_add_needs_new_impulse）
 翻向：本 session 已有反向 RTH 人读卡时，必须 cash HMM 同向 TREND
 RTH winner stick = 900s；stick 内 rank/delivery 不得改方向
+借记管理：50% premium stop + trail + 15:45 ET 硬退出；无 20 分钟 time stop
 ```
 
 空头：volume down + 1m/5m 为负。不要求 `path_state = TREND`，也不等回踩。
