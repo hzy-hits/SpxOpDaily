@@ -26,6 +26,8 @@ MAX_QUOTE_AGE_SECONDS = 30.0
 MAX_LEG_SKEW_SECONDS = 5.0
 HARD_MARK_TIME_ET = time(15, 45)
 PROVIDER_PRIORITY = ("schwab", "ibkr")
+SPX_INSTRUMENT_ID = "index:SPX"
+ES_INSTRUMENT_ID = "future:ES"
 FACTOR_NAMES = (
     "session_gth",
     "session_rth",
@@ -107,16 +109,35 @@ def mine_session(
     if not providers:
         return SessionResult([], base_coverage)
 
-    underlier = store.underlier_series(
-        instrument_id="index:SPX",
-        start=start - timedelta(minutes=60, seconds=MAX_QUOTE_AGE_SECONDS),
+    rth_times = [at for at, mode in samples if mode == "rth"]
+    rth_start = rth_times[0] if rth_times else None
+    es_series = store.underlier_series(
+        instrument_id=ES_INSTRUMENT_ID,
+        start=start,
+        end=rth_start or close,
+    )
+    spx_start = (
+        rth_start - timedelta(minutes=60, seconds=MAX_QUOTE_AGE_SECONDS)
+        if rth_start is not None
+        else start
+    )
+    spx_series = store.underlier_series(
+        instrument_id=SPX_INSTRUMENT_ID,
+        start=spx_start,
         end=close,
     )
-    sampled_spots = {
-        at: tick
-        for at, _ in samples
-        if (tick := _underlier_at(underlier, at, MAX_QUOTE_AGE_SECONDS)) is not None
-    }
+    sampled_spots: dict[datetime, tuple[UnderlierTick, str, list[UnderlierTick], datetime]] = {}
+    for at, mode in samples:
+        if mode == "gth":
+            tick = _underlier_at(es_series, at, MAX_QUOTE_AGE_SECONDS)
+            if tick is None:
+                continue
+            sampled_spots[at] = (tick, ES_INSTRUMENT_ID, es_series, start)
+        else:
+            tick = _underlier_at(spx_series, at, MAX_QUOTE_AGE_SECONDS)
+            if tick is None:
+                continue
+            sampled_spots[at] = (tick, SPX_INSTRUMENT_ID, spx_series, spx_start)
     if not sampled_spots:
         base_coverage.update(
             {
@@ -128,7 +149,7 @@ def mine_session(
         )
         return SessionResult([], base_coverage)
 
-    sampled_prices = [tick.price for tick in sampled_spots.values()]
+    sampled_prices = [tick.price for tick, _source, _series, _floor in sampled_spots.values()]
     strike_min = math.floor(min(sampled_prices) / 5.0) * 5.0 - WIDTH
     strike_max = math.ceil(max(sampled_prices) / 5.0) * 5.0 + WIDTH
     loaded = store.load_option_window(
@@ -143,9 +164,10 @@ def mine_session(
     exit_cache: dict[tuple[str, str, float, float], tuple[datetime, float] | None] = {}
     spot_modes: Counter[str] = Counter()
     for decision_at, session_mode in samples:
-        spot_tick = sampled_spots.get(decision_at)
-        if spot_tick is None:
+        sampled = sampled_spots.get(decision_at)
+        if sampled is None:
             continue
+        spot_tick, spot_source, underlier, return_floor = sampled
         spot_modes[session_mode] += 1
         strike = math.floor(spot_tick.price / 5.0 + 0.5) * 5.0
         snapshot = store.option_snapshot(
@@ -155,7 +177,12 @@ def mine_session(
             strikes=(strike - WIDTH, strike, strike + WIDTH),
         )
         straddle_mid = _atm_straddle_mid(snapshot, strike=strike, as_of=decision_at)
-        returns = _spot_returns(underlier, spot_tick, decision_at)
+        returns = _spot_returns(
+            underlier,
+            spot_tick,
+            decision_at,
+            not_before=return_floor,
+        )
         for direction, right, short_strike in (
             ("call", "C", strike + WIDTH),
             ("put", "P", strike - WIDTH),
@@ -221,6 +248,7 @@ def mine_session(
                     "right": right,
                     "width": WIDTH,
                     "spot": spot_tick.price,
+                    "spot_source": spot_source,
                     "atm_strike": strike,
                     "long_strike": strike,
                     "short_strike": short_strike,
@@ -255,6 +283,9 @@ def mine_session(
         {
             "spot_available_bars": len(sampled_spots),
             "spot_available_bars_by_mode": dict(spot_modes),
+            "spot_source_counts": dict(
+                Counter(source for _tick, source, _series, _floor in sampled_spots.values())
+            ),
             "live_option_ticks_in_spot_band": loaded,
             "strike_band": [strike_min, strike_max],
             "rows": len(rows),
@@ -276,15 +307,21 @@ def _underlier_at(
 
 
 def _spot_returns(
-    ticks: Sequence[UnderlierTick], current: UnderlierTick, decision_at: datetime
+    ticks: Sequence[UnderlierTick],
+    current: UnderlierTick,
+    decision_at: datetime,
+    *,
+    not_before: datetime | None = None,
 ) -> dict[str, float | None]:
     values: dict[str, float | None] = {}
     for minutes in (1, 5, 15, 60):
-        prior = _underlier_at(
-            ticks,
-            decision_at - timedelta(minutes=minutes),
-            MAX_QUOTE_AGE_SECONDS,
-        )
+        prior_at = decision_at - timedelta(minutes=minutes)
+        if not_before is not None and prior_at < not_before:
+            values[f"spot_ret_{minutes}m"] = None
+            continue
+        prior = _underlier_at(ticks, prior_at, MAX_QUOTE_AGE_SECONDS)
+        if prior is not None and not_before is not None and prior.at < not_before:
+            prior = None
         values[f"spot_ret_{minutes}m"] = (
             current.price / prior.price - 1.0 if prior is not None else None
         )
@@ -666,6 +703,8 @@ def build_report(
             "quote_only": True,
             "production_entry_gates_used": [],
             "entry_universe": "both ATM-rounded 10-wide debit directions when causal live NBBO exists",
+            "gth_spot": "future:ES same-session raw prints for ATM location and returns; no ES-to-SPX basis conversion",
+            "rth_spot": "index:SPX",
             "entry_price": "conservative_combo_ask_no_mid",
             "exit_policy": "hold_to_last_live_combo_bid_at_or_before_1545_et_no_stop_no_trail",
             "pnl_units": "SPX_points_before_fees",
@@ -683,7 +722,8 @@ def build_report(
             "no_option_parquet_session_count": len(missing),
             "limitations": [
                 "Associations are in-sample and are not a production strategy or causal edge claim.",
-                "Rows require live-quality causal ticks; missing NBBO and SPX spot observations are not imputed.",
+                "Rows require live-quality causal ticks; missing NBBO and underlier prints are not imputed.",
+                "GTH returns use same-session future:ES changes only; they do not chain into the prior RTH SPX print.",
                 "Provider priority selects one same-provider two-leg BBO per direction and sample.",
             ],
         },

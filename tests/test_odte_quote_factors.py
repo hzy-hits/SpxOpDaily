@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from spx_spark.data_platform.research.odte_level_signals import OptionTick, UnderlierTick
 from spx_spark.data_platform.research.odte_quote_factors import (
+    ES_INSTRUMENT_ID,
+    SPX_INSTRUMENT_ID,
     _best_vertical,
     _factor_correlations,
+    _spot_returns,
     _top_factors,
     mine_session,
     session_sample_times,
@@ -37,36 +42,41 @@ def _option_tick(
 class FakeQuoteStore:
     def __init__(self) -> None:
         gth = datetime(2026, 8, 16, 20, 15, tzinfo=ET).astimezone(timezone.utc)
+        gth_later = datetime(2026, 8, 16, 20, 20, tzinfo=ET).astimezone(timezone.utc)
+        prior_rth = datetime(2026, 8, 16, 15, 0, tzinfo=ET).astimezone(timezone.utc)
         rth = datetime(2026, 8, 17, 9, 30, tzinfo=ET).astimezone(timezone.utc)
-        self.underlier = [UnderlierTick(gth, 6001.0), UnderlierTick(rth, 6001.0)]
+        self.spx = [UnderlierTick(rth, 6001.0)]
+        self.es = [
+            UnderlierTick(prior_rth, 5000.0),
+            UnderlierTick(gth, 6001.0),
+            UnderlierTick(gth_later, 6013.0),
+        ]
 
     def option_expiry_providers(self, **_kwargs) -> tuple[str, ...]:
         return ("schwab",)
 
-    def underlier_series(self, **_kwargs) -> list[UnderlierTick]:
-        return self.underlier
+    def underlier_series(self, *, instrument_id: str, **_kwargs) -> list[UnderlierTick]:
+        if instrument_id == ES_INSTRUMENT_ID:
+            return list(self.es)
+        return list(self.spx)
 
     def load_option_window(self, **_kwargs) -> int:
         return 12
 
     def option_snapshot(self, *, as_of: datetime, **_kwargs):
         return {
-            ("schwab", 5990.0, "P"): _option_tick(
-                as_of, bid=1.0, ask=2.0, delta=-0.30
-            ),
-            ("schwab", 6000.0, "P"): _option_tick(
-                as_of, bid=4.0, ask=5.0, delta=-0.50
-            ),
-            ("schwab", 6000.0, "C"): _option_tick(
-                as_of, bid=4.0, ask=5.0, delta=0.50
-            ),
-            ("schwab", 6010.0, "C"): _option_tick(
-                as_of, bid=1.0, ask=2.0, delta=0.30
-            ),
+            ("schwab", 5990.0, "P"): _option_tick(as_of, bid=1.0, ask=2.0, delta=-0.30),
+            ("schwab", 6000.0, "P"): _option_tick(as_of, bid=4.0, ask=5.0, delta=-0.50),
+            ("schwab", 6000.0, "C"): _option_tick(as_of, bid=4.0, ask=5.0, delta=0.50),
+            ("schwab", 6010.0, "C"): _option_tick(as_of, bid=1.0, ask=2.0, delta=0.30),
+            ("schwab", 6005.0, "P"): _option_tick(as_of, bid=1.0, ask=2.0, delta=-0.30),
+            ("schwab", 6015.0, "P"): _option_tick(as_of, bid=4.0, ask=5.0, delta=-0.50),
+            ("schwab", 6015.0, "C"): _option_tick(as_of, bid=4.0, ask=5.0, delta=0.50),
+            ("schwab", 6025.0, "C"): _option_tick(as_of, bid=1.0, ask=2.0, delta=0.30),
         }
 
     def option_series(self, *, strike: float, start: datetime, end: datetime, **_kwargs):
-        is_long = strike == 6000.0
+        is_long = strike in {6000.0, 6015.0}
         return [
             _option_tick(
                 start,
@@ -92,7 +102,7 @@ class FakeQuoteStore:
 def test_quote_only_miner_labels_both_ten_wide_sides_at_close_without_stop() -> None:
     result = mine_session(FakeQuoteStore(), session_date=SESSION_DATE)
 
-    assert len(result.rows) == 4
+    assert len(result.rows) == 6
     assert {(row["session_mode"], row["direction"]) for row in result.rows} == {
         ("gth", "call"),
         ("gth", "put"),
@@ -106,7 +116,57 @@ def test_quote_only_miner_labels_both_ten_wide_sides_at_close_without_stop() -> 
     assert {row["label_policy"] for row in result.rows} == {
         "hold_to_1545_no_stop_no_trail"
     }
+    assert {row["spot_source"] for row in result.rows if row["session_mode"] == "gth"} == {
+        ES_INSTRUMENT_ID
+    }
+    assert {row["spot_source"] for row in result.rows if row["session_mode"] == "rth"} == {
+        SPX_INSTRUMENT_ID
+    }
     assert all(str(row["exit_at"]).endswith("19:45:00+00:00") for row in result.rows)
+
+
+def test_gth_returns_use_same_session_es_change_and_ignore_prior_rth() -> None:
+    result = mine_session(FakeQuoteStore(), session_date=SESSION_DATE)
+    gth_later = [
+        row
+        for row in result.rows
+        if row["session_mode"] == "gth"
+        and str(row["decision_at"]).endswith("00:20:00+00:00")
+    ]
+    gth_open = [
+        row
+        for row in result.rows
+        if row["session_mode"] == "gth"
+        and str(row["decision_at"]).endswith("00:15:00+00:00")
+    ]
+
+    assert gth_later
+    assert gth_open
+    assert gth_later[0]["spot"] == 6013.0
+    assert gth_later[0]["spot_ret_5m"] == pytest.approx(6013.0 / 6001.0 - 1.0)
+    assert gth_later[0]["spot_ret_60m"] is None
+    assert gth_open[0]["spot_ret_5m"] is None
+    assert gth_open[0]["spot_ret_60m"] is None
+
+
+def test_spot_returns_do_not_look_before_session_floor() -> None:
+    decision_at = datetime(2026, 8, 17, 0, 20, tzinfo=timezone.utc)
+    session_start = datetime(2026, 8, 17, 0, 15, tzinfo=timezone.utc)
+    ticks = [
+        UnderlierTick(datetime(2026, 8, 16, 23, 20, tzinfo=timezone.utc), 5000.0),
+        UnderlierTick(session_start, 6000.0),
+        UnderlierTick(decision_at, 6060.0),
+    ]
+
+    returns = _spot_returns(
+        ticks,
+        ticks[-1],
+        decision_at,
+        not_before=session_start,
+    )
+
+    assert returns["spot_ret_5m"] == pytest.approx(0.01)
+    assert returns["spot_ret_60m"] is None
 
 
 def test_five_minute_samples_split_exchange_open_gth_and_rth() -> None:
