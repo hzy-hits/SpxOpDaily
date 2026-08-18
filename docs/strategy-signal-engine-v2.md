@@ -552,8 +552,9 @@ VWAP slope >= +0.05 ATR
 sector breadth >= 0.55
 ```
 
-空头反向。趋势判断只代表路径背景，不代表立即交易。RTH 人读方向卡由
-`ES_VOLUME_MOMENTUM`（ES 量比 + 1m/5m 动量）授权，不再等 TREND + 回踩。
+空头反向。趋势判断只代表路径背景，不代表立即交易。v34 起 RTH/GTH 方向 Debit
+（`ES_VOLUME_MOMENTUM`、GTH 宽链扫描、失败突破、趋势回踩、GTH level path）
+不再授权人读卡，只记结构事实；人读 Debit 仅 `EVENT_SETTLEMENT_THRESHOLD`。
 
 ### 7.2 BALANCED
 
@@ -575,8 +576,9 @@ abs(existing D) <= 3
 - 突破刚失败但尚未完成 retest；
 - 跨市场宽度正在翻转。
 
-Transition 不挡**第一张**短周期 ES 量比动量卡。Failed Break 仍记事实，但不再授权 RTH 人读卡。
-本 session 已有反向 RTH 人读卡时，翻向必须等 cash HMM 同向 TREND，不能只靠 5 分钟反弹。
+Transition 仍不挡量比 setup 的枚举。Failed Break 与量比卡都只记事实，不再授权
+RTH 人读 Debit。本 session 已有反向 RTH 人读卡时，翻向必须等 cash HMM 同向 TREND，
+不能只靠 5 分钟反弹；该规则约束枚举，不单独开出方向卡。
 
 ### 7.4 PIN_STABLE
 
@@ -689,8 +691,9 @@ reason = direction_valid_but_entry_too_late
 
 ## 9. 策略一：ES Volume Momentum Vertical
 
-RTH 人读方向卡的唯一 setup。`TREND_PULLBACK` 仍可出现在 `rth_setups` 审计里，
-不再经过 `build_strategy_decision` 授权。GTH 仍可把夜盘证据标成该旧名。
+v34 起不再授权人读卡，只保留枚举、审计与 funnel。`TREND_PULLBACK` 仍可出现在
+`rth_setups` 审计里。GTH 仍可把夜盘证据标成该旧名。人读 Debit 仅
+`EVENT_SETTLEMENT_THRESHOLD`。
 
 ### 9.1 交易假设
 

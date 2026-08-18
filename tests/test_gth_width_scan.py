@@ -255,7 +255,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v33"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v34"
     assert ranked.passed == []
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
@@ -294,7 +294,7 @@ def test_gth_decision_keeps_locked_direction_instead_of_best_vertical(
 
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
-    assert "gth_winner_stick_direction_locked" in (decision.get("why_not") or {}).get("reasons", [])
+    assert "unevidenced_debit_not_human_authorized" in (decision.get("why_not") or {}).get("reasons", [])
 
 
 def test_gth_directional_verticals_require_aligned_trend() -> None:
@@ -316,20 +316,28 @@ def test_gth_directional_verticals_require_aligned_trend() -> None:
             for row in result.gate_audit
         )
 
-    assert "CALL_DEBIT_VERTICAL" not in _types(uncertain)
-    assert "PUT_DEBIT_VERTICAL" not in _types(uncertain)
-    assert "CALL_DEBIT_VERTICAL" not in _types(transition)
-    assert "PUT_DEBIT_VERTICAL" not in _types(transition)
+    def _gated_unevidenced(result, strategy_type: str) -> bool:
+        return any(
+            str(row.get("strategy_type")) == strategy_type
+            and any(
+                str(gate.get("gate")) == "unevidenced_debit_not_human_authorized"
+                for gate in row.get("gate_failures") or ()
+            )
+            for row in result.gate_audit
+        )
+
+    assert _types(uncertain) == set()
+    assert _types(transition) == set()
+    assert _types(trend_up) == set()
+    assert _types(trend_down) == set()
     assert _gated(uncertain, "CALL_DEBIT_VERTICAL")
     assert _gated(uncertain, "PUT_DEBIT_VERTICAL")
     assert _gated(transition, "PUT_DEBIT_VERTICAL")
-    assert "CALL_DEBIT_VERTICAL" in _types(trend_up)
-    assert "PUT_DEBIT_VERTICAL" not in _types(trend_up)
-    assert "CALL_BUTTERFLY" not in _types(trend_up)
-    assert "PUT_BUTTERFLY" not in _types(trend_up)
+    assert _gated_unevidenced(trend_up, "CALL_DEBIT_VERTICAL")
+    assert not _gated(trend_up, "CALL_DEBIT_VERTICAL")
     assert _gated(trend_up, "PUT_DEBIT_VERTICAL")
-    assert "PUT_DEBIT_VERTICAL" in _types(trend_down)
-    assert "CALL_DEBIT_VERTICAL" not in _types(trend_down)
+    assert _gated_unevidenced(trend_down, "PUT_DEBIT_VERTICAL")
+    assert not _gated(trend_down, "PUT_DEBIT_VERTICAL")
     assert _gated(trend_down, "CALL_DEBIT_VERTICAL")
 
 

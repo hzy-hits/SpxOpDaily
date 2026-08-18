@@ -199,6 +199,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "es_volume_momentum_flip_needs_hmm_trend": "翻向需要现金 HMM 同向 TREND",
         "es_volume_momentum_add_needs_new_impulse": "同向加仓需要新的 TREND 冲动，不能只靠冷却后再推",
         "es_volume_momentum_post_event": "宏观事件后发现窗口不发短周期量比卡",
+        "unevidenced_debit_not_human_authorized": "方向价差没有被证据授权，只保留结构观察",
         "vertical_path_inputs_unavailable": "路径输入不足，不能评估价差",
         "vertical_short_beyond_target": "短腿超过目标位，翼宽与方向目标不匹配",
         "vertical_width_exceeds_remaining_move": "翼宽大于剩余期望波动，方向杠杆过大",

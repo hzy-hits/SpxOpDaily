@@ -32,6 +32,7 @@ from spx_spark.settings.strategy_distribution import StrategyDistributionSetting
 _POLICY_EV_TABLE_PATH = ("research", "policy_ev_table.v1.json")
 _POLICY_EV_SCHEMA_VERSION = "policy_ev_table.v1"
 _EVENT_SETTLEMENT_SETUP = "EVENT_SETTLEMENT_THRESHOLD"
+_UNEVIDENCED_DEBIT_GATE = "unevidenced_debit_not_human_authorized"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _RTH_DIRECTIONAL_SPREADS = {
@@ -418,6 +419,21 @@ def _macro_hard_gates(
     ]
 
 
+def _unevidenced_debit_human_gate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "gate": _UNEVIDENCED_DEBIT_GATE,
+        "actual": candidate.get("setup_kind"),
+        "threshold": "EVENT_SETTLEMENT_THRESHOLD_only",
+    }
+
+
+def _block_unevidenced_debit(
+    candidate: Mapping[str, Any],
+    gates: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [_unevidenced_debit_human_gate(candidate), *gates]
+
+
 def _vertical_hard_gates(
     candidate: dict[str, Any],
     facts: Mapping[str, Any],
@@ -428,25 +444,34 @@ def _vertical_hard_gates(
     if candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP:
         return _event_settlement_vertical_hard_gates(candidate)
     if candidate.get("setup_kind") in {_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN}:
-        return _gth_scan_vertical_hard_gates(candidate, facts, regime, policy=policy)
+        return _block_unevidenced_debit(
+            candidate,
+            _gth_scan_vertical_hard_gates(candidate, facts, regime, policy=policy),
+        )
     if (
         candidate.get("setup_kind") in _RTH_DIRECTIONAL_SPREADS
         and pin_blocks_directional_spreads(regime)
     ):
-        return [
-            {
-                "gate": "directional_spread_blocked_by_pin_watch",
-                "actual": {
-                    "setup_kind": candidate.get("setup_kind"),
-                    "terminal_state": regime.get("terminal_state"),
-                    "pin_grade": _map(regime.get("pin")).get("grade"),
-                },
-                "threshold": "pin_look_or_trade_blocks_rth_vertical",
-            }
-        ]
+        return _block_unevidenced_debit(
+            candidate,
+            [
+                {
+                    "gate": "directional_spread_blocked_by_pin_watch",
+                    "actual": {
+                        "setup_kind": candidate.get("setup_kind"),
+                        "terminal_state": regime.get("terminal_state"),
+                        "pin_grade": _map(regime.get("pin")).get("grade"),
+                    },
+                    "threshold": "pin_look_or_trade_blocks_rth_vertical",
+                }
+            ],
+        )
     long, short = _map(candidate.get("long")), _map(candidate.get("short"))
     if not long or not short:
-        return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
+        return _block_unevidenced_debit(
+            candidate,
+            [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}],
+        )
     economics, path = _map(candidate.get("economics")), _map(facts.get("path"))
     spot = _number(_map(facts.get("spot")).get("spx"))
     atr = _number(path.get("atr_5m"))
@@ -454,12 +479,18 @@ def _vertical_hard_gates(
     stop = _number(candidate.get("invalidation_spx"))
     debit_fraction = _number(economics.get("debit_fraction_of_width"))
     if None in (spot, atr, target, stop, debit_fraction):
-        return [{"gate": "entry_quality_atr_or_geometry_unavailable", "actual": None, "threshold": "present"}]
+        return _block_unevidenced_debit(
+            candidate,
+            [{"gate": "entry_quality_atr_or_geometry_unavailable", "actual": None, "threshold": "present"}],
+        )
     long_strike = _number(long.get("strike"))
     short_strike = _number(short.get("strike"))
     remaining_move = _number(_map(facts.get("volatility")).get("expected_move_points"))
     if long_strike is None or short_strike is None:
-        return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
+        return _block_unevidenced_debit(
+            candidate,
+            [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}],
+        )
     right = _vertical_right(candidate, long, long_strike=long_strike, short_strike=short_strike)
     path_reasons = vertical_width_path_reasons(
         long_strike=long_strike,
@@ -469,16 +500,19 @@ def _vertical_hard_gates(
         remaining_expected_move=remaining_move,
     )
     if path_reasons:
-        return [
-            _width_path_gate(
-                reason,
-                long_strike=long_strike,
-                short_strike=short_strike,
-                target=target,
-                remaining_expected_move=remaining_move,
-            )
-            for reason in path_reasons
-        ]
+        return _block_unevidenced_debit(
+            candidate,
+            [
+                _width_path_gate(
+                    reason,
+                    long_strike=long_strike,
+                    short_strike=short_strike,
+                    target=target,
+                    remaining_expected_move=remaining_move,
+                )
+                for reason in path_reasons
+            ],
+        )
     entry_quality, reasons = vertical_entry_quality(
         spot=float(spot),
         atr=float(atr),
@@ -495,15 +529,18 @@ def _vertical_hard_gates(
     candidate["entry_quality"] = entry_quality
     if "direction_valid_but_entry_too_late" in reasons:
         candidate["setup_state"] = "ENTRY_TOO_LATE"
-    return [
-        _gate_from_entry_reason(
-            reason,
-            entry_quality,
-            policy,
-            setup_kind=str(candidate.get("setup_kind") or ""),
-        )
-        for reason in reasons
-    ]
+    return _block_unevidenced_debit(
+        candidate,
+        [
+            _gate_from_entry_reason(
+                reason,
+                entry_quality,
+                policy,
+                setup_kind=str(candidate.get("setup_kind") or ""),
+            )
+            for reason in reasons
+        ],
+    )
 
 
 def _gth_scan_vertical_hard_gates(

@@ -41,7 +41,13 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v33"
+    policy_version: str = "strategy_policy.bootstrap.v34"
+    # v34: unevidenced debit verticals no longer authorize a human card.
+    # GTH width/delta scans, RTH ES_VOLUME_MOMENTUM, failed-break, trend
+    # pullback, breakout, and GTH level-path verticals stay enumerated for
+    # the desk map and funnel. Human debit is EVENT_SETTLEMENT_THRESHOLD
+    # only. RTH pin TRADE butterflies stay. Replay on persisted cards found
+    # no edge in width-scan / volume-momentum debit under v1 management.
     # v33: same-direction RTH adds need a new impulse (cash HMM TREND the
     # same way and |5m|/ATR5m at least es_momentum_add_min_return_5m_atr).
     # POST_EVENT_DISCOVERY blocks ES_VOLUME_MOMENTUM after the RTH open
