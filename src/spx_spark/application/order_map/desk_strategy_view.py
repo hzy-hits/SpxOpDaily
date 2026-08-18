@@ -15,6 +15,21 @@ from spx_spark.application.order_map.strategy_regime import (
 )
 
 
+def strategy_human_debit_selected(
+    payload: Mapping[str, Any],
+    decision: Mapping[str, Any] | None = None,
+) -> bool:
+    """True when strategy_decision selected a manual debit, including GTH."""
+
+    decision = _mapping(decision or payload.get("strategy_decision"))
+    candidate = _mapping(decision.get("candidate"))
+    return (
+        decision.get("action_authority") == "manual"
+        and bool(candidate)
+        and str(decision.get("decision_type") or "NO_TRADE") != "NO_TRADE"
+    )
+
+
 def strategy_candidate_is_watchable(
     payload: Mapping[str, Any],
     decision: Mapping[str, Any] | None = None,
@@ -25,13 +40,7 @@ def strategy_candidate_is_watchable(
     still go through trade_ready, so this card never becomes 可看 in GTH.
     """
 
-    decision = _mapping(decision or payload.get("strategy_decision"))
-    candidate = _mapping(decision.get("candidate"))
-    if (
-        decision.get("action_authority") != "manual"
-        or not candidate
-        or str(decision.get("decision_type") or "NO_TRADE") == "NO_TRADE"
-    ):
+    if not strategy_human_debit_selected(payload, decision):
         return False
     if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
         return False
@@ -105,26 +114,32 @@ def _gth_scan_desk_view(
     decision: Mapping[str, Any],
     reasons: list[str],
 ) -> str:
-    del payload
     ic_line = iron_condor_desk_line(_mapping(decision.get("iron_condor_map")))
+    candidate = _mapping(decision.get("candidate"))
     quality = _mapping(decision.get("data_quality"))
     quality_reasons = [
         str(reason)
         for reason in quality.get("reasons") or ()
         if str(reason).strip()
     ]
-    if quality_reasons:
+    if strategy_human_debit_selected(payload, decision):
+        primary = f"当前方向已另发「SPX 人工候选」：{strategy_candidate_label(candidate)}"
+        next_step = "下单只看那张通知；不要用本图当执行"
+    elif quality_reasons:
         primary = quality_reason_text(quality_reasons[0])
+        next_step = "若有可做方向，只会另发「SPX 人工候选」；本图不给执行结论"
     elif reasons:
         primary = humanize_strategy_reason(reasons[0])
+        next_step = "若有可做方向，只会另发「SPX 人工候选」；本图不给执行结论"
     else:
         primary = "1 分钟报价持续重算 5–50 点价差与 5–20Δ 10 点翼宽铁鹰"
+        next_step = "若有可做方向，只会另发「SPX 人工候选」；本图不给执行结论"
     return "\n".join(
         (
-            "结论  不做",
+            "结论  本图不是下单卡",
             f"主因  {primary}",
             f"铁鹰  {ic_line}",
-            "下一步  仅「SPX 人工候选」可做",
+            f"下一步  {next_step}",
         )
     )
 
@@ -149,7 +164,12 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
         return None
     candidate = _mapping(decision.get("candidate"))
     if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-        return "原因  本图不是交易卡"
+        if strategy_human_debit_selected(payload, decision):
+            return (
+                "原因  本图不是下单卡；当前方向已另发「SPX 人工候选」："
+                f"{strategy_candidate_label(candidate)}"
+            )
+        return "原因  本图不是下单卡；可做方向只看「SPX 人工候选」"
     if strategy_candidate_is_watchable(payload, decision):
         return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
     reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]

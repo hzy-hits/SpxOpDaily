@@ -126,9 +126,9 @@ def test_terminal_level_phase_renders_as_current_standby_not_a_repeated_old_path
 
     assert projection.stage.value == "OBSERVING"
     assert projection.phase.value == "expired"
-    assert "NO TRADE · STANDBY · 当前没有有效机会" in rendered
-    assert "原因  旧事件已经结束，当前没有活跃交易路径" in rendered
-    assert "Execution  WAIT · 当前没有可执行机会" in rendered
+    assert "NO TRADE · STANDBY · 墙位事件已结束，本图不给执行结论" in rendered
+    assert "原因  墙位事件已结束；本图不是下单卡" in rendered
+    assert "Execution  WAIT · 本图不下单；可做方向只看「SPX 人工候选」" in rendered
     assert "已过期（已过期）" not in rendered
     assert "当前结构阶段继续有效" not in rendered
 
@@ -617,11 +617,13 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
     sections = build_desk_message_sections(payload, gth_now)
 
     assert "心跳 · 健康检查" not in sections.desk_view
+    assert "结论  本图不是下单卡" in sections.desk_view
     assert "7730/7725" not in sections.desk_view
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 9 最大亏损 1" in sections.desk_view
+    assert "本图不下单 · 可做方向只看「SPX 人工候选」" in sections.execution
 
 
 def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
@@ -653,10 +655,53 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
 
     assert "心跳 · 健康检查" not in sections.desk_view
     assert "最近候选  无" not in sections.desk_view
-    assert "7750/7745" not in sections.desk_view
+    assert "结论  本图不是下单卡" in sections.desk_view
+    assert "当前方向已另发「SPX 人工候选」：Put 价差 7750/7745" in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
-    assert "扫描中 · 仅人工候选可做" in sections.execution
+    assert "本图不下单 · 当前人工候选已另发" in sections.execution
+
+
+def test_gth_expired_level_with_live_winner_does_not_claim_no_human_action() -> None:
+    gth_now = datetime(2026, 8, 18, 10, 30, tzinfo=timezone.utc)
+    payload = _payload()
+    payload["session_phase"] = {"name": "asia_globex", "name_cn": "亚盘夜盘"}
+    payload["level_decision"] = {
+        **payload["level_decision"],  # type: ignore[dict-item]
+        "phase": "expired",
+        "session_mode": "gth",
+        "thesis": "breakout",
+        "direction": "up",
+    }
+    payload["strategy_decision"] = {
+        "decision_type": "CALL_DEBIT_VERTICAL",
+        "action_authority": "manual",
+        "candidate": {
+            "strategy_type": "CALL_DEBIT_VERTICAL",
+            "setup_kind": "GTH_WIDTH_SCAN",
+            "long": {"strike": 7715.0},
+            "short": {"strike": 7735.0},
+            "opportunity_id": "strategy-opportunity:gth-call",
+        },
+        "execution": {"action": "MANUAL_LIMIT"},
+        "iron_condor_map": {"status": "unavailable", "reason": "iron_condor_delta_quotes_unavailable"},
+        "why_not": {"reasons": []},
+        "data_quality": {"status": "ready", "reasons": []},
+    }
+
+    sections = build_desk_message_sections(payload, gth_now)
+    rendered = render_operator_status_brief(payload, [], gth_now)
+
+    assert "结论  本图不是下单卡" in sections.desk_view
+    assert "当前方向已另发「SPX 人工候选」：Call 价差 7715/7735" in sections.desk_view
+    assert "可看 ·" not in sections.desk_view
+    assert "当前没有有效机会" not in rendered
+    assert "当前无有效机会" not in rendered
+    assert "当前无人工操作" not in rendered
+    assert "当前没有可执行机会" not in rendered
+    assert "本图不下单 · 当前人工候选已另发" in sections.execution
+    assert "本图不是下单卡" in rendered
+    assert "SPX 人工候选" in rendered
 
 
 @pytest.mark.parametrize(

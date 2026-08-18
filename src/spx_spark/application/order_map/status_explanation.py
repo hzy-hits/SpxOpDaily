@@ -115,7 +115,7 @@ def operator_reason_line(payload: dict[str, Any]) -> str:
         reasons.append("新结构仍在确认")
     phase = str(decision.get("phase") or "far").lower()
     if phase in {"invalidated", "expired"}:
-        reasons.append("旧事件已经结束，当前没有活跃交易路径")
+        reasons.append("墙位事件已结束；本图不是下单卡")
     if phase == "far":
         reasons.append("当前未触发关键位，趋势信号继续独立评估")
     if intent.get("status") == "blocked":

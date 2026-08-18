@@ -6,7 +6,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use spx_domain::{
-    DeskDataQuality, DeskLevelPhase, DeskMapProjectionV1, DeskMessageV2, DeskStage,
+    DeskDataQuality, DeskLevelPhase, DeskMapProjectionV1, DeskMessageV2, DeskStage, MarketSession,
     NOTIFICATION_INTENT_V2_SCHEMA_VERSION, NotificationIntentV2, NotificationLineageV2, Token,
     Validate,
 };
@@ -696,8 +696,8 @@ fn scheduled_operator_projection(
         .join(" · ");
     let data_quality = match projection.quality {
         DeskDataQuality::Ready => "READY · 行情仅用于等待下一结构",
-        DeskDataQuality::Degraded => "DEGRADED · 数据降级，保持 NO TRADE",
-        DeskDataQuality::Unavailable => "UNAVAILABLE · 行情不足，保持 NO TRADE",
+        DeskDataQuality::Degraded => "DEGRADED · 数据降级，本图不给执行结论",
+        DeskDataQuality::Unavailable => "UNAVAILABLE · 行情不足，本图不给执行结论",
     };
     let structure = source
         .structure
@@ -708,7 +708,10 @@ fn scheduled_operator_projection(
         .unwrap_or("当前结构不可用");
     let standing = DeskMessageV2 {
         title: Token::new("SPX Desk Map · STANDBY", "standing title")?,
-        desk_view: Token::new("NO TRADE · 当前无有效机会", "standing desk view")?,
+        desk_view: Token::new(
+            "NO TRADE · 墙位路径已结束，本图不给执行结论",
+            "standing desk view",
+        )?,
         location: Token::new(
             if location.is_empty() {
                 "当前坐标不可用".to_owned()
@@ -720,8 +723,11 @@ fn scheduled_operator_projection(
         structure: Token::new(format!("参考结构 · {structure}"), "standing structure")?,
         primary_path: Token::new("方向来源：暂无；等待新的价格事件确认", "standing trigger")?,
         alternative_path: Token::new("新结构形成后重新计算", "standing invalidation")?,
-        targets: Token::new("无有效交易目标", "standing targets")?,
-        execution: Token::new("WAIT · 当前无人工操作", "standing execution")?,
+        targets: Token::new("本图无交易目标", "standing targets")?,
+        execution: Token::new(
+            "WAIT · 可做方向只看「SPX 人工候选」；本图不是下单卡",
+            "standing execution",
+        )?,
         data_quality: Token::new(data_quality, "standing data quality")?,
     };
     standing.validate()?;
@@ -729,6 +735,12 @@ fn scheduled_operator_projection(
 }
 
 fn standing_status_required(projection: &DeskMapProjectionV1) -> bool {
+    // GTH maps are overnight structure scans. An expired cash/RTH level is the
+    // normal overnight state and must not wipe the iron-condor / width-scan
+    // copy into "no opportunity" while trade_ready still pushes a human card.
+    if projection.session == MarketSession::Gth {
+        return false;
+    }
     matches!(
         projection.stage,
         DeskStage::Exit | DeskStage::Invalidated | DeskStage::Expired
@@ -762,7 +774,9 @@ mod tests {
         DEEPSEEK_MODEL_ID, DeskMessageWriteFailure, ReportWriterErrorCode, ResponseMetadata,
         projection_expired_after_generation, scheduled_operator_projection,
     };
-    use spx_domain::{DeskDirection, DeskLevelPhase, DeskMapProjectionV1, DeskStage, Token};
+    use spx_domain::{
+        DeskDirection, DeskLevelPhase, DeskMapProjectionV1, DeskStage, MarketSession, Token,
+    };
 
     #[test]
     fn slot_grace_limits_generation_start_not_valid_completion() {
@@ -859,10 +873,16 @@ mod tests {
 
         let standing = scheduled_operator_projection(&projection, source).unwrap();
 
-        assert_eq!(standing.desk_view.as_str(), "NO TRADE · 当前无有效机会");
+        assert_eq!(
+            standing.desk_view.as_str(),
+            "NO TRADE · 墙位路径已结束，本图不给执行结论"
+        );
         assert_eq!(standing.title.as_str(), "SPX Desk Map · STANDBY");
-        assert_eq!(standing.execution.as_str(), "WAIT · 当前无人工操作");
-        assert_eq!(standing.targets.as_str(), "无有效交易目标");
+        assert_eq!(
+            standing.execution.as_str(),
+            "WAIT · 可做方向只看「SPX 人工候选」；本图不是下单卡"
+        );
+        assert_eq!(standing.targets.as_str(), "本图无交易目标");
         assert!(standing.structure.as_str().starts_with("参考结构 · "));
         assert!(
             standing
@@ -875,6 +895,36 @@ mod tests {
         assert!(!visible.contains("已过期"));
         assert!(!visible.contains("模型权重"));
         assert!(!visible.contains("P−Q"));
+        assert!(!visible.contains("当前无有效机会"));
+        assert!(!visible.contains("当前无人工操作"));
+    }
+
+    #[test]
+    fn gth_expired_level_keeps_the_writer_structure_scan() {
+        let mut projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v1/desk_map_projection.json"
+        ))
+        .unwrap();
+        projection.session = MarketSession::Gth;
+        projection.stage = DeskStage::Observing;
+        projection.phase = DeskLevelPhase::Expired;
+        projection.direction = DeskDirection::None;
+        projection.message.desk_view = Token::new(
+            "结论  本图不是下单卡\n主因  当前方向已另发「SPX 人工候选」：Call 价差 7715/7735",
+            "gth desk view",
+        )
+        .unwrap();
+        projection.message.execution =
+            Token::new("本图不下单 · 当前人工候选已另发", "gth execution").unwrap();
+        let source = projection.message.clone();
+
+        let projected = scheduled_operator_projection(&projection, source.clone()).unwrap();
+
+        assert_eq!(projected, source);
+        assert!(projected.desk_view.as_str().contains("本图不是下单卡"));
+        assert!(projected.desk_view.as_str().contains("SPX 人工候选"));
+        assert!(!projected.desk_view.as_str().contains("当前无有效机会"));
+        assert!(!projected.execution.as_str().contains("当前无人工操作"));
     }
 
     #[test]

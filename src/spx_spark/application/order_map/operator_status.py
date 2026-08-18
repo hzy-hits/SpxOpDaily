@@ -31,6 +31,7 @@ from spx_spark.application.order_map.desk_strategy_view import (
     stage_label,
     strategy_candidate_is_watchable,
     strategy_decision_desk_view,
+    strategy_human_debit_selected,
     strategy_reason_line,
     thesis_label,
     volume_alignment_text,
@@ -329,8 +330,8 @@ def _desk_view_line(
         return f"Desk View  {strategy_line}"
     if projection.phase in {LevelPhase.INVALIDATED, LevelPhase.EXPIRED}:
         return (
-            "Desk View  NO TRADE · STANDBY · 当前没有有效机会；"
-            "旧事件已结束，等待新的价格触发"
+            "Desk View  NO TRADE · STANDBY · 墙位事件已结束，本图不给执行结论；"
+            "可做方向只看「SPX 人工候选」"
         )
     if projection.stage is DeskStage.PAUSED:
         signal = "NO TRADE · 数据或执行门控暂停"
@@ -897,7 +898,9 @@ def _execution_line(
                 f"机会 {short_opportunity}"
             )
         if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
-            return "Execution  扫描中 · 仅人工候选可做"
+            if strategy_human_debit_selected(payload, strategy_decision):
+                return "Execution  本图不下单 · 当前人工候选已另发"
+            return "Execution  本图不下单 · 可做方向只看「SPX 人工候选」"
         reasons = list(_mapping(strategy_decision.get("why_not")).get("reasons") or ())
         blocker = humanize_strategy_reason(
             str(reasons[0]) if reasons else "no_supported_strategy_candidate"
@@ -936,7 +939,7 @@ def _execution_line(
             return "Execution  PAUSED · 执行卡与当前价格路径不一致，禁止使用旧 READY"
         return f"Execution  PAUSED · {guidance.action_text}"
     if projection.phase in {LevelPhase.INVALIDATED, LevelPhase.EXPIRED}:
-        return "Execution  WAIT · 当前没有可执行机会；新事件确认后再评估"
+        return "Execution  WAIT · 本图不下单；可做方向只看「SPX 人工候选」"
     return "Execution  WAIT · 尚无确定性结构入场"
 
 

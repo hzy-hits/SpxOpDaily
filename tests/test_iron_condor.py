@@ -371,12 +371,12 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
     assert "心跳 · 非交易卡" not in sections.execution
     assert "可看 ·" not in sections.desk_view
     assert "7730/7725" not in sections.desk_view
-    assert "结论  不做" in sections.desk_view
+    assert "结论  本图不是下单卡" in sections.desk_view
     assert "扫描赢家已推送" not in sections.desk_view
     assert "无过门赢家" not in sections.desk_view
     assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 2.4 最大亏损 7.6" in sections.desk_view
     assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 2.4 最大亏损 7.6" in sections.structure
-    assert "扫描中 · 仅人工候选可做" in sections.execution
+    assert "本图不下单 · 可做方向只看「SPX 人工候选」" in sections.execution
 
 
 def test_gth_width_scan_adds_delta_anchors_when_greeks_exist() -> None:
