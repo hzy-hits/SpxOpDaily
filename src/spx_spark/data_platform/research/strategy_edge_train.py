@@ -1,9 +1,10 @@
 """Train candidate-level SPXW edge models from existing operational history.
 
 This one-shot offline command replays conservative combination bids from the
-quote lake, labels selected/no-trade/shadow candidates with a fixed 20-minute
-debit management contract, performs session-purged walk-forward validation,
-and emits the JSON artifact consumed by ``strategy_edge_model``.
+quote lake, labels selected/no-trade/shadow candidates with the production
+debit management contract (50% premium stop, trail, 15:45 ET hard close; no
+20-minute time stop), performs session-purged walk-forward validation, and
+emits the JSON artifact consumed by ``strategy_edge_model``.
 
 The command never auto-promotes a weak model: each RTH/GTH structure family
 must pass explicit out-of-sample PnL, drawdown, concentration, and coverage
@@ -15,7 +16,6 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
 import math
@@ -47,11 +47,7 @@ from spx_spark.data_platform.research.strategy_policy_backfill import (
 )
 
 
-ENTRY_EDGE_POLICY = replace(
-    DEFAULT_MANAGEMENT_POLICY,
-    policy_version="management_policy.entry_edge_20m.v1",
-    time_stop_minutes=20,
-)
+ENTRY_EDGE_POLICY = DEFAULT_MANAGEMENT_POLICY
 DEFAULT_THRESHOLDS = {
     "min_expected_pnl_points": 0.25,
     "min_expected_pnl_lcb_points": 0.10,
@@ -76,7 +72,7 @@ def load_candidate_labels(
     data_root: Path,
     start_date: str | None = None,
     end_date: str | None = None,
-    lookforward_minutes: int = 20,
+    lookforward_minutes: int | None = None,
 ) -> list[dict[str, Any]]:
     """Label all persisted candidate-bearing decisions from existing history."""
 
@@ -129,7 +125,7 @@ def _label_decision(
     decision: Mapping[str, Any],
     *,
     store: QuoteStore,
-    lookforward_minutes: int,
+    lookforward_minutes: int | None,
 ) -> dict[str, Any] | None:
     candidate = _candidate(decision)
     decision_at = _time(decision.get("decision_at"))
@@ -156,7 +152,11 @@ def _label_decision(
         decision_at,
         ENTRY_EDGE_POLICY,
         session_date=session_date,
-        lookforward_minutes=lookforward_minutes,
+        lookforward_minutes=(
+            None
+            if ENTRY_EDGE_POLICY.time_stop_minutes is None
+            else lookforward_minutes
+        ),
     )
     marks = _combo_bid_marks(
         store,
@@ -768,7 +768,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--holdout-sessions", type=int, default=8)
     parser.add_argument("--min-train-sessions", type=int, default=12)
-    parser.add_argument("--lookforward-minutes", type=int, default=20)
+    parser.add_argument(
+        "--lookforward-minutes",
+        type=int,
+        default=None,
+        help="Optional quote-window cap in minutes. Omitted by default so labels "
+        "follow the production 15:45 ET hard close instead of a 20-minute flatten.",
+    )
     parser.add_argument("--artifact", type=Path, default=None)
     parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args(argv)

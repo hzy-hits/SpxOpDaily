@@ -54,14 +54,14 @@ The model is candidate-level. A row represents one concrete quoted spread at one
 
 ## Training labels
 
-The trainer uses a frozen 20-minute debit management contract:
+The trainer uses the production debit management contract (`management_policy.v2`):
 
 - Entry: conservative synthetic combination ask.
 - Valuation/exit: conservative synthetic combination bid.
 - Profit arm: +50% return on debit.
 - Premium stop: -50% of debit.
 - Armed trail: existing 75% peak trail with entry-debit floor.
-- Time stop: 20 minutes.
+- Time stop: none. Do not flatten at 20 minutes.
 - Session hard close: 15:45 ET.
 - Fees: existing per-leg round-trip fee assumption.
 
@@ -153,7 +153,7 @@ uv run python -m spx_spark.data_platform.research.strategy_edge_train \
   --report /srv/data/research/strategy_edge_model.v1.report.json
 ```
 
-Use the last completed session for `--end-date`; do not train on a partially completed current session and then use that artifact later in the same session. The exact production paths must be taken from deployment settings rather than copied blindly from this example.
+Use the last completed session for `--end-date`; do not train on a partially completed current session and then use that artifact later in the same session. Omit `--lookforward-minutes` so labels follow 15:45 ET rather than a 20-minute flatten. The exact production paths must be taken from deployment settings rather than copied blindly from this example.
 
 ## Cutover safeguards
 

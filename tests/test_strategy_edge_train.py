@@ -1,9 +1,29 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
+from spx_spark.analytics.options.strategy_payoff import policy_mark_horizon_end
 from spx_spark.application.order_map.strategy_edge_model import FEATURE_NAMES
-from spx_spark.data_platform.research.strategy_edge_train import train_edge_artifact
+from spx_spark.data_platform.research.strategy_edge_train import (
+    ENTRY_EDGE_POLICY,
+    train_edge_artifact,
+)
+
+
+def test_edge_training_holds_to_1545_without_a_twenty_minute_stop() -> None:
+    assert ENTRY_EDGE_POLICY.time_stop_minutes is None
+    assert ENTRY_EDGE_POLICY.policy_version == "management_policy.v2"
+    assert ENTRY_EDGE_POLICY.hard_exit_et == "15:45"
+    assert ENTRY_EDGE_POLICY.premium_stop_fraction == 0.50
+    start = datetime(2026, 8, 17, 14, 30, tzinfo=timezone.utc)
+    end = policy_mark_horizon_end(
+        start,
+        ENTRY_EDGE_POLICY,
+        session_date=date(2026, 8, 17),
+        lookforward_minutes=None,
+    )
+    assert end == datetime(2026, 8, 17, 19, 45, tzinfo=timezone.utc)
+    assert end - start > timedelta(minutes=20)
 
 
 def _rows() -> list[dict[str, object]]:
