@@ -40,7 +40,7 @@ No files or services are deleted. Static `selection_score`, setup rules, and the
 
 ### Minimal end-to-end acceptance path
 
-1. Run the trainer against the existing two-month database and quote lake.
+1. Run the trainer against the existing two-month database and quote lake through the last completed market session.
 2. Inspect the report and confirm at least one model is `promoted` by walk-forward and final-holdout gates.
 3. Put the generated artifact at `data_root/research/strategy_edge_model.v1.json`.
 4. Run strategy tests/replay and confirm rejected candidates surface model gate reasons.
@@ -148,12 +148,12 @@ uv run python -m spx_spark.data_platform.research.strategy_edge_train \
   --database /srv/data/spx.sqlite \
   --data-root /srv/data \
   --start-date 2026-06-19 \
-  --end-date 2026-08-18 \
+  --end-date 2026-08-17 \
   --artifact /srv/data/research/strategy_edge_model.v1.json \
   --report /srv/data/research/strategy_edge_model.v1.report.json
 ```
 
-The exact production paths must be taken from deployment settings rather than copied blindly from this example.
+Use the last completed session for `--end-date`; do not train on a partially completed current session and then use that artifact later in the same session. The exact production paths must be taken from deployment settings rather than copied blindly from this example.
 
 ## Cutover safeguards
 
