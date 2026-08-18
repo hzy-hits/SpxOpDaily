@@ -678,6 +678,17 @@ def run(
             "accepted": False,
             "outcome": "operational_decision_not_persisted",
         }
+        if not args.json:
+            print(
+                json.dumps(
+                    {
+                        "task": "market_features",
+                        "event": "strategy_decision_persistence",
+                        **strategy_persistence,
+                    },
+                    sort_keys=True,
+                )
+            )
     else:
         try:
             shadow_persisted_ids = persist_strategy_shadow_candidates(strategy_decision)

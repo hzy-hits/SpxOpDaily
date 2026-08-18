@@ -209,6 +209,63 @@ def test_candidate_and_legs_commit_atomically_and_conflicts_fail(tmp_path: Path)
         )
 
 
+def _iron_condor_leg(
+    *,
+    strike: float,
+    right: str,
+    bid: float,
+    ask: float,
+) -> dict[str, object]:
+    source_at = NOW - timedelta(seconds=1)
+    return {
+        "contract_id": f"option:SPX:SPXW:20260807:{strike:g}:{right}",
+        "strike": strike,
+        "right": right,
+        "provider": "ibkr",
+        "bid": bid,
+        "ask": ask,
+        "source_at": source_at.isoformat(),
+    }
+
+
+def test_iron_condor_four_legs_persist_signed_units(tmp_path: Path) -> None:
+    database = _migrate(tmp_path)
+    legs = (
+        _iron_condor_leg(strike=7700.0, right="P", bid=3.1, ask=3.3),
+        _iron_condor_leg(strike=7710.0, right="P", bid=4.3, ask=4.5),
+        _iron_condor_leg(strike=7775.0, right="C", bid=3.5, ask=3.7),
+        _iron_condor_leg(strike=7785.0, right="C", bid=1.9, ask=2.0),
+    )
+    decision = {
+        **_no_trade(),
+        "decision_id": "strategy:iron-condor",
+        "decision_type": "IRON_CONDOR",
+        "candidate": {
+            "direction": "NEUTRAL",
+            "strategy_type": "IRON_CONDOR",
+            "setup_kind": "IRON_CONDOR_DELTA",
+            "legs": list(legs),
+        },
+        "why_not": {"reasons": []},
+        "execution": {"action": "MANUAL_LIMIT", "automatic_ordering": False},
+    }
+
+    persist_strategy_decision(decision, database_path=database)
+
+    with sqlite3.connect(database) as connection:
+        stored = connection.execute(
+            "SELECT instrument_id, quantity FROM decision_legs "
+            "WHERE decision_id=? ORDER BY leg_index",
+            ("strategy:iron-condor",),
+        ).fetchall()
+    assert stored == [
+        ("option:SPX:SPXW:20260807:7700:P", 1.0),
+        ("option:SPX:SPXW:20260807:7710:P", -1.0),
+        ("option:SPX:SPXW:20260807:7775:C", -1.0),
+        ("option:SPX:SPXW:20260807:7785:C", 1.0),
+    ]
+
+
 def test_shadow_candidates_persist_join_observation_queue_and_stay_out_of_replay(
     tmp_path: Path,
 ) -> None:

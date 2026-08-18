@@ -679,14 +679,13 @@ def _leg_rows(
     if not candidate:
         return ()
     raw_legs = candidate.get("legs")
-    if isinstance(raw_legs, Sequence) and not isinstance(raw_legs, (str, bytes)):
+    if isinstance(raw_legs, Sequence) and not isinstance(raw_legs, (str, bytes)) and raw_legs:
         legs = tuple(_mapping(item) for item in raw_legs)
-        quantities = (1.0, -2.0, 1.0)
     else:
         legs = (_mapping(candidate.get("long")), _mapping(candidate.get("short")))
-        quantities = (1.0, -1.0)
-    if not legs or any(not leg for leg in legs) or len(legs) != len(quantities):
+    if not legs or any(not leg for leg in legs):
         raise ValueError("selected strategy decision requires a complete execution leg set")
+    quantities = _leg_quantities(legs)
     rows = []
     for index, (leg, quantity) in enumerate(zip(legs, quantities, strict=True)):
         instrument = str(leg.get("contract_id") or "").strip()
@@ -723,6 +722,33 @@ def _leg_rows(
             }
         )
     return tuple(rows)
+
+
+def _leg_quantities(legs: Sequence[Mapping[str, object]]) -> tuple[float, ...]:
+    """Signed units for verticals, butterflies, and iron condors.
+
+    Explicit ``quantity`` on every leg wins. Otherwise the layout is positional:
+    2-leg debit/credit ``(1, -1)``, 3-leg fly ``(1, -2, 1)``, 4-leg iron condor
+    ``(1, -1, -1, 1)`` as put long / put short / call short / call long.
+    """
+
+    explicit: list[float] = []
+    for leg in legs:
+        quantity = _number(leg.get("quantity"))
+        if quantity is None:
+            explicit = []
+            break
+        explicit.append(quantity)
+    else:
+        if len(explicit) == len(legs):
+            return tuple(explicit)
+    if len(legs) == 2:
+        return (1.0, -1.0)
+    if len(legs) == 3:
+        return (1.0, -2.0, 1.0)
+    if len(legs) == 4:
+        return (1.0, -1.0, -1.0, 1.0)
+    raise ValueError("selected strategy decision requires a complete execution leg set")
 
 
 def _contract_fields(
