@@ -507,3 +507,31 @@ def test_walk_forward_artifact_can_promote_a_stable_synthetic_edge() -> None:
     assert model["holdout_metrics"]["net_pnl_points"] > 0
     assert len(model["feature_mean"]) == len(FEATURE_NAMES)
     assert report["promoted_models"] == ["rth|vertical"]
+
+
+def test_five_session_history_fits_models_without_changing_promotion_gates() -> None:
+    rows = _rows()[:20]
+    assert {row["session_date"] for row in rows} == {
+        "2026-06-20",
+        "2026-06-21",
+        "2026-06-22",
+        "2026-06-23",
+        "2026-06-24",
+    }
+    unknown = dict(rows[0])
+    unknown["model_key"] = "unknown|vertical"
+    unknown["session_date"] = "2026-06-19"
+    artifact, report = train_edge_artifact(
+        [*rows, unknown],
+        generated_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
+        holdout_sessions=8,
+        min_train_sessions=3,
+    )
+
+    model = artifact["models"]["rth|vertical"]
+    assert "unknown|vertical" not in artifact["models"]
+    assert model["training_sessions"] == 5
+    assert model["training_rows"] == 20
+    assert len(model["feature_mean"]) == len(FEATURE_NAMES)
+    assert model["promoted"] is False
+    assert report["promoted_models"] == []

@@ -897,7 +897,7 @@ def train_edge_artifact(
     *,
     generated_at: datetime,
     holdout_sessions: int = 8,
-    min_train_sessions: int = 12,
+    min_train_sessions: int = 3,
     thresholds: Mapping[str, float] = DEFAULT_THRESHOLDS,
     promotion_gates: Mapping[str, float] = DEFAULT_PROMOTION_GATES,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -906,8 +906,11 @@ def train_edge_artifact(
     by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in rows:
         row = dict(raw)
+        model_key = str(row.get("model_key") or "")
+        if model_key.startswith("unknown|"):
+            continue
         if _valid_training_row(row):
-            by_key[str(row["model_key"])].append(row)
+            by_key[model_key].append(row)
 
     models: dict[str, Any] = {}
     reports: dict[str, Any] = {}
@@ -962,7 +965,8 @@ def _train_group(
         key=lambda item: (str(item["session_date"]), str(item["decision_at"])),
     )
     sessions = sorted({str(row["session_date"]) for row in ordered})
-    if len(sessions) < max(min_train_sessions + 2, 6):
+    # Need expanding-window train + one OOF session + one holdout session.
+    if len(sessions) < min_train_sessions + 2:
         return None, {
             "model_key": model_key,
             "promoted": False,
@@ -988,12 +992,12 @@ def _train_group(
         validation_session = development_sessions[index]
         train_rows = [row for row in ordered if row["session_date"] in train_set]
         validation_rows = [row for row in ordered if row["session_date"] == validation_session]
-        if len(train_rows) < 30 or not validation_rows:
+        if len(train_rows) < 10 or not validation_rows:
             continue
         fitted = _fit_models(train_rows)
         oof.extend(_predict_rows(fitted, validation_rows))
 
-    if len(oof) < 10:
+    if not oof:
         return None, {
             "model_key": model_key,
             "promoted": False,
@@ -1431,7 +1435,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--start-date", type=str, default=None)
     parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--holdout-sessions", type=int, default=8)
-    parser.add_argument("--min-train-sessions", type=int, default=12)
+    parser.add_argument(
+        "--min-train-sessions",
+        type=int,
+        default=3,
+        help="Minimum expanding-window train sessions before the first OOF fold. "
+        "Promotion gates are independent and still require coverage/PnL checks.",
+    )
     parser.add_argument(
         "--lookforward-minutes",
         type=int,

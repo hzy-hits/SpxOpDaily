@@ -107,7 +107,10 @@ Validation is by trading session, never by random minute split:
 
 - expanding-window training;
 - next-session out-of-fold prediction;
-- final eight sessions held out by default;
+- default minimum of three train sessions before the first OOF fold so current
+  history can actually fit; holdout still defaults to eight and is capped at
+  one third of available sessions;
+- promotion still requires the coverage/PnL gates below, not merely a fitted model;
 - candidate-opportunity deduplication;
 - no use of future quote marks in features.
 
