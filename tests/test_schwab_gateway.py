@@ -11,6 +11,7 @@ from schwab.auth import AuthContext
 from spx_spark.config import SchwabSettings
 from spx_spark.schwab import gateway
 from spx_spark.schwab.gateway import (
+    SchwabGatewayRequestError,
     SchwabGatewayUnavailable,
     SchwabRequestPolicy,
     SchwabSessionManager,
@@ -289,6 +290,90 @@ def test_unauthorized_response_latches_reauthorization(
     assert load_count == 1
     assert len(fake_client.requests) == 1
     assert clock.sleeps == []
+
+
+class OAuthError(Exception):
+    """Name-matched stand-in for authlib token failures."""
+
+
+def test_oauth_exception_reloads_token_client_instead_of_latching(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    fake_client = FakeClient()
+    fake_client.outcomes = [OAuthError("refresh raced"), FakeResponse(status_code=200)]
+    clock = FakeClock()
+    load_count = 0
+
+    def fake_from_access(*args: object, **kwargs: object) -> FakeClient:
+        nonlocal load_count
+        del args, kwargs
+        load_count += 1
+        return fake_client
+
+    monkeypatch.setattr(gateway, "client_from_access_functions", fake_from_access)
+    write_token(settings)
+    manager = SchwabSessionManager(
+        settings,
+        request_policy=SchwabRequestPolicy(max_retries=3),
+        monotonic=clock.monotonic,
+        wall_clock=clock.wall_clock,
+        sleep=clock.sleep,
+    )
+    assert manager.load() is True
+
+    response = manager.request("/marketdata/v1/quotes", [("symbols", "SPY")])
+
+    assert response.status == 200
+    health = manager.health()
+    assert health.ready is True
+    assert health.reauth_required is False
+    assert health.last_error is None
+    assert load_count == 2
+    assert len(fake_client.requests) == 2
+    assert manager.client_for_streaming() is fake_client
+
+
+def test_oauth_exception_latches_only_after_reload_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    fake_client = FakeClient()
+    fake_client.outcomes = [OAuthError("stale"), OAuthError("still stale")]
+    clock = FakeClock()
+    load_count = 0
+
+    def fake_from_access(*args: object, **kwargs: object) -> FakeClient:
+        nonlocal load_count
+        del args, kwargs
+        load_count += 1
+        return fake_client
+
+    monkeypatch.setattr(gateway, "client_from_access_functions", fake_from_access)
+    write_token(settings)
+    manager = SchwabSessionManager(
+        settings,
+        request_policy=SchwabRequestPolicy(max_retries=3),
+        monotonic=clock.monotonic,
+        wall_clock=clock.wall_clock,
+        sleep=clock.sleep,
+    )
+    assert manager.load() is True
+
+    with pytest.raises(SchwabGatewayRequestError, match="OAuthError"):
+        manager.request("/marketdata/v1/quotes", [("symbols", "SPY")])
+    health = manager.health()
+    assert health.ready is False
+    assert health.reauth_required is True
+    assert health.last_error == "OAuthError"
+
+    with pytest.raises(SchwabGatewayUnavailable, match="reauthorization is required"):
+        manager.request("/marketdata/v1/quotes", [("symbols", "SPY")])
+    assert load_count == 2
+    assert len(fake_client.requests) == 2
+    assert clock.sleeps == [0.5]
 
 
 def test_request_policy_is_configurable_from_environment(

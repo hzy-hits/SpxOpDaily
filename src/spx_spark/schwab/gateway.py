@@ -291,6 +291,7 @@ class SchwabSessionManager:
             if client is None:  # pragma: no cover - load() guarantees this invariant
                 raise SchwabGatewayUnavailable("Schwab authorization client is unavailable")
             url = urljoin(self.settings.api_base_url.rstrip("/") + "/", path.lstrip("/"))
+            oauth_reloaded = False
             for retry_index in range(self.request_policy.max_retries + 1):
                 self._rate_limiter.acquire()
                 attempted_at = float(self._wall_clock())
@@ -315,10 +316,17 @@ class SchwabSessionManager:
                     with self._lock:
                         self._last_error = error_kind
                     if is_oauth_failure(exc):
-                        with self._lock:
-                            if self._client is client:
-                                self._drop_client()
-                            self._reauth_required = True
+                        if not oauth_reloaded:
+                            recovered = self._reload_oauth_client(failed_client=client)
+                            oauth_reloaded = True
+                            if recovered is not None:
+                                client = recovered
+                                continue
+                        else:
+                            with self._lock:
+                                if self._client is client:
+                                    self._drop_client()
+                                self._reauth_required = True
                         raise SchwabGatewayRequestError(error_kind) from None
                     if is_transient_network_failure(exc) and self._can_retry(retry_index):
                         self._sleep(self.request_policy.backoff_seconds(retry_index))
@@ -402,6 +410,23 @@ class SchwabSessionManager:
                 close()
             except Exception:  # noqa: BLE001 - best-effort cleanup only
                 pass
+
+    def _reload_oauth_client(self, *, failed_client: Any) -> Any | None:
+        """Reload the token-file client after an OAuth exception.
+
+        A process-lifetime reauth latch is reserved for a failed disk reload.
+        A still-valid token file must be able to recover without a restart.
+        """
+
+        with self._lock:
+            if self._reauth_required:
+                return None
+            if self._client is failed_client:
+                self._drop_client()
+        if not self.load():
+            return None
+        with self._lock:
+            return self._client
 
     def _can_retry(self, retry_index: int) -> bool:
         return retry_index < self.request_policy.max_retries
