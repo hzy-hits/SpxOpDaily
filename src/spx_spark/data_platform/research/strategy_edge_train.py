@@ -62,6 +62,7 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
 ENTRY_EDGE_POLICY = DEFAULT_MANAGEMENT_POLICY
+GeometryKey = tuple[str, str, str, tuple[float, float]]
 DEFAULT_THRESHOLDS = {
     "min_expected_pnl_points": 0.25,
     "min_expected_pnl_lcb_points": 0.10,
@@ -118,8 +119,9 @@ def load_candidate_labels(
     }
 
     # A sticky winner may reuse one opportunity_id for thousands of cycles.
-    # Geometry is the training identity: session + type + ordered strikes.
-    deduped: dict[tuple[str, str, tuple[float, float]], dict[str, Any]] = {}
+    # Geometry is the training identity: session + RTH/GTH + type + ordered strikes.
+    # Session mode is part of the key so a GTH print cannot steal the RTH row.
+    deduped: dict[GeometryKey, dict[str, Any]] = {}
     for decision in decisions:
         if decision.get("_malformed_payload") is True:
             counts["malformed_payloads"] += 1
@@ -223,9 +225,9 @@ def load_candidate_labels(
 
 
 def _keep_earliest_geometry(
-    deduped: dict[tuple[str, str, tuple[float, float]], dict[str, Any]],
+    deduped: dict[GeometryKey, dict[str, Any]],
     *,
-    key: tuple[str, str, tuple[float, float]],
+    key: GeometryKey,
     decision: Mapping[str, Any],
     candidate: Mapping[str, Any],
     source: str,
@@ -260,7 +262,7 @@ def _keep_earliest_geometry(
 def _enumerate_lake_geometries(
     decisions: Sequence[Mapping[str, Any]],
     *,
-    deduped: dict[tuple[str, str, tuple[float, float]], dict[str, Any]],
+    deduped: dict[GeometryKey, dict[str, Any]],
     store: QuoteStore,
     data_root: Path,
 ) -> dict[str, Any]:
@@ -678,13 +680,29 @@ def _candidate_observations(
 def _candidate_geometry_key(
     decision: Mapping[str, Any],
     candidate: Mapping[str, Any],
-) -> tuple[str, str, tuple[float, float]] | None:
+) -> GeometryKey | None:
     session = str(decision.get("session_date") or "").strip()
     strategy_type = str(candidate.get("strategy_type") or "").upper()
     strikes = _candidate_strikes(candidate)
     if not session or not strategy_type.endswith("_DEBIT_VERTICAL") or len(strikes) != 2:
         return None
-    return session, strategy_type, (strikes[0], strikes[1])
+    return session, _session_mode(decision), strategy_type, (strikes[0], strikes[1])
+
+
+def _session_mode(decision: Mapping[str, Any]) -> str:
+    mode = str(
+        _map(_map(decision.get("market_facts")).get("session")).get("mode") or ""
+    ).strip().lower()
+    if mode in {"rth", "gth"}:
+        return mode
+    at = _time(decision.get("decision_at"))
+    if at is None:
+        return "unknown"
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(at):
+        return "rth"
+    if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(at):
+        return "gth"
+    return "unknown"
 
 
 def _rebuild_candidate_at_decision(

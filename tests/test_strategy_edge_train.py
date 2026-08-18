@@ -183,6 +183,104 @@ def test_candidate_loader_expands_hard_gate_universe_and_dedupes_by_geometry(
     assert funnel["labeling"]["labeled_rows"] == 4
 
 
+def test_geometry_dedup_keeps_gth_and_rth_prints_separate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "spx.sqlite"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE decisions (
+            decision_id TEXT,
+            event_key TEXT,
+            session_date TEXT,
+            strategy_name TEXT,
+            decision_at TEXT,
+            status TEXT,
+            attributes_json TEXT
+        )
+        """
+    )
+    session = "2026-08-17"
+    candidate = {
+        "candidate_id": "same-spread",
+        "opportunity_id": "sticky-winner",
+        "strategy_type": "CALL_DEBIT_VERTICAL",
+        "direction": "UP",
+        "long": {
+            "expiry": session,
+            "strike": 6000.0,
+            "right": "C",
+            "provider": "schwab",
+        },
+        "short": {
+            "expiry": session,
+            "strike": 6010.0,
+            "right": "C",
+            "provider": "schwab",
+        },
+        "economics": {"max_loss_points": 1.1, "max_gain_points": 8.9, "width_points": 10.0},
+    }
+    for decision_id, mode, at in (
+        ("gth-print", "gth", "2026-08-17T08:00:00+00:00"),
+        ("rth-print", "rth", "2026-08-17T14:30:00+00:00"),
+        ("rth-reprint", "rth", "2026-08-17T14:31:00+00:00"),
+    ):
+        payload = {
+            "candidate": candidate,
+            "market_facts": {
+                "session": {"mode": mode},
+                "structure": {"strike_differential_context": {"expiry": "20260817"}},
+            },
+            "regime": {},
+        }
+        connection.execute(
+            "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                decision_id,
+                decision_id,
+                session,
+                "strategy_signal_engine_v2",
+                at,
+                "selected",
+                json.dumps(payload),
+            ),
+        )
+    connection.commit()
+    connection.close()
+
+    class FakeQuoteStore:
+        def __init__(self, data_root: Path) -> None:
+            del data_root
+
+        def close(self) -> None:
+            return None
+
+        def option_series(self, **kwargs) -> list[OptionTick]:
+            start, end = kwargs["start"], kwargs["end"]
+            at = end if end - start <= timedelta(minutes=1) else start + timedelta(minutes=1)
+            return [OptionTick(at=at, bid=1.0, ask=1.1, mid=1.05)]
+
+    monkeypatch.setattr(
+        "spx_spark.data_platform.research.strategy_edge_train.QuoteStore",
+        FakeQuoteStore,
+    )
+    funnel: dict[str, object] = {}
+    rows = load_candidate_labels(
+        database_path=database,
+        data_root=tmp_path,
+        start_date=session,
+        end_date=session,
+        funnel=funnel,
+    )
+
+    assert {row["model_key"] for row in rows} == {"gth|vertical", "rth|vertical"}
+    assert len(rows) == 2
+    assert funnel["unique_candidate_geometries"] == 2
+    assert funnel["duplicate_candidate_occurrences_dropped"] == 1
+
+
 class _FakeLakeQuoteStore:
     def __init__(self, data_root: Path) -> None:
         del data_root
