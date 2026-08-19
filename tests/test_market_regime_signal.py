@@ -365,7 +365,16 @@ def test_rth_preaverage_detector_catches_up_causally_without_direct_authority(
             values.append(7_708.5 + 1.7 * (step - 165) / 15.0)
     spx.update(price=values[-1] + 50.0, source_at=now.isoformat())
     _write(paths.market, market)
-    _write(paths.options, _options(as_of=now.isoformat()))
+    options = _options(as_of=now.isoformat())
+    options["structure"].update(
+        {
+            "call_wall": 7730.0,
+            "put_wall": 7680.0,
+            "zero_gamma": 7695.0,
+            "gex_quality": "open_interest_gex",
+        }
+    )
+    _write(paths.options, options)
     _write(
         paths.state,
         {
@@ -411,6 +420,13 @@ def test_rth_preaverage_detector_catches_up_causally_without_direct_authority(
     assert signal["evidence_status"] == "forward_unvalidated_user_override"
     assert signal["automatic_ordering"] is False
     assert signal["target_spx"] > signal["trigger_level"] > signal["invalidation_spx"]
+    hazard = signal["wall_hazard"]
+    assert hazard["status"] == "available"
+    assert hazard["action_authority"] == "none"
+    assert hazard["automatic_ordering"] is False
+    assert hazard["contract_hash"].startswith("sha256:")
+    assert sum(hazard["probabilities"].values()) == pytest.approx(1.0)
+    assert hazard["path_scale_points"] >= 2.5
 
 
 def test_direct_feature_frames_do_not_require_projection_roundtrip(

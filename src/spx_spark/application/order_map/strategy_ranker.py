@@ -38,8 +38,9 @@ _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _GTH_HUMAN_DEBIT_SETUPS = frozenset({_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN})
 _PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
+_WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
 _RTH_HUMAN_DEBIT_SETUPS = frozenset(
-    {"ES_VOLUME_MOMENTUM", _PREAVERAGE15_PULLBACK}
+    {"ES_VOLUME_MOMENTUM", _PREAVERAGE15_PULLBACK, _WALL_BREAKOUT_HAZARD}
 )
 _GTH_HUMAN_DEBIT_SOURCES = frozenset(
     {
@@ -50,6 +51,7 @@ _GTH_HUMAN_DEBIT_SOURCES = frozenset(
 _RTH_DIRECTIONAL_SPREADS = {
     "ES_VOLUME_MOMENTUM",
     _PREAVERAGE15_PULLBACK,
+    _WALL_BREAKOUT_HAZARD,
     "FAILED_BREAK_RECLAIM",
     "TREND_PULLBACK",
     "BREAKOUT_ACCEPTANCE",
@@ -443,7 +445,7 @@ def _unevidenced_debit_human_gate(candidate: Mapping[str, Any]) -> dict[str, Any
     return {
         "gate": _UNEVIDENCED_DEBIT_GATE,
         "actual": candidate.get("setup_kind"),
-        "threshold": "EVENT_SETTLEMENT_GTH_ES_VOLUME_or_PREAVERAGE15",
+        "threshold": "EVENT_SETTLEMENT_GTH_ES_VOLUME_PREAVERAGE15_or_WALL_HAZARD",
     }
 
 
@@ -560,18 +562,77 @@ def _vertical_hard_gates(
     candidate["entry_quality"] = entry_quality
     if "direction_valid_but_entry_too_late" in reasons:
         candidate["setup_state"] = "ENTRY_TOO_LATE"
-    return _block_unevidenced_debit(
-        candidate,
-        [
-            _gate_from_entry_reason(
-                reason,
-                entry_quality,
-                policy,
-                setup_kind=str(candidate.get("setup_kind") or ""),
-            )
-            for reason in reasons
-        ],
+    gates = [
+        _gate_from_entry_reason(
+            reason,
+            entry_quality,
+            policy,
+            setup_kind=str(candidate.get("setup_kind") or ""),
+        )
+        for reason in reasons
+    ]
+    if candidate.get("setup_kind") == _WALL_BREAKOUT_HAZARD:
+        gates.extend(_wall_hazard_execution_gates(candidate, policy=policy))
+    return _block_unevidenced_debit(candidate, gates)
+
+
+def _wall_hazard_execution_gates(
+    candidate: dict[str, Any], *, policy: StrategyPolicy
+) -> list[dict[str, Any]]:
+    probability = _number(candidate.get("hazard_probability"))
+    economics = _map(candidate.get("economics"))
+    debit = _number(economics.get("max_loss_points"))
+    target = _number(candidate.get("target_spx"))
+    long = _map(candidate.get("long"))
+    short = _map(candidate.get("short"))
+    long_strike = _number(long.get("strike"))
+    short_strike = _number(short.get("strike"))
+    right = str(long.get("right") or candidate.get("right") or "").upper()
+    if None in (probability, debit, target, long_strike, short_strike):
+        return [
+            {
+                "gate": "wall_hazard_execution_ev_unavailable",
+                "actual": None,
+                "threshold": "probability_payoff_and_target_present",
+            }
+        ]
+    assert probability is not None and debit is not None and target is not None
+    assert long_strike is not None and short_strike is not None
+    width = abs(short_strike - long_strike)
+    terminal_value = (
+        min(max(target - long_strike, 0.0), width)
+        if right == "C"
+        else min(max(long_strike - target, 0.0), width)
+        if right == "P"
+        else 0.0
     )
+    breakout_pnl = terminal_value - debit
+    expected_pnl = probability * breakout_pnl - (1.0 - probability) * debit
+    candidate["hazard_execution"] = {
+        "probability": probability,
+        "target_terminal_value_points": round(terminal_value, 6),
+        "breakout_pnl_points": round(breakout_pnl, 6),
+        "no_break_pnl_points": round(-debit, 6),
+        "conservative_expected_pnl_points": round(expected_pnl, 6),
+    }
+    gates = []
+    if probability < policy.wall_hazard_min_side_probability:
+        gates.append(
+            {
+                "gate": "wall_hazard_probability_below_threshold",
+                "actual": probability,
+                "threshold": policy.wall_hazard_min_side_probability,
+            }
+        )
+    if breakout_pnl <= 0.0 or expected_pnl <= policy.wall_hazard_min_execution_ev_points:
+        gates.append(
+            {
+                "gate": "wall_hazard_conservative_execution_ev_not_positive",
+                "actual": expected_pnl,
+                "threshold": f">{policy.wall_hazard_min_execution_ev_points}",
+            }
+        )
+    return gates
 
 
 def _preaverage_vertical_hard_gates(

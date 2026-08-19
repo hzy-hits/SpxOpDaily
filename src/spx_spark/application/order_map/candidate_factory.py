@@ -36,6 +36,7 @@ GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 GTH_ATM_PIN = "GTH_ATM_PIN"
 PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
+WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
     "strategy_event_expired",
@@ -507,6 +508,10 @@ def _vertical_candidate_from_evidence(
                 "impulse_15m_points",
                 "pullback_points",
                 "resume_1m_points",
+                "hazard_probability",
+                "hazard_probabilities",
+                "hazard_features",
+                "hazard_oos",
             )
         },
         "right": right,
@@ -572,6 +577,11 @@ def _rth_evidences(
         for row in setup_facts
         if str(row.get("setup_kind") or "") == PREAVERAGE15_PULLBACK
     ]
+    wall_hazard_setups = [
+        row
+        for row in setup_facts
+        if str(row.get("setup_kind") or "") == WALL_BREAKOUT_HAZARD
+    ]
     pin_blocks = pin_blocks_directional_spreads(regime)
     if pin_blocks:
         reasons.append("directional_spread_blocked_by_pin_watch")
@@ -611,10 +621,23 @@ def _rth_evidences(
                 "source": "rth_preaverage15_pullback",
             }
         )
+    for setup in wall_hazard_setups:
+        direction = _direction(setup.get("direction"))
+        if setup.get("state") != "ENTRY_WINDOW_OPEN" or not direction or pin_blocks:
+            continue
+        bases.append(
+            {
+                **dict(setup),
+                "setup_kind": WALL_BREAKOUT_HAZARD,
+                "setup_state": setup.get("state"),
+                "direction": direction,
+                "source": "rth_wall_breakout_hazard",
+            }
+        )
     if not bases and not pin_blocks:
         if clarity_blocks:
             reasons.append(clarity_blocks[0])
-        elif not momentum_setups:
+        elif not momentum_setups and not wall_hazard_setups:
             reasons.append("es_volume_momentum_unavailable")
         else:
             blocked = [
@@ -659,6 +682,9 @@ def _rth_evidences(
             "invalidation_spx": stop,
             "geometry_source": geometry_source,
         }
+        if evidence.get("setup_kind") == WALL_BREAKOUT_HAZARD:
+            evidences.append(evidence)
+            continue
         spread_source = (
             "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
         )

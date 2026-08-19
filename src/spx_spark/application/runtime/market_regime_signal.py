@@ -20,6 +20,7 @@ from spx_spark.application.runtime.market_regime_context import (
 )
 from spx_spark.application.runtime.market_regime_denoising import (
     DENOISING_FORWARD_CONTRACT_HASH,
+    WALL_HAZARD_CONTRACT_HASH,
     advance_denoising_forward,
 )
 from spx_spark.application.runtime.market_regime_observation import (
@@ -728,6 +729,7 @@ def build_signal(
     )
     denoising_forward, denoising_forward_state = advance_denoising_forward(
         market,
+        options,
         previous,
         now=now,
         session_day=session_day,
@@ -821,6 +823,7 @@ def produce_once(
                     "research_context_schema": "research_context.v2",
                     "hmm_adjusted_range": HMM_ADJUSTED_RANGE_VERSION,
                     "denoising_forward": DENOISING_FORWARD_CONTRACT_HASH,
+                    "wall_hazard": WALL_HAZARD_CONTRACT_HASH,
                 },
             }
         )

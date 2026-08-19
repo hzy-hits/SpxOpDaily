@@ -41,7 +41,11 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v40"
+    policy_version: str = "strategy_policy.bootstrap.v41"
+    # v41: user-authorized RTH wall competing-risk hazard may produce a
+    # forward-unvalidated manual debit candidate. The four-feature frozen
+    # model supplies direction only; exact BBO, structure quality, PIN,
+    # geometry, debit, and conservative target-payoff EV remain hard gates.
     # v40: explicit user authorization promotes the RTH causal 15-second
     # pre-average pullback detector to a manual-only 60-delta/15-point debit
     # lane. It stays marked forward-unvalidated, uses Schwab exact BBO <=5s,
@@ -194,6 +198,8 @@ class StrategyPolicy:
     es_momentum_max_return_5m_atr: float = 1.50
     es_momentum_max_progress: float = 0.50
     es_momentum_add_min_return_5m_atr: float = 0.50
+    wall_hazard_min_side_probability: float = 0.17
+    wall_hazard_min_execution_ev_points: float = 0.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
     pin_stable_max_minutes_to_close: float = 300.0
     pin_stable_enter_min_excursions: int = 2

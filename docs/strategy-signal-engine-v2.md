@@ -552,9 +552,15 @@ VWAP slope >= +0.05 ATR
 sector breadth >= 0.55
 ```
 
-空头反向。趋势判断只代表路径背景，不代表立即交易。v40 起 RTH 人读 Debit
+空头反向。趋势判断只代表路径背景，不代表立即交易。v41 起 RTH 人读 Debit
 为 `EVENT_SETTLEMENT_THRESHOLD`、`ES_VOLUME_MOMENTUM` 与
-`PREAVERAGE15_PULLBACK`。后者是用户明确授权的独立原始 SPX 五秒路径 lane：只在
+`PREAVERAGE15_PULLBACK`，并新增用户明确授权的 `WALL_BREAKOUT_HAZARD`。
+墙位 hazard 是独立左侧 lane：以因果 SPX 路径尺度归一化 Call/Put Wall、Zero Gamma
+与剩余 EM，冻结三分类模型输出未来 15 分钟上破站稳 / 下破站稳 / 未突破概率；仅当
+OI-GEX 可用、同向概率至少 0.17、证据不超过 15 秒、目标结算价值下的保守执行 EV > 0
+且 exact BBO、通用几何/借记、PIN 与宏观门全部通过时才可出人工卡。它必须标记
+`forward-unvalidated`，不得表述为已证明 edge，也不得继承旧策略方向。
+`PREAVERAGE15_PULLBACK` 是用户明确授权的独立原始 SPX 五秒路径 lane：只在
 60 秒决策点使用因果 15 秒加权前均值触发，固定选 Schwab 60Δ / 15 点价差，不继承
 HMM、GEX 方向、旧 entry-quality 或历史方向 stick 门；它必须标记
 `forward-unvalidated`，不得表述为
@@ -683,6 +689,9 @@ abs(distance_to_vwap_atr) > 1.0 且 abs(impulse_15m_atr) > 1.0
 `PREAVERAGE15_PULLBACK` 使用自己的局部尺度对称目标/失效位，不进入本节的 ATR、
 VWAP、路径进度或 20 分钟旧管理门；仍受宏观、PIN、Schwab exact-BBO、单腿相对价差
 不高于 5%、最大借记、人工确认和 15:45 ET 硬退出约束。
+`WALL_BREAKOUT_HAZARD` 不用 HMM/旧方向作触发，但仍走通用 ATR 几何、目标空间、
+最大借记和 exact-BBO 门；额外用 `p_break * target_terminal_value - net_debit > 0`
+作为保守执行 EV 硬门。
 短周期过晚：`abs(return_5m) / ATR5m > 1.5`，或 trigger→target 路程 ≥ 50%，
 或借记/空间门与上表相同。
 

@@ -26,6 +26,10 @@ _PREAVERAGE_SETUP = "PREAVERAGE15_PULLBACK"
 _PREAVERAGE_CONTRACT_HASH = (
     "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27"
 )
+_WALL_HAZARD_SETUP = "WALL_BREAKOUT_HAZARD"
+_WALL_HAZARD_CONTRACT_HASH = (
+    "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
+)
 
 # Stable feature order shared by offline training and runtime inference.
 FEATURE_NAMES: tuple[str, ...] = (
@@ -108,13 +112,13 @@ def apply_strategy_edge_authority(
     data_root: str | Path | None,
     now: datetime,
 ) -> EdgeAuthorityResult:
-    """Gate candidates by promoted models or the explicit v40 manual lane.
+    """Gate candidates by promoted models or explicit unvalidated manual lanes.
 
     ``data_root is None`` is reserved for pure unit/replay fixtures that do not
     model deployment state. Production model-backed lanes fail closed when the
     artifact is absent, unpromoted, stale, malformed, or out of domain. The
-    v40 pre-average lane is the sole explicit manual-policy exception and is
-    always labeled forward-unvalidated.
+    Pre-average v40 and wall-hazard v41 are explicit manual-policy exceptions
+    and are always labeled forward-unvalidated.
     """
 
     if not candidates:
@@ -129,24 +133,40 @@ def apply_strategy_edge_authority(
     rejected: list[dict[str, Any]] = []
     model_candidates: list[Mapping[str, Any]] = []
     for candidate in candidates:
-        if candidate.get("setup_kind") != _PREAVERAGE_SETUP:
+        setup = candidate.get("setup_kind")
+        if setup not in {_PREAVERAGE_SETUP, _WALL_HAZARD_SETUP}:
             model_candidates.append(candidate)
             continue
+        expected_policy, expected_hash, failure = (
+            (
+                "strategy_policy.bootstrap.v40",
+                _PREAVERAGE_CONTRACT_HASH,
+                "preaverage_policy_authority_invalid",
+            )
+            if setup == _PREAVERAGE_SETUP
+            else (
+                "strategy_policy.bootstrap.v41",
+                _WALL_HAZARD_CONTRACT_HASH,
+                "wall_hazard_policy_authority_invalid",
+            )
+        )
         if (
-            candidate.get("authorization_policy") != "strategy_policy.bootstrap.v40"
-            or candidate.get("evidence_contract_hash") != _PREAVERAGE_CONTRACT_HASH
+            candidate.get("authorization_policy") != expected_policy
+            or candidate.get("evidence_contract_hash") != expected_hash
             or candidate.get("evidence_status") != "forward_unvalidated_user_override"
         ):
-            rejected.append(_reject(candidate, "preaverage_policy_authority_invalid"))
+            rejected.append(_reject(candidate, failure))
             continue
         scored.append(
             _attach_model_payload(
                 candidate,
                 {
                     "status": "explicit_policy_authority_unvalidated",
-                    "policy_version": "strategy_policy.bootstrap.v40",
-                    "evidence_contract_hash": _PREAVERAGE_CONTRACT_HASH,
+                    "policy_version": expected_policy,
+                    "evidence_contract_hash": expected_hash,
                     "evidence_status": "forward_unvalidated_user_override",
+                    "hazard_probability": candidate.get("hazard_probability"),
+                    "hazard_oos": dict(_map(candidate.get("hazard_oos"))),
                 },
             )
         )

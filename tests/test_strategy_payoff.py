@@ -458,7 +458,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v40"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v41"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -841,7 +841,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v40"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v41"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -951,6 +951,78 @@ def test_rth_preaverage_signal_reaches_manual_decision_with_frozen_contract(
         now=now,
         policy=DEFAULT_STRATEGY_POLICY,
     ) == []
+
+
+def test_rth_wall_hazard_reaches_manual_decision_only_with_positive_execution_ev(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    monkeypatch.setattr(
+        strategy_select,
+        "apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
+    now = datetime(2026, 8, 7, 15, 0, 10, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["es_volume"] = {}
+    payload["level_decision"] = {"phase": "far"}
+    payload.pop("call_skew_spread_shadow")
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    _attach_wall_hazard_signal(payload, now)
+    latest = _vertical_chain_state(now)
+
+    facts = build_market_fact_pack(payload, latest, now)
+    regime = assess_regime(facts)
+    rows = enumerate_candidates(
+        payload,
+        facts,
+        regime,
+        latest,
+        now=now,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    ranked = rank_candidates(
+        rows,
+        facts,
+        regime,
+        policy=DEFAULT_STRATEGY_POLICY,
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=now,
+    )
+    decision = build_strategy_decision(payload, latest, now, data_root=tmp_path)
+
+    assert [row["setup_kind"] for row in facts["rth_setups"]] == [
+        "WALL_BREAKOUT_HAZARD"
+    ]
+    assert rows
+    assert all(row["source"] == "rth_schwab_width_enumeration" for row in rows)
+    assert all(
+        row["geometry_source"] == "wall_break_hold_competing_risk" for row in rows
+    )
+    assert ranked.passed
+    assert ranked.passed[0]["hazard_execution"][
+        "conservative_expected_pnl_points"
+    ] > 0
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "WALL_BREAKOUT_HAZARD"
+    assert decision["candidate"]["edge"]["edge_status"] == (
+        "explicit_manual_policy_unvalidated"
+    )
+    assert decision["action_authority"] == "manual"
+    assert decision["automatic_ordering"] is False
+
+    below_threshold = deepcopy(payload)
+    _attach_wall_hazard_signal(below_threshold, now, up_probability=0.16)
+    assert not any(
+        row.get("setup_kind") == "WALL_BREAKOUT_HAZARD"
+        for row in build_market_fact_pack(below_threshold, latest, now)["rth_setups"]
+    )
 
 
 def test_selected_decision_carries_shadow_candidates_and_skips_incomplete_quotes(
@@ -3784,6 +3856,42 @@ def _attach_preaverage_signal(payload: dict[str, object], now: datetime) -> None
             "impulse_15m_points": 8.0,
             "pullback_points": 1.5,
             "resume_1m_points": 0.5,
+        },
+    }
+
+
+def _attach_wall_hazard_signal(
+    payload: dict[str, object], now: datetime, *, up_probability: float = 0.35
+) -> None:
+    available_at = now - timedelta(seconds=5)
+    payload["experimental_research_signals"] = {
+        "schema_version": "research_context.v2",
+        "action_authority": "none",
+        "automatic_ordering": False,
+        "generated_at": (now - timedelta(seconds=4)).isoformat(),
+        "denoising_forward": {
+            "wall_hazard": {
+                "schema_version": "wall_competing_risk_hazard.v1",
+                "contract_hash": (
+                    "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
+                ),
+                "status": "available",
+                "action_authority": "none",
+                "automatic_ordering": False,
+                "evidence_status": "forward_unvalidated_user_override",
+                "available_at": available_at.isoformat(),
+                "spot": 7710.0,
+                "path_scale_points": 10.0,
+                "upper_barrier": 7730.0,
+                "lower_barrier": 7680.0,
+                "probabilities": {
+                    "down_break": 0.10,
+                    "no_break": 0.90 - up_probability,
+                    "up_break": up_probability,
+                },
+                "features": {"call_wall_distance_scale": 2.0},
+                "oos": {"sessions": 17, "ci95": [-0.0234477, -0.0027284]},
+            }
         },
     }
 

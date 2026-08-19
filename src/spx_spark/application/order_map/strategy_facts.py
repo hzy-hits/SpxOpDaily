@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from spx_spark.application.order_map.strategy_regime import (
@@ -17,6 +17,9 @@ from spx_spark.storage import LatestState
 
 _DENOISING_FORWARD_CONTRACT_HASH = (
     "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27"
+)
+_WALL_HAZARD_CONTRACT_HASH = (
+    "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
 
 
@@ -236,6 +239,14 @@ def build_market_fact_pack(
     )
     if preaverage_setup:
         rth_setups.append(preaverage_setup)
+    wall_hazard_setup = _wall_hazard_setup(
+        payload,
+        decision_at=decision_at,
+        session_date=trading_date,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    if wall_hazard_setup:
+        rth_setups.append(wall_hazard_setup)
     failed_break_evaluable = opening_range_ready and bool(rth_bars)
     shock = _shock_fact(
         shock_state,
@@ -1079,6 +1090,81 @@ def _preaverage_pullback_setup(
         "state": "ENTRY_WINDOW_OPEN",
         "source": "rth_preaverage15_pullback",
         "evidence_contract_hash": _DENOISING_FORWARD_CONTRACT_HASH,
+    }
+
+
+def _wall_hazard_setup(
+    payload: Mapping[str, Any],
+    *,
+    decision_at: datetime,
+    session_date: str,
+    policy: StrategyPolicy,
+) -> dict[str, Any]:
+    document = _map(
+        payload.get("experimental_research_signals") or payload.get("research_context")
+    )
+    forward = _map(document.get("denoising_forward"))
+    hazard = _map(forward.get("wall_hazard"))
+    generated_at = _time(document.get("generated_at"))
+    available_at = _time(hazard.get("available_at"))
+    probabilities = _map(hazard.get("probabilities"))
+    down = _number(probabilities.get("down_break"))
+    flat = _number(probabilities.get("no_break"))
+    up = _number(probabilities.get("up_break"))
+    scale = _number(hazard.get("path_scale_points"))
+    spot = _number(hazard.get("spot"))
+    upper = _number(hazard.get("upper_barrier"))
+    lower = _number(hazard.get("lower_barrier"))
+    if (
+        document.get("action_authority") not in {None, "none"}
+        or hazard.get("action_authority") != "none"
+        or hazard.get("automatic_ordering") is not False
+        or hazard.get("schema_version") != "wall_competing_risk_hazard.v1"
+        or hazard.get("contract_hash") != _WALL_HAZARD_CONTRACT_HASH
+        or hazard.get("evidence_status") != "forward_unvalidated_user_override"
+        or hazard.get("status") != "available"
+        or generated_at is None
+        or available_at is None
+        or available_at > generated_at
+        or generated_at > decision_at
+        or not 0.0 <= (decision_at - available_at).total_seconds() <= 15.0
+        or None in (down, flat, up, scale, spot)
+        or abs(float(down) + float(flat) + float(up) - 1.0) > 1e-6
+    ):
+        return {}
+    choices = [
+        (float(up), "UP", upper, float(down)),
+        (float(down), "DOWN", lower, float(up)),
+    ]
+    probability, direction, barrier, opposite = max(choices, key=lambda row: row[0])
+    if (
+        barrier is None
+        or probability < policy.wall_hazard_min_side_probability
+        or probability <= opposite
+    ):
+        return {}
+    sign = 1.0 if direction == "UP" else -1.0
+    return {
+        "setup_kind": "WALL_BREAKOUT_HAZARD",
+        "setup_variant": "walls_only_multinomial::15m_break_hold",
+        "state": "ENTRY_WINDOW_OPEN",
+        "direction": direction,
+        "session_date": session_date,
+        "signal_at": available_at.isoformat(),
+        "valid_until": (available_at + timedelta(seconds=60)).isoformat(),
+        "trigger_level": spot,
+        "target_spx": barrier + sign * 0.10 * float(scale),
+        "invalidation_spx": spot - sign * 0.50 * float(scale),
+        "local_scale_points": scale,
+        "hazard_probability": probability,
+        "hazard_probabilities": dict(probabilities),
+        "hazard_features": dict(_map(hazard.get("features"))),
+        "hazard_oos": dict(_map(hazard.get("oos"))),
+        "source": "rth_wall_breakout_hazard",
+        "geometry_source": "wall_break_hold_competing_risk",
+        "evidence_contract_hash": _WALL_HAZARD_CONTRACT_HASH,
+        "authorization_policy": policy.policy_version,
+        "evidence_status": "forward_unvalidated_user_override",
     }
 
 

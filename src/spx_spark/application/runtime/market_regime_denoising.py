@@ -16,10 +16,49 @@ DENOISING_FORWARD_CONTRACT_HASH = (
 )
 DENOISING_FORWARD_START = date(2026, 8, 20)
 DENOISING_SETUP = "PREAVERAGE15_PULLBACK"
+WALL_HAZARD_VERSION = "wall_competing_risk_hazard.v1"
+WALL_HAZARD_CONTRACT_HASH = (
+    "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
+)
+WALL_HAZARD_FEATURES = (
+    "call_wall_distance_scale",
+    "put_wall_distance_scale",
+    "zero_gamma_distance_scale",
+    "expected_move_scale",
+)
+_WALL_HAZARD_MEDIAN = (
+    1.1501412772797974,
+    1.1696909191453773,
+    0.1449712367677628,
+    1.978951565478213,
+)
+_WALL_HAZARD_MEAN = (
+    1.5208851911995038,
+    1.650917216480979,
+    -0.013691080377019152,
+    2.08221867757674,
+)
+_WALL_HAZARD_SCALE = (
+    1.738054184220481,
+    1.941876963243608,
+    1.84620094727459,
+    0.6681519971577666,
+)
+_WALL_HAZARD_INTERCEPT = (
+    -0.8131746831125304,
+    1.3923624776740768,
+    -0.5791877945615551,
+)
+_WALL_HAZARD_COEF = (
+    (0.1860169991381373, -0.7490547664408425, -0.025360678449045354, -0.06690871056421151),
+    (0.31916748635514014, 0.4250397033984637, -0.0675888136350847, -0.054367409907073366),
+    (-0.5051844854932778, 0.3240150630423788, 0.09294949208413028, 0.12127612047128496),
+)
 
 
 def advance_denoising_forward(
     market: Mapping[str, object],
+    options: Mapping[str, object],
     previous: Mapping[str, object],
     *,
     now: datetime,
@@ -101,6 +140,11 @@ def advance_denoising_forward(
         "evidence_status": "forward_unvalidated_user_override",
         "automatic_ordering": False,
         "reason": None if status == "triggered" else reason,
+        "wall_hazard": _wall_hazard_projection(
+            samples,
+            options,
+            bucket_epoch=bucket_epoch,
+        ),
         **(latest_signal if status == "triggered" else {}),
     }
     return projection, {
@@ -110,6 +154,130 @@ def advance_denoising_forward(
         "last_decision_epoch": last_decision,
         "latest_signal": latest_signal,
     }
+
+
+def _wall_hazard_projection(
+    samples: list[object],
+    options: Mapping[str, object],
+    *,
+    bucket_epoch: int,
+) -> dict[str, object]:
+    structure = _mapping(options.get("structure"))
+    volatility = _mapping(options.get("volatility"))
+    option_at = _parse_at(options.get("as_of"))
+    observed_at = datetime.fromtimestamp(bucket_epoch, tz=UTC)
+    scale = _minute_realized_scale(samples, bucket_epoch=bucket_epoch)
+    spot = _latest_sample_price(samples, bucket_epoch=bucket_epoch)
+    call_wall = _number(structure.get("call_wall"))
+    put_wall = _number(structure.get("put_wall"))
+    zero_gamma = _number(structure.get("zero_gamma"))
+    expected_move = _number(volatility.get("expected_move_points_0dte"))
+    ready = (
+        options.get("quality") == "ready"
+        and structure.get("gex_quality") == "open_interest_gex"
+        and option_at is not None
+        and 0.0 <= (observed_at - option_at).total_seconds() <= 360.0
+        and scale is not None
+        and spot is not None
+        and expected_move is not None
+        and (call_wall is not None or put_wall is not None or zero_gamma is not None)
+    )
+    base = {
+        "schema_version": WALL_HAZARD_VERSION,
+        "contract_hash": WALL_HAZARD_CONTRACT_HASH,
+        "status": "available" if ready else "unavailable",
+        "action_authority": "none",
+        "automatic_ordering": False,
+        "trained_through": "2026-08-18",
+        "evidence_status": "forward_unvalidated_user_override",
+        "reason": None if ready else "wall_hazard_inputs_unavailable",
+    }
+    if not ready:
+        return base
+    assert scale is not None and spot is not None and expected_move is not None
+    raw = (
+        (call_wall - spot) / scale if call_wall is not None else None,
+        (spot - put_wall) / scale if put_wall is not None else None,
+        (zero_gamma - spot) / scale if zero_gamma is not None else None,
+        expected_move / scale,
+    )
+    standardized = [
+        ((value if value is not None else median) - mean) / feature_scale
+        for value, median, mean, feature_scale in zip(
+            raw,
+            _WALL_HAZARD_MEDIAN,
+            _WALL_HAZARD_MEAN,
+            _WALL_HAZARD_SCALE,
+            strict=True,
+        )
+    ]
+    logits = [
+        intercept + math.fsum(weight * value for weight, value in zip(row, standardized, strict=True))
+        for intercept, row in zip(_WALL_HAZARD_INTERCEPT, _WALL_HAZARD_COEF, strict=True)
+    ]
+    anchor = max(logits)
+    weights = [math.exp(value - anchor) for value in logits]
+    probabilities = [value / math.fsum(weights) for value in weights]
+    upper_levels = [value for value in (call_wall, zero_gamma) if value is not None and value > spot]
+    lower_levels = [value for value in (put_wall, zero_gamma) if value is not None and value < spot]
+    return {
+        **base,
+        "available_at": max(observed_at, option_at).isoformat() if option_at else observed_at.isoformat(),
+        "spot": spot,
+        "path_scale_points": scale,
+        "features": dict(zip(WALL_HAZARD_FEATURES, raw, strict=True)),
+        "probabilities": {
+            "down_break": probabilities[0],
+            "no_break": probabilities[1],
+            "up_break": probabilities[2],
+        },
+        "upper_barrier": min(upper_levels) if upper_levels else None,
+        "lower_barrier": max(lower_levels) if lower_levels else None,
+        "oos": {
+            "sessions": 17,
+            "rows": 1050,
+            "delta_multiclass_brier_vs_path": -0.0133362,
+            "ci95": [-0.0234477, -0.0027284],
+        },
+    }
+
+
+def _minute_realized_scale(
+    samples: list[object], *, bucket_epoch: int
+) -> float | None:
+    rows = sorted(
+        (
+            (int(row["epoch"]), value)
+            for row in samples
+            if isinstance(row, Mapping)
+            and isinstance(row.get("epoch"), int)
+            and (value := _number(row.get("raw"))) is not None
+            and int(row["epoch"]) <= bucket_epoch
+        ),
+        key=lambda item: item[0],
+    )
+    values: list[float] = []
+    for target in range(bucket_epoch - 14 * 60, bucket_epoch + 1, 60):
+        prior = next((row for row in reversed(rows) if row[0] <= target), None)
+        if prior is not None and target - prior[0] <= 15:
+            values.append(prior[1])
+    if len(values) < 10:
+        return None
+    realized = math.sqrt(
+        math.fsum((right - left) ** 2 for left, right in zip(values, values[1:]))
+    )
+    return max(2.5, 1.25 * realized)
+
+
+def _latest_sample_price(samples: list[object], *, bucket_epoch: int) -> float | None:
+    rows = [
+        row
+        for row in samples
+        if isinstance(row, Mapping)
+        and isinstance(row.get("epoch"), int)
+        and int(row["epoch"]) <= bucket_epoch
+    ]
+    return _number(max(rows, key=lambda row: int(row["epoch"])).get("raw")) if rows else None
 
 
 def _append_sample(
