@@ -41,7 +41,14 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v41"
+    policy_version: str = "strategy_policy.bootstrap.v42"
+    # v42: blind GTH width/delta scans remain in the rejection funnel but no
+    # longer authorize Trade Ready. Recent live cards showed rapid direction
+    # flips without forward edge evidence. GTH manual debit now requires
+    # confirmed level/dip-reclaim evidence; existing RTH authorities remain.
+    # GTH directional hysteresis is 30 minutes, same-setup cards cool down for
+    # 15 minutes, and each direction is capped at two accepted cards/session.
+    # GTH debit above 45% of width fails closed.
     # v41: user-authorized RTH wall competing-risk hazard may produce a
     # forward-unvalidated manual debit candidate. The four-feature frozen
     # model supplies direction only; exact BBO, structure quality, PIN,
@@ -187,7 +194,7 @@ class StrategyPolicy:
     min_target_room_ratio: float = 1.5
     failed_break_min_target_room_ratio: float = 1.8
     max_debit_fraction: float = 0.45
-    gth_max_debit_fraction: float = 0.55
+    gth_max_debit_fraction: float = 0.45
     failed_break_max_debit_fraction: float = 0.40
     min_stop_atr: float = 0.25
     max_stop_atr: float = 1.0
@@ -225,11 +232,11 @@ class StrategyPolicy:
     # v5: debit vertical short strike may not pass the target, and width may
     # not exceed remaining 0DTE expected move. Missing EM fails closed.
     # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
-    candidate_cooldown_seconds: float = 300.0
-    max_cards_per_direction_per_session: int = 6
+    candidate_cooldown_seconds: float = 900.0
+    max_cards_per_direction_per_session: int = 2
     # GTH hysteresis from the start of the current direction streak, not a
     # sliding window: reprinting the same winner must not refresh the lock.
-    gth_winner_stick_seconds: float = 180.0
+    gth_winner_stick_seconds: float = 1800.0
     # RTH same-direction hold after an accepted human card. Flip after this
     # window still needs cash HMM TREND the new way (see v32).
     rth_winner_stick_seconds: float = 900.0

@@ -356,8 +356,10 @@ def _gth_width_verticals(
                     geometry_source = "facts_wall_ladder_fallback"
                 else:
                     setup_kind = GTH_DELTA_SCAN
-                    row_target, row_stop = short_strike, long_strike
+                    row_target, row_stop = short_strike, stop
                     geometry_source = "gth_delta_anchor"
+                    if row_stop is None:
+                        continue
                     if debit_vertical_reach_reasons(
                         spot=spot,
                         long_strike=long_strike,
@@ -1001,7 +1003,15 @@ def _facts_wall_ladder_geometry(
     spot, structure = _number(_map(facts.get("spot")).get("spx")), _map(facts.get("structure"))
     if spot is None or direction not in {"UP", "DOWN"}:
         return None, None
-    target = _number(structure.get("call_wall" if direction == "UP" else "put_wall"))
+    raw_target = _number(
+        structure.get("call_wall" if direction == "UP" else "put_wall")
+    )
+    target = (
+        raw_target
+        if raw_target is not None
+        and ((direction == "UP" and raw_target > spot) or (direction == "DOWN" and raw_target < spot))
+        else None
+    )
     levels = [
         _number(structure.get("put_wall")),
         *_flip_values(structure.get("flip_zone")),

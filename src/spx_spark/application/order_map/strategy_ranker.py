@@ -36,7 +36,7 @@ _UNEVIDENCED_DEBIT_GATE = "unevidenced_debit_not_human_authorized"
 _IRON_CONDOR_HUMAN_GATE = "iron_condor_not_human_authorized"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
-_GTH_HUMAN_DEBIT_SETUPS = frozenset({_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN})
+_GTH_HUMAN_DEBIT_SETUPS: frozenset[str] = frozenset()
 _PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 _WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
 _RTH_HUMAN_DEBIT_SETUPS = frozenset(
@@ -445,7 +445,7 @@ def _unevidenced_debit_human_gate(candidate: Mapping[str, Any]) -> dict[str, Any
     return {
         "gate": _UNEVIDENCED_DEBIT_GATE,
         "actual": candidate.get("setup_kind"),
-        "threshold": "EVENT_SETTLEMENT_GTH_ES_VOLUME_PREAVERAGE15_or_WALL_HAZARD",
+        "threshold": "EVENT_SETTLEMENT_GTH_CONFIRMED_PREAVERAGE15_or_WALL_HAZARD",
     }
 
 

@@ -552,9 +552,9 @@ VWAP slope >= +0.05 ATR
 sector breadth >= 0.55
 ```
 
-空头反向。趋势判断只代表路径背景，不代表立即交易。v41 起 RTH 人读 Debit
-为 `EVENT_SETTLEMENT_THRESHOLD`、`ES_VOLUME_MOMENTUM` 与
-`PREAVERAGE15_PULLBACK`，并新增用户明确授权的 `WALL_BREAKOUT_HAZARD`。
+空头反向。趋势判断只代表路径背景，不代表立即交易。v42 起 RTH 人读 Debit
+为 `EVENT_SETTLEMENT_THRESHOLD`、`ES_VOLUME_MOMENTUM`、
+`PREAVERAGE15_PULLBACK` 与 `WALL_BREAKOUT_HAZARD`。
 墙位 hazard 是独立左侧 lane：以与冻结模型训练同源的因果 SPX 标准化一分钟路径尺度
 归一化 Call/Put Wall、Zero Gamma
 与剩余 EM，冻结三分类模型输出未来 15 分钟上破站稳 / 下破站稳 / 未突破概率；仅当
@@ -566,9 +566,10 @@ OI-GEX 可用、同向概率至少 0.17、证据不超过 15 秒、目标结算�
 60 秒决策点使用因果 15 秒加权前均值触发，固定选 Schwab 60Δ / 15 点价差，不继承
 HMM、GEX 方向、旧 entry-quality 或历史方向 stick 门；它必须标记
 `forward-unvalidated`，不得表述为
-已证明 edge。失败突破、趋势回踩、突破接受只记结构事实。GTH 在 TREND 或
-TRANSITION 同向时可出宽链/delta 价差，确认水平 / 回踩收复也可出人读卡。
-Desk Map 仍写不做。
+已证明 edge。失败突破、趋势回踩、突破接受只记结构事实。GTH 宽链/delta 扫描继续
+进入 Desk Map 与拒绝漏斗，但不再授权 Trade Ready；GTH 人读 Debit 只保留确认水平 /
+回踩收复证据。Desk Map 仍写不做。GTH 同方向锁定 30 分钟；同 setup/direction 卡片
+冷却 15 分钟；每个 session mode 每个方向最多接受 2 张卡。
 
 ### 7.2 BALANCED
 
@@ -590,8 +591,8 @@ abs(existing D) <= 3
 - 突破刚失败但尚未完成 retest；
 - 跨市场宽度正在翻转。
 
-Transition 仍不挡量比 setup 的枚举。Failed Break 与量比卡都只记事实，不再授权
-RTH 人读 Debit。GTH 不受此条关闭。本 session 已有反向 RTH 人读卡时，翻向必须等
+Transition 仍不挡量比 setup 的枚举。Failed Break 与量比卡都只记事实，不授权
+RTH 人读 Debit。GTH 扫描也只记漏斗事实。本 session 已有反向 RTH 人读卡时，翻向必须等
 cash HMM 同向 TREND，不能只靠 5 分钟反弹；该规则约束 RTH 枚举。
 
 ### 7.4 PIN_STABLE

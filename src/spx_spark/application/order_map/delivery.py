@@ -20,7 +20,6 @@ from spx_spark.application.order_map.desk_projection_export import (
     rust_report_owner_enabled,
 )
 from spx_spark.application.order_map.models import SHANGHAI_TZ
-from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.render import render_template
 from spx_spark.application.order_map.strategy_ranker import (
     outbox_accepted_strategy_cards,
@@ -252,10 +251,6 @@ def _session_close_utc(session_date: str) -> datetime | None:
 def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, Any]) -> str:
     quote, economics = candidate.get("quote") or {}, candidate.get("economics") or {}
     setup = str(candidate.get("setup_kind") or "")
-    edge = candidate.get("edge") if isinstance(candidate.get("edge"), dict) else {}
-    path_text = path_distribution_desk_text(
-        edge.get("path_distribution") if isinstance(edge.get("path_distribution"), dict) else None
-    )
     title = _strategy_card_title(candidate)
     until = _beijing_clock(candidate.get("opportunity_valid_until"))
     loss = _usd_loss(economics.get("max_loss_points"))
@@ -289,7 +284,11 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         debit_frac = economics.get("debit_fraction_of_width")
         payoff = ""
         if isinstance(width, int | float) and isinstance(debit_frac, int | float):
-            payoff = f" · 翼宽 {_fmt_strike(width)} 点 · 借记占 {_percent(debit_frac)}"
+            debit_warning = "（偏贵）" if float(debit_frac) >= 0.40 else ""
+            payoff = (
+                f" · 翼宽 {_fmt_strike(width)} 点"
+                f" · 借记占 {_percent(debit_frac)}{debit_warning}"
+            )
         lines = [
             f"【{title}】",
             "",
@@ -345,7 +344,11 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         debit_frac = economics.get("debit_fraction_of_width")
         payoff = ""
         if isinstance(width, int | float) and isinstance(debit_frac, int | float):
-            payoff = f" · 翼宽 {_fmt_strike(width)} 点 · 借记占 {_percent(debit_frac)}"
+            debit_warning = "（偏贵）" if float(debit_frac) >= 0.40 else ""
+            payoff = (
+                f" · 翼宽 {_fmt_strike(width)} 点"
+                f" · 借记占 {_percent(debit_frac)}{debit_warning}"
+            )
         lines = [
             f"【{title}】",
             "",
@@ -372,8 +375,6 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "不下自动单 · 人工限价",
         )
     )
-    if path_text:
-        lines.append(f"{path_text}（未校准，不改结论）")
     del decision
     return "\n".join(lines)
 
@@ -577,8 +578,6 @@ def _flood_control_block(
     session_mode = _decision_session_mode(decision, candidate)
     if not session_date or not setup_kind or not direction:
         return None
-    trigger = candidate.get("trigger_level")
-    trigger_level = float(trigger) if isinstance(trigger, (int, float)) else None
     opportunity_id = str(candidate.get("opportunity_id") or "")
     rows = recent_selected_strategy_cards(
         session_date=session_date,
@@ -604,11 +603,7 @@ def _flood_control_block(
             continue
         if row["decision_at"] < cooldown_start:
             continue
-        stored_trigger = row.get("trigger_level")
-        if trigger_level is None or stored_trigger is None:
-            cooldown_hits += 1
-        elif abs(float(stored_trigger) - float(trigger_level)) <= 0.01:
-            cooldown_hits += 1
+        cooldown_hits += 1
     counts = {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
     if session_mode in {"gth", "rth"}:
         stick_seconds = (

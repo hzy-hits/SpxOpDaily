@@ -4843,6 +4843,43 @@ def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> No
     assert "automatic_ordering" not in text
 
 
+def test_render_strategy_candidate_marks_thin_odds_and_omits_uncalibrated_path() -> None:
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
+
+    now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+    text = _render_strategy_candidate(
+        {"decision_id": "strategy:compact-card", "decision_at": now.isoformat()},
+        {
+            "setup_kind": "WALL_BREAKOUT_HAZARD",
+            "direction": "UP",
+            "strategy_type": "CALL_DEBIT_VERTICAL",
+            "target_spx": 7730.0,
+            "invalidation_spx": 7705.0,
+            "opportunity_valid_until": (now + timedelta(minutes=5)).isoformat(),
+            "long": {"strike": 7710.0, "right": "C"},
+            "short": {"strike": 7720.0, "right": "C"},
+            "quote": {"ask": 4.2},
+            "economics": {
+                "max_loss_points": 4.2,
+                "width_points": 10.0,
+                "debit_fraction_of_width": 0.42,
+            },
+            "edge": {
+                "path_distribution": {
+                    "p10": -12.0,
+                    "p50": 4.0,
+                    "p90": 18.0,
+                    "n": 100,
+                }
+            },
+        },
+    )
+
+    assert "借记占 42%（偏贵）" in text
+    assert "路径 P10/P50/P90" not in text
+    assert "未校准" not in text
+
+
 def test_pin_stable_watch_enqueues_once_per_center_and_clock_phase(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -5230,7 +5267,7 @@ def test_strategy_flood_control_session_cap_is_per_session_mode(monkeypatch) -> 
     rth_cards = tuple(
         {
             **card,
-            "decision_at": now,
+            "decision_at": now - timedelta(minutes=20),
             "opportunity_id": f"strategy-opportunity:rth{index}",
             "setup_kind": "TREND_PULLBACK",
             "session_mode": "rth",
@@ -5308,7 +5345,66 @@ def test_gth_flood_control_blocks_opposite_direction_during_winner_stick(
         NotificationSettings.from_env(),
         now=now + timedelta(seconds=180),
     )
-    assert later is None
+    assert later is not None
+    assert later["outcome"] == "flood_control_gth_direction_lock"
+
+    expired = _flood_control_block(
+        call_decision,
+        call_decision["candidate"],
+        NotificationSettings.from_env(),
+        now=now + timedelta(seconds=1800),
+    )
+    assert expired is None
+
+
+def test_flood_control_cools_same_setup_direction_across_nearby_triggers(
+    monkeypatch,
+) -> None:
+    from spx_spark.application.order_map.delivery import _flood_control_block
+    from spx_spark.config import NotificationSettings
+
+    now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+    prior = (
+        {
+            "decision_id": "strategy:prior",
+            "decision_at": now - timedelta(minutes=10),
+            "opportunity_id": "strategy-opportunity:prior",
+            "direction": "UP",
+            "setup_kind": "ES_VOLUME_MOMENTUM",
+            "trigger_level": 7700.0,
+            "session_mode": "rth",
+        },
+    )
+    monkeypatch.setattr(
+        "spx_spark.infrastructure.operational_db.recent_selected_strategy_cards",
+        lambda **_kwargs: prior,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.delivery.notification_event_exists",
+        lambda _settings, _event_id: True,
+    )
+    decision = {
+        "session_date": "2026-08-20",
+        "decision_id": "strategy:new",
+        "market_facts": {"session": {"mode": "rth"}},
+        "candidate": {
+            "opportunity_id": "strategy-opportunity:new",
+            "setup_kind": "ES_VOLUME_MOMENTUM",
+            "direction": "UP",
+            "trigger_level": 7710.0,
+        },
+    }
+
+    blocked = _flood_control_block(
+        decision,
+        decision["candidate"],
+        NotificationSettings.from_env(),
+        now=now,
+    )
+
+    assert blocked is not None
+    assert blocked["outcome"] == "flood_control_cooldown"
+    assert blocked["counts"]["cooldown_hits"] == 1
 
 
 def test_rth_flood_control_blocks_opposite_direction_during_stick(monkeypatch) -> None:

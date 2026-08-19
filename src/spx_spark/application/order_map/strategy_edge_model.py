@@ -117,8 +117,9 @@ def apply_strategy_edge_authority(
     ``data_root is None`` is reserved for pure unit/replay fixtures that do not
     model deployment state. Production model-backed lanes fail closed when the
     artifact is absent, unpromoted, stale, malformed, or out of domain. The
-    Pre-average v40 and wall-hazard v41 are explicit manual-policy exceptions
-    and are always labeled forward-unvalidated.
+    Pre-average v40 and wall hazard (introduced in v41, carried by the current
+    strategy policy) are explicit manual-policy exceptions and are always
+    labeled forward-unvalidated.
     """
 
     if not candidates:
@@ -145,7 +146,7 @@ def apply_strategy_edge_authority(
             )
             if setup == _PREAVERAGE_SETUP
             else (
-                "strategy_policy.bootstrap.v41",
+                "strategy_policy.bootstrap.v42",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             )
