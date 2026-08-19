@@ -60,6 +60,7 @@ FACT_FEATURES = (
 PRICE_CONCURRENT = frozenset(
     {"abs_ret_1m", "abs_ret_5m", "abs_ret_15m", "near_extreme_30m"}
 )
+VOL_REGIME = frozenset({"atr_30m", "atr_5m_fact", "dist_session_open_abs"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,7 +545,13 @@ def feature_skill(rows: Sequence[Mapping[str, Any]], feature: str, label_key: st
         "mean_event": _mean(event_values),
         "mean_other": _mean(control_values),
         "auroc": _auroc(scores, labels),
-        "family": "price_concurrent" if feature in PRICE_CONCURRENT else "non_price",
+        "family": (
+            "price_concurrent"
+            if feature in PRICE_CONCURRENT
+            else "vol_regime"
+            if feature in VOL_REGIME
+            else "non_price"
+        ),
     }
 
 
@@ -686,6 +693,7 @@ def build_report(
             "price_concurrent_is_not_anticipation": True,
             "july_has_no_persisted_hmm_volume": True,
             "question": "parameters_feel_large_breakout_or_pullback_before_it_starts",
+            "atr_is_vol_clustering_not_direction": True,
             "answer": (
                 "yes_anticipatory"
                 if anticipatory
@@ -694,7 +702,7 @@ def build_report(
                     name in useful
                     for name in ("already_moving_1m", "already_moving_5m", "near_30m_extreme")
                 )
-                else "no_lead"
+                else "no_directional_lead"
             ),
         },
     }
