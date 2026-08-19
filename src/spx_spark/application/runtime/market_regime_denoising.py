@@ -6,6 +6,9 @@ import math
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 
+from spx_spark.application.runtime.market_regime_range import (
+    causal_spx_session_minutes,
+)
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 
@@ -59,10 +62,12 @@ _WALL_HAZARD_COEF = (
 def advance_denoising_forward(
     market: Mapping[str, object],
     options: Mapping[str, object],
+    spx_minutes: Mapping[str, object],
     previous: Mapping[str, object],
     *,
     now: datetime,
     session_day: date | None,
+    spx_minute_max_age_seconds: float,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Advance the frozen causal 5-second RTH pre-average detector."""
 
@@ -143,7 +148,10 @@ def advance_denoising_forward(
         "wall_hazard": _wall_hazard_projection(
             samples,
             options,
+            spx_minutes,
             bucket_epoch=bucket_epoch,
+            session_day=session_day,
+            spx_minute_max_age_seconds=spx_minute_max_age_seconds,
         ),
         **(latest_signal if status == "triggered" else {}),
     }
@@ -159,15 +167,28 @@ def advance_denoising_forward(
 def _wall_hazard_projection(
     samples: list[object],
     options: Mapping[str, object],
+    spx_minutes: Mapping[str, object],
     *,
     bucket_epoch: int,
+    session_day: date | None,
+    spx_minute_max_age_seconds: float,
 ) -> dict[str, object]:
     structure = _mapping(options.get("structure"))
     volatility = _mapping(options.get("volatility"))
     option_at = _parse_at(options.get("as_of"))
     observed_at = datetime.fromtimestamp(bucket_epoch, tz=UTC)
-    scale = _minute_realized_scale(samples, bucket_epoch=bucket_epoch)
-    spot = _latest_sample_price(samples, bucket_epoch=bucket_epoch)
+    path = _wall_realized_scale(
+        spx_minutes,
+        session_day=session_day,
+        observed_at=observed_at,
+        max_age_seconds=spx_minute_max_age_seconds,
+    )
+    scale, path_sample_count, path_observed_through = path or (None, 0, None)
+    spot = _latest_sample_price(
+        samples,
+        bucket_epoch=bucket_epoch,
+        max_age_seconds=15,
+    )
     call_wall = _number(structure.get("call_wall"))
     put_wall = _number(structure.get("put_wall"))
     zero_gamma = _number(structure.get("zero_gamma"))
@@ -191,6 +212,11 @@ def _wall_hazard_projection(
         "trained_through": "2026-08-18",
         "evidence_status": "forward_unvalidated_user_override",
         "reason": None if ready else "wall_hazard_inputs_unavailable",
+        "path_source": "spx_standardized_minutes",
+        "path_sample_count": path_sample_count,
+        "path_observed_through": (
+            path_observed_through.isoformat() if path_observed_through is not None else None
+        ),
     }
     if not ready:
         return base
@@ -242,34 +268,44 @@ def _wall_hazard_projection(
     }
 
 
-def _minute_realized_scale(
-    samples: list[object], *, bucket_epoch: int
-) -> float | None:
-    rows = sorted(
-        (
-            (int(row["epoch"]), value)
-            for row in samples
-            if isinstance(row, Mapping)
-            and isinstance(row.get("epoch"), int)
-            and (value := _number(row.get("raw"))) is not None
-            and int(row["epoch"]) <= bucket_epoch
-        ),
-        key=lambda item: item[0],
-    )
-    values: list[float] = []
-    for target in range(bucket_epoch - 14 * 60, bucket_epoch + 1, 60):
-        prior = next((row for row in reversed(rows) if row[0] <= target), None)
-        if prior is not None and target - prior[0] <= 15:
-            values.append(prior[1])
-    if len(values) < 10:
+def _wall_realized_scale(
+    spx_minutes: Mapping[str, object],
+    *,
+    session_day: date | None,
+    observed_at: datetime,
+    max_age_seconds: float,
+) -> tuple[float, int, datetime] | None:
+    if session_day is None:
         return None
+    samples = causal_spx_session_minutes(
+        spx_minutes,
+        session_day=session_day,
+        now=observed_at,
+    )
+    latest_by_minute = {sample.minute: sample for sample in samples}
+    window_start = observed_at.replace(second=0, microsecond=0) - timedelta(minutes=15)
+    path = [
+        latest_by_minute[minute]
+        for minute in sorted(latest_by_minute)
+        if window_start <= minute <= observed_at
+    ]
+    if len(path) < 10:
+        return None
+    latest = path[-1]
+    if not 0.0 <= (observed_at - latest.source_at).total_seconds() <= max_age_seconds:
+        return None
+    if not 0.0 <= (observed_at - latest.transport_at).total_seconds() <= max_age_seconds:
+        return None
+    values = [sample.price for sample in path]
     realized = math.sqrt(
         math.fsum((right - left) ** 2 for left, right in zip(values, values[1:]))
     )
-    return max(2.5, 1.25 * realized)
+    return max(2.5, 1.25 * realized), len(path), latest.source_at
 
 
-def _latest_sample_price(samples: list[object], *, bucket_epoch: int) -> float | None:
+def _latest_sample_price(
+    samples: list[object], *, bucket_epoch: int, max_age_seconds: int
+) -> float | None:
     rows = [
         row
         for row in samples
@@ -277,7 +313,12 @@ def _latest_sample_price(samples: list[object], *, bucket_epoch: int) -> float |
         and isinstance(row.get("epoch"), int)
         and int(row["epoch"]) <= bucket_epoch
     ]
-    return _number(max(rows, key=lambda row: int(row["epoch"])).get("raw")) if rows else None
+    if not rows:
+        return None
+    latest = max(rows, key=lambda row: int(row["epoch"]))
+    if bucket_epoch - int(latest["epoch"]) > max_age_seconds:
+        return None
+    return _number(latest.get("raw"))
 
 
 def _append_sample(

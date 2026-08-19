@@ -730,9 +730,13 @@ def build_signal(
     denoising_forward, denoising_forward_state = advance_denoising_forward(
         market,
         options,
+        spx_minutes,
         previous,
         now=now,
         session_day=session_day,
+        spx_minute_max_age_seconds=(
+            freshness_policy.standardized_spx_minute_max_age_seconds
+        ),
     )
     source_times = [
         parsed

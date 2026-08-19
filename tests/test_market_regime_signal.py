@@ -45,7 +45,7 @@ def _write(path: Path, payload: dict[str, object]) -> None:
 def _spx_minute_row(minute: str, price: float) -> dict[str, object]:
     at = datetime.fromisoformat(minute).astimezone(UTC)
     return {
-        "session_date": "2026-08-03",
+        "session_date": at.date().isoformat(),
         "minute": at.isoformat(),
         "observed_at": at.replace(second=40).isoformat(),
         "selected": {
@@ -375,6 +375,20 @@ def test_rth_preaverage_detector_catches_up_causally_without_direct_authority(
         }
     )
     _write(paths.options, options)
+    minute_start = decision_at.replace(second=0, microsecond=0) - timedelta(minutes=15)
+    _write(
+        paths.spx_minutes,
+        {
+            "as_of": (decision_at - timedelta(seconds=5)).isoformat(),
+            "rows": [
+                _spx_minute_row(
+                    (minute_start + timedelta(minutes=index)).isoformat(),
+                    7_700.0 + 0.2 * index,
+                )
+                for index in range(15)
+            ],
+        },
+    )
     _write(
         paths.state,
         {
@@ -426,6 +440,71 @@ def test_rth_preaverage_detector_catches_up_causally_without_direct_authority(
     assert hazard["automatic_ordering"] is False
     assert hazard["contract_hash"].startswith("sha256:")
     assert sum(hazard["probabilities"].values()) == pytest.approx(1.0)
+    assert hazard["path_scale_points"] >= 2.5
+    assert hazard["path_source"] == "spx_standardized_minutes"
+    assert hazard["path_sample_count"] == 15
+
+
+def test_wall_hazard_scale_does_not_depend_on_sparse_five_second_cache(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 20, 15, 0, 10, tzinfo=UTC)
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    market = _rth_market()
+    market.update(session_id="2026-08-20", as_of=now.isoformat())
+    spx = market["cross_asset"]["cash_index"]["observations"]["index:SPX"]
+    spx.update(price=7_703.0, source_at=(now - timedelta(seconds=1)).isoformat())
+    _write(paths.market, market)
+    options = _options(as_of=(now - timedelta(seconds=2)).isoformat())
+    options["structure"].update(
+        {
+            "call_wall": 7_720.0,
+            "put_wall": 7_680.0,
+            "zero_gamma": 7_695.0,
+            "gex_quality": "open_interest_gex",
+        }
+    )
+    _write(paths.options, options)
+    minute_start = now.replace(second=0, microsecond=0) - timedelta(minutes=15)
+    _write(
+        paths.spx_minutes,
+        {
+            "as_of": (now - timedelta(seconds=5)).isoformat(),
+            "rows": [
+                _spx_minute_row(
+                    (minute_start + timedelta(minutes=index)).isoformat(),
+                    7_700.0 + math.sin(index / 2.0),
+                )
+                for index in range(15)
+            ],
+        },
+    )
+    _write(
+        paths.state,
+        {
+            "schema_version": "research_context.state.v2",
+            "online_state": {},
+            "denoising_forward_state": {
+                "session_id": "2026-08-20",
+                "samples": [],
+                "cooldowns": {},
+                "last_decision_epoch": None,
+                "latest_signal": {},
+            },
+        },
+    )
+
+    document = produce_once(
+        paths=paths,
+        now=now,
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+    hazard = document["denoising_forward"]["wall_hazard"]
+
+    assert hazard["status"] == "available"
+    assert hazard["path_source"] == "spx_standardized_minutes"
+    assert hazard["path_sample_count"] == 15
     assert hazard["path_scale_points"] >= 2.5
 
 
