@@ -558,6 +558,7 @@ sector breadth >= 0.55
 墙位 hazard 是独立左侧 lane：以与冻结模型训练同源的因果 SPX 标准化一分钟路径尺度
 归一化 Call/Put Wall、Zero Gamma
 与剩余 EM，冻结三分类模型输出未来 15 分钟上破站稳 / 下破站稳 / 未突破概率；仅当
+现价直接来自 `latest_state` 中 source/transport 均不超过 15 秒的 Schwab SPX quote，
 OI-GEX 可用、同向概率至少 0.17、证据不超过 15 秒、目标结算价值下的保守执行 EV > 0
 且 exact BBO、通用几何/借记、PIN 与宏观门全部通过时才可出人工卡。它必须标记
 `forward-unvalidated`，不得表述为已证明 edge，也不得继承旧策略方向。

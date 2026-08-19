@@ -63,6 +63,7 @@ def advance_denoising_forward(
     market: Mapping[str, object],
     options: Mapping[str, object],
     spx_minutes: Mapping[str, object],
+    latest_state: Mapping[str, object],
     previous: Mapping[str, object],
     *,
     now: datetime,
@@ -146,10 +147,10 @@ def advance_denoising_forward(
         "automatic_ordering": False,
         "reason": None if status == "triggered" else reason,
         "wall_hazard": _wall_hazard_projection(
-            samples,
             options,
             spx_minutes,
-            bucket_epoch=bucket_epoch,
+            latest_state,
+            observed_at=now,
             session_day=session_day,
             spx_minute_max_age_seconds=spx_minute_max_age_seconds,
         ),
@@ -165,18 +166,17 @@ def advance_denoising_forward(
 
 
 def _wall_hazard_projection(
-    samples: list[object],
     options: Mapping[str, object],
     spx_minutes: Mapping[str, object],
+    latest_state: Mapping[str, object],
     *,
-    bucket_epoch: int,
+    observed_at: datetime,
     session_day: date | None,
     spx_minute_max_age_seconds: float,
 ) -> dict[str, object]:
     structure = _mapping(options.get("structure"))
     volatility = _mapping(options.get("volatility"))
     option_at = _parse_at(options.get("as_of"))
-    observed_at = datetime.fromtimestamp(bucket_epoch, tz=UTC)
     path = _wall_realized_scale(
         spx_minutes,
         session_day=session_day,
@@ -184,10 +184,36 @@ def _wall_hazard_projection(
         max_age_seconds=spx_minute_max_age_seconds,
     )
     scale, path_sample_count, path_observed_through = path or (None, 0, None)
-    spot = _latest_sample_price(
-        samples,
-        bucket_epoch=bucket_epoch,
-        max_age_seconds=15,
+    spot_candidates: list[tuple[datetime, datetime, float]] = []
+    quote_rows = latest_state.get("best_quotes")
+    if isinstance(quote_rows, list):
+        for value in quote_rows:
+            row = _mapping(value)
+            instrument = _mapping(row.get("instrument"))
+            canonical_id = str(
+                instrument.get("canonical_id") or row.get("instrument_id") or ""
+            )
+            source_at = _parse_at(row.get("quote_time")) or _parse_at(
+                row.get("trade_time")
+            )
+            transport_at = _parse_at(row.get("last_update_at")) or _parse_at(
+                row.get("received_at")
+            )
+            price = _number(row.get("effective_price"))
+            if (
+                canonical_id == "index:SPX"
+                and row.get("provider") == "schwab"
+                and row.get("quality") == "live"
+                and source_at is not None
+                and transport_at is not None
+                and price is not None
+                and 0.0 <= (observed_at - source_at).total_seconds() <= 15.0
+                and 0.0 <= (observed_at - transport_at).total_seconds() <= 15.0
+                and source_at <= transport_at + timedelta(seconds=2)
+            ):
+                spot_candidates.append((transport_at, source_at, price))
+    spot_available_at, spot_source_at, spot = (
+        max(spot_candidates) if spot_candidates else (None, None, None)
     )
     call_wall = _number(structure.get("call_wall"))
     put_wall = _number(structure.get("put_wall"))
@@ -203,6 +229,13 @@ def _wall_hazard_projection(
         and expected_move is not None
         and (call_wall is not None or put_wall is not None or zero_gamma is not None)
     )
+    reason = None
+    if spot is None:
+        reason = "fresh_live_schwab_spx_unavailable"
+    elif scale is None:
+        reason = "causal_spx_minute_path_unavailable"
+    elif not ready:
+        reason = "wall_hazard_option_structure_unavailable"
     base = {
         "schema_version": WALL_HAZARD_VERSION,
         "contract_hash": WALL_HAZARD_CONTRACT_HASH,
@@ -211,11 +244,15 @@ def _wall_hazard_projection(
         "automatic_ordering": False,
         "trained_through": "2026-08-18",
         "evidence_status": "forward_unvalidated_user_override",
-        "reason": None if ready else "wall_hazard_inputs_unavailable",
+        "reason": reason,
         "path_source": "spx_standardized_minutes",
         "path_sample_count": path_sample_count,
         "path_observed_through": (
             path_observed_through.isoformat() if path_observed_through is not None else None
+        ),
+        "spot_source_at": spot_source_at.isoformat() if spot_source_at else None,
+        "spot_available_at": (
+            spot_available_at.isoformat() if spot_available_at else None
         ),
     }
     if not ready:
@@ -301,24 +338,6 @@ def _wall_realized_scale(
         math.fsum((right - left) ** 2 for left, right in zip(values, values[1:]))
     )
     return max(2.5, 1.25 * realized), len(path), latest.source_at
-
-
-def _latest_sample_price(
-    samples: list[object], *, bucket_epoch: int, max_age_seconds: int
-) -> float | None:
-    rows = [
-        row
-        for row in samples
-        if isinstance(row, Mapping)
-        and isinstance(row.get("epoch"), int)
-        and int(row["epoch"]) <= bucket_epoch
-    ]
-    if not rows:
-        return None
-    latest = max(rows, key=lambda row: int(row["epoch"]))
-    if bucket_epoch - int(latest["epoch"]) > max_age_seconds:
-        return None
-    return _number(latest.get("raw"))
 
 
 def _append_sample(

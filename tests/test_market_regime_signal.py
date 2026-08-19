@@ -56,6 +56,22 @@ def _spx_minute_row(minute: str, price: float) -> dict[str, object]:
     }
 
 
+def _spx_latest_state(at: datetime, price: float) -> dict[str, object]:
+    return {
+        "as_of": at.isoformat(),
+        "best_quotes": [
+            {
+                "instrument": {"canonical_id": "index:SPX"},
+                "provider": "schwab",
+                "quality": "live",
+                "effective_price": price,
+                "quote_time": at.isoformat(),
+                "last_update_at": at.isoformat(),
+            }
+        ],
+    }
+
+
 def _read(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -365,6 +381,7 @@ def test_rth_preaverage_detector_catches_up_causally_without_direct_authority(
             values.append(7_708.5 + 1.7 * (step - 165) / 15.0)
     spx.update(price=values[-1] + 50.0, source_at=now.isoformat())
     _write(paths.market, market)
+    _write(paths.latest_state, _spx_latest_state(now, values[-1] + 50.0))
     options = _options(as_of=now.isoformat())
     options["structure"].update(
         {
@@ -454,8 +471,12 @@ def test_wall_hazard_scale_does_not_depend_on_sparse_five_second_cache(
     market = _rth_market()
     market.update(session_id="2026-08-20", as_of=now.isoformat())
     spx = market["cross_asset"]["cash_index"]["observations"]["index:SPX"]
-    spx.update(price=7_703.0, source_at=(now - timedelta(seconds=1)).isoformat())
+    spx.update(price=7_650.0, source_at=(now - timedelta(seconds=30)).isoformat())
     _write(paths.market, market)
+    _write(
+        paths.latest_state,
+        _spx_latest_state(now - timedelta(seconds=1), 7_703.0),
+    )
     options = _options(as_of=(now - timedelta(seconds=2)).isoformat())
     options["structure"].update(
         {
@@ -502,6 +523,7 @@ def test_wall_hazard_scale_does_not_depend_on_sparse_five_second_cache(
     )
     hazard = document["denoising_forward"]["wall_hazard"]
 
+    assert document["denoising_forward"]["status"] == "unavailable"
     assert hazard["status"] == "available"
     assert hazard["path_source"] == "spx_standardized_minutes"
     assert hazard["path_sample_count"] == 15

@@ -731,6 +731,7 @@ def build_signal(
         market,
         options,
         spx_minutes,
+        latest_state,
         previous,
         now=now,
         session_day=session_day,
