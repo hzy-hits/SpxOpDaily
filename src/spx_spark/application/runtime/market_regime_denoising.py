@@ -64,21 +64,21 @@ def advance_denoising_forward(
         )
         reason = "observing"
 
+    decision_epoch = bucket_epoch - ((bucket_epoch - 5) % 60)
     if (
         usable
         and session_day >= DENOISING_FORWARD_START
-        and bucket_epoch % 60 == 5
-        and last_decision != bucket_epoch
+        and last_decision != decision_epoch
     ):
-        last_decision = bucket_epoch
+        last_decision = decision_epoch
         signal = _detect(
             samples,
-            bucket_epoch=bucket_epoch,
+            bucket_epoch=decision_epoch,
             session_id=session_id or "",
         )
         direction = str(signal.get("direction") or "")
-        if direction and bucket_epoch >= int(cooldowns.get(direction) or 0):
-            cooldowns[direction] = bucket_epoch + 900
+        if direction and decision_epoch >= int(cooldowns.get(direction) or 0):
+            cooldowns[direction] = decision_epoch + 900
             latest_signal = signal
 
     signal_valid = (

@@ -343,10 +343,11 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
     assert _read(paths.state)["online_state"]["observation_count"] == 2
 
 
-def test_rth_preaverage_detector_is_causal_and_publishes_no_direct_authority(
+def test_rth_preaverage_detector_catches_up_causally_without_direct_authority(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 8, 20, 15, 0, 5, tzinfo=UTC)
+    decision_at = datetime(2026, 8, 20, 15, 0, 5, tzinfo=UTC)
+    now = decision_at + timedelta(seconds=5)
     paths = SignalPaths.from_data_root(tmp_path)
     _seed_rth(paths)
     market = _rth_market()
@@ -362,7 +363,7 @@ def test_rth_preaverage_detector_is_causal_and_publishes_no_direct_authority(
             values.append(7_712.0 - 3.5 * (step - 150) / 15.0)
         else:
             values.append(7_708.5 + 1.7 * (step - 165) / 15.0)
-    spx.update(price=values[-1], source_at=now.isoformat())
+    spx.update(price=values[-1] + 50.0, source_at=now.isoformat())
     _write(paths.market, market)
     _write(paths.options, _options(as_of=now.isoformat()))
     _write(
@@ -374,13 +375,18 @@ def test_rth_preaverage_detector_is_causal_and_publishes_no_direct_authority(
                 "session_id": "2026-08-20",
                 "samples": [
                     {
-                        "epoch": int((now - timedelta(seconds=5 * (182 - index))).timestamp()),
+                        "epoch": int(
+                            (
+                                decision_at
+                                - timedelta(seconds=5 * (182 - index))
+                            ).timestamp()
+                        ),
                         "raw": value,
                         "source_at": (
-                            now - timedelta(seconds=5 * (182 - index))
+                            decision_at - timedelta(seconds=5 * (182 - index))
                         ).isoformat(),
                     }
-                    for index, value in enumerate(values[:-1])
+                    for index, value in enumerate(values)
                 ],
                 "cooldowns": {},
                 "last_decision_epoch": None,
@@ -399,7 +405,8 @@ def test_rth_preaverage_detector_is_causal_and_publishes_no_direct_authority(
     assert signal["status"] == "triggered"
     assert signal["direction"] == "UP"
     assert signal["contract_hash"] == DENOISING_FORWARD_CONTRACT_HASH
-    assert signal["signal_at"] == now.isoformat()
+    assert signal["signal_at"] == decision_at.isoformat()
+    assert signal["trigger_level"] == values[-1]
     assert signal["action_authority"] == "none"
     assert signal["evidence_status"] == "forward_unvalidated_user_override"
     assert signal["automatic_ordering"] is False
