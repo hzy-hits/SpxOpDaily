@@ -1,0 +1,51 @@
+{
+  "schema_version": "raw_tick_event_forward.v2",
+  "frozen_at": "2026-08-19T07:21:49+00:00",
+  "forward_start_session": "2026-08-19",
+  "scope": "RTH SPX/SPXW production-compatible Debit Vertical research only; no strategy_decision or notification authority",
+  "data_contract": {
+    "input": "causally available five-second SPX quote-update grid",
+    "decision_frequency_seconds": 60,
+    "cooldown_seconds_by_event_and_direction": 900,
+    "knowledge_guard": "quality=live; source/quote clocks not from future; exact BBO fresh at both selection and fill"
+  },
+  "event_contract": {
+    "right_breakout": "cross prior causal 30-minute high/low on a 60-second decision point",
+    "right_pullback_resume": "15-minute impulse >= local scale; 0.25-0.80 scale pullback; latest one-minute move resumes impulse direction",
+    "local_scale": "max(2.5 points, 1.25*causal 15-minute realized path volatility); no fixed holding horizon",
+    "outcome": "symmetric first-passage target/stop at one local scale; otherwise censor at RTH close"
+  },
+  "option_contract": {
+    "hypotheses": {
+      "right_pullback_resume": {
+        "candidate": "right_pullback_resume::delta_0.60/vertical_15",
+        "maximum_selection_relative_spread": 0.05
+      }
+    },
+    "selection": "nearest absolute delta using information available at decision_at",
+    "entry_delay_seconds": 5,
+    "entry": "long ask minus short bid at decision+5s",
+    "exit": "long bid minus short ask at first-passage outcome time",
+    "fee_dollars_per_leg_side": 1.5,
+    "mid_allowed": false
+  },
+  "promotion_gate": {
+    "minimum_complete_forward_sessions": 20,
+    "minimum_event_sessions_per_hypothesis": 8,
+    "minimum_exact_bbo_trades_per_hypothesis": 30,
+    "minimum_executable_coverage": 0.2,
+    "mean_net_dollars": "> 0",
+    "session_bootstrap_95_return_lower": "> 0",
+    "holm_adjusted_one_sided_session_sign_flip_p": "<= 0.05",
+    "positive_session_rate": ">= 0.60"
+  },
+  "explicit_rejections": {
+    "left_gex_rejection": "negative exact-BBO validation/tail economics",
+    "left_zero_gamma_rejection": "negative exact-BBO validation/tail economics",
+    "right_breakout": "production-compatible vertical has negative development session LCB",
+    "gth_right_breakout": "negative validation and tail IBKR exact-BBO economics",
+    "gth_right_pullback_resume": "negative validation and tail IBKR exact-BBO economics"
+  },
+  "integration_constraint": "A future pass may authorize only a Debit Vertical candidate generated from the same raw event contract; adding RIGHT_PULLBACK_RESUME as a human-visible setup still requires explicit candidate-space approval.",
+  "contract_hash": "sha256:85f48249f02a65437fb35dfa5814fbd0310f3e6e70623fc0a607e3c9aea32559"
+}

@@ -1,0 +1,51 @@
+{
+  "schema_version": "raw_tick_denoising_forward.v1",
+  "frozen_at": "2026-08-19T09:41:19+00:00",
+  "forward_start_session": "2026-08-20",
+  "scope": "RTH raw-vs-15-second-pre-average paired research; no strategy_decision or notification authority",
+  "existing_v2_contract_hash_unchanged": "sha256:85f48249f02a65437fb35dfa5814fbd0310f3e6e70623fc0a607e3c9aea32559",
+  "lanes": {
+    "raw_control": {
+      "pipeline": "raw_pullback",
+      "candidate": "raw_pullback::delta_0.60/vertical_15",
+      "maximum_selection_relative_spread": 0.05
+    },
+    "preaverage_candidate": {
+      "pipeline": "preaverage15_pullback",
+      "candidate": "preaverage15_pullback::delta_0.60/vertical_15",
+      "maximum_selection_relative_spread": 0.05
+    }
+  },
+  "shared_event_contract": {
+    "decision_frequency_seconds": 60,
+    "cooldown_seconds": 900,
+    "trigger": "15-minute impulse >= causal local scale; 0.25-0.80 scale pullback; latest one-minute observation resumes impulse direction",
+    "raw_control_observation": "causal five-second raw SPX price",
+    "candidate_observation": "causal trailing three-bucket weighted pre-average with weights 1,2,3",
+    "outcome": "symmetric one-local-scale first passage; censor at RTH close"
+  },
+  "execution_contract": {
+    "provider": "Schwab",
+    "entry_delay_seconds": 5,
+    "maximum_bbo_age_seconds": 5,
+    "entry": "long ask minus short bid",
+    "exit": "long bid minus short ask",
+    "fee_dollars_per_leg_side": 1.5,
+    "mid_allowed": false
+  },
+  "promotion_gate": {
+    "minimum_complete_forward_sessions": 20,
+    "minimum_event_sessions_per_lane": 8,
+    "minimum_exact_bbo_trades_per_lane": 30,
+    "minimum_executable_coverage_per_lane": 0.5,
+    "preaverage_mean_net_dollars": "> 0",
+    "preaverage_session_bootstrap_95_return_lower": "> 0",
+    "preaverage_one_sided_session_sign_flip_p": "<= 0.05",
+    "paired_sessions": ">= 8",
+    "paired_preaverage_minus_raw_bootstrap_95_lower": "> 0",
+    "paired_one_sided_session_sign_flip_p": "<= 0.05"
+  },
+  "notification_authority": false,
+  "strategy_decision_authority": false,
+  "contract_hash": "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27"
+}

@@ -1,0 +1,4428 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "SPX 0DTE 原始行情 Edge Discovery",
+    "description": "Strategy-independent raw quote-update discovery, held-out directional tests and exact-BBO option falsification for RTH and GTH.",
+    "generatedAt": "2026-08-19T18:16:05.423806+08:00",
+    "sources": [
+      {
+        "id": "raw_quotes",
+        "label": "Causal raw quote-update lake",
+        "path": "quote_lake/schema=v1/provider=schwab",
+        "query": {
+          "engine": "DuckDB over Parquet (read-only)",
+          "id": "raw-quote-edge-discovery-20260819",
+          "sql": "\n    WITH filtered AS (\n      SELECT\n        received_at,\n        source_at,\n        instrument_id,\n        effective_price,\n        bid,\n        ask,\n        bid_size,\n        ask_size,\n        volume,\n        lag(bid) OVER instrument_window AS previous_bid,\n        lag(ask) OVER instrument_window AS previous_ask,\n        lag(bid_size) OVER instrument_window AS previous_bid_size,\n        lag(ask_size) OVER instrument_window AS previous_ask_size,\n        lag(volume) OVER instrument_window AS previous_volume\n      FROM read_parquet(?, hive_partitioning=true, union_by_name=true)\n      WHERE provider = 'schwab'\n        AND instrument_id IN ('index:SPX', 'future:ES', 'future:NQ', 'future:RTY', 'future:YM', 'equity:SPY', 'index:VIX')\n        AND quality = 'live'\n        AND lower(coalesce(market_data_type, 'live')) IN ('live', '1')\n        AND effective_price > 0\n        AND source_at IS NOT NULL\n        AND source_at >= received_at - INTERVAL 30 SECOND\n        AND source_at <= received_at + INTERVAL 5 SECOND\n        AND (quote_time IS NULL OR quote_time <= received_at + INTERVAL 5 SECOND)\n      WINDOW instrument_window AS (\n        PARTITION BY instrument_id ORDER BY received_at, source_at\n      )\n    ), normalized AS (\n      SELECT\n        to_timestamp((floor(epoch(received_at) / 5) + 1) * 5) AS bucket_end,\n        instrument_id,\n        received_at,\n        effective_price,\n        bid,\n        ask,\n        bid_size,\n        ask_size,\n        CASE\n          WHEN bid_size IS NOT NULL AND ask_size IS NOT NULL\n            AND bid_size + ask_size > 0\n          THEN (bid_size - ask_size) / (bid_size + ask_size)\n        END AS depth_imbalance,\n        CASE\n          WHEN bid > 0 AND ask >= bid AND bid_size IS NOT NULL AND ask_size IS NOT NULL\n            AND bid_size + ask_size > 0\n          THEN (((ask * bid_size + bid * ask_size) / (bid_size + ask_size))\n                / ((bid + ask) / 2) - 1) * 10000\n        END AS microprice_deviation_bps,\n        coalesce(\n          CASE WHEN bid >= previous_bid THEN bid_size ELSE 0 END, 0\n        ) - coalesce(\n          CASE WHEN bid <= previous_bid THEN previous_bid_size ELSE 0 END, 0\n        ) - coalesce(\n          CASE WHEN ask <= previous_ask THEN ask_size ELSE 0 END, 0\n        ) + coalesce(\n          CASE WHEN ask >= previous_ask THEN previous_ask_size ELSE 0 END, 0\n        ) AS ofi,\n        CASE\n          WHEN volume >= previous_volume THEN volume - previous_volume\n          ELSE 0\n        END AS volume_delta\n      FROM filtered\n    )\n    SELECT\n      bucket_end,\n      instrument_id,\n      arg_max(effective_price, received_at) AS price,\n      arg_max(bid, received_at) AS bid,\n      arg_max(ask, received_at) AS ask,\n      arg_max(bid_size, received_at) AS bid_size,\n      arg_max(ask_size, received_at) AS ask_size,\n      arg_max(depth_imbalance, received_at) AS depth_imbalance,\n      arg_max(microprice_deviation_bps, received_at) AS microprice_deviation_bps,\n      sum(ofi) AS ofi,\n      sum(volume_delta) AS volume_delta,\n      count(*) AS quote_count\n    FROM normalized\n    GROUP BY 1, 2\n    ORDER BY 1, 2\n    ",
+          "description": "Builds five-second causal RTH/GTH quote-update buckets.",
+          "executed_at": "2026-08-19T10:10:10.116078+00:00",
+          "language": "sql+python",
+          "filters": [
+            "quality=live",
+            "market_data_type in {live,1}",
+            "source_at between received_at-30s and received_at+5s",
+            "quote_time no later than received_at+5s",
+            "bucket available only at bucket_end"
+          ],
+          "metric_definitions": [
+            "RTH target is future SPX log return in basis points.",
+            "GTH target is future ES-proxy log return in basis points.",
+            "Decision points are fifteen seconds apart; signal outcomes use a horizon-length cooldown."
+          ],
+          "tables_used": [
+            "raw quote Parquet partitions"
+          ]
+        }
+      },
+      {
+        "id": "exact_bbo",
+        "label": "Same-day SPXW exact BBO",
+        "path": "quote_lake/schema=v1/provider={schwab|ibkr}",
+        "query": {
+          "engine": "DuckDB ASOF joins over Parquet (read-only)",
+          "id": "exact-bbo-option-falsification-20260819",
+          "sql": "-- Representative exact-BBO event-time join. Provider, expiry and event table are bound per session.\nWITH option_quotes AS (\n  SELECT instrument_id, strike, right, received_at, source_at, quote_time, bid, ask, delta\n  FROM read_parquet($partition, hive_partitioning=true, union_by_name=true)\n  WHERE quality = 'live'\n    AND lower(coalesce(market_data_type, 'live')) IN ('live', '1')\n    AND bid >= 0 AND ask >= bid AND ask > 0\n    AND source_at BETWEEN received_at - INTERVAL 30 SECOND AND received_at + INTERVAL 5 SECOND\n    AND (quote_time IS NULL OR quote_time <= received_at + INTERVAL 5 SECOND)\n)\nSELECT event.*, quote.bid, quote.ask, quote.received_at\nFROM option_events AS event\nASOF LEFT JOIN option_quotes AS quote\n  ON event.instrument_id = quote.instrument_id\n AND event.event_at >= quote.received_at;",
+          "description": "Selects contracts at decision time and applies conservative leg-side BBO fills.",
+          "executed_at": "2026-08-19T10:10:10.116078+00:00",
+          "language": "sql+python",
+          "filters": [
+            "same-day SPXW",
+            "RTH Schwab BBO age <= 5 seconds",
+            "GTH IBKR BBO age <= 15 seconds",
+            "entry at decision + 5 seconds",
+            "buy at ask and sell at bid"
+          ],
+          "metric_definitions": [
+            "Outright P&L = exit bid - entry ask - fees.",
+            "Vertical P&L uses long ask/short bid entry and long bid/short ask exit.",
+            "$1.50 per contract leg-side is charged in addition to displayed spread crossing."
+          ],
+          "tables_used": [
+            "raw SPXW quote Parquet partitions"
+          ]
+        }
+      },
+      {
+        "id": "notebook",
+        "label": "Executed companion notebook",
+        "path": "docs/notebooks/raw-tick-edge-discovery-2026-08-19.ipynb",
+        "query": {
+          "engine": "Python notebook",
+          "id": "raw-tick-edge-notebook-20260819",
+          "sql": "\n    WITH filtered AS (\n      SELECT\n        received_at,\n        source_at,\n        instrument_id,\n        effective_price,\n        bid,\n        ask,\n        bid_size,\n        ask_size,\n        volume,\n        lag(bid) OVER instrument_window AS previous_bid,\n        lag(ask) OVER instrument_window AS previous_ask,\n        lag(bid_size) OVER instrument_window AS previous_bid_size,\n        lag(ask_size) OVER instrument_window AS previous_ask_size,\n        lag(volume) OVER instrument_window AS previous_volume\n      FROM read_parquet(?, hive_partitioning=true, union_by_name=true)\n      WHERE provider = 'schwab'\n        AND instrument_id IN ('index:SPX', 'future:ES', 'future:NQ', 'future:RTY', 'future:YM', 'equity:SPY', 'index:VIX')\n        AND quality = 'live'\n        AND lower(coalesce(market_data_type, 'live')) IN ('live', '1')\n        AND effective_price > 0\n        AND source_at IS NOT NULL\n        AND source_at >= received_at - INTERVAL 30 SECOND\n        AND source_at <= received_at + INTERVAL 5 SECOND\n        AND (quote_time IS NULL OR quote_time <= received_at + INTERVAL 5 SECOND)\n      WINDOW instrument_window AS (\n        PARTITION BY instrument_id ORDER BY received_at, source_at\n      )\n    ), normalized AS (\n      SELECT\n        to_timestamp((floor(epoch(received_at) / 5) + 1) * 5) AS bucket_end,\n        instrument_id,\n        received_at,\n        effective_price,\n        bid,\n        ask,\n        bid_size,\n        ask_size,\n        CASE\n          WHEN bid_size IS NOT NULL AND ask_size IS NOT NULL\n            AND bid_size + ask_size > 0\n          THEN (bid_size - ask_size) / (bid_size + ask_size)\n        END AS depth_imbalance,\n        CASE\n          WHEN bid > 0 AND ask >= bid AND bid_size IS NOT NULL AND ask_size IS NOT NULL\n            AND bid_size + ask_size > 0\n          THEN (((ask * bid_size + bid * ask_size) / (bid_size + ask_size))\n                / ((bid + ask) / 2) - 1) * 10000\n        END AS microprice_deviation_bps,\n        coalesce(\n          CASE WHEN bid >= previous_bid THEN bid_size ELSE 0 END, 0\n        ) - coalesce(\n          CASE WHEN bid <= previous_bid THEN previous_bid_size ELSE 0 END, 0\n        ) - coalesce(\n          CASE WHEN ask <= previous_ask THEN ask_size ELSE 0 END, 0\n        ) + coalesce(\n          CASE WHEN ask >= previous_ask THEN previous_ask_size ELSE 0 END, 0\n        ) AS ofi,\n        CASE\n          WHEN volume >= previous_volume THEN volume - previous_volume\n          ELSE 0\n        END AS volume_delta\n      FROM filtered\n    )\n    SELECT\n      bucket_end,\n      instrument_id,\n      arg_max(effective_price, received_at) AS price,\n      arg_max(bid, received_at) AS bid,\n      arg_max(ask, received_at) AS ask,\n      arg_max(bid_size, received_at) AS bid_size,\n      arg_max(ask_size, received_at) AS ask_size,\n      arg_max(depth_imbalance, received_at) AS depth_imbalance,\n      arg_max(microprice_deviation_bps, received_at) AS microprice_deviation_bps,\n      sum(ofi) AS ofi,\n      sum(volume_delta) AS volume_delta,\n      count(*) AS quote_count\n    FROM normalized\n    GROUP BY 1, 2\n    ORDER BY 1, 2\n    ",
+          "description": "Reproduces data quality, validation, held-out tests and exact-BBO falsification.",
+          "executed_at": "2026-08-19T18:16:05.423806+08:00",
+          "language": "python+sql",
+          "filters": [
+            "read-only research",
+            "no production strategy input",
+            "no order creation"
+          ],
+          "metric_definitions": [
+            "Post-hoc use of a seen test segment cannot independently confirm an edge."
+          ],
+          "tables_used": [
+            "derived causal five-second grids"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "rth_sessions",
+        "description": "Complete RTH sessions.",
+        "dataset": "headline",
+        "sourceId": "raw_quotes",
+        "metrics": [
+          {
+            "label": "RTH sessions",
+            "field": "rth_sessions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "gth_sessions",
+        "description": "Complete GTH sessions.",
+        "dataset": "headline",
+        "sourceId": "raw_quotes",
+        "metrics": [
+          {
+            "label": "GTH sessions",
+            "field": "gth_sessions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "rth_direction",
+        "description": "Held-out-test RTH signed SPX return.",
+        "dataset": "headline",
+        "sourceId": "raw_quotes",
+        "metrics": [
+          {
+            "label": "RTH direction",
+            "field": "rth_direction_bps",
+            "format": "decimal",
+            "suffix": " bp"
+          }
+        ]
+      },
+      {
+        "id": "gth_direction",
+        "description": "Held-out-test GTH signed ES-proxy return.",
+        "dataset": "headline",
+        "sourceId": "raw_quotes",
+        "metrics": [
+          {
+            "label": "GTH direction",
+            "field": "gth_direction_bps",
+            "format": "decimal",
+            "suffix": " bp"
+          }
+        ]
+      },
+      {
+        "id": "rth_option",
+        "description": "Held-out-test exact-BBO net P&L per RTH trade.",
+        "dataset": "headline",
+        "sourceId": "exact_bbo",
+        "metrics": [
+          {
+            "label": "RTH option",
+            "field": "rth_option_dollars",
+            "format": "currency"
+          }
+        ]
+      },
+      {
+        "id": "gth_option",
+        "description": "Held-out-test exact-BBO net P&L per GTH trade.",
+        "dataset": "headline",
+        "sourceId": "exact_bbo",
+        "metrics": [
+          {
+            "label": "GTH option",
+            "field": "gth_option_dollars",
+            "format": "currency"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "direction_sessions",
+        "title": "Directional candidates are suggestive but under-supported",
+        "subtitle": "RTH has only four represented sessions; GTH session outcomes are unstable.",
+        "intent": "comparison",
+        "question": "Directional candidates are suggestive but under-supported",
+        "rationale": "RTH has only four represented sessions; GTH session outcomes are unstable.",
+        "type": "bar",
+        "dataset": "direction_session_rows",
+        "sourceId": "raw_quotes",
+        "encodings": {
+          "x": {
+            "field": "session_date",
+            "type": "nominal",
+            "label": "Test session"
+          },
+          "y": {
+            "field": "mean_signed_bps",
+            "type": "quantitative",
+            "format": "decimal",
+            "label": "Mean signed future return (bp)"
+          },
+          "color": {
+            "field": "mode",
+            "type": "nominal",
+            "label": "Mode"
+          }
+        },
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "sort": "none"
+        }
+      },
+      {
+        "id": "delay_decay",
+        "title": "RTH edge decays almost completely within ten seconds",
+        "subtitle": "The GTH 15-minute signal is less latency-sensitive; the two horizons are not pooled.",
+        "intent": "trend",
+        "question": "How much directional return remains after realistic entry delay?",
+        "rationale": "A statistically positive mark is not executable if it disappears before an order can fill.",
+        "type": "line",
+        "dataset": "delay_rows",
+        "sourceId": "raw_quotes",
+        "encodings": {
+          "x": {
+            "field": "delay_seconds",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Entry delay (seconds)"
+          },
+          "y": {
+            "field": "mean_signed_bps",
+            "type": "quantitative",
+            "format": "decimal",
+            "label": "Remaining signed return (bp)"
+          },
+          "color": {
+            "field": "mode",
+            "type": "nominal",
+            "label": "Mode"
+          }
+        },
+        "layout": "full",
+        "settings": {
+          "showPoints": true,
+          "sort": "none"
+        }
+      },
+      {
+        "id": "option_sessions",
+        "title": "RTH option P&L loses; GTH remains inconclusive",
+        "subtitle": "GTH mean is positive after spread gating, but its session interval crosses zero.",
+        "intent": "comparison",
+        "question": "RTH option P&L loses; GTH remains inconclusive",
+        "rationale": "GTH mean is positive after spread gating, but its session interval crosses zero.",
+        "type": "bar",
+        "dataset": "option_session_rows",
+        "sourceId": "exact_bbo",
+        "encodings": {
+          "x": {
+            "field": "session_date",
+            "type": "nominal",
+            "label": "Test session"
+          },
+          "y": {
+            "field": "mean_net_return",
+            "type": "quantitative",
+            "format": "percent",
+            "label": "Mean net option return"
+          },
+          "color": {
+            "field": "mode",
+            "type": "nominal",
+            "label": "Mode"
+          }
+        },
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "sort": "none"
+        }
+      },
+      {
+        "id": "denoising_development_lcb",
+        "title": "Light pre-averaging improves RTH; no GTH pipeline clears zero",
+        "subtitle": "Bars are development session-bootstrap 95% lower bounds across six fixed pipelines.",
+        "intent": "comparison",
+        "question": "Light pre-averaging improves RTH; no GTH pipeline clears zero",
+        "rationale": "Bars are development session-bootstrap 95% lower bounds across six fixed pipelines.",
+        "type": "bar",
+        "dataset": "denoising_development_rows",
+        "sourceId": "raw_quotes",
+        "encodings": {
+          "x": {
+            "field": "pipeline",
+            "type": "nominal",
+            "label": "Fixed causal pipeline"
+          },
+          "y": {
+            "field": "ci_low_r",
+            "type": "quantitative",
+            "format": "decimal",
+            "label": "Development lower bound (R)"
+          },
+          "color": {
+            "field": "mode",
+            "type": "nominal",
+            "label": "Mode"
+          }
+        },
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "sort": "none"
+        }
+      },
+      {
+        "id": "gth_hurdle_stage_counts",
+        "title": "GTH hurdle stage counts by cohort",
+        "subtitle": "Direction signals, fresh fixed-vertical BBOs, and conditional-EV selections are shown separately.",
+        "intent": "comparison",
+        "question": "GTH hurdle stage counts by cohort",
+        "rationale": "Direction signals, fresh fixed-vertical BBOs, and conditional-EV selections are shown separately.",
+        "type": "bar",
+        "dataset": "gth_hurdle_stage_rows",
+        "sourceId": "exact_bbo",
+        "encodings": {
+          "x": {
+            "field": "cohort",
+            "type": "nominal",
+            "label": "Cohort"
+          },
+          "y": {
+            "field": "count",
+            "type": "quantitative",
+            "format": "number",
+            "label": "Observations"
+          },
+          "color": {
+            "field": "stage",
+            "type": "nominal",
+            "label": "Stage"
+          }
+        },
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "sort": "none"
+        }
+      },
+      {
+        "id": "gex_gate_option_pnl",
+        "title": "RTH pre-average and GEX-gated mean option P&L",
+        "subtitle": "Fixed 60-delta/15-point vertical, shown by development, validation, and seen-tail cohort.",
+        "intent": "comparison",
+        "question": "RTH pre-average and GEX-gated mean option P&L",
+        "rationale": "Fixed 60-delta/15-point vertical, shown by development, validation, and seen-tail cohort.",
+        "type": "bar",
+        "dataset": "gex_gate_rows",
+        "sourceId": "exact_bbo",
+        "encodings": {
+          "x": {
+            "field": "cohort",
+            "type": "nominal",
+            "label": "Cohort"
+          },
+          "y": {
+            "field": "mean_net_dollars",
+            "type": "quantitative",
+            "format": "currency",
+            "label": "Mean net P&L per trade ($)"
+          },
+          "color": {
+            "field": "policy",
+            "type": "nominal",
+            "label": "Policy"
+          }
+        },
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "sort": "none"
+        }
+      },
+      {
+        "id": "factor_share",
+        "title": "Cross-market information dominates RTH; price path dominates GTH",
+        "subtitle": "Shares use absolute standardized Ridge loadings and are descriptive, not causal.",
+        "intent": "comparison",
+        "question": "Cross-market information dominates RTH; price path dominates GTH",
+        "rationale": "Shares use absolute standardized Ridge loadings and are descriptive, not causal.",
+        "type": "bar",
+        "dataset": "factor_share_rows",
+        "sourceId": "raw_quotes",
+        "encodings": {
+          "x": {
+            "field": "factor_family",
+            "type": "nominal",
+            "label": "Factor family"
+          },
+          "y": {
+            "field": "absolute_loading_share",
+            "type": "quantitative",
+            "format": "percent",
+            "label": "Absolute loading share"
+          },
+          "color": {
+            "field": "mode",
+            "type": "nominal",
+            "label": "Mode"
+          }
+        },
+        "layout": "full",
+        "labels": {
+          "values": "none"
+        },
+        "settings": {
+          "categoryLabelPolicy": "wrap",
+          "groupMode": "grouped",
+          "sort": "none"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "decision_table",
+        "title": "What passed and what failed",
+        "subtitle": "Direction and executable option EV are separate claims.",
+        "dataset": "decision_rows",
+        "sourceId": "notebook",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "layer",
+            "label": "Layer",
+            "type": "text"
+          },
+          {
+            "field": "RTH",
+            "label": "RTH",
+            "type": "text"
+          },
+          {
+            "field": "GTH",
+            "label": "GTH",
+            "type": "text"
+          },
+          {
+            "field": "decision",
+            "label": "Decision",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "quality_table",
+        "title": "Point-in-time dataset and split",
+        "subtitle": "Target freshness is measured after the source-time knowledge guard.",
+        "dataset": "quality_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "target",
+            "label": "Target",
+            "type": "text"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "quote_updates",
+            "label": "Quote updates",
+            "format": "number"
+          },
+          {
+            "field": "decision_samples",
+            "label": "Decision points",
+            "format": "number"
+          },
+          {
+            "field": "features",
+            "label": "Features",
+            "format": "number"
+          },
+          {
+            "field": "coverage_min",
+            "label": "Min fresh coverage",
+            "format": "percent"
+          },
+          {
+            "field": "train_sessions",
+            "label": "Train",
+            "format": "number"
+          },
+          {
+            "field": "validation_sessions",
+            "label": "Validation",
+            "format": "number"
+          },
+          {
+            "field": "test_sessions",
+            "label": "Test",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "direction_table",
+        "title": "Held-out directional candidates",
+        "subtitle": "The test segment is now seen and cannot support another confirmatory tuning round.",
+        "dataset": "direction_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "target",
+            "label": "Target",
+            "type": "text"
+          },
+          {
+            "field": "holding_seconds",
+            "label": "Horizon s",
+            "format": "number"
+          },
+          {
+            "field": "model",
+            "label": "Model",
+            "type": "text"
+          },
+          {
+            "field": "signals",
+            "label": "Signals",
+            "format": "number"
+          },
+          {
+            "field": "mean_signed_bps",
+            "label": "Mean bp",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_low_bps",
+            "label": "CI low",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_high_bps",
+            "label": "CI high",
+            "format": "decimal"
+          },
+          {
+            "field": "hit_rate",
+            "label": "Hit rate",
+            "format": "percent"
+          },
+          {
+            "field": "holm_p",
+            "label": "Holm p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "option_table",
+        "title": "Joint direction + option validation",
+        "subtitle": "The option structure and direction horizon are both selected on validation only.",
+        "dataset": "option_rows",
+        "sourceId": "exact_bbo",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "direction_candidate",
+            "label": "Direction candidate",
+            "type": "text"
+          },
+          {
+            "field": "option_structure",
+            "label": "Option",
+            "type": "text"
+          },
+          {
+            "field": "maximum_relative_spread",
+            "label": "Max rel spread",
+            "format": "percent"
+          },
+          {
+            "field": "validation_lcb_return",
+            "label": "Validation LCB",
+            "format": "percent"
+          },
+          {
+            "field": "trades",
+            "label": "Test trades",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "BBO coverage",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return",
+            "label": "Mean return",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high_return",
+            "label": "CI high",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "search_table",
+        "title": "Validation-supported horizons entering joint option search",
+        "subtitle": "Only horizon champions with a positive directional validation lower bound enter this layer.",
+        "dataset": "search_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "holding_seconds",
+            "label": "Horizon s",
+            "format": "number"
+          },
+          {
+            "field": "model",
+            "label": "Model",
+            "type": "text"
+          },
+          {
+            "field": "confidence_quantile",
+            "label": "Confidence q",
+            "format": "decimal"
+          },
+          {
+            "field": "direction_validation_lcb_bps",
+            "label": "Direction LCB bp",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "denoising_development_table",
+        "title": "Six fixed causal denoising/state pipelines",
+        "subtitle": "Selection uses development only; family-wise max-p penalizes choosing the best of six.",
+        "dataset": "denoising_development_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "pipeline",
+            "label": "Pipeline",
+            "type": "text"
+          },
+          {
+            "field": "selected",
+            "label": "Selected",
+            "type": "text"
+          },
+          {
+            "field": "events",
+            "label": "Events",
+            "format": "number"
+          },
+          {
+            "field": "resolved",
+            "label": "Resolved",
+            "format": "number"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "target_first_rate",
+            "label": "Target first",
+            "format": "percent"
+          },
+          {
+            "field": "mean_return_r",
+            "label": "Mean R",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_low_r",
+            "label": "CI low R",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_high_r",
+            "label": "CI high R",
+            "format": "decimal"
+          },
+          {
+            "field": "one_sided_p",
+            "label": "One-sided p",
+            "format": "decimal"
+          },
+          {
+            "field": "familywise_max_p",
+            "label": "Family-wise p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "denoising_cohort_table",
+        "title": "Development champion on later underlying paths",
+        "subtitle": "Validation and the previously seen tail can falsify but cannot create new forward evidence.",
+        "dataset": "denoising_cohort_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "pipeline",
+            "label": "Pipeline",
+            "type": "text"
+          },
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "events",
+            "label": "Events",
+            "format": "number"
+          },
+          {
+            "field": "resolved",
+            "label": "Resolved",
+            "format": "number"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "target_first_rate",
+            "label": "Target first",
+            "format": "percent"
+          },
+          {
+            "field": "mean_return_r",
+            "label": "Mean R",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_low_r",
+            "label": "CI low R",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_high_r",
+            "label": "CI high R",
+            "format": "decimal"
+          },
+          {
+            "field": "one_sided_p",
+            "label": "One-sided p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "denoising_option_table",
+        "title": "Raw baseline vs selected denoiser at fixed exact-BBO economics",
+        "subtitle": "Both use 60-delta/15-point verticals; no delta, width or spread threshold is reselected here.",
+        "dataset": "denoising_option_rows",
+        "sourceId": "exact_bbo",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "role",
+            "label": "Role",
+            "type": "text"
+          },
+          {
+            "field": "pipeline",
+            "label": "Pipeline",
+            "type": "text"
+          },
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "trades",
+            "label": "Trades",
+            "format": "number"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "Coverage",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return",
+            "label": "Mean return",
+            "format": "percent"
+          },
+          {
+            "field": "positive_session_rate",
+            "label": "Positive sessions",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high_return",
+            "label": "CI high",
+            "format": "percent"
+          },
+          {
+            "field": "one_sided_p",
+            "label": "One-sided p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "denoising_forward_table",
+        "title": "RTH raw/pre-average strict-forward ledger",
+        "subtitle": "Only complete sessions on or after August 20, 2026 enter the paired contract.",
+        "dataset": "denoising_forward_rows",
+        "sourceId": "notebook",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "row_type",
+            "label": "Row type",
+            "type": "text"
+          },
+          {
+            "field": "lane",
+            "label": "Lane",
+            "type": "text"
+          },
+          {
+            "field": "complete_forward_sessions",
+            "label": "New sessions",
+            "format": "number"
+          },
+          {
+            "field": "signals",
+            "label": "Signals",
+            "format": "number"
+          },
+          {
+            "field": "trades",
+            "label": "Trades",
+            "format": "number"
+          },
+          {
+            "field": "event_sessions",
+            "label": "Event/paired sessions",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "Coverage",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return_or_improvement",
+            "label": "Return / paired lift",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low",
+            "label": "CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high",
+            "label": "CI high",
+            "format": "percent"
+          },
+          {
+            "field": "p_value",
+            "label": "One-sided p",
+            "format": "decimal"
+          },
+          {
+            "field": "promotion_eligible",
+            "label": "Promotable",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "gth_hurdle_table",
+        "title": "GTH observed-BBO and conditional-EV hurdle",
+        "subtitle": "Development uses leave-one-session-out predictions; later cohorts use the frozen development fit.",
+        "dataset": "gth_hurdle_rows",
+        "sourceId": "exact_bbo",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "direction_signals",
+            "label": "Direction signals",
+            "format": "number"
+          },
+          {
+            "field": "fresh_exact_bbo_trades",
+            "label": "Fresh BBO",
+            "format": "number"
+          },
+          {
+            "field": "exact_bbo_coverage",
+            "label": "BBO coverage",
+            "format": "percent"
+          },
+          {
+            "field": "selected_trades",
+            "label": "EV>0 selections",
+            "format": "number"
+          },
+          {
+            "field": "selected_sessions",
+            "label": "Selected sessions",
+            "format": "number"
+          },
+          {
+            "field": "conditional_selection_rate",
+            "label": "Selection rate",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Selected mean $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return",
+            "label": "Selected return",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high_return",
+            "label": "CI high",
+            "format": "percent"
+          },
+          {
+            "field": "p_value",
+            "label": "One-sided p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "gex_gate_table",
+        "title": "RTH GEX location gate against the pre-average baseline",
+        "subtitle": "The gate requires a causal surface within ten minutes and one event-scale of room to the next wall.",
+        "dataset": "gex_gate_rows",
+        "sourceId": "exact_bbo",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "policy",
+            "label": "Policy",
+            "type": "text"
+          },
+          {
+            "field": "exact_bbo_trades",
+            "label": "Exact-BBO trades",
+            "format": "number"
+          },
+          {
+            "field": "surface_located_trades",
+            "label": "Located",
+            "format": "number"
+          },
+          {
+            "field": "surface_coverage",
+            "label": "Surface coverage",
+            "format": "percent"
+          },
+          {
+            "field": "gated_trades",
+            "label": "Gated trades",
+            "format": "number"
+          },
+          {
+            "field": "gate_rate",
+            "label": "Gate rate",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return",
+            "label": "Mean return",
+            "format": "percent"
+          },
+          {
+            "field": "return_increment",
+            "label": "Return lift",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "Gate CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high_return",
+            "label": "Gate CI high",
+            "format": "percent"
+          },
+          {
+            "field": "p_value",
+            "label": "One-sided p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "cusum_table",
+        "title": "RTH CUSUM state-transition exact-BBO results",
+        "subtitle": "The same fixed 60-delta/15-point vertical and five-percent relative-spread gate are used in every cohort.",
+        "dataset": "cusum_rows",
+        "sourceId": "exact_bbo",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "signals",
+            "label": "Signals",
+            "format": "number"
+          },
+          {
+            "field": "trades",
+            "label": "Trades",
+            "format": "number"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "Coverage",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return",
+            "label": "Mean return",
+            "format": "percent"
+          },
+          {
+            "field": "positive_session_rate",
+            "label": "Positive sessions",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high_return",
+            "label": "CI high",
+            "format": "percent"
+          },
+          {
+            "field": "p_value",
+            "label": "One-sided p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "bocpd_table",
+        "title": "BOCPD change probability before hindsight trend launches",
+        "subtitle": "Maximum probability in the prior fifteen minutes is compared with matched-clock non-trend controls.",
+        "dataset": "bocpd_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "trend_launches",
+            "label": "Launches",
+            "format": "number"
+          },
+          {
+            "field": "prelaunch_max_probability",
+            "label": "Prelaunch max p",
+            "format": "percent"
+          },
+          {
+            "field": "matched_control_max_probability",
+            "label": "Control max p",
+            "format": "percent"
+          },
+          {
+            "field": "standardized_difference",
+            "label": "Std difference",
+            "format": "decimal"
+          },
+          {
+            "field": "prelaunch_hit_rate_at_0_20",
+            "label": "Hit rate at 0.20",
+            "format": "percent"
+          },
+          {
+            "field": "all_probability_p90",
+            "label": "All p90",
+            "format": "percent"
+          },
+          {
+            "field": "all_probability_p99",
+            "label": "All p99",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "loading_table",
+        "title": "Largest standardized factor loadings",
+        "subtitle": "Correlated loadings explain model composition, not causality.",
+        "dataset": "factor_loading_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "rank",
+            "label": "Rank",
+            "format": "number"
+          },
+          {
+            "field": "feature",
+            "label": "Feature",
+            "type": "text"
+          },
+          {
+            "field": "standardized_loading",
+            "label": "Loading",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "day_label_table",
+        "title": "Hindsight day labels use two independent axes",
+        "subtitle": "Amplitude does not define trend; mixed days are retained instead of forced into a binary class.",
+        "dataset": "day_label_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "axis",
+            "label": "Axis",
+            "type": "text"
+          },
+          {
+            "field": "label",
+            "label": "Label",
+            "type": "text"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          }
+        ]
+      },
+      {
+        "id": "launch_effect_table",
+        "title": "What changed before hindsight trend launches",
+        "subtitle": "Matched-clock standardized differences are descriptive; only seven trend sessions exist.",
+        "dataset": "launch_effect_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "rank",
+            "label": "Rank",
+            "format": "number"
+          },
+          {
+            "field": "feature",
+            "label": "Feature",
+            "type": "text"
+          },
+          {
+            "field": "launches",
+            "label": "Launches",
+            "format": "number"
+          },
+          {
+            "field": "launch_mean_change_15m",
+            "label": "Launch Δ15m",
+            "format": "decimal"
+          },
+          {
+            "field": "matched_clock_control_mean_change_15m",
+            "label": "Control Δ15m",
+            "format": "decimal"
+          },
+          {
+            "field": "standardized_difference",
+            "label": "Std difference",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "event_table",
+        "title": "Causal event labels on the SPX path",
+        "subtitle": "Outcomes use volatility-scaled symmetric first passage to close, never a fixed 20-minute return.",
+        "dataset": "event_rows",
+        "sourceId": "raw_quotes",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "event_type",
+            "label": "Event",
+            "type": "text"
+          },
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "events",
+            "label": "Events",
+            "format": "number"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "target_first_rate",
+            "label": "Target first",
+            "format": "percent"
+          },
+          {
+            "field": "mean_return_r",
+            "label": "Mean R",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_low_r",
+            "label": "CI low R",
+            "format": "decimal"
+          },
+          {
+            "field": "ci_high_r",
+            "label": "CI high R",
+            "format": "decimal"
+          },
+          {
+            "field": "p_value",
+            "label": "One-sided p",
+            "format": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "event_option_table",
+        "title": "Event hypotheses after exact-BBO costs",
+        "subtitle": "Option mapping is selected only on each mode's earliest development sessions and held fixed through later cohorts.",
+        "dataset": "event_option_rows",
+        "sourceId": "exact_bbo",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "mode",
+            "label": "Mode",
+            "type": "text"
+          },
+          {
+            "field": "option_scope",
+            "label": "Option scope",
+            "type": "text"
+          },
+          {
+            "field": "event_type",
+            "label": "Event",
+            "type": "text"
+          },
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "candidate",
+            "label": "Selected option",
+            "type": "text"
+          },
+          {
+            "field": "trades",
+            "label": "Trades",
+            "format": "number"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "Coverage",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return",
+            "label": "Mean return",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high_return",
+            "label": "CI high",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "qualifier_table",
+        "title": "Causal conditions around RTH pullback/resume",
+        "subtitle": "Twelve predefined single-variable qualifiers are ranked on development only; only the selected row is evaluated later.",
+        "dataset": "qualifier_rows",
+        "sourceId": "exact_bbo",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "cohort",
+            "label": "Cohort",
+            "type": "text"
+          },
+          {
+            "field": "qualifier",
+            "label": "Qualifier",
+            "type": "text"
+          },
+          {
+            "field": "selected",
+            "label": "Selected",
+            "type": "text"
+          },
+          {
+            "field": "eligible",
+            "label": "Eligible",
+            "type": "text"
+          },
+          {
+            "field": "signals",
+            "label": "Signals",
+            "format": "number"
+          },
+          {
+            "field": "trades",
+            "label": "Trades",
+            "format": "number"
+          },
+          {
+            "field": "sessions",
+            "label": "Sessions",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "Coverage",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "mean_net_return",
+            "label": "Mean return",
+            "format": "percent"
+          },
+          {
+            "field": "selection_lcb90",
+            "label": "Dev LCB90",
+            "format": "percent"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "Later CI low",
+            "format": "percent"
+          },
+          {
+            "field": "ci_high_return",
+            "label": "Later CI high",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "forward_table",
+        "title": "Strict forward promotion ledger",
+        "subtitle": "The contract starts with the 2026-08-19 RTH session; no pre-freeze session can enter this ledger.",
+        "dataset": "forward_rows",
+        "sourceId": "notebook",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "event_type",
+            "label": "Event",
+            "type": "text"
+          },
+          {
+            "field": "complete_forward_sessions",
+            "label": "New sessions",
+            "format": "number"
+          },
+          {
+            "field": "signals",
+            "label": "Signals",
+            "format": "number"
+          },
+          {
+            "field": "trades",
+            "label": "Trades",
+            "format": "number"
+          },
+          {
+            "field": "event_sessions",
+            "label": "Event sessions",
+            "format": "number"
+          },
+          {
+            "field": "coverage",
+            "label": "Coverage",
+            "format": "percent"
+          },
+          {
+            "field": "mean_net_dollars",
+            "label": "Mean net $",
+            "format": "currency"
+          },
+          {
+            "field": "ci_low_return",
+            "label": "CI low",
+            "format": "percent"
+          },
+          {
+            "field": "holm_p",
+            "label": "Holm p",
+            "format": "decimal"
+          },
+          {
+            "field": "promotion_eligible",
+            "label": "Promotable",
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "layout": "full",
+        "body": "# SPX 0DTE 原始行情 Edge Discovery\n\n**结论：原始 quote updates 中出现了方向候选，但严格统计门和 exact-BBO 执行门都没有找到已验证的 RTH/GTH 0DTE 期权 edge。**"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Technical Summary\n\n研究完全没有读取生产策略的 decision、setup、candidate、threshold、management 或 strategy_version。25 个完整 RTH session 和 26 个完整 GTH session 被因果聚合成 5 秒 quote-update 桶，每 15 秒观察一次；自由搜索 15/30/60/120/240/480/900/1800/3600 秒九个窗口，没有固定 20 分钟标签。最后六个 session 作为测试段。\n\n扩大到 97.5%/99% 极高置信后，方向结果更尖锐但也更稀疏：RTH 15 秒候选均值 1.44 bp，却只有 7 个信号、4 个 session，Holm p=0.125；GTH 15 分钟候选均值 1.95 bp，但 session bootstrap 区间 [-0.27, 6.55] bp。二者都不满足严格确认门。RTH 在延迟 5 秒后只剩 0.15 bp，延迟 10 秒转为 -0.14 bp。\n\n执行层仍失败：validation 同时比较方向窗口、30/40/50/60 delta、单腿/5/10/15 点 vertical，以及 1%–20% 相对 spread 门。最佳 RTH/GTH validation session-LCB 仍为 -0.94%/-0.84%。测试段 RTH 为 -$33.00/笔；GTH 虽为 +$41.81/笔，但只有 27 笔且 95% session 区间 [-0.22%, 7.57%]、Holm p=0.1875，不能确认。\n\n新增去噪/状态 benchmark 只比较六条预定义 pipeline。RTH 的 15 秒 causal pre-average pullback 在开发段为 29 个 resolved event/11 个 session、均值 +0.405R、95% 下界 +0.170R；跨六模型 max sign-flip p=0.015。它在 validation/已见尾部固定 60-delta、15 点 vertical 后为 +$37.94/+42.33 每笔，但两段 95% session 区间都跨零，严格门仍失败。GTH 的开发冠军 Kalman pullback family-wise p=0.800，底层方向没有优势；固定 vertical 在 validation/尾部为 -$46.48/-56.00，明确拒绝。\n\n本轮进一步把建议的四条路径逐一做了样本外审计。RTH raw 与 15 秒 pre-average 已冻结为从 2026-08-20 起、按完整 session 配对的双轨前向合同，目前零笔是正确状态。GTH 两阶段 hurdle 在 development 的 32 笔 fresh-BBO 交易中只选出 1 笔，实际 -15.06%，validation/tail 均选择零笔；它学会的是不交易，而不是稳定挑出赢家。GEX location gate 从 development 的 +3.20% 收益增量翻为 validation -7.24%、tail -6.35%；CUSUM 三段区间均跨零。BOCPD 在 RTH/GTH 趋势启动前的 change probability 与匹配对照几乎相同，0.20 阈值命中率均为零。\n\n事件层同样没有可推送 edge。RTH GEX 墙和 zero-gamma 左侧反转均亏损；production-compatible breakout vertical 在 validation 均值约 +$8.15 但收益率为负、尾段 -$23.66，因此拒绝。RTH 回撤续行的 15 点 vertical 在 validation/尾段为 +$16.58/+27.21，但 development LCB 为 -0.11%，两段区间也跨零，只能冻结为弱前向假设。GTH 使用独立 ES 路径和 IBKR SPXW BBO 后，两类事件 validation/tail 全部为负，均拒绝。action authority 仍为 none。"
+      },
+      {
+        "id": "headline",
+        "type": "metric-strip",
+        "layout": "full",
+        "cardIds": [
+          "rth_sessions",
+          "gth_sessions",
+          "rth_direction",
+          "gth_direction",
+          "rth_option",
+          "gth_option"
+        ]
+      },
+      {
+        "id": "findings",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Key Findings"
+      },
+      {
+        "id": "direction_chart",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "direction_sessions"
+      },
+      {
+        "id": "direction_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "raw_quotes",
+        "body": "方向结果按 session 聚类，而不是把行级观察当独立样本。极端置信门把 RTH test 压缩到 7 个信号/4 个 session，把 GTH 压缩到 13 个信号/5 个 session；均值看起来更大，但有效样本反而不足，不能称为已验证 edge。"
+      },
+      {
+        "id": "delay_chart",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "delay_decay"
+      },
+      {
+        "id": "delay_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "raw_quotes",
+        "body": "RTH 的主要增量来自 cross block：SPY/ES 相对 SPX 的短时变化与 ES 微价格。候选在 +5 秒只剩 0.15 bp、+10 秒变成负值，不能把未延迟 SPX mark 当作可成交利润。GTH 的 15 分钟候选对延迟不敏感，但收益集中于少数 session。"
+      },
+      {
+        "id": "option_chart",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "option_sessions"
+      },
+      {
+        "id": "option_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "exact_bbo",
+        "body": "期权层没有使用 mid：决策后五秒买在 ask，退出卖在 bid；vertical 逐腿使用 long ask/short bid 入场和 long bid/short ask 退出，并另收每 leg-side $1.50。即使只交易相对 spread 最窄的 1%–5% 门，最佳 validation 下界仍为负；GTH test 的正均值属于未通过统计门的候选。"
+      },
+      {
+        "id": "denoising_header",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "raw_quotes",
+        "body": "## Causal Denoising and State-Change Benchmark\n\n复杂因子被改写成四层：Observation 只处理报价离群点/平滑，State 只估水平、斜率和结构变化，Trigger 只产生 first-passage 方向事件，Execution 只负责 exact-BBO 净收益。首轮固定六条 pipeline：raw pullback、25 秒 causal Hampel、15 秒 causal pre-average、local-linear Kalman、Kalman+breadth，以及 Kalman+CUSUM+breadth；没有搜索神经网络结构或任意因子组合。"
+      },
+      {
+        "id": "denoising_chart",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "denoising_development_lcb"
+      },
+      {
+        "id": "denoising_development_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "denoising_development_table"
+      },
+      {
+        "id": "denoising_cohort_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "denoising_cohort_table"
+      },
+      {
+        "id": "denoising_option_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "denoising_option_table"
+      },
+      {
+        "id": "denoising_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "exact_bbo",
+        "body": "RTH 的结果说明轻度 pre-average 有增量，但不是已确认 edge：它把 development event LCB 从 raw 的 +0.045R 提高到 +0.170R，validation 的固定 vertical 均值也从 +$8.53 提高到 +$37.94；然而 validation CI 为 [-8.94%, +14.38%]、已见尾部为 [-18.25%, +28.52%]，p=0.309/0.406。GTH 六条 pipeline 的开发 LCB 全部为负，Kalman 只能把固定 vertical 的亏损从约 -$58.76 缩到 -$46.48，不能把负 edge 变正。结论：RTH 的触发噪声是次要瓶颈且可改善；GTH 的核心瓶颈是方向信息与 SPXW payoff/执行，不是滤波器不够复杂。"
+      },
+      {
+        "id": "followup_header",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Layered Follow-up Audit\n\n四条路径分别承担不同职责：RTH 双轨只回答去噪是否有增量；GTH hurdle 把方向存在与期权值得买拆开；GEX 只做位置门控；CUSUM/BOCPD 只检测状态变化。它们不共享最终分数，也没有任何通知或策略权限。"
+      },
+      {
+        "id": "denoising_forward_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "denoising_forward_table"
+      },
+      {
+        "id": "denoising_forward_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "notebook",
+        "body": "双轨合同冻结时间为 2026-08-19 09:41:19 UTC，首个可计入交易日为 2026-08-20。raw 与 pre-average 必须在同一完整 session 上配对；除各自通过 20 session、30 笔、8 个 event session、覆盖率和统计门外，还要求 pre-average 减 raw 的 session 配对提升下界大于零且 p≤0.05。现有历史不能进入这份新合同，所以当前零 session、零笔和不可晋级都是防止回看污染的正确结果。"
+      },
+      {
+        "id": "gth_hurdle_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "gth_hurdle_stage_counts"
+      },
+      {
+        "id": "gth_hurdle_chart_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "exact_bbo",
+        "body": "GTH 第一层沿用已失败的 ES/Kalman 方向事件，第二层只在 fresh two-sided SPXW exact BBO 存在时用固定 Ridge 估计条件净收益。开发段 leave-one-session-out 共 32 笔只选中 1 笔，而该笔实际亏损 $116、收益率 -15.06%；validation 与 tail 均选择零笔。模型的有效行为是 fail closed，不是发现可交易 edge。"
+      },
+      {
+        "id": "gth_hurdle_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "gth_hurdle_table"
+      },
+      {
+        "id": "gex_gate_chart_block",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "gex_gate_option_pnl"
+      },
+      {
+        "id": "gex_gate_chart_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "exact_bbo",
+        "body": "GEX gate 只使用决策时之前十分钟内的 RTH surface，要求现货位于 put/call wall 之间且顺势方向至少留有一个事件尺度空间。它在 development 把均值从 $13.26 提到 $27.21，但 validation/tail 的 gated 均值都变为负值，收益增量分别为 -7.24%/-6.35%。surface 覆盖率为 100%，所以失败来自关系不稳定，不是数据缺失。"
+      },
+      {
+        "id": "gex_gate_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "gex_gate_table"
+      },
+      {
+        "id": "cusum_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "cusum_table"
+      },
+      {
+        "id": "bocpd_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "bocpd_table"
+      },
+      {
+        "id": "state_change_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "raw_quotes",
+        "body": "CUSUM 触发在 development 为负，validation/tail 虽转正但 session 区间均跨零。BOCPD 用 60 秒 Kalman 标准化变化、1/60 hazard，并比较趋势启动前 15 分钟与匹配时钟对照；RTH 标准化差异 -0.355，GTH +0.195，0.20 阈值命中率均为零。两者最多保留为可视化状态诊断，不产生方向或交易。"
+      },
+      {
+        "id": "algorithm_evidence",
+        "type": "markdown",
+        "layout": "full",
+        "body": "### Why these algorithms\n\n- [Pre-averaging spot-volatility estimation](https://arxiv.org/abs/2004.01865) 和 [realized kernels](https://faculty.washington.edu/~ezivot/econ589/realizedKernelsInPractice.pdf) 提供了在微观结构噪声下先稳健估计局部路径/波动的依据。\n- [The Micro-Price](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2970694) 与 [order-flow imbalance](https://arxiv.org/abs/1011.6402) 支持把 microprice/OFI 作为短时观测，不把成交量方向当作真实持仓。\n- [Bayesian online changepoint detection](https://arxiv.org/abs/0710.3742) 支持把 run-length/change probability 独立成 State 层；本轮已与参数更少的 CUSUM 一并审计，两者都没有获得交易权限。\n- [White's Reality Check](https://onlinelibrary.wiley.com/doi/abs/10.1111/1468-0262.00152) 与 [backtest-overfitting analysis](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2308659) 是限制 pipeline 数量并报告 family-wise max-p 的原因。"
+      },
+      {
+        "id": "day_type_header",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "raw_quotes",
+        "body": "## Hindsight Regime and Event Atlas\n\n按你的建议把后视镜拆成两个轴：振幅 low ≤50 点、mid 50–80 点、high ≥80 点；路径独立标成 trend/range/mixed。RTH 25 个 session 的振幅为 12/9/4，路径为 7/7/11；GTH 26 个 session 的 ES 振幅为 21/4/1，路径为 6/7/13。全天标签只用于问‘后来是哪种日’，不会进入当时的事件特征。"
+      },
+      {
+        "id": "day_label_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "day_label_table"
+      },
+      {
+        "id": "launch_effect_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "launch_effect_table"
+      },
+      {
+        "id": "launch_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "raw_quotes",
+        "body": "RTH 趋势启动前较明显的是 SPX 5/10 分钟路径效率提升（标准化差异 1.50/1.73）；GTH 恰好相反，ES 5/10 分钟效率变化为 -2.06/-1.77。两个时段没有可共用的启动签名，而且各自只有 6–7 个有效启动样本；启动时点又由全天路径回看定义，所以这里只能生成分时段假设。"
+      },
+      {
+        "id": "event_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "event_table"
+      },
+      {
+        "id": "event_option_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "event_option_table"
+      },
+      {
+        "id": "event_decision",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "exact_bbo",
+        "body": "RTH GEX 墙位与 zero-gamma 左侧 fade 被明确否定。更重要的是，outright 结果不能为生产 Debit Vertical 背书：production-compatible breakout vertical 在 validation 为 +$8.15/笔但平均收益率 -0.14%，尾段 -$23.66，故拒绝；pullback 15 点 vertical 在 validation/尾段为 +$16.58/+27.21，但 development session-LCB -0.11%，95% 区间均跨零，仅保留为弱前向假设。GTH 两类事件 validation 与尾段全部为负，不冻结。"
+      },
+      {
+        "id": "qualifier_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "qualifier_table"
+      },
+      {
+        "id": "qualifier_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "exact_bbo",
+        "body": "固定扫描只包含时段、路径效率、短长波动比、跨资产 breadth、VIX 反向确认、ES OFI 和冲动尺度这些决策时已知的单变量条件，不使用全天 trend/range 标签，也不组合条件。Selected `breadth_300_ge_0.6` on development only; validation $+9.94/trade and seen tail $+107.75/trade. 判定：NO NEW FORWARD HYPOTHESIS。无论结果如何，现有 v2 前向合约保持不变，扫描结果没有通知权限。"
+      },
+      {
+        "id": "forward_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "forward_table"
+      },
+      {
+        "id": "forward_note",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "notebook",
+        "body": "v2 冻结合约从 2026-08-19 开始，只接收全新完整 RTH session。唯一假设是冲动后回撤续行：60-delta long leg、15 点 Debit Vertical、两腿 selection relative spread ≤5%、+5 秒按 long ask-short bid 入场、first-passage 时按 long bid-short ask 退出。至少 20 个新 session、30 笔/8 个 event session、95% session bootstrap 下界 >0、单侧 session sign-flip p≤0.05 后，才允许讨论接入 strategy_decision；新增 RIGHT_PULLBACK_RESUME 人读 setup 仍需显式批准。"
+      },
+      {
+        "id": "decision_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "decision_table"
+      },
+      {
+        "id": "scope",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Scope, Data and Metrics\n\nRTH 预测 fresh SPX；GTH 因现货 SPX 非 live，明确预测 ES proxy，两个 mode 从不 pooled。输入是 sampled near-tick quote updates，不是每个交易所 packet。knowledge guard 要求 live、source_at 不早于 received_at 30 秒且不晚于 5 秒、quote_time 不得来自未来；五秒桶只在 bucket_end 后可用。"
+      },
+      {
+        "id": "quality_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "quality_table"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Methodology and Model Validation\n\n1. 从 raw quote updates 构建 5 秒 causal grid；每 15 秒产生一个研究观察。\n2. 特征按 price、L1 microstructure、cross-market、state 四块递增；没有 VWAP 墙位、现有 setup 或管理变量。\n3. 方向目标是未来 log return bps，持有期自由覆盖 15 秒到 60 分钟；置信门覆盖 50%–99%。\n4. 最早 11/12 个 session 训练，中间 8 个选择模型、窗口和预测置信分位，最后 6 个作为测试段。\n5. 搜索 Ridge 与低容量 HistGradientBoosting；validation 以非重叠信号的 session-cluster 90% 下界排序，至少 25 个信号、6 个 session。\n6. 每个 mode 只落一个方向冠军；跨 RTH/GTH 对精确 session sign-flip p-value 做 Holm 校正。\n7. 期权联合层只接纳方向 validation 下界为正的窗口冠军，再比较 16 种结构和 1%/2%/5%/10%/20% 相对 spread 门；合约按决策时已知 delta 选择，五秒后才成交。\n8. 去噪 benchmark 固定六条 pipeline，在 development 只选一次；模型选择后的 p-value 采用跨 pipeline 的 exact session sign-flip maximum statistic。冠军随后固定为 60-delta/15 点 vertical，RTH/GTH 相对 spread 门分别固定为 5%/2%。\n9. RTH 双轨前向合同在全部历史结果已知之后冻结；只接收 2026-08-20 起的完整新 session，并同时检验各 lane 与 session 配对增量。\n10. GTH hurdle 第一层只定义固定方向事件，第二层以 development session leave-one-out Ridge 预测 exact-BBO 净收益；validation/tail 不重估参数。\n11. GEX 只使用 decision_at 之前十分钟内的 surface，作为 pre-average 事件的 location gate；它不生成方向。\n12. BOCPD 只在 60 秒 Kalman 标准化 path 上生成 change probability，趋势启动标签仅用于盘后匹配对照，不进入交易触发。\n13. 极端置信、spread 门及所有 follow-up benchmark 均发生在原 test 已被看过之后，所以 validation/tail 只用于 retrospective falsification；它们不能成为新的 independent confirmation。"
+      },
+      {
+        "id": "direction_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "direction_table"
+      },
+      {
+        "id": "search_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "search_table"
+      },
+      {
+        "id": "option_table_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "option_table"
+      },
+      {
+        "id": "factor_header",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Factor Decomposition"
+      },
+      {
+        "id": "factor_chart",
+        "type": "chart",
+        "layout": "full",
+        "chartId": "factor_share"
+      },
+      {
+        "id": "factor_note",
+        "type": "markdown",
+        "layout": "full",
+        "body": "RTH 标准化绝对 loading 中 cross 占 55.9%、micro 占 26.9%、自身 price 占 17.1%；GTH 则 price 44.5%、state 18.0%、cross 19.0%、micro 18.5%。这实现了因子块解耦，但高度相关特征的线性 loading 不能解释为因果贡献。"
+      },
+      {
+        "id": "loading_block",
+        "type": "table",
+        "layout": "full",
+        "tableId": "loading_table"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Limitations, Uncertainty and Robustness\n\n只有 25/26 个完整 session，封存检验每个 mode 只有 6 个 session；精确 sign-flip 的最小单侧 p-value 是 1/64。RTH SPX mark 的短时可预测性可能是 cross-market repricing/指数发布延迟，而不是能交易的错误定价，5–10 秒延迟和期权 BBO 已支持这一反证。GTH 用 ES proxy，不代表 SPX cash 方向可直接成交。历史期权 universe 受当时订阅 lattice 影响；本研究只在 fresh exact BBO 存在时计入，不能证明未订阅合约的结果。联合搜索与去噪 benchmark 都在人类看过第一次 sealed 方向/期权结果后扩展，因此是更完整的 falsification，不是新的 independent confirmatory trial。RTH pre-average 的正均值和 family-wise development p 值只说明它值得继续观察；validation/tail 区间跨零，不能称为稳定 edge。GTH hurdle 的 development OOF 只选中一笔，无法估计稳定条件分布；GEX gate 的开发提升在两个后续 cohort 反号；BOCPD 只有 RTH 7 个、GTH 6 个 hindsight launch，且 0.20 门没有一次命中。这些结果足以拒绝当前规格，却不足以证明所有同类算法永久无效。"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Recommended Next Steps\n\n1. 不把任何本次候选接入 Trade Ready；当前可执行结论仍是 NO EDGE / NO TRADE。\n2. 保持 v2 前向合约与哈希不变；另按新冻结的双轨合同，从 2026-08-20 起自动累计 raw 与 15 秒 pre-average 的同日完整 RTH session。\n3. 双轨合同达到 20 个新 session、各 30 笔/8 个 event session 前不读中途输赢、不调阈值；届时同时报告各 lane 和 pre-average-minus-raw 的 session 配对检验。\n4. 停止当前 GTH hurdle 规格和方向滤波器搜索：上游方向层未通过，条件 EV 层又只学会零选择。若未来研究 XSP/SPY/MES 等更低摩擦 payoff，应另立合同，不能把本结果包装为 SPXW edge。\n5. GEX 保持 RTH 描述性位置字段，不做方向与 gate；CUSUM/BOCPD 保持诊断性状态字段，不形成交易。高波震荡反转仍必须另开前向假设，不能把全天 >80 点标签放进盘中特征。"
+      },
+      {
+        "id": "questions",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Further Questions\n\n- RTH 的 SPY/ES→SPX 重定价在 option combo NBBO 本身是否存在 1–3 秒 lead，而不是只存在于 SPX mark？\n- GTH 30 分钟 edge 能否在更低 spread 的 XSP/SPY 或 MES/ES options 上存活，还是仅 SPXW 成本过高？\n- 下一批数据是否应随机记录固定 delta lattice 的 inclusion probability，以便对历史订阅缺失做加权估计？"
+      },
+      {
+        "id": "reproducibility",
+        "type": "markdown",
+        "layout": "full",
+        "sourceId": "notebook",
+        "body": "## Reproducibility\n\n伴随 notebook 从 raw Parquet top-to-bottom 执行并生成 snapshot。全部工作为只读研究：没有读取生产策略候选，没有修改配置/服务/数据库，没有通知或订单。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-19T18:16:05.423806+08:00",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "rth_sessions": 25,
+          "gth_sessions": 26,
+          "rth_direction_bps": 1.4379971685557436,
+          "gth_direction_bps": 1.9548069453498753,
+          "rth_option_dollars": -33.00000000000004,
+          "gth_option_dollars": 41.814814814814774
+        }
+      ],
+      "quality_rows": [
+        {
+          "mode": "RTH",
+          "target": "SPX",
+          "sessions": 25,
+          "quote_updates": 2589820,
+          "decision_samples": 38000,
+          "features": 62,
+          "coverage_min": 0.9944444444444445,
+          "coverage_median": 1.0,
+          "train_sessions": 11,
+          "validation_sessions": 8,
+          "test_sessions": 6
+        },
+        {
+          "mode": "GTH",
+          "target": "ES proxy",
+          "sessions": 26,
+          "quote_updates": 3028953,
+          "decision_samples": 81120,
+          "features": 38,
+          "coverage_min": 0.9715189873417721,
+          "coverage_median": 0.9990506329113924,
+          "train_sessions": 12,
+          "validation_sessions": 8,
+          "test_sessions": 6
+        }
+      ],
+      "direction_rows": [
+        {
+          "mode": "RTH",
+          "target": "SPX",
+          "holding_seconds": 15,
+          "model": "ridge:cross:10",
+          "feature_block": "cross",
+          "signals": 7,
+          "sessions": 4,
+          "mean_signed_bps": 1.4379971685557436,
+          "hit_rate": 1.0,
+          "ci_low_bps": 0.45238015604545334,
+          "ci_high_bps": 1.8761316635325351,
+          "holm_p": 0.125,
+          "validated": false
+        },
+        {
+          "mode": "GTH",
+          "target": "ES proxy",
+          "holding_seconds": 900,
+          "model": "ridge:full:0.1",
+          "feature_block": "full",
+          "signals": 13,
+          "sessions": 5,
+          "mean_signed_bps": 1.9548069453498753,
+          "hit_rate": 0.5384615384615384,
+          "ci_low_bps": -0.2673417923310435,
+          "ci_high_bps": 6.549580311013004,
+          "holm_p": 0.21875,
+          "validated": false
+        }
+      ],
+      "direction_session_rows": [
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-10",
+          "mean_signed_bps": 2.044356163582371
+        },
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-12",
+          "mean_signed_bps": 1.5009885554806865
+        },
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-14",
+          "mean_signed_bps": 1.3714581633830283
+        },
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-17",
+          "mean_signed_bps": 0.1028440229003756
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-10",
+          "mean_signed_bps": -0.3211149109987478
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-11",
+          "mean_signed_bps": 4.819804884185208
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-12",
+          "mean_signed_bps": 9.487166279402459
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-14",
+          "mean_signed_bps": 0.16003793866858945
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-17",
+          "mean_signed_bps": -0.5334021673275638
+        }
+      ],
+      "delay_rows": [
+        {
+          "mode": "RTH",
+          "delay_seconds": 0,
+          "mean_signed_bps": 1.4379971685557436
+        },
+        {
+          "mode": "RTH",
+          "delay_seconds": 5,
+          "mean_signed_bps": 0.14579130216824246
+        },
+        {
+          "mode": "RTH",
+          "delay_seconds": 10,
+          "mean_signed_bps": -0.14191945728260977
+        },
+        {
+          "mode": "GTH",
+          "delay_seconds": 0,
+          "mean_signed_bps": 1.9548069453498753
+        },
+        {
+          "mode": "GTH",
+          "delay_seconds": 5,
+          "mean_signed_bps": 1.9551002312624597
+        },
+        {
+          "mode": "GTH",
+          "delay_seconds": 10,
+          "mean_signed_bps": 1.6334894875788917
+        },
+        {
+          "mode": "GTH",
+          "delay_seconds": 15,
+          "mean_signed_bps": 1.5348107786707894
+        }
+      ],
+      "option_rows": [
+        {
+          "mode": "RTH",
+          "direction_candidate": "h15_ridge_cross_10_q0.99",
+          "option_structure": "delta_0.60/outright",
+          "maximum_relative_spread": 0.05,
+          "validation_lcb_return": -0.00937672720731103,
+          "trades": 7,
+          "sessions": 4,
+          "coverage": 1.0,
+          "mean_net_dollars": -33.00000000000004,
+          "mean_net_return": -0.02258902624583159,
+          "hit_rate": 0.2857142857142857,
+          "ci_low_return": -0.04317277844772217,
+          "ci_high_return": -0.014370336167786414,
+          "holm_p": 1.0,
+          "validated": false
+        },
+        {
+          "mode": "GTH",
+          "direction_candidate": "h1800_ridge_cross_10_q0.5",
+          "option_structure": "delta_0.60/outright",
+          "maximum_relative_spread": 0.01,
+          "validation_lcb_return": -0.008439969459962917,
+          "trades": 27,
+          "sessions": 6,
+          "coverage": 0.18620689655172415,
+          "mean_net_dollars": 41.814814814814774,
+          "mean_net_return": 0.024618393837304204,
+          "hit_rate": 0.5925925925925926,
+          "ci_low_return": -0.002212562365840808,
+          "ci_high_return": 0.07568614825285198,
+          "holm_p": 0.1875,
+          "validated": false
+        }
+      ],
+      "option_session_rows": [
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-10",
+          "mean_net_return": -0.010069539132806157
+        },
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-12",
+          "mean_net_return": -0.01993037759456952
+        },
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-14",
+          "mean_net_return": -0.05092024539877305
+        },
+        {
+          "mode": "RTH",
+          "session_date": "2026-08-17",
+          "mean_net_return": -0.027272727272727188
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-10",
+          "mean_net_return": 0.07773299268587348
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-11",
+          "mean_net_return": -0.028194463196183142
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-12",
+          "mean_net_return": -0.020294859096199734
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-13",
+          "mean_net_return": 0.06316713252726519
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-14",
+          "mean_net_return": 0.021769485903814237
+        },
+        {
+          "mode": "GTH",
+          "session_date": "2026-08-17",
+          "mean_net_return": 0.10685714285714278
+        }
+      ],
+      "factor_share_rows": [
+        {
+          "mode": "RTH",
+          "factor_family": "cross",
+          "absolute_loading_share": 0.559283634765768
+        },
+        {
+          "mode": "RTH",
+          "factor_family": "micro",
+          "absolute_loading_share": 0.2693718744839936
+        },
+        {
+          "mode": "RTH",
+          "factor_family": "price",
+          "absolute_loading_share": 0.17134449075023844
+        },
+        {
+          "mode": "GTH",
+          "factor_family": "price",
+          "absolute_loading_share": 0.4445987032085511
+        },
+        {
+          "mode": "GTH",
+          "factor_family": "state",
+          "absolute_loading_share": 0.18012978989724085
+        },
+        {
+          "mode": "GTH",
+          "factor_family": "cross",
+          "absolute_loading_share": 0.19041798777932004
+        },
+        {
+          "mode": "GTH",
+          "factor_family": "micro",
+          "absolute_loading_share": 0.1848535191148881
+        }
+      ],
+      "factor_loading_rows": [
+        {
+          "mode": "RTH",
+          "rank": 1,
+          "feature": "cross/equity:SPY/return_300s_bps",
+          "standardized_loading": 1.27659644742176
+        },
+        {
+          "mode": "RTH",
+          "rank": 2,
+          "feature": "cross/future:ES/return_300s_bps",
+          "standardized_loading": -0.861192861682876
+        },
+        {
+          "mode": "RTH",
+          "rank": 3,
+          "feature": "micro/future:ES/depth_imbalance",
+          "standardized_loading": -0.5818315059617881
+        },
+        {
+          "mode": "RTH",
+          "rank": 4,
+          "feature": "cross/equity:SPY/return_60s_bps",
+          "standardized_loading": 0.5729638467821822
+        },
+        {
+          "mode": "RTH",
+          "rank": 5,
+          "feature": "micro/future:ES/microprice_deviation_bps",
+          "standardized_loading": 0.5629766638748331
+        },
+        {
+          "mode": "RTH",
+          "rank": 6,
+          "feature": "price/index:SPX/return_300s_bps",
+          "standardized_loading": -0.5440101313330581
+        },
+        {
+          "mode": "RTH",
+          "rank": 7,
+          "feature": "cross/equity:SPY/return_15s_bps",
+          "standardized_loading": 0.3549625035587768
+        },
+        {
+          "mode": "RTH",
+          "rank": 8,
+          "feature": "price/index:SPX/return_60s_bps",
+          "standardized_loading": -0.2529444202807876
+        },
+        {
+          "mode": "RTH",
+          "rank": 9,
+          "feature": "price/index:SPX/return_15s_bps",
+          "standardized_loading": -0.23692635788778205
+        },
+        {
+          "mode": "RTH",
+          "rank": 10,
+          "feature": "cross/future:ES/return_60s_bps",
+          "standardized_loading": -0.2182022479514206
+        },
+        {
+          "mode": "GTH",
+          "rank": 1,
+          "feature": "price/future:ES/rv_60s_bps",
+          "standardized_loading": 0.4500304731525565
+        },
+        {
+          "mode": "GTH",
+          "rank": 2,
+          "feature": "price/future:ES/rv_600s_bps",
+          "standardized_loading": -0.39495901296401414
+        },
+        {
+          "mode": "GTH",
+          "rank": 3,
+          "feature": "price/future:ES/return_300s_bps",
+          "standardized_loading": -0.31385455346678154
+        },
+        {
+          "mode": "GTH",
+          "rank": 4,
+          "feature": "state/time_cos",
+          "standardized_loading": -0.2692634141066049
+        },
+        {
+          "mode": "GTH",
+          "rank": 5,
+          "feature": "state/rv_60_to_600",
+          "standardized_loading": -0.23435953180623958
+        },
+        {
+          "mode": "GTH",
+          "rank": 6,
+          "feature": "cross/future:RTY/return_300s_bps",
+          "standardized_loading": 0.22268087976173176
+        },
+        {
+          "mode": "GTH",
+          "rank": 7,
+          "feature": "micro/future:ES/quote_count_300s",
+          "standardized_loading": 0.20603139730544542
+        },
+        {
+          "mode": "GTH",
+          "rank": 8,
+          "feature": "price/future:ES/return_60s_bps",
+          "standardized_loading": -0.19299100749372372
+        },
+        {
+          "mode": "GTH",
+          "rank": 9,
+          "feature": "state/time_sin",
+          "standardized_loading": -0.16045837083590145
+        },
+        {
+          "mode": "GTH",
+          "rank": 10,
+          "feature": "cross/future:NQ/return_300s_bps",
+          "standardized_loading": 0.14135610758866154
+        }
+      ],
+      "search_rows": [
+        {
+          "mode": "RTH",
+          "holding_seconds": 15,
+          "model": "ridge:cross:10",
+          "confidence_quantile": 0.99,
+          "direction_validation_lcb_bps": 1.1154854335565632
+        },
+        {
+          "mode": "RTH",
+          "holding_seconds": 30,
+          "model": "ridge:full:10",
+          "confidence_quantile": 0.95,
+          "direction_validation_lcb_bps": 0.5932395717142338
+        },
+        {
+          "mode": "RTH",
+          "holding_seconds": 60,
+          "model": "ridge:cross:0.1",
+          "confidence_quantile": 0.8,
+          "direction_validation_lcb_bps": 0.15819409137276516
+        },
+        {
+          "mode": "GTH",
+          "holding_seconds": 900,
+          "model": "ridge:full:0.1",
+          "confidence_quantile": 0.975,
+          "direction_validation_lcb_bps": 0.9518267462362471
+        },
+        {
+          "mode": "GTH",
+          "holding_seconds": 1800,
+          "model": "ridge:cross:10",
+          "confidence_quantile": 0.5,
+          "direction_validation_lcb_bps": 0.63351041609846
+        },
+        {
+          "mode": "GTH",
+          "holding_seconds": 480,
+          "model": "ridge:full:0.1",
+          "confidence_quantile": 0.95,
+          "direction_validation_lcb_bps": 0.5556406721267584
+        },
+        {
+          "mode": "GTH",
+          "holding_seconds": 15,
+          "model": "ridge:full:10",
+          "confidence_quantile": 0.99,
+          "direction_validation_lcb_bps": 0.3353743062552257
+        },
+        {
+          "mode": "GTH",
+          "holding_seconds": 240,
+          "model": "ridge:full:10",
+          "confidence_quantile": 0.975,
+          "direction_validation_lcb_bps": 0.3318674955411043
+        }
+      ],
+      "decision_rows": [
+        {
+          "layer": "Raw directional predictability",
+          "RTH": "1.44 bp mean, but only 7 signals / 4 sessions; Holm p=0.125",
+          "GTH": "1.95 bp mean on ES proxy; session CI crosses zero",
+          "decision": "Suggestive, not validated"
+        },
+        {
+          "layer": "Latency robustness",
+          "RTH": "Falls to 0.15 bp at +5s and -0.14 bp at +10s",
+          "GTH": "1.53 bp at +15s, but still session-unstable",
+          "decision": "RTH resembles short-lived cross-market repricing"
+        },
+        {
+          "layer": "Validation exact-BBO",
+          "RTH": "Best confidence+spread-gated LCB = -0.94%",
+          "GTH": "Best confidence+spread-gated LCB = -0.84%",
+          "decision": "No candidate clears promotion before test"
+        },
+        {
+          "layer": "Held-out exact-BBO",
+          "RTH": "-$33.00/trade; 0/4 positive sessions",
+          "GTH": "+$41.81/trade; CI crosses zero; Holm p=0.1875",
+          "decision": "NO EXECUTABLE OPTION EDGE"
+        },
+        {
+          "layer": "GEX wall / zero-gamma left-side fade",
+          "RTH": "Tail exact-BBO mean -$84.00 / -$79.43; both session CIs are below zero",
+          "GTH": "Not tested: cash SPX/GEX structure is not a live GTH equivalent",
+          "decision": "REJECT"
+        },
+        {
+          "layer": "Right-side 30m breakout",
+          "RTH": "Production vertical validation +$8.15/trade but mean return -0.14%; seen tail -$23.66",
+          "GTH": "Production vertical validation -$63.33/trade; seen tail -$61.29",
+          "decision": "REJECT BOTH MODES"
+        },
+        {
+          "layer": "Right-side impulse pullback/resume",
+          "RTH": "Production 15-point vertical validation +$16.58; seen tail +$27.21, but all CIs cross zero",
+          "GTH": "Production vertical validation -$58.76/trade; seen tail -$67.67",
+          "decision": "RTH WEAK FORWARD HYPOTHESIS; GTH REJECT"
+        },
+        {
+          "layer": "Causal pullback qualifier scan",
+          "RTH": "Selected `breadth_300_ge_0.6` on development only; validation $+9.94/trade and seen tail $+107.75/trade.",
+          "GTH": "Not searched; GTH base pullback economics were already negative.",
+          "decision": "NO NEW FORWARD HYPOTHESIS"
+        },
+        {
+          "layer": "Causal denoising + state-change benchmark",
+          "RTH": "preaverage15_pullback; family-wise p=0.015; validation/tail $+37.94 / $+42.33",
+          "GTH": "kalman_pullback; family-wise p=0.800; validation/tail $-46.48 / $-56.00",
+          "decision": "RTH PROMISING BUT UNCONFIRMED; GTH REJECT"
+        },
+        {
+          "layer": "RTH raw/pre-average paired forward contract",
+          "RTH": "Starts 2026-08-20; 0 new sessions; contract sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27",
+          "GTH": "Out of scope; RTH cash/Schwab contract only.",
+          "decision": "FROZEN RESEARCH CONTRACT; AWAIT FORWARD DATA"
+        },
+        {
+          "layer": "GTH observed-BBO + conditional-EV hurdle",
+          "RTH": "Out of scope.",
+          "GTH": "Development OOF selected 1 losing trade; validation and seen tail selected 0 trades; upstream direction gate also failed.",
+          "decision": "REJECT AS EDGE; FAIL CLOSED"
+        },
+        {
+          "layer": "RTH GEX location gate",
+          "RTH": "Development gated mean +$27.21; validation/seen tail -$7.15/-$6.00 despite positive ungated baselines.",
+          "GTH": "Not copied into GTH.",
+          "decision": "REJECT GATE"
+        },
+        {
+          "layer": "CUSUM / BOCPD state change",
+          "RTH": "CUSUM development -$38.58, later means positive but CIs cross zero; BOCPD prelaunch standardized difference -0.36.",
+          "GTH": "BOCPD prelaunch standardized difference +0.20; no trigger support.",
+          "decision": "STATE OBSERVATION ONLY; NO TRADE AUTHORITY"
+        }
+      ],
+      "day_label_rows": [
+        {
+          "mode": "RTH",
+          "axis": "amplitude",
+          "label": "low",
+          "sessions": 12
+        },
+        {
+          "mode": "RTH",
+          "axis": "amplitude",
+          "label": "mid",
+          "sessions": 9
+        },
+        {
+          "mode": "RTH",
+          "axis": "amplitude",
+          "label": "high",
+          "sessions": 4
+        },
+        {
+          "mode": "RTH",
+          "axis": "path",
+          "label": "trend",
+          "sessions": 7
+        },
+        {
+          "mode": "RTH",
+          "axis": "path",
+          "label": "range",
+          "sessions": 7
+        },
+        {
+          "mode": "RTH",
+          "axis": "path",
+          "label": "mixed",
+          "sessions": 11
+        },
+        {
+          "mode": "GTH",
+          "axis": "amplitude",
+          "label": "low",
+          "sessions": 21
+        },
+        {
+          "mode": "GTH",
+          "axis": "amplitude",
+          "label": "mid",
+          "sessions": 4
+        },
+        {
+          "mode": "GTH",
+          "axis": "amplitude",
+          "label": "high",
+          "sessions": 1
+        },
+        {
+          "mode": "GTH",
+          "axis": "path",
+          "label": "trend",
+          "sessions": 6
+        },
+        {
+          "mode": "GTH",
+          "axis": "path",
+          "label": "range",
+          "sessions": 7
+        },
+        {
+          "mode": "GTH",
+          "axis": "path",
+          "label": "mixed",
+          "sessions": 13
+        }
+      ],
+      "launch_effect_rows": [
+        {
+          "mode": "RTH",
+          "rank": 1,
+          "feature": "price/index:SPX/efficiency_600s",
+          "launches": 6,
+          "launch_mean_change_15m": 0.13769047323878097,
+          "matched_clock_control_mean_change_15m": 0.039907975065863494,
+          "standardized_difference": 1.731829652669833
+        },
+        {
+          "mode": "RTH",
+          "rank": 2,
+          "feature": "price/index:SPX/efficiency_300s",
+          "launches": 6,
+          "launch_mean_change_15m": 0.1175430051456929,
+          "matched_clock_control_mean_change_15m": 0.004205703324542338,
+          "standardized_difference": 1.4974953179035613
+        },
+        {
+          "mode": "RTH",
+          "rank": 3,
+          "feature": "cross/future:RTY/return_300s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -3.8934384130680244,
+          "matched_clock_control_mean_change_15m": 4.540638676769393,
+          "standardized_difference": -0.8567835563289525
+        },
+        {
+          "mode": "RTH",
+          "rank": 4,
+          "feature": "cross/future:NQ/return_60s_bps",
+          "launches": 7,
+          "launch_mean_change_15m": -4.438654959106768,
+          "matched_clock_control_mean_change_15m": 0.04746038269293264,
+          "standardized_difference": -0.629855909967017
+        },
+        {
+          "mode": "RTH",
+          "rank": 5,
+          "feature": "cross/index:VIX/return_60s_bps",
+          "launches": 5,
+          "launch_mean_change_15m": 11.163924348880402,
+          "matched_clock_control_mean_change_15m": -6.351222823849205,
+          "standardized_difference": 0.5963055844494403
+        },
+        {
+          "mode": "RTH",
+          "rank": 6,
+          "feature": "cross/future:YM/return_60s_bps",
+          "launches": 7,
+          "launch_mean_change_15m": 1.2007871387837756,
+          "matched_clock_control_mean_change_15m": -0.09226949244415102,
+          "standardized_difference": 0.39324659791054384
+        },
+        {
+          "mode": "RTH",
+          "rank": 7,
+          "feature": "cross/equity:SPY/return_300s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -2.3997235807135753,
+          "matched_clock_control_mean_change_15m": 0.39838960154441844,
+          "standardized_difference": -0.33026482548428615
+        },
+        {
+          "mode": "RTH",
+          "rank": 8,
+          "feature": "cross/future:ES/return_300s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -2.614609464219573,
+          "matched_clock_control_mean_change_15m": 0.029543883329931225,
+          "standardized_difference": -0.31422141162516587
+        },
+        {
+          "mode": "RTH",
+          "rank": 9,
+          "feature": "price/index:SPX/return_300s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -2.1125420495238214,
+          "matched_clock_control_mean_change_15m": 0.34508385155385013,
+          "standardized_difference": -0.29197160300050373
+        },
+        {
+          "mode": "RTH",
+          "rank": 10,
+          "feature": "price/index:SPX/return_600s_bps",
+          "launches": 7,
+          "launch_mean_change_15m": 3.1683400941916235,
+          "matched_clock_control_mean_change_15m": -0.6355651766391538,
+          "standardized_difference": 0.2560326143734664
+        },
+        {
+          "mode": "GTH",
+          "rank": 1,
+          "feature": "price/future:ES/efficiency_300s",
+          "launches": 6,
+          "launch_mean_change_15m": -0.07413750772014233,
+          "matched_clock_control_mean_change_15m": 0.03494154448264015,
+          "standardized_difference": -2.0649293563769002
+        },
+        {
+          "mode": "GTH",
+          "rank": 2,
+          "feature": "price/future:ES/efficiency_600s",
+          "launches": 6,
+          "launch_mean_change_15m": -0.03893692062459669,
+          "matched_clock_control_mean_change_15m": 0.021207517859202083,
+          "standardized_difference": -1.7739031368780376
+        },
+        {
+          "mode": "GTH",
+          "rank": 3,
+          "feature": "price/future:ES/rv_300s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -0.3026379177666557,
+          "matched_clock_control_mean_change_15m": 0.1185211499841673,
+          "standardized_difference": -0.9483862689339719
+        },
+        {
+          "mode": "GTH",
+          "rank": 4,
+          "feature": "cross/future:NQ/return_300s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -2.6016900070801676,
+          "matched_clock_control_mean_change_15m": 0.22406070898653505,
+          "standardized_difference": -0.5330608835619118
+        },
+        {
+          "mode": "GTH",
+          "rank": 5,
+          "feature": "cross/future:RTY/return_60s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -0.4490766500198375,
+          "matched_clock_control_mean_change_15m": 0.055863282686618033,
+          "standardized_difference": -0.3813509842579675
+        },
+        {
+          "mode": "GTH",
+          "rank": 6,
+          "feature": "state/rv_60_to_600",
+          "launches": 6,
+          "launch_mean_change_15m": 0.04592664113949408,
+          "matched_clock_control_mean_change_15m": 0.01978289437020353,
+          "standardized_difference": 0.34170596898491334
+        },
+        {
+          "mode": "GTH",
+          "rank": 7,
+          "feature": "price/future:ES/return_600s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -0.6364455533000629,
+          "matched_clock_control_mean_change_15m": 0.2186836745892428,
+          "standardized_difference": -0.2437949706061466
+        },
+        {
+          "mode": "GTH",
+          "rank": 8,
+          "feature": "price/future:ES/return_300s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -0.34931941738383215,
+          "matched_clock_control_mean_change_15m": 0.16232070899889306,
+          "standardized_difference": -0.21572568084948374
+        },
+        {
+          "mode": "GTH",
+          "rank": 9,
+          "feature": "price/future:ES/rv_60s_bps",
+          "launches": 6,
+          "launch_mean_change_15m": -0.03601049131933467,
+          "matched_clock_control_mean_change_15m": -0.0973272376281703,
+          "standardized_difference": 0.18222061690407756
+        },
+        {
+          "mode": "GTH",
+          "rank": 10,
+          "feature": "micro/future:ES/normalized_ofi_60s",
+          "launches": 6,
+          "launch_mean_change_15m": 0.07785601404983152,
+          "matched_clock_control_mean_change_15m": -0.05687370959270336,
+          "standardized_difference": 0.17878425929956315
+        }
+      ],
+      "event_rows": [
+        {
+          "mode": "RTH",
+          "event_type": "left_gex_rejection",
+          "cohort": "retrospective_validation",
+          "events": 93,
+          "sessions": 8,
+          "target_first_rate": 0.3888888888888889,
+          "mean_return_r": -0.23003596402798535,
+          "ci_low_r": -0.39743203151326795,
+          "ci_high_r": 0.14564807327204535,
+          "p_value": 0.828125
+        },
+        {
+          "mode": "RTH",
+          "event_type": "left_gex_rejection",
+          "cohort": "previously_seen_tail",
+          "events": 86,
+          "sessions": 6,
+          "target_first_rate": 0.5316455696202531,
+          "mean_return_r": 0.07222809557017462,
+          "ci_low_r": -0.48476679200240774,
+          "ci_high_r": 0.2267705046096304,
+          "p_value": 0.5625
+        },
+        {
+          "mode": "RTH",
+          "event_type": "left_zero_gamma_rejection",
+          "cohort": "retrospective_validation",
+          "events": 8,
+          "sessions": 3,
+          "target_first_rate": 0.5,
+          "mean_return_r": -0.016281266708339986,
+          "ci_low_r": -0.3554382356281193,
+          "ci_high_r": 0.3445455024253881,
+          "p_value": 0.75
+        },
+        {
+          "mode": "RTH",
+          "event_type": "left_zero_gamma_rejection",
+          "cohort": "previously_seen_tail",
+          "events": 14,
+          "sessions": 3,
+          "target_first_rate": 0.5,
+          "mean_return_r": -0.007213417723023263,
+          "ci_low_r": -0.3069174158530437,
+          "ci_high_r": 0.3311891940032323,
+          "p_value": 0.625
+        },
+        {
+          "mode": "RTH",
+          "event_type": "right_breakout",
+          "cohort": "retrospective_validation",
+          "events": 102,
+          "sessions": 8,
+          "target_first_rate": 0.6082474226804123,
+          "mean_return_r": 0.21889803403729638,
+          "ci_low_r": -0.003351730469001279,
+          "ci_high_r": 0.4922493963645409,
+          "p_value": 0.046875
+        },
+        {
+          "mode": "RTH",
+          "event_type": "right_breakout",
+          "cohort": "previously_seen_tail",
+          "events": 63,
+          "sessions": 6,
+          "target_first_rate": 0.5689655172413793,
+          "mean_return_r": 0.14609382833737142,
+          "ci_low_r": -0.08255566033374893,
+          "ci_high_r": 0.3858103381521982,
+          "p_value": 0.140625
+        },
+        {
+          "mode": "RTH",
+          "event_type": "right_pullback_resume",
+          "cohort": "retrospective_validation",
+          "events": 38,
+          "sessions": 8,
+          "target_first_rate": 0.631578947368421,
+          "mean_return_r": 0.22509334153734972,
+          "ci_low_r": -0.09433105657840206,
+          "ci_high_r": 0.561342076292638,
+          "p_value": 0.13671875
+        },
+        {
+          "mode": "RTH",
+          "event_type": "right_pullback_resume",
+          "cohort": "previously_seen_tail",
+          "events": 19,
+          "sessions": 6,
+          "target_first_rate": 0.5263157894736842,
+          "mean_return_r": 0.20252211473001958,
+          "ci_low_r": -0.7407371847578098,
+          "ci_high_r": 1.085581666738807,
+          "p_value": 0.4375
+        },
+        {
+          "mode": "GTH",
+          "event_type": "right_breakout",
+          "cohort": "retrospective_validation",
+          "events": 125,
+          "sessions": 8,
+          "target_first_rate": 0.44537815126050423,
+          "mean_return_r": -0.10713964280904054,
+          "ci_low_r": -0.27509624271939936,
+          "ci_high_r": 0.04587037541835399,
+          "p_value": 0.90234375
+        },
+        {
+          "mode": "GTH",
+          "event_type": "right_breakout",
+          "cohort": "previously_seen_tail",
+          "events": 74,
+          "sessions": 6,
+          "target_first_rate": 0.36619718309859156,
+          "mean_return_r": -0.30061313642054566,
+          "ci_low_r": -0.47793232224096366,
+          "ci_high_r": -0.07334422129995712,
+          "p_value": 0.984375
+        },
+        {
+          "mode": "GTH",
+          "event_type": "right_pullback_resume",
+          "cohort": "retrospective_validation",
+          "events": 35,
+          "sessions": 8,
+          "target_first_rate": 0.45454545454545453,
+          "mean_return_r": -0.08657201843990928,
+          "ci_low_r": -0.47585759744872297,
+          "ci_high_r": 0.38005109167886814,
+          "p_value": 0.609375
+        },
+        {
+          "mode": "GTH",
+          "event_type": "right_pullback_resume",
+          "cohort": "previously_seen_tail",
+          "events": 12,
+          "sessions": 5,
+          "target_first_rate": 0.45454545454545453,
+          "mean_return_r": -0.09747426859773432,
+          "ci_low_r": -0.9391974022876154,
+          "ci_high_r": 0.40990398154374075,
+          "p_value": 0.8125
+        }
+      ],
+      "event_option_rows": [
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "left_gex_rejection",
+          "cohort": "retrospective_validation",
+          "candidate": "left_gex_rejection::delta_0.30/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 93,
+          "trades": 32,
+          "sessions": 8,
+          "coverage": 0.34408602150537637,
+          "mean_net_dollars": -68.0,
+          "mean_net_return": -0.07286224056156437,
+          "positive_session_rate": 0.375,
+          "ci_low_return": -0.4548636796615326,
+          "ci_high_return": 0.36391898446821175,
+          "p_value": 0.64453125
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "left_gex_rejection",
+          "cohort": "previously_seen_tail",
+          "candidate": "left_gex_rejection::delta_0.30/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 86,
+          "trades": 15,
+          "sessions": 6,
+          "coverage": 0.1744186046511628,
+          "mean_net_dollars": -84.00000000000001,
+          "mean_net_return": -0.1329981886541002,
+          "positive_session_rate": 0.16666666666666666,
+          "ci_low_return": -0.5062875833531794,
+          "ci_high_return": -0.08711847281599457,
+          "p_value": 0.96875
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "left_gex_rejection",
+          "cohort": "retrospective_validation",
+          "candidate": "left_gex_rejection::delta_0.60/vertical_10",
+          "maximum_relative_spread": 0.05,
+          "signals": 93,
+          "trades": 83,
+          "sessions": 8,
+          "coverage": 0.8924731182795699,
+          "mean_net_dollars": -91.90361445783132,
+          "mean_net_return": -0.19335317378633368,
+          "positive_session_rate": 0.25,
+          "ci_low_return": -0.27139518150878594,
+          "ci_high_return": -0.02305495433529977,
+          "p_value": 0.97265625
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "left_gex_rejection",
+          "cohort": "previously_seen_tail",
+          "candidate": "left_gex_rejection::delta_0.60/vertical_10",
+          "maximum_relative_spread": 0.05,
+          "signals": 86,
+          "trades": 71,
+          "sessions": 6,
+          "coverage": 0.8255813953488372,
+          "mean_net_dollars": -10.22535211267606,
+          "mean_net_return": -0.01484042627016649,
+          "positive_session_rate": 0.3333333333333333,
+          "ci_low_return": -0.19690990499264757,
+          "ci_high_return": 0.021241592055787645,
+          "p_value": 0.78125
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "left_zero_gamma_rejection",
+          "cohort": "retrospective_validation",
+          "candidate": "left_zero_gamma_rejection::delta_0.60/outright",
+          "maximum_relative_spread": 0.1,
+          "signals": 8,
+          "trades": 8,
+          "sessions": 3,
+          "coverage": 1.0,
+          "mean_net_dollars": -36.12499999999997,
+          "mean_net_return": -0.05374627837450855,
+          "positive_session_rate": 0.3333333333333333,
+          "ci_low_return": -0.1558462792245176,
+          "ci_high_return": 0.036162326008141045,
+          "p_value": 0.75
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "left_zero_gamma_rejection",
+          "cohort": "previously_seen_tail",
+          "candidate": "left_zero_gamma_rejection::delta_0.60/outright",
+          "maximum_relative_spread": 0.1,
+          "signals": 14,
+          "trades": 14,
+          "sessions": 3,
+          "coverage": 1.0,
+          "mean_net_dollars": -79.42857142857143,
+          "mean_net_return": -0.1451528664579964,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.2384411630723319,
+          "ci_high_return": -0.02670311990876507,
+          "p_value": 1.0
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "left_zero_gamma_rejection",
+          "cohort": "retrospective_validation",
+          "candidate": "left_zero_gamma_rejection::delta_0.50/vertical_15",
+          "maximum_relative_spread": 0.2,
+          "signals": 8,
+          "trades": 8,
+          "sessions": 3,
+          "coverage": 1.0,
+          "mean_net_dollars": -56.000000000000085,
+          "mean_net_return": -0.09838733807699337,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.20150872711792267,
+          "ci_high_return": -0.014497354497354583,
+          "p_value": 1.0
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "left_zero_gamma_rejection",
+          "cohort": "previously_seen_tail",
+          "candidate": "left_zero_gamma_rejection::delta_0.50/vertical_15",
+          "maximum_relative_spread": 0.2,
+          "signals": 14,
+          "trades": 9,
+          "sessions": 3,
+          "coverage": 0.6428571428571429,
+          "mean_net_dollars": -73.22222222222226,
+          "mean_net_return": -0.17497160608427964,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.4863354037267082,
+          "ci_high_return": -0.03581923844218932,
+          "p_value": 1.0
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_breakout",
+          "cohort": "retrospective_validation",
+          "candidate": "right_breakout::delta_0.30/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 102,
+          "trades": 40,
+          "sessions": 8,
+          "coverage": 0.39215686274509803,
+          "mean_net_dollars": 76.0,
+          "mean_net_return": 0.16473131191786275,
+          "positive_session_rate": 0.75,
+          "ci_low_return": -0.11517538386275628,
+          "ci_high_return": 0.37580413647121474,
+          "p_value": 0.16796875
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_breakout",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_breakout::delta_0.30/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 63,
+          "trades": 8,
+          "sessions": 5,
+          "coverage": 0.12698412698412698,
+          "mean_net_dollars": -63.625,
+          "mean_net_return": -0.05147666246792215,
+          "positive_session_rate": 0.6,
+          "ci_low_return": -0.5529903357354338,
+          "ci_high_return": 0.45186730860704233,
+          "p_value": 0.53125
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_breakout",
+          "cohort": "retrospective_validation",
+          "candidate": "right_breakout::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.1,
+          "signals": 102,
+          "trades": 94,
+          "sessions": 8,
+          "coverage": 0.9215686274509803,
+          "mean_net_dollars": 8.148936170212753,
+          "mean_net_return": -0.0014331762800227667,
+          "positive_session_rate": 0.5,
+          "ci_low_return": -0.09159280902188473,
+          "ci_high_return": 0.10720154422040151,
+          "p_value": 0.453125
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_breakout",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_breakout::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.1,
+          "signals": 63,
+          "trades": 47,
+          "sessions": 6,
+          "coverage": 0.746031746031746,
+          "mean_net_dollars": -23.659574468085115,
+          "mean_net_return": -0.027401060788537032,
+          "positive_session_rate": 0.5,
+          "ci_low_return": -0.19440701861390006,
+          "ci_high_return": 0.08412074227594224,
+          "p_value": 0.796875
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_pullback_resume",
+          "cohort": "retrospective_validation",
+          "candidate": "right_pullback_resume::delta_0.60/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 38,
+          "trades": 32,
+          "sessions": 8,
+          "coverage": 0.8421052631578947,
+          "mean_net_dollars": 62.937499999999936,
+          "mean_net_return": 0.03795827641784607,
+          "positive_session_rate": 0.625,
+          "ci_low_return": -0.11733506747175403,
+          "ci_high_return": 0.1876010105543653,
+          "p_value": 0.33203125
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_pullback_resume",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_pullback_resume::delta_0.60/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 19,
+          "trades": 11,
+          "sessions": 4,
+          "coverage": 0.5789473684210527,
+          "mean_net_dollars": 92.4545454545455,
+          "mean_net_return": 0.0850877089404881,
+          "positive_session_rate": 0.5,
+          "ci_low_return": -0.37196357404750513,
+          "ci_high_return": 0.4691497749819127,
+          "p_value": 0.5
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_pullback_resume",
+          "cohort": "retrospective_validation",
+          "candidate": "right_pullback_resume::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 38,
+          "trades": 33,
+          "sessions": 8,
+          "coverage": 0.868421052631579,
+          "mean_net_dollars": 16.575757575757518,
+          "mean_net_return": 0.027160215795991607,
+          "positive_session_rate": 0.625,
+          "ci_low_return": -0.08534373624095797,
+          "ci_high_return": 0.13095815873438033,
+          "p_value": 0.35546875
+        },
+        {
+          "mode": "RTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_pullback_resume",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_pullback_resume::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 19,
+          "trades": 14,
+          "sessions": 4,
+          "coverage": 0.7368421052631579,
+          "mean_net_dollars": 27.214285714285737,
+          "mean_net_return": 0.0480466442955234,
+          "positive_session_rate": 0.5,
+          "ci_low_return": -0.3334385528507868,
+          "ci_high_return": 0.3166854800242118,
+          "p_value": 0.5
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_breakout",
+          "cohort": "retrospective_validation",
+          "candidate": "right_breakout::delta_0.60/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 125,
+          "trades": 97,
+          "sessions": 8,
+          "coverage": 0.776,
+          "mean_net_dollars": -46.91752577319586,
+          "mean_net_return": -0.020232036028499382,
+          "positive_session_rate": 0.375,
+          "ci_low_return": -0.04741348380597236,
+          "ci_high_return": 0.000280004726648657,
+          "p_value": 0.9453125
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_breakout",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_breakout::delta_0.60/outright",
+          "maximum_relative_spread": 0.02,
+          "signals": 74,
+          "trades": 42,
+          "sessions": 6,
+          "coverage": 0.5675675675675675,
+          "mean_net_dollars": -75.14285714285714,
+          "mean_net_return": -0.033344332809214,
+          "positive_session_rate": 0.3333333333333333,
+          "ci_low_return": -0.05648204050628142,
+          "ci_high_return": 0.032094025025548804,
+          "p_value": 0.71875
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_breakout",
+          "cohort": "retrospective_validation",
+          "candidate": "right_breakout::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 125,
+          "trades": 86,
+          "sessions": 8,
+          "coverage": 0.688,
+          "mean_net_dollars": -63.32558139534885,
+          "mean_net_return": -0.07411555819374609,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.08922114090778882,
+          "ci_high_return": -0.06198722945326552,
+          "p_value": 1.0
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_breakout",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_breakout::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 74,
+          "trades": 34,
+          "sessions": 6,
+          "coverage": 0.4594594594594595,
+          "mean_net_dollars": -61.2941176470588,
+          "mean_net_return": -0.07607217018199919,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.08812773242515004,
+          "ci_high_return": -0.027311866093855688,
+          "p_value": 1.0
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_pullback_resume",
+          "cohort": "retrospective_validation",
+          "candidate": "right_pullback_resume::delta_0.60/outright",
+          "maximum_relative_spread": 0.05,
+          "signals": 35,
+          "trades": 32,
+          "sessions": 8,
+          "coverage": 0.9142857142857143,
+          "mean_net_dollars": -33.93749999999996,
+          "mean_net_return": -0.014908809842987087,
+          "positive_session_rate": 0.375,
+          "ci_low_return": -0.05227717426203826,
+          "ci_high_return": 0.05201682916792195,
+          "p_value": 0.5625
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "unrestricted_research",
+          "event_type": "right_pullback_resume",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_pullback_resume::delta_0.60/outright",
+          "maximum_relative_spread": 0.05,
+          "signals": 12,
+          "trades": 7,
+          "sessions": 4,
+          "coverage": 0.5833333333333334,
+          "mean_net_dollars": -148.71428571428567,
+          "mean_net_return": -0.07598558802314768,
+          "positive_session_rate": 0.25,
+          "ci_low_return": -0.16468867984658786,
+          "ci_high_return": 0.0032817337461300312,
+          "p_value": 0.9375
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_pullback_resume",
+          "cohort": "retrospective_validation",
+          "candidate": "right_pullback_resume::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 35,
+          "trades": 29,
+          "sessions": 8,
+          "coverage": 0.8285714285714286,
+          "mean_net_dollars": -58.75862068965512,
+          "mean_net_return": -0.06837474870522699,
+          "positive_session_rate": 0.25,
+          "ci_low_return": -0.0920497624265807,
+          "ci_high_return": -0.02165351474952007,
+          "p_value": 0.98828125
+        },
+        {
+          "mode": "GTH",
+          "option_scope": "production_vertical",
+          "event_type": "right_pullback_resume",
+          "cohort": "previously_seen_tail",
+          "candidate": "right_pullback_resume::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 12,
+          "trades": 6,
+          "sessions": 3,
+          "coverage": 0.5,
+          "mean_net_dollars": -67.66666666666666,
+          "mean_net_return": -0.08254742975830943,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.11168831168831134,
+          "ci_high_return": -0.017977528089887795,
+          "p_value": 1.0
+        }
+      ],
+      "qualifier_rows": [
+        {
+          "cohort": "development_selection",
+          "qualifier": "breadth_300_ge_0.6",
+          "definition": "directional cross-asset breadth over 300s >= 0.6",
+          "selected": true,
+          "eligible": true,
+          "signals": 16,
+          "trades": 15,
+          "sessions": 9,
+          "coverage": 0.9375,
+          "mean_net_dollars": 107.33333333333333,
+          "mean_net_return": 0.19332566529628814,
+          "selection_lcb90": 0.14011572578331488,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "unfiltered",
+          "definition": "all causal pullback/resume events",
+          "selected": false,
+          "eligible": true,
+          "signals": 38,
+          "trades": 33,
+          "sessions": 11,
+          "coverage": 0.868421052631579,
+          "mean_net_dollars": 27.939393939393938,
+          "mean_net_return": 0.06041399231935868,
+          "selection_lcb90": -0.0010793148335118824,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "es_ofi_aligned",
+          "definition": "direction-adjusted ES normalized OFI over 60s > 0",
+          "selected": false,
+          "eligible": true,
+          "signals": 30,
+          "trades": 25,
+          "sessions": 10,
+          "coverage": 0.8333333333333334,
+          "mean_net_dollars": 6.599999999999992,
+          "mean_net_return": 0.033525373407173945,
+          "selection_lcb90": -0.033836939750246514,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "breadth_60_ge_0.6",
+          "definition": "directional cross-asset breadth over 60s >= 0.6",
+          "selected": false,
+          "eligible": true,
+          "signals": 31,
+          "trades": 26,
+          "sessions": 10,
+          "coverage": 0.8387096774193549,
+          "mean_net_dollars": 3.038461538461542,
+          "mean_net_return": 0.024227448745167135,
+          "selection_lcb90": -0.08105926346367609,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "vix_inverse_aligned",
+          "definition": "VIX 60s move is inverse-aligned with SPX direction",
+          "selected": false,
+          "eligible": true,
+          "signals": 15,
+          "trades": 13,
+          "sessions": 7,
+          "coverage": 0.8666666666666667,
+          "mean_net_dollars": -128.3076923076923,
+          "mean_net_return": -0.16439857784055567,
+          "selection_lcb90": -0.36473779890612357,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "efficiency_300_ge_0.25",
+          "definition": "causal SPX path efficiency over 300s >= 0.25",
+          "selected": false,
+          "eligible": false,
+          "signals": 2,
+          "trades": 2,
+          "sessions": 2,
+          "coverage": 1.0,
+          "mean_net_dollars": 219.0,
+          "mean_net_return": 0.4215626444752658,
+          "selection_lcb90": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "efficiency_600_ge_0.25",
+          "definition": "causal SPX path efficiency over 600s >= 0.25",
+          "selected": false,
+          "eligible": false,
+          "signals": 2,
+          "trades": 2,
+          "sessions": 2,
+          "coverage": 1.0,
+          "mean_net_dollars": 159.00000000000003,
+          "mean_net_return": 0.2150406504065041,
+          "selection_lcb90": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "rv_rate_ratio_ge_1.15",
+          "definition": "causal per-unit-time SPX rv(60s) / rv(600s) >= 1.15",
+          "selected": false,
+          "eligible": false,
+          "signals": 14,
+          "trades": 11,
+          "sessions": 7,
+          "coverage": 0.7857142857142857,
+          "mean_net_dollars": 78.09090909090908,
+          "mean_net_return": 0.162255144490095,
+          "selection_lcb90": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "rv_rate_ratio_le_0.85",
+          "definition": "causal per-unit-time SPX rv(60s) / rv(600s) <= 0.85",
+          "selected": false,
+          "eligible": false,
+          "signals": 9,
+          "trades": 8,
+          "sessions": 6,
+          "coverage": 0.8888888888888888,
+          "mean_net_dollars": -35.37499999999999,
+          "mean_net_return": -0.03764676081369962,
+          "selection_lcb90": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "first_session_third",
+          "definition": "causal session progress <= one third",
+          "selected": false,
+          "eligible": false,
+          "signals": 8,
+          "trades": 7,
+          "sessions": 6,
+          "coverage": 0.875,
+          "mean_net_dollars": -14.571428571428585,
+          "mean_net_return": -0.02976433156730925,
+          "selection_lcb90": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "last_session_third",
+          "definition": "causal session progress >= two thirds",
+          "selected": false,
+          "eligible": false,
+          "signals": 11,
+          "trades": 7,
+          "sessions": 5,
+          "coverage": 0.6363636363636364,
+          "mean_net_dollars": 164.0,
+          "mean_net_return": 0.30104390954349947,
+          "selection_lcb90": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development_selection",
+          "qualifier": "impulse_scale_ge_1.5",
+          "definition": "directional 15m impulse >= 1.5 local scales",
+          "selected": false,
+          "eligible": false,
+          "signals": 6,
+          "trades": 5,
+          "sessions": 4,
+          "coverage": 0.8333333333333334,
+          "mean_net_dollars": 216.00000000000006,
+          "mean_net_return": 0.3512220380456232,
+          "selection_lcb90": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "retrospective_validation",
+          "qualifier": "breadth_300_ge_0.6",
+          "definition": "directional cross-asset breadth over 300s >= 0.6",
+          "selected": true,
+          "eligible": null,
+          "signals": 17,
+          "trades": 16,
+          "sessions": 7,
+          "coverage": 0.9411764705882353,
+          "mean_net_dollars": 9.937499999999913,
+          "mean_net_return": 0.012307963251953203,
+          "selection_lcb90": null,
+          "ci_low_return": -0.03717149756459715,
+          "ci_high_return": 0.19921616785745253,
+          "p_value": 0.1328125
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "qualifier": "breadth_300_ge_0.6",
+          "definition": "directional cross-asset breadth over 300s >= 0.6",
+          "selected": true,
+          "eligible": null,
+          "signals": 8,
+          "trades": 4,
+          "sessions": 2,
+          "coverage": 0.5,
+          "mean_net_dollars": 107.74999999999999,
+          "mean_net_return": 0.16827053022187868,
+          "selection_lcb90": null,
+          "ci_low_return": -0.10539442342721028,
+          "ci_high_return": 0.4419354838709677,
+          "p_value": 0.5
+        }
+      ],
+      "forward_rows": [
+        {
+          "event_type": "right_pullback_resume",
+          "contract_hash": "sha256:85f48249f02a65437fb35dfa5814fbd0310f3e6e70623fc0a607e3c9aea32559",
+          "complete_forward_sessions": 0,
+          "signals": 0,
+          "trades": 0,
+          "event_sessions": 0,
+          "coverage": 0.0,
+          "mean_net_dollars": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "holm_p": null,
+          "promotion_eligible": false
+        }
+      ],
+      "denoising_development_rows": [
+        {
+          "mode": "RTH",
+          "pipeline": "preaverage15_pullback",
+          "selected": true,
+          "eligible": true,
+          "events": 32,
+          "resolved": 29,
+          "sessions": 11,
+          "target_first_rate": 0.6896551724137931,
+          "mean_return_r": 0.4053133118630024,
+          "ci_low_r": 0.16952593354056256,
+          "ci_high_r": 0.9106520864300273,
+          "one_sided_p": 0.00732421875,
+          "familywise_max_p": 0.01513671875
+        },
+        {
+          "mode": "RTH",
+          "pipeline": "kalman_cusum_breadth_transition",
+          "selected": false,
+          "eligible": true,
+          "events": 41,
+          "resolved": 39,
+          "sessions": 11,
+          "target_first_rate": 0.6153846153846154,
+          "mean_return_r": 0.21885865963892373,
+          "ci_low_r": 0.09547615343874154,
+          "ci_high_r": 0.5528911225022722,
+          "one_sided_p": 0.01171875,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "RTH",
+          "pipeline": "raw_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 42,
+          "resolved": 40,
+          "sessions": 11,
+          "target_first_rate": 0.625,
+          "mean_return_r": 0.27313430116335163,
+          "ci_low_r": 0.045131968170279264,
+          "ci_high_r": 0.610389073279202,
+          "one_sided_p": 0.02392578125,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "RTH",
+          "pipeline": "hampel25_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 34,
+          "resolved": 32,
+          "sessions": 10,
+          "target_first_rate": 0.59375,
+          "mean_return_r": 0.20668580432590705,
+          "ci_low_r": -0.09853306472273651,
+          "ci_high_r": 0.7548841863845832,
+          "one_sided_p": 0.0830078125,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "RTH",
+          "pipeline": "kalman_breadth_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 14,
+          "resolved": 12,
+          "sessions": 6,
+          "target_first_rate": 0.5833333333333334,
+          "mean_return_r": 0.12775943808666634,
+          "ci_low_r": -0.42506577304621684,
+          "ci_high_r": 0.8672553370938124,
+          "one_sided_p": 0.25,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "RTH",
+          "pipeline": "kalman_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 30,
+          "resolved": 27,
+          "sessions": 10,
+          "target_first_rate": 0.5555555555555556,
+          "mean_return_r": 0.1198275255903307,
+          "ci_low_r": -0.45900914465111475,
+          "ci_high_r": 0.5552815212505723,
+          "one_sided_p": 0.40625,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "kalman_pullback",
+          "selected": true,
+          "eligible": true,
+          "events": 45,
+          "resolved": 44,
+          "sessions": 11,
+          "target_first_rate": 0.5227272727272727,
+          "mean_return_r": 0.04255153553824323,
+          "ci_low_r": -0.3602556348238626,
+          "ci_high_r": 0.4337162603987613,
+          "one_sided_p": 0.45068359375,
+          "familywise_max_p": 0.799560546875
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "preaverage15_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 47,
+          "resolved": 45,
+          "sessions": 12,
+          "target_first_rate": 0.4444444444444444,
+          "mean_return_r": -0.10492548300882891,
+          "ci_low_r": -0.3762319596535699,
+          "ci_high_r": 0.41999269187843097,
+          "one_sided_p": 0.492431640625,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "raw_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 56,
+          "resolved": 53,
+          "sessions": 12,
+          "target_first_rate": 0.4716981132075472,
+          "mean_return_r": -0.06507466386023263,
+          "ci_low_r": -0.4300538698219707,
+          "ci_high_r": 0.26504048823267007,
+          "one_sided_p": 0.68505859375,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "hampel25_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 56,
+          "resolved": 54,
+          "sessions": 12,
+          "target_first_rate": 0.48148148148148145,
+          "mean_return_r": -0.04425206911018476,
+          "ci_low_r": -0.4309796958540738,
+          "ci_high_r": 0.2959524174455823,
+          "one_sided_p": 0.6533203125,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "kalman_cusum_breadth_transition",
+          "selected": false,
+          "eligible": true,
+          "events": 65,
+          "resolved": 64,
+          "sessions": 11,
+          "target_first_rate": 0.453125,
+          "mean_return_r": -0.03969312287768512,
+          "ci_low_r": -0.4360186697603734,
+          "ci_high_r": 0.3465376139348287,
+          "one_sided_p": 0.58642578125,
+          "familywise_max_p": null
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "kalman_breadth_pullback",
+          "selected": false,
+          "eligible": true,
+          "events": 16,
+          "resolved": 16,
+          "sessions": 8,
+          "target_first_rate": 0.5625,
+          "mean_return_r": 0.12815657840898162,
+          "ci_low_r": -0.6400825594102311,
+          "ci_high_r": 0.6413460629770049,
+          "one_sided_p": 0.4765625,
+          "familywise_max_p": null
+        }
+      ],
+      "denoising_cohort_rows": [
+        {
+          "mode": "RTH",
+          "pipeline": "preaverage15_pullback",
+          "cohort": "development",
+          "events": 32,
+          "resolved": 29,
+          "sessions": 11,
+          "target_first_rate": 0.6896551724137931,
+          "mean_return_r": 0.4053133118630024,
+          "ci_low_r": 0.16952593354056256,
+          "ci_high_r": 0.9106520864300273,
+          "one_sided_p": 0.00732421875
+        },
+        {
+          "mode": "RTH",
+          "pipeline": "preaverage15_pullback",
+          "cohort": "retrospective_validation",
+          "events": 38,
+          "resolved": 38,
+          "sessions": 8,
+          "target_first_rate": 0.6052631578947368,
+          "mean_return_r": 0.21538955718115366,
+          "ci_low_r": -0.10922071080319133,
+          "ci_high_r": 0.48503774878641126,
+          "one_sided_p": 0.125
+        },
+        {
+          "mode": "RTH",
+          "pipeline": "preaverage15_pullback",
+          "cohort": "previously_seen_tail",
+          "events": 13,
+          "resolved": 13,
+          "sessions": 6,
+          "target_first_rate": 0.6153846153846154,
+          "mean_return_r": 0.4261474352128855,
+          "ci_low_r": -0.3497178968120583,
+          "ci_high_r": 1.3025227494249938,
+          "one_sided_p": 0.25
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "kalman_pullback",
+          "cohort": "development",
+          "events": 45,
+          "resolved": 44,
+          "sessions": 11,
+          "target_first_rate": 0.5227272727272727,
+          "mean_return_r": 0.04255153553824323,
+          "ci_low_r": -0.3602556348238626,
+          "ci_high_r": 0.4337162603987613,
+          "one_sided_p": 0.45068359375
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "kalman_pullback",
+          "cohort": "retrospective_validation",
+          "events": 29,
+          "resolved": 28,
+          "sessions": 8,
+          "target_first_rate": 0.5,
+          "mean_return_r": 0.008164823728591144,
+          "ci_low_r": -0.4207824787624581,
+          "ci_high_r": 0.4568127441360152,
+          "one_sided_p": 0.484375
+        },
+        {
+          "mode": "GTH",
+          "pipeline": "kalman_pullback",
+          "cohort": "previously_seen_tail",
+          "events": 13,
+          "resolved": 12,
+          "sessions": 5,
+          "target_first_rate": 0.5,
+          "mean_return_r": -0.06384819784877709,
+          "ci_low_r": -0.7375106706096801,
+          "ci_high_r": 0.8477949071417811,
+          "one_sided_p": 0.5
+        }
+      ],
+      "denoising_option_rows": [
+        {
+          "mode": "RTH",
+          "role": "raw_baseline",
+          "pipeline": "raw_pullback",
+          "cohort": "development",
+          "candidate": "raw_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 42,
+          "trades": 37,
+          "sessions": 11,
+          "coverage": 0.8809523809523809,
+          "mean_net_dollars": 10.756756756756744,
+          "mean_net_return": 0.03789740394668451,
+          "positive_session_rate": 0.6363636363636364,
+          "ci_low_return": -0.020572919764305975,
+          "ci_high_return": 0.13601066051448887,
+          "one_sided_p": 0.09228515625
+        },
+        {
+          "mode": "RTH",
+          "role": "raw_baseline",
+          "pipeline": "raw_pullback",
+          "cohort": "retrospective_validation",
+          "candidate": "raw_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 37,
+          "trades": 32,
+          "sessions": 8,
+          "coverage": 0.8648648648648649,
+          "mean_net_dollars": 8.531249999999954,
+          "mean_net_return": 0.018599631880275688,
+          "positive_session_rate": 0.5,
+          "ci_low_return": -0.14654941121034848,
+          "ci_high_return": 0.11937303929108602,
+          "one_sided_p": 0.5859375
+        },
+        {
+          "mode": "RTH",
+          "role": "raw_baseline",
+          "pipeline": "raw_pullback",
+          "cohort": "previously_seen_tail",
+          "candidate": "raw_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 19,
+          "trades": 14,
+          "sessions": 4,
+          "coverage": 0.7368421052631579,
+          "mean_net_dollars": 27.214285714285737,
+          "mean_net_return": 0.0480466442955234,
+          "positive_session_rate": 0.5,
+          "ci_low_return": -0.3334385528507868,
+          "ci_high_return": 0.3166854800242118,
+          "one_sided_p": 0.5
+        },
+        {
+          "mode": "RTH",
+          "role": "development_champion",
+          "pipeline": "preaverage15_pullback",
+          "cohort": "development",
+          "candidate": "preaverage15_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 32,
+          "trades": 27,
+          "sessions": 11,
+          "coverage": 0.84375,
+          "mean_net_dollars": 13.25925925925927,
+          "mean_net_return": 0.027043134201687337,
+          "positive_session_rate": 0.7272727272727273,
+          "ci_low_return": -0.09162207229974025,
+          "ci_high_return": 0.2714206896219334,
+          "one_sided_p": 0.173828125
+        },
+        {
+          "mode": "RTH",
+          "role": "development_champion",
+          "pipeline": "preaverage15_pullback",
+          "cohort": "retrospective_validation",
+          "candidate": "preaverage15_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 38,
+          "trades": 33,
+          "sessions": 8,
+          "coverage": 0.868421052631579,
+          "mean_net_dollars": 37.939393939393874,
+          "mean_net_return": 0.056705845524972154,
+          "positive_session_rate": 0.625,
+          "ci_low_return": -0.0893533362242979,
+          "ci_high_return": 0.14381916758196958,
+          "one_sided_p": 0.30859375
+        },
+        {
+          "mode": "RTH",
+          "role": "development_champion",
+          "pipeline": "preaverage15_pullback",
+          "cohort": "previously_seen_tail",
+          "candidate": "preaverage15_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 13,
+          "trades": 9,
+          "sessions": 5,
+          "coverage": 0.6923076923076923,
+          "mean_net_dollars": 42.333333333333314,
+          "mean_net_return": 0.052573088549780836,
+          "positive_session_rate": 0.4,
+          "ci_low_return": -0.18253714517163397,
+          "ci_high_return": 0.2852465003043213,
+          "one_sided_p": 0.40625
+        },
+        {
+          "mode": "RTH",
+          "role": "raw_baseline",
+          "pipeline": "kalman_cusum_breadth_transition",
+          "cohort": "development",
+          "candidate": "kalman_cusum_breadth_transition::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 41,
+          "trades": 31,
+          "sessions": 11,
+          "coverage": 0.7560975609756098,
+          "mean_net_dollars": -38.58064516129026,
+          "mean_net_return": -0.02852606172145078,
+          "positive_session_rate": 0.5454545454545454,
+          "ci_low_return": -0.047222678964818236,
+          "ci_high_return": 0.16395290757840056,
+          "one_sided_p": 0.1484375
+        },
+        {
+          "mode": "RTH",
+          "role": "raw_baseline",
+          "pipeline": "kalman_cusum_breadth_transition",
+          "cohort": "retrospective_validation",
+          "candidate": "kalman_cusum_breadth_transition::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 40,
+          "trades": 34,
+          "sessions": 8,
+          "coverage": 0.85,
+          "mean_net_dollars": 41.20588235294117,
+          "mean_net_return": 0.02960055034408023,
+          "positive_session_rate": 0.375,
+          "ci_low_return": -0.12787450780453918,
+          "ci_high_return": 0.13446328191566273,
+          "one_sided_p": 0.48046875
+        },
+        {
+          "mode": "RTH",
+          "role": "raw_baseline",
+          "pipeline": "kalman_cusum_breadth_transition",
+          "cohort": "previously_seen_tail",
+          "candidate": "kalman_cusum_breadth_transition::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.05,
+          "signals": 27,
+          "trades": 14,
+          "sessions": 5,
+          "coverage": 0.5185185185185185,
+          "mean_net_dollars": 24.357142857142815,
+          "mean_net_return": 0.03092493619653688,
+          "positive_session_rate": 0.6,
+          "ci_low_return": -0.13074674485718094,
+          "ci_high_return": 0.22080316830862792,
+          "one_sided_p": 0.375
+        },
+        {
+          "mode": "GTH",
+          "role": "raw_baseline",
+          "pipeline": "raw_pullback",
+          "cohort": "development",
+          "candidate": "raw_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 56,
+          "trades": 33,
+          "sessions": 9,
+          "coverage": 0.5892857142857143,
+          "mean_net_dollars": -69.63636363636364,
+          "mean_net_return": -0.07845261301365558,
+          "positive_session_rate": 0.1111111111111111,
+          "ci_low_return": -0.12125914286161663,
+          "ci_high_return": -0.05451793673989592,
+          "one_sided_p": 0.998046875
+        },
+        {
+          "mode": "GTH",
+          "role": "raw_baseline",
+          "pipeline": "raw_pullback",
+          "cohort": "retrospective_validation",
+          "candidate": "raw_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 36,
+          "trades": 29,
+          "sessions": 8,
+          "coverage": 0.8055555555555556,
+          "mean_net_dollars": -58.75862068965512,
+          "mean_net_return": -0.06837474870522699,
+          "positive_session_rate": 0.25,
+          "ci_low_return": -0.0920497624265807,
+          "ci_high_return": -0.02165351474952007,
+          "one_sided_p": 0.98828125
+        },
+        {
+          "mode": "GTH",
+          "role": "raw_baseline",
+          "pipeline": "raw_pullback",
+          "cohort": "previously_seen_tail",
+          "candidate": "raw_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 13,
+          "trades": 6,
+          "sessions": 3,
+          "coverage": 0.46153846153846156,
+          "mean_net_dollars": -67.66666666666666,
+          "mean_net_return": -0.08254742975830943,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.11168831168831134,
+          "ci_high_return": -0.017977528089887795,
+          "one_sided_p": 1.0
+        },
+        {
+          "mode": "GTH",
+          "role": "development_champion",
+          "pipeline": "kalman_pullback",
+          "cohort": "development",
+          "candidate": "kalman_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 45,
+          "trades": 32,
+          "sessions": 10,
+          "coverage": 0.7111111111111111,
+          "mean_net_dollars": -63.81250000000003,
+          "mean_net_return": -0.07302834068402435,
+          "positive_session_rate": 0.2,
+          "ci_low_return": -0.11511650739821055,
+          "ci_high_return": -0.04018219898878032,
+          "one_sided_p": 0.9951171875
+        },
+        {
+          "mode": "GTH",
+          "role": "development_champion",
+          "pipeline": "kalman_pullback",
+          "cohort": "retrospective_validation",
+          "candidate": "kalman_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 29,
+          "trades": 21,
+          "sessions": 7,
+          "coverage": 0.7241379310344828,
+          "mean_net_dollars": -46.476190476190524,
+          "mean_net_return": -0.05378589847661378,
+          "positive_session_rate": 0.2857142857142857,
+          "ci_low_return": -0.06987816442140098,
+          "ci_high_return": -0.007966594193697574,
+          "one_sided_p": 0.96875
+        },
+        {
+          "mode": "GTH",
+          "role": "development_champion",
+          "pipeline": "kalman_pullback",
+          "cohort": "previously_seen_tail",
+          "candidate": "kalman_pullback::delta_0.60/vertical_15",
+          "maximum_relative_spread": 0.02,
+          "signals": 13,
+          "trades": 6,
+          "sessions": 3,
+          "coverage": 0.46153846153846156,
+          "mean_net_dollars": -56.000000000000064,
+          "mean_net_return": -0.06551076762719543,
+          "positive_session_rate": 0.0,
+          "ci_low_return": -0.08630050505050513,
+          "ci_high_return": -0.017977528089887795,
+          "one_sided_p": 1.0
+        }
+      ],
+      "denoising_forward_rows": [
+        {
+          "row_type": "lane",
+          "lane": "raw_control",
+          "contract_hash": "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27",
+          "complete_forward_sessions": 0,
+          "signals": 0,
+          "trades": 0,
+          "event_sessions": 0,
+          "coverage": 0.0,
+          "mean_net_dollars": null,
+          "mean_net_return_or_improvement": null,
+          "ci_low": null,
+          "ci_high": null,
+          "p_value": null,
+          "promotion_eligible": false
+        },
+        {
+          "row_type": "lane",
+          "lane": "preaverage_candidate",
+          "contract_hash": "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27",
+          "complete_forward_sessions": 0,
+          "signals": 0,
+          "trades": 0,
+          "event_sessions": 0,
+          "coverage": 0.0,
+          "mean_net_dollars": null,
+          "mean_net_return_or_improvement": null,
+          "ci_low": null,
+          "ci_high": null,
+          "p_value": null,
+          "promotion_eligible": false
+        },
+        {
+          "row_type": "paired_increment",
+          "lane": "preaverage_minus_raw",
+          "contract_hash": "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27",
+          "complete_forward_sessions": 0,
+          "signals": null,
+          "trades": null,
+          "event_sessions": 0,
+          "coverage": null,
+          "mean_net_dollars": null,
+          "mean_net_return_or_improvement": null,
+          "ci_low": null,
+          "ci_high": null,
+          "p_value": null,
+          "promotion_eligible": false
+        }
+      ],
+      "gth_hurdle_rows": [
+        {
+          "cohort": "development_oof",
+          "direction_signals": 45,
+          "fresh_exact_bbo_trades": 32,
+          "exact_bbo_coverage": 0.7111111111111111,
+          "selected_trades": 1,
+          "selected_sessions": 1,
+          "conditional_selection_rate": 0.03125,
+          "mean_net_dollars": -116.00000000000014,
+          "mean_net_return": -0.15064935064935087,
+          "ci_low_return": -0.15064935064935087,
+          "ci_high_return": -0.15064935064935087,
+          "p_value": 1.0
+        },
+        {
+          "cohort": "retrospective_validation",
+          "direction_signals": 29,
+          "fresh_exact_bbo_trades": 21,
+          "exact_bbo_coverage": 0.7241379310344828,
+          "selected_trades": 0,
+          "selected_sessions": 0,
+          "conditional_selection_rate": 0.0,
+          "mean_net_dollars": null,
+          "mean_net_return": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "direction_signals": 13,
+          "fresh_exact_bbo_trades": 6,
+          "exact_bbo_coverage": 0.46153846153846156,
+          "selected_trades": 0,
+          "selected_sessions": 0,
+          "conditional_selection_rate": 0.0,
+          "mean_net_dollars": null,
+          "mean_net_return": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        }
+      ],
+      "gth_hurdle_stage_rows": [
+        {
+          "cohort": "development_oof",
+          "stage": "direction_signal",
+          "count": 45
+        },
+        {
+          "cohort": "development_oof",
+          "stage": "fresh_exact_bbo",
+          "count": 32
+        },
+        {
+          "cohort": "development_oof",
+          "stage": "conditional_ev_gt_0",
+          "count": 1
+        },
+        {
+          "cohort": "retrospective_validation",
+          "stage": "direction_signal",
+          "count": 29
+        },
+        {
+          "cohort": "retrospective_validation",
+          "stage": "fresh_exact_bbo",
+          "count": 21
+        },
+        {
+          "cohort": "retrospective_validation",
+          "stage": "conditional_ev_gt_0",
+          "count": 0
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "stage": "direction_signal",
+          "count": 13
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "stage": "fresh_exact_bbo",
+          "count": 6
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "stage": "conditional_ev_gt_0",
+          "count": 0
+        }
+      ],
+      "gex_gate_rows": [
+        {
+          "cohort": "development",
+          "policy": "preaverage_baseline",
+          "exact_bbo_trades": 27,
+          "surface_located_trades": 27,
+          "surface_coverage": 1.0,
+          "gated_trades": 14,
+          "gate_rate": 0.5185185185185185,
+          "mean_net_dollars": 13.25925925925927,
+          "mean_net_return": 0.027043134201687337,
+          "return_increment": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "development",
+          "policy": "gex_location_gate",
+          "exact_bbo_trades": 27,
+          "surface_located_trades": 27,
+          "surface_coverage": 1.0,
+          "gated_trades": 14,
+          "gate_rate": 0.5185185185185185,
+          "mean_net_dollars": 27.21428571428572,
+          "mean_net_return": 0.05899157257213313,
+          "return_increment": 0.031948438370445795,
+          "ci_low_return": -0.029824342233333613,
+          "ci_high_return": 0.35621450352716294,
+          "p_value": 0.07421875
+        },
+        {
+          "cohort": "retrospective_validation",
+          "policy": "preaverage_baseline",
+          "exact_bbo_trades": 33,
+          "surface_located_trades": 33,
+          "surface_coverage": 1.0,
+          "gated_trades": 13,
+          "gate_rate": 0.3939393939393939,
+          "mean_net_dollars": 37.939393939393874,
+          "mean_net_return": 0.056705845524972154,
+          "return_increment": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "retrospective_validation",
+          "policy": "gex_location_gate",
+          "exact_bbo_trades": 33,
+          "surface_located_trades": 33,
+          "surface_coverage": 1.0,
+          "gated_trades": 13,
+          "gate_rate": 0.3939393939393939,
+          "mean_net_dollars": -7.153846153846261,
+          "mean_net_return": -0.015683929071765332,
+          "return_increment": -0.07238977459673748,
+          "ci_low_return": -0.2155815222452004,
+          "ci_high_return": 0.2751322396404698,
+          "p_value": 0.40625
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "policy": "preaverage_baseline",
+          "exact_bbo_trades": 9,
+          "surface_located_trades": 9,
+          "surface_coverage": 1.0,
+          "gated_trades": 4,
+          "gate_rate": 0.4444444444444444,
+          "mean_net_dollars": 42.333333333333314,
+          "mean_net_return": 0.052573088549780836,
+          "return_increment": null,
+          "ci_low_return": null,
+          "ci_high_return": null,
+          "p_value": null
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "policy": "gex_location_gate",
+          "exact_bbo_trades": 9,
+          "surface_located_trades": 9,
+          "surface_coverage": 1.0,
+          "gated_trades": 4,
+          "gate_rate": 0.4444444444444444,
+          "mean_net_dollars": -5.999999999999995,
+          "mean_net_return": -0.01096186359120016,
+          "return_increment": -0.063534952140981,
+          "ci_low_return": -0.34844702467343974,
+          "ci_high_return": 0.3265232974910395,
+          "p_value": 0.5625
+        }
+      ],
+      "cusum_rows": [
+        {
+          "cohort": "development",
+          "signals": 41,
+          "trades": 31,
+          "sessions": 11,
+          "coverage": 0.7560975609756098,
+          "mean_net_dollars": -38.58064516129026,
+          "mean_net_return": -0.02852606172145078,
+          "positive_session_rate": 0.5454545454545454,
+          "ci_low_return": -0.047222678964818236,
+          "ci_high_return": 0.16395290757840056,
+          "p_value": 0.1484375
+        },
+        {
+          "cohort": "retrospective_validation",
+          "signals": 40,
+          "trades": 34,
+          "sessions": 8,
+          "coverage": 0.85,
+          "mean_net_dollars": 41.20588235294117,
+          "mean_net_return": 0.02960055034408023,
+          "positive_session_rate": 0.375,
+          "ci_low_return": -0.12787450780453918,
+          "ci_high_return": 0.13446328191566273,
+          "p_value": 0.48046875
+        },
+        {
+          "cohort": "previously_seen_tail",
+          "signals": 27,
+          "trades": 14,
+          "sessions": 5,
+          "coverage": 0.5185185185185185,
+          "mean_net_dollars": 24.357142857142815,
+          "mean_net_return": 0.03092493619653688,
+          "positive_session_rate": 0.6,
+          "ci_low_return": -0.13074674485718094,
+          "ci_high_return": 0.22080316830862792,
+          "p_value": 0.375
+        }
+      ],
+      "bocpd_rows": [
+        {
+          "mode": "RTH",
+          "trend_launches": 7,
+          "prelaunch_max_probability": 0.023639455575239266,
+          "matched_control_max_probability": 0.02562083470027451,
+          "standardized_difference": -0.3551493283439002,
+          "prelaunch_hit_rate_at_0_20": 0.0,
+          "all_probability_p90": 0.02005155845495658,
+          "all_probability_p99": 0.04679030699208514
+        },
+        {
+          "mode": "GTH",
+          "trend_launches": 6,
+          "prelaunch_max_probability": 0.022445531327999937,
+          "matched_control_max_probability": 0.02172187828962252,
+          "standardized_difference": 0.1954288385287951,
+          "prelaunch_hit_rate_at_0_20": 0.0,
+          "all_probability_p90": 0.017586667448813854,
+          "all_probability_p99": 0.03737797859017589
+        }
+      ]
+    }
+  }
+}
