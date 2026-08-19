@@ -1,13 +1,47 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from spx_spark.application.order_map import strategy_select
-from spx_spark.application.order_map.strategy_edge_model import EdgeAuthorityResult
+from spx_spark.application.order_map.strategy_edge_model import (
+    EdgeAuthorityResult,
+    apply_strategy_edge_authority,
+)
 from spx_spark.application.order_map.strategy_ranker import RankResult
 
 
 NOW = datetime(2026, 8, 18, 15, 0, tzinfo=timezone.utc)
+
+
+def test_v40_preaverage_manual_authority_is_explicitly_unvalidated(
+    tmp_path: Path,
+) -> None:
+    candidate = {
+        "setup_kind": "PREAVERAGE15_PULLBACK",
+        "authorization_policy": "strategy_policy.bootstrap.v40",
+        "evidence_contract_hash": (
+            "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27"
+        ),
+        "evidence_status": "forward_unvalidated_user_override",
+        "selection_score": 1.0,
+    }
+
+    result = apply_strategy_edge_authority(
+        [candidate],
+        {"session": {"mode": "rth"}},
+        {},
+        data_root=tmp_path,
+        now=NOW,
+    )
+
+    assert result.rejected == []
+    assert result.passed[0]["edge"]["edge_status"] == (
+        "explicit_manual_policy_unvalidated"
+    )
+    assert result.passed[0]["edge"]["strategy_edge"]["evidence_status"] == (
+        "forward_unvalidated_user_override"
+    )
 
 
 def test_model_rejection_prevents_manual_authority(monkeypatch) -> None:

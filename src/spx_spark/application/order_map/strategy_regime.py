@@ -41,7 +41,11 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v39"
+    policy_version: str = "strategy_policy.bootstrap.v40"
+    # v40: explicit user authorization promotes the RTH causal 15-second
+    # pre-average pullback detector to a manual-only 60-delta/15-point debit
+    # lane. It stays marked forward-unvalidated, uses Schwab exact BBO <=5s,
+    # and does not inherit HMM, GEX direction, or legacy entry-quality gates.
     # v39: POST_EVENT_DISCOVERY no longer blocks ES_VOLUME_MOMENTUM after
     # the RTH open. Debit management drops the v1 20-minute time stop;
     # verticals keep the 50% premium stop, trail, and 15:45 ET hard close.

@@ -3,12 +3,13 @@ from __future__ import annotations
 import copy
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from spx_spark.application.runtime.market_regime_signal import (
+    DENOISING_FORWARD_CONTRACT_HASH,
     MODEL_VERSION,
     SignalPaths,
     build_signal,
@@ -272,11 +273,13 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
         "regime_reason_codes",
         "forecasts",
         "close_location",
+        "denoising_forward",
     }
     assert first["evidence_status"] == "bootstrap_unvalidated"
     assert first["use_scope"] == "advisory"
     assert first["action_authority"] == "none"
     assert first["automatic_ordering"] is False
+    assert first["denoising_forward"]["action_authority"] == "none"
     regime = first["regime"]
     assert isinstance(regime, dict)
     assert regime["inference"] == "filtered"
@@ -338,6 +341,69 @@ def test_v2_document_is_advisory_explicit_and_same_frame_does_not_repeat(
     )
     assert next_frame["regime"]["update_index"] == 2
     assert _read(paths.state)["online_state"]["observation_count"] == 2
+
+
+def test_rth_preaverage_detector_is_causal_and_publishes_no_direct_authority(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 20, 15, 0, 5, tzinfo=UTC)
+    paths = SignalPaths.from_data_root(tmp_path)
+    _seed_rth(paths)
+    market = _rth_market()
+    market.update(session_id="2026-08-20", as_of=now.isoformat())
+    spx = market["cross_asset"]["cash_index"]["observations"]["index:SPX"]
+
+    values = []
+    for index in range(183):
+        step = index - 2
+        if step <= 150:
+            values.append(7_700.0 + 12.0 * step / 150.0)
+        elif step <= 165:
+            values.append(7_712.0 - 3.5 * (step - 150) / 15.0)
+        else:
+            values.append(7_708.5 + 1.7 * (step - 165) / 15.0)
+    spx.update(price=values[-1], source_at=now.isoformat())
+    _write(paths.market, market)
+    _write(paths.options, _options(as_of=now.isoformat()))
+    _write(
+        paths.state,
+        {
+            "schema_version": "research_context.state.v2",
+            "online_state": {},
+            "denoising_forward_state": {
+                "session_id": "2026-08-20",
+                "samples": [
+                    {
+                        "epoch": int((now - timedelta(seconds=5 * (182 - index))).timestamp()),
+                        "raw": value,
+                        "source_at": (
+                            now - timedelta(seconds=5 * (182 - index))
+                        ).isoformat(),
+                    }
+                    for index, value in enumerate(values[:-1])
+                ],
+                "cooldowns": {},
+                "last_decision_epoch": None,
+                "latest_signal": {},
+            },
+        },
+    )
+
+    document = produce_once(
+        paths=paths,
+        now=now,
+        freshness_policy=DEFAULT_FRESHNESS,
+    )
+    signal = document["denoising_forward"]
+
+    assert signal["status"] == "triggered"
+    assert signal["direction"] == "UP"
+    assert signal["contract_hash"] == DENOISING_FORWARD_CONTRACT_HASH
+    assert signal["signal_at"] == now.isoformat()
+    assert signal["action_authority"] == "none"
+    assert signal["evidence_status"] == "forward_unvalidated_user_override"
+    assert signal["automatic_ordering"] is False
+    assert signal["target_spx"] > signal["trigger_level"] > signal["invalidation_spx"]
 
 
 def test_direct_feature_frames_do_not_require_projection_roundtrip(

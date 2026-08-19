@@ -22,6 +22,10 @@ from typing import Any
 SCHEMA_VERSION = "strategy_edge_model.v1"
 FEATURE_VERSION = "strategy_edge_features.v1"
 ARTIFACT_RELATIVE_PATH = ("research", "strategy_edge_model.v1.json")
+_PREAVERAGE_SETUP = "PREAVERAGE15_PULLBACK"
+_PREAVERAGE_CONTRACT_HASH = (
+    "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27"
+)
 
 # Stable feature order shared by offline training and runtime inference.
 FEATURE_NAMES: tuple[str, ...] = (
@@ -104,12 +108,13 @@ def apply_strategy_edge_authority(
     data_root: str | Path | None,
     now: datetime,
 ) -> EdgeAuthorityResult:
-    """Gate and rank candidates by a promoted walk-forward edge artifact.
+    """Gate candidates by promoted models or the explicit v40 manual lane.
 
     ``data_root is None`` is reserved for pure unit/replay fixtures that do not
-    model deployment state. Production always supplies ``data_root`` and is
-    fail-closed when the artifact is absent, unpromoted, stale, malformed, or
-    out of domain.
+    model deployment state. Production model-backed lanes fail closed when the
+    artifact is absent, unpromoted, stale, malformed, or out of domain. The
+    v40 pre-average lane is the sole explicit manual-policy exception and is
+    always labeled forward-unvalidated.
     """
 
     if not candidates:
@@ -120,23 +125,45 @@ def apply_strategy_edge_authority(
             rejected=[],
         )
 
-    artifact, artifact_reason = load_strategy_edge_artifact(data_root)
-    if artifact is None:
-        return EdgeAuthorityResult(
-            passed=[],
-            rejected=[
-                _reject(
-                    candidate,
-                    artifact_reason or "strategy_edge_model_unavailable",
-                    model_payload={"status": "unavailable"},
-                )
-                for candidate in candidates
-            ],
-        )
-
     scored: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    model_candidates: list[Mapping[str, Any]] = []
     for candidate in candidates:
+        if candidate.get("setup_kind") != _PREAVERAGE_SETUP:
+            model_candidates.append(candidate)
+            continue
+        if (
+            candidate.get("authorization_policy") != "strategy_policy.bootstrap.v40"
+            or candidate.get("evidence_contract_hash") != _PREAVERAGE_CONTRACT_HASH
+            or candidate.get("evidence_status") != "forward_unvalidated_user_override"
+        ):
+            rejected.append(_reject(candidate, "preaverage_policy_authority_invalid"))
+            continue
+        scored.append(
+            _attach_model_payload(
+                candidate,
+                {
+                    "status": "explicit_policy_authority_unvalidated",
+                    "policy_version": "strategy_policy.bootstrap.v40",
+                    "evidence_contract_hash": _PREAVERAGE_CONTRACT_HASH,
+                    "evidence_status": "forward_unvalidated_user_override",
+                },
+            )
+        )
+
+    artifact, artifact_reason = load_strategy_edge_artifact(data_root)
+    if artifact is None:
+        rejected.extend(
+            _reject(
+                candidate,
+                artifact_reason or "strategy_edge_model_unavailable",
+                model_payload={"status": "unavailable"},
+            )
+            for candidate in model_candidates
+        )
+        return EdgeAuthorityResult(passed=scored, rejected=rejected)
+
+    for candidate in model_candidates:
         result, reasons = score_candidate_with_edge_model(
             candidate,
             facts,
@@ -516,6 +543,8 @@ def _attach_model_payload(
     edge["strategy_edge"] = dict(payload)
     if payload.get("status") == "scored":
         edge["edge_status"] = "promoted_model_pass"
+    elif payload.get("status") == "explicit_policy_authority_unvalidated":
+        edge["edge_status"] = "explicit_manual_policy_unvalidated"
     return {**dict(candidate), "edge": edge}
 
 

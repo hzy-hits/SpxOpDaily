@@ -128,13 +128,21 @@ def build_strategy_decision(
             stick_reason: str | None = None
             if rank.passed:
                 session_mode = str(_map(facts.get("session")).get("mode") or "")
+                independent_preaverage = any(
+                    row.get("setup_kind") == "PREAVERAGE15_PULLBACK"
+                    for row in rank.passed
+                )
                 stuck, stick_reason = apply_winner_stick(
                     rank.passed,
-                    _session_direction_lock(
-                        facts,
-                        now=_utc(now),
-                        policy=DEFAULT_STRATEGY_POLICY,
-                        payload=payload,
+                    (
+                        None
+                        if independent_preaverage
+                        else _session_direction_lock(
+                            facts,
+                            now=_utc(now),
+                            policy=DEFAULT_STRATEGY_POLICY,
+                            payload=payload,
+                        )
                     ),
                     session_mode=session_mode,
                 )
@@ -597,6 +605,8 @@ def _candidate_score(candidate: Mapping[str, Any]) -> float:
 
 def _decision_geometry_source(candidate: Mapping[str, Any]) -> str:
     source = candidate.get("geometry_source")
+    if source == "preaverage_local_scale_first_passage":
+        return source
     return "confirmation_geometry" if source == "confirmation_geometry" else "facts_wall_ladder_fallback"
 
 

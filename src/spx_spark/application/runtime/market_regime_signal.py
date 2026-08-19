@@ -18,6 +18,10 @@ from spx_spark.config import StorageSettings
 from spx_spark.application.runtime.market_regime_context import (
     build_research_context_document,
 )
+from spx_spark.application.runtime.market_regime_denoising import (
+    DENOISING_FORWARD_CONTRACT_HASH,
+    advance_denoising_forward,
+)
 from spx_spark.application.runtime.market_regime_observation import (
     CROSS_INDEX_FEATURE_SET_VERSION,
     ES_FEATURE_WEIGHTS,
@@ -722,6 +726,12 @@ def build_signal(
         now=now,
         freshness_policy=freshness_policy,
     )
+    denoising_forward, denoising_forward_state = advance_denoising_forward(
+        market,
+        previous,
+        now=now,
+        session_day=session_day,
+    )
     source_times = [
         parsed
         for parsed in (
@@ -757,6 +767,8 @@ def build_signal(
         "regime": regime,
         "today_range": ranges,
         "online_state": online_state,
+        "denoising_forward": denoising_forward,
+        "denoising_forward_state": denoising_forward_state,
         "readiness": "experimental_context_only",
         "action_authority": "none",
         "automatic_ordering": False,
@@ -808,6 +820,7 @@ def produce_once(
                     "range_schema": RANGE_SCHEMA_VERSION,
                     "research_context_schema": "research_context.v2",
                     "hmm_adjusted_range": HMM_ADJUSTED_RANGE_VERSION,
+                    "denoising_forward": DENOISING_FORWARD_CONTRACT_HASH,
                 },
             }
         )
@@ -847,11 +860,13 @@ def produce_once(
                 freshness_policy.live_input_max_age_seconds
             ),
         )
+        wire["denoising_forward"] = payload["denoising_forward"]
         state_payload = {
             "schema_version": "research_context.state.v2",
             "input_fingerprint": payload["input_fingerprint"],
             "evaluation_fingerprint": evaluation_fingerprint,
             "online_state": payload["online_state"],
+            "denoising_forward_state": payload["denoising_forward_state"],
             "wire_document": wire,
         }
         atomic_write_json_secure(paths.state, state_payload)

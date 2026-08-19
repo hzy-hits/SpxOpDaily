@@ -15,6 +15,11 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.storage import LatestState
 
 
+_DENOISING_FORWARD_CONTRACT_HASH = (
+    "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27"
+)
+
+
 def build_market_fact_pack(
     payload: Mapping[str, Any], latest: LatestState, now: datetime
 ) -> dict[str, Any]:
@@ -224,6 +229,13 @@ def build_market_fact_pack(
     )
     if momentum_setup:
         rth_setups.append(momentum_setup)
+    preaverage_setup = _preaverage_pullback_setup(
+        payload,
+        decision_at=decision_at,
+        session_date=trading_date,
+    )
+    if preaverage_setup:
+        rth_setups.append(preaverage_setup)
     failed_break_evaluable = opening_range_ready and bool(rth_bars)
     shock = _shock_fact(
         shock_state,
@@ -1026,6 +1038,47 @@ def _hmm_fact(payload: Mapping[str, Any], decision_at: datetime) -> dict[str, An
         "max_state_probability": posterior[dominant],
         "observed_through": observed.isoformat(),
         "reason": None,
+    }
+
+
+def _preaverage_pullback_setup(
+    payload: Mapping[str, Any],
+    *,
+    decision_at: datetime,
+    session_date: str,
+) -> dict[str, Any]:
+    document = _map(
+        payload.get("experimental_research_signals") or payload.get("research_context")
+    )
+    signal = _map(document.get("denoising_forward"))
+    signal_at = _time(signal.get("signal_at"))
+    valid_until = _time(signal.get("valid_until"))
+    generated_at = _time(document.get("generated_at"))
+    if (
+        document.get("action_authority") not in {None, "none"}
+        or signal.get("action_authority") != "none"
+        or signal.get("automatic_ordering") is not False
+        or signal.get("schema_version") != "raw_tick_denoising_forward.v1"
+        or signal.get("contract_hash") != _DENOISING_FORWARD_CONTRACT_HASH
+        or signal.get("authorization_policy") != "strategy_policy.bootstrap.v40"
+        or signal.get("evidence_status") != "forward_unvalidated_user_override"
+        or signal.get("status") != "triggered"
+        or signal.get("setup_kind") != "PREAVERAGE15_PULLBACK"
+        or signal.get("session_date") != session_date
+        or signal_at is None
+        or valid_until is None
+        or generated_at is None
+        or signal_at > generated_at
+        or generated_at > decision_at
+        or (decision_at - signal_at).total_seconds() < 5.0
+        or decision_at >= valid_until
+    ):
+        return {}
+    return {
+        **dict(signal),
+        "state": "ENTRY_WINDOW_OPEN",
+        "source": "rth_preaverage15_pullback",
+        "evidence_contract_hash": _DENOISING_FORWARD_CONTRACT_HASH,
     }
 
 

@@ -42,7 +42,13 @@ from spx_spark.data_platform.research.strategy_decision_replay import (
     build_vertical_replay_report,
     classify_gth_vertical_record,
 )
-from spx_spark.marketdata import InstrumentId, MarketDataQuality, Provider, Quote
+from spx_spark.marketdata import (
+    InstrumentId,
+    MarketDataQuality,
+    OptionGreeks,
+    Provider,
+    Quote,
+)
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 from spx_spark.storage import LatestState
 
@@ -452,7 +458,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v39"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v40"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -835,7 +841,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v39"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v40"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -854,6 +860,97 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert rejected["shadow_candidates"] == []
     assert rejected["shadow_candidates_skipped"] == []
     assert "es_volume_momentum_too_late" in rejected["why_not"]["reasons"]
+
+
+def test_rth_preaverage_signal_reaches_manual_decision_with_frozen_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    monkeypatch.setattr(
+        strategy_select,
+        "apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
+    now = datetime(2026, 8, 7, 15, 0, 10, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["es_volume"] = {}
+    payload["option_structure_frame"]["front_expiry"] = "20260807"
+    payload["session_direction_lock"] = {
+        "direction": "DOWN",
+        "opportunity_id": "prior-down-card",
+        "started_at": (now - timedelta(seconds=10)).isoformat(),
+    }
+    _attach_preaverage_signal(payload, now)
+    latest = _preaverage_chain_state(now)
+
+    facts = build_market_fact_pack(payload, latest, now)
+    regime = assess_regime(facts)
+    rows = enumerate_candidates(
+        payload,
+        facts,
+        regime,
+        latest,
+        now=now,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    decision = build_strategy_decision(payload, latest, now, data_root=tmp_path)
+
+    assert [row["setup_kind"] for row in facts["rth_setups"]] == [
+        "PREAVERAGE15_PULLBACK"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["long"]["delta"] == pytest.approx(0.60)
+    assert rows[0]["short"]["strike"] - rows[0]["long"]["strike"] == 15.0
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "PREAVERAGE15_PULLBACK"
+    assert decision["geometry_source"] == "preaverage_local_scale_first_passage"
+    assert decision["candidate"]["edge"]["strategy_edge"]["status"] == (
+        "explicit_policy_authority_unvalidated"
+    )
+    assert decision["action_authority"] == "manual"
+    assert decision["automatic_ordering"] is False
+
+    pathless = deepcopy(payload)
+    pathless["minute_market_frame"]["es"] = {}
+    pathless["minute_market_frame"]["diagnostics"] = {}
+    decoupled = build_strategy_decision(pathless, latest, now, data_root=tmp_path)
+    assert decoupled["market_facts"]["capabilities"]["path"]["ready"] is False
+    assert decoupled["candidate"]["setup_kind"] == "PREAVERAGE15_PULLBACK"
+
+    future_document = deepcopy(payload)
+    future_document["experimental_research_signals"]["generated_at"] = (
+        now + timedelta(seconds=1)
+    ).isoformat()
+    assert not any(
+        row.get("setup_kind") == "PREAVERAGE15_PULLBACK"
+        for row in build_market_fact_pack(future_document, latest, now)["rth_setups"]
+    )
+
+    wide = _preaverage_chain_state(now, short_bid=3.5, short_ask=4.0)
+    wide_rows = enumerate_candidates(
+        payload,
+        build_market_fact_pack(payload, wide, now),
+        regime,
+        wide,
+        now=now,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    assert wide_rows == []
+
+    stale_greeks = _preaverage_chain_state(now, greeks_age_seconds=6.0)
+    assert enumerate_candidates(
+        payload,
+        build_market_fact_pack(payload, stale_greeks, now),
+        regime,
+        stale_greeks,
+        now=now,
+        policy=DEFAULT_STRATEGY_POLICY,
+    ) == []
 
 
 def test_selected_decision_carries_shadow_candidates_and_skips_incomplete_quotes(
@@ -3557,6 +3654,45 @@ def _vertical_chain_state(now: datetime) -> LatestState:
     return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
 
 
+def _preaverage_chain_state(
+    now: datetime,
+    *,
+    short_bid: float = 3.85,
+    short_ask: float = 4.0,
+    greeks_age_seconds: float = 1.0,
+) -> LatestState:
+    observed = now - timedelta(seconds=1)
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.option(
+                "SPX",
+                expiry="20260807",
+                strike=strike,
+                right="C",
+                trading_class="SPXW",
+            ),
+            provider=Provider.SCHWAB,
+            received_at=observed,
+            quote_time=observed,
+            quality=MarketDataQuality.LIVE,
+            bid=bid,
+            ask=ask,
+            greeks=OptionGreeks(delta=delta, implied_vol=0.18),
+            raw={
+                "greeks_provider": "schwab",
+                "greeks_observed_at": (
+                    now - timedelta(seconds=greeks_age_seconds)
+                ).isoformat(),
+            },
+        )
+        for strike, bid, ask, delta in (
+            (7710.0, 9.60, 10.0, 0.60),
+            (7725.0, short_bid, short_ask, 0.30),
+        )
+    )
+    return LatestState(created_at=observed, as_of=observed, quotes=quotes, best_quotes=quotes)
+
+
 def _failed_break_20260812_chain(now: datetime) -> LatestState:
     observed = now - timedelta(seconds=1)
     quotes = tuple(
@@ -3614,6 +3750,40 @@ def _attach_cash_hmm(
                 {"state_id": "state_01", "probability": state_01},
                 {"state_id": "state_02", "probability": state_02},
             ],
+        },
+    }
+
+
+def _attach_preaverage_signal(payload: dict[str, object], now: datetime) -> None:
+    signal_at = now - timedelta(seconds=5)
+    payload["experimental_research_signals"] = {
+        "schema_version": "research_context.v2",
+        "action_authority": "none",
+        "automatic_ordering": False,
+        "generated_at": (now - timedelta(seconds=4)).isoformat(),
+        "denoising_forward": {
+            "schema_version": "raw_tick_denoising_forward.v1",
+            "contract_hash": (
+                "sha256:fc276ff1d44bf4a150ff18889c445a6eaa68b12131b93b4c191765617fc1fb27"
+            ),
+            "status": "triggered",
+            "action_authority": "none",
+            "authorization_policy": "strategy_policy.bootstrap.v40",
+            "evidence_status": "forward_unvalidated_user_override",
+            "automatic_ordering": False,
+            "setup_kind": "PREAVERAGE15_PULLBACK",
+            "setup_variant": "preaverage15_pullback::delta_0.60/vertical_15",
+            "direction": "UP",
+            "session_date": "2026-08-07",
+            "signal_at": signal_at.isoformat(),
+            "valid_until": (signal_at + timedelta(seconds=15)).isoformat(),
+            "trigger_level": 7710.0,
+            "target_spx": 7712.5,
+            "invalidation_spx": 7707.5,
+            "local_scale_points": 2.5,
+            "impulse_15m_points": 8.0,
+            "pullback_points": 1.5,
+            "resume_1m_points": 0.5,
         },
     }
 

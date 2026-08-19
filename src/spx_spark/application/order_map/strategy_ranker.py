@@ -37,7 +37,10 @@ _IRON_CONDOR_HUMAN_GATE = "iron_condor_not_human_authorized"
 _GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _GTH_HUMAN_DEBIT_SETUPS = frozenset({_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN})
-_RTH_HUMAN_DEBIT_SETUPS = frozenset({"ES_VOLUME_MOMENTUM"})
+_PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
+_RTH_HUMAN_DEBIT_SETUPS = frozenset(
+    {"ES_VOLUME_MOMENTUM", _PREAVERAGE15_PULLBACK}
+)
 _GTH_HUMAN_DEBIT_SOURCES = frozenset(
     {
         "gth_level_manual_candidate",
@@ -46,6 +49,7 @@ _GTH_HUMAN_DEBIT_SOURCES = frozenset(
 )
 _RTH_DIRECTIONAL_SPREADS = {
     "ES_VOLUME_MOMENTUM",
+    _PREAVERAGE15_PULLBACK,
     "FAILED_BREAK_RECLAIM",
     "TREND_PULLBACK",
     "BREAKOUT_ACCEPTANCE",
@@ -439,7 +443,7 @@ def _unevidenced_debit_human_gate(candidate: Mapping[str, Any]) -> dict[str, Any
     return {
         "gate": _UNEVIDENCED_DEBIT_GATE,
         "actual": candidate.get("setup_kind"),
-        "threshold": "EVENT_SETTLEMENT_GTH_or_ES_VOLUME_MOMENTUM",
+        "threshold": "EVENT_SETTLEMENT_GTH_ES_VOLUME_or_PREAVERAGE15",
     }
 
 
@@ -468,6 +472,8 @@ def _vertical_hard_gates(
 ) -> list[dict[str, Any]]:
     if candidate.get("setup_kind") == _EVENT_SETTLEMENT_SETUP:
         return _event_settlement_vertical_hard_gates(candidate)
+    if candidate.get("setup_kind") == _PREAVERAGE15_PULLBACK:
+        return _preaverage_vertical_hard_gates(candidate, regime, policy=policy)
     if candidate.get("setup_kind") in {_GTH_WIDTH_SCAN, _GTH_DELTA_SCAN}:
         return _block_unevidenced_debit(
             candidate,
@@ -566,6 +572,94 @@ def _vertical_hard_gates(
             for reason in reasons
         ],
     )
+
+
+def _preaverage_vertical_hard_gates(
+    candidate: Mapping[str, Any],
+    regime: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    long, short = _map(candidate.get("long")), _map(candidate.get("short"))
+    economics = _map(candidate.get("economics"))
+    gates: list[dict[str, Any]] = []
+    if pin_blocks_directional_spreads(regime):
+        gates.append(
+            {
+                "gate": "directional_spread_blocked_by_pin_watch",
+                "actual": regime.get("terminal_state"),
+                "threshold": "pin_look_or_trade_blocks_rth_vertical",
+            }
+        )
+    long_strike, short_strike = _number(long.get("strike")), _number(short.get("strike"))
+    width = (
+        abs(float(short_strike) - float(long_strike))
+        if long_strike is not None and short_strike is not None
+        else None
+    )
+    if width is None or abs(width - 15.0) > 1e-9:
+        gates.append({"gate": "preaverage_width_mismatch", "actual": width, "threshold": 15.0})
+    long_delta = _number(long.get("delta"))
+    if long_delta is None or abs(abs(long_delta) - 0.60) > 0.08:
+        gates.append(
+            {
+                "gate": "preaverage_long_delta_out_of_range",
+                "actual": long_delta,
+                "threshold": "abs_delta_0.60_plus_or_minus_0.08",
+            }
+        )
+    for label, leg in (("long", long), ("short", short)):
+        bid, ask = _number(leg.get("bid")), _number(leg.get("ask"))
+        relative = (ask - bid) / ask if bid is not None and ask is not None and ask > 0 else None
+        if relative is None or relative > 0.05:
+            gates.append(
+                {
+                    "gate": f"preaverage_{label}_relative_spread",
+                    "actual": relative,
+                    "threshold": 0.05,
+                }
+            )
+        if leg.get("provider") != "schwab":
+            gates.append(
+                {
+                    "gate": f"preaverage_{label}_provider",
+                    "actual": leg.get("provider"),
+                    "threshold": "schwab",
+                }
+            )
+    debit_fraction = _number(economics.get("debit_fraction_of_width"))
+    if debit_fraction is None or debit_fraction > policy.max_debit_fraction:
+        gates.append(
+            {
+                "gate": "vertical_debit_fraction_above_max",
+                "actual": debit_fraction,
+                "threshold": policy.max_debit_fraction,
+            }
+        )
+    trigger = _number(candidate.get("trigger_level"))
+    target = _number(candidate.get("target_spx"))
+    stop = _number(candidate.get("invalidation_spx"))
+    scale = _number(candidate.get("local_scale_points"))
+    direction = str(candidate.get("direction") or "")
+    geometry_ok = (
+        trigger is not None
+        and target is not None
+        and stop is not None
+        and scale is not None
+        and scale >= 2.5
+        and abs(abs(target - trigger) - scale) <= 1e-6
+        and abs(abs(trigger - stop) - scale) <= 1e-6
+        and ((direction == "UP" and target > trigger > stop) or (direction == "DOWN" and target < trigger < stop))
+    )
+    if not geometry_ok:
+        gates.append(
+            {
+                "gate": "preaverage_first_passage_geometry_invalid",
+                "actual": {"direction": direction, "target": target, "trigger": trigger, "stop": stop},
+                "threshold": "symmetric_directional_geometry",
+            }
+        )
+    return _block_unevidenced_debit(candidate, gates)
 
 
 def _gth_scan_vertical_hard_gates(

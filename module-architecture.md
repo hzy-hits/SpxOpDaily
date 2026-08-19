@@ -102,7 +102,9 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
   `intraday_shock.py` 为门面（保留 `shock_direct_delivery_enabled` 快路径）
 - `application/morning_map/` — build / render / delivery / state / service；
   `morning_map.py` 为门面
-- `application/runtime/` — service_loop settings / registry / runner / scheduler
+- `application/runtime/` — service_loop settings / registry / runner / scheduler；
+  `market_regime_denoising.py` 只持有 RTH 因果五秒 pre-average 状态推进，I/O 仍由
+  `market_regime_signal.py` 统一负责
 - `application/market_features/` — 实时特征编排、GTH 手工候选，以及独立的
   current-session trend transition source 校验与候选生命周期分类；其中
   `gth_level_candidate_runtime.py` 负责候选持久化、投递回执对账、人工计划监控、

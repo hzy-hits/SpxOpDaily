@@ -35,6 +35,7 @@ WIDTHS: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
 GTH_WIDTH_SCAN = "GTH_WIDTH_SCAN"
 GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 GTH_ATM_PIN = "GTH_ATM_PIN"
+PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
     "strategy_event_expired",
@@ -147,15 +148,24 @@ def _vertical_candidates(
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
-        if _capability_reasons(facts, "vertical"):
-            return []
         evidences, _ = _rth_evidences(
             payload, facts, regime, latest, now=now, policy=policy
         )
         if not evidences:
             return []
+        if _capability_reasons(facts, "vertical") and not any(
+            row.get("setup_kind") == PREAVERAGE15_PULLBACK for row in evidences
+        ):
+            return []
         rows = []
         for evidence in evidences:
+            if evidence.get("setup_kind") == PREAVERAGE15_PULLBACK:
+                row = _rth_preaverage_vertical(
+                    evidence, payload, facts, latest, now=now, policy=policy
+                )
+                if row:
+                    rows.append(row)
+                continue
             if _map(evidence.get("long")) and _map(evidence.get("short")):
                 rows.append(
                     _vertical_candidate_from_evidence(
@@ -182,6 +192,62 @@ def _vertical_candidates(
         )
         return [row for row in rows if row]
     return []
+
+
+def _rth_preaverage_vertical(
+    evidence: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    latest: LatestState,
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> dict[str, Any]:
+    expiry = str(_map(payload.get("option_structure_frame")).get("front_expiry") or "")
+    direction = str(evidence.get("direction") or "")
+    right = "C" if direction == "UP" else "P" if direction == "DOWN" else ""
+    lane_policy = replace(policy, quote_max_age_seconds=5.0)
+    long_strike = nearest_abs_delta_strike(
+        latest,
+        expiry,
+        right,
+        target_abs_delta=0.60,
+        now=now,
+        policy=lane_policy,
+        providers=(Provider.SCHWAB,),
+        max_greeks_age_seconds=5.0,
+    )
+    if not expiry or long_strike is None:
+        return {}
+    short_strike = long_strike + 15.0 if right == "C" else long_strike - 15.0
+    legs = _session_option_legs(
+        latest,
+        expiry,
+        ((long_strike, right), (short_strike, right)),
+        now=now,
+        policy=lane_policy,
+        providers=(Provider.SCHWAB,),
+    )
+    if not legs or any(
+        (_number(leg.get("ask")) or 0.0) <= 0.0
+        or ((_number(leg.get("ask")) or 0.0) - (_number(leg.get("bid")) or 0.0))
+        / (_number(leg.get("ask")) or 1.0)
+        > 0.05
+        for leg in legs
+    ):
+        return {}
+    return _vertical_candidate_from_evidence(
+        {
+            **dict(evidence),
+            "long": legs[0],
+            "short": legs[1],
+            "source": "rth_schwab_preaverage15_pullback",
+            "geometry_source": "preaverage_local_scale_first_passage",
+        },
+        facts,
+        now=now,
+        policy=lane_policy,
+    )
 
 
 def _rth_width_verticals(
@@ -416,6 +482,7 @@ def _vertical_candidate_from_evidence(
         "candidate_id": candidate_id,
         "long_contract_id": long.get("contract_id"),
         "short_contract_id": short.get("contract_id"),
+        "signal_at": evidence.get("signal_at"),
     }
     return {
         "candidate_id": candidate_id,
@@ -432,6 +499,14 @@ def _vertical_candidate_from_evidence(
                 "invalidation_spx",
                 "source",
                 "geometry_source",
+                "signal_at",
+                "evidence_contract_hash",
+                "authorization_policy",
+                "evidence_status",
+                "local_scale_points",
+                "impulse_15m_points",
+                "pullback_points",
+                "resume_1m_points",
             )
         },
         "right": right,
@@ -492,6 +567,11 @@ def _rth_evidences(
     momentum_setups = [
         row for row in setup_facts if str(row.get("setup_kind") or "") == "ES_VOLUME_MOMENTUM"
     ]
+    preaverage_setups = [
+        row
+        for row in setup_facts
+        if str(row.get("setup_kind") or "") == PREAVERAGE15_PULLBACK
+    ]
     pin_blocks = pin_blocks_directional_spreads(regime)
     if pin_blocks:
         reasons.append("directional_spread_blocked_by_pin_watch")
@@ -516,6 +596,19 @@ def _rth_evidences(
                 "direction": direction,
                 "trigger_level": _number(setup.get("trigger_level")),
                 "source": setup.get("source") or "es_volume_momentum",
+            }
+        )
+    for setup in preaverage_setups:
+        direction = _direction(setup.get("direction"))
+        if setup.get("state") != "ENTRY_WINDOW_OPEN" or not direction or pin_blocks:
+            continue
+        bases.append(
+            {
+                **dict(setup),
+                "setup_kind": PREAVERAGE15_PULLBACK,
+                "setup_state": setup.get("state"),
+                "direction": direction,
+                "source": "rth_preaverage15_pullback",
             }
         )
     if not bases and not pin_blocks:
@@ -550,9 +643,13 @@ def _rth_evidences(
     for base in bases:
         direction = str(base["direction"])
         trigger_level = _number(base.get("trigger_level"))
-        target, stop, geometry_source = resolve_geometry(
-            payload, facts, direction, trigger_level
-        )
+        target = _number(base.get("target_spx"))
+        stop = _number(base.get("invalidation_spx"))
+        geometry_source = base.get("geometry_source")
+        if target is None or stop is None:
+            target, stop, geometry_source = resolve_geometry(
+                payload, facts, direction, trigger_level
+            )
         if target is None or stop is None:
             reasons.append("vertical_target_or_invalidation_unavailable")
             continue
@@ -1006,6 +1103,7 @@ def nearest_abs_delta_strike(
     max_distance: float = 0.08,
     min_abs_delta: float | None = None,
     max_abs_delta: float | None = None,
+    max_greeks_age_seconds: float | None = None,
 ) -> float | None:
     """Return the strike whose |delta| is closest to target among fresh quotes.
 
@@ -1037,6 +1135,17 @@ def nearest_abs_delta_strike(
             delta = usable_delta(quote)
             if delta is None:
                 continue
+            if max_greeks_age_seconds is not None:
+                raw = _map(quote.raw)
+                greeks_at = _time(raw.get("greeks_observed_at")) or source_at
+                greeks_provider = str(raw.get("greeks_provider") or provider.value)
+                greeks_age = (now - greeks_at).total_seconds()
+                if (
+                    greeks_provider != provider.value
+                    or greeks_age < 0.0
+                    or greeks_age > max_greeks_age_seconds
+                ):
+                    continue
             abs_delta = abs(delta)
             if abs_delta < floor:
                 continue
