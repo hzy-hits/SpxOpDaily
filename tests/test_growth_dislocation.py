@@ -392,6 +392,41 @@ def test_missing_ibkr_ivp_fails_closed_to_watchlist(tmp_path: Path) -> None:
     assert "**TEST**" not in text
 
 
+def test_incomplete_ibkr_ivp_is_not_cached_and_retries_next_scan(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fetch(symbols: list[str]):
+        calls.append(symbols)
+        if len(calls) == 1:
+            return _ivp_fetcher(symbols, ivp_13w=None, ivp_26w=None)  # type: ignore[arg-type]
+        return _ivp_fetcher(symbols)
+
+    first = scan_once(
+        now=NOW,
+        mode="rth",
+        client=FakeSchwabClient(NOW),  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=fetch,
+    )
+    second = scan_once(
+        now=NOW,
+        mode="rth",
+        client=FakeSchwabClient(NOW),  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=fetch,
+    )
+
+    assert first.document["counts"]["strict_candidates"] == 0
+    assert first.document["counts"]["ivp_refreshed"] == 0
+    assert second.document["counts"]["strict_candidates"] == 1
+    assert second.document["counts"]["ivp_refreshed"] == 1
+    assert calls == [["TEST"], ["TEST"]]
+
+
 def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Path) -> None:
     client = FakeSchwabClient(NOW)
     deliveries: list[NotificationEnvelope] = []

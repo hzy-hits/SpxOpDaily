@@ -282,6 +282,8 @@ def _build_document(
                 fetched = iv_percentile_fetcher(refresh_symbols)
                 for raw_symbol, snapshot in fetched.items():
                     symbol = _ibkr_provider_symbol(raw_symbol)
+                    if snapshot.ivp_13w is None or snapshot.ivp_26w is None:
+                        continue
                     iv_snapshots[symbol] = snapshot
                     iv_cache[symbol] = iv_percentile_snapshot_to_payload(snapshot)
                     refreshed_iv_symbols.add(symbol)
