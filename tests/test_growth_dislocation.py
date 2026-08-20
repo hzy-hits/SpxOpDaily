@@ -427,6 +427,38 @@ def test_incomplete_ibkr_ivp_is_not_cached_and_retries_next_scan(tmp_path: Path)
     assert calls == [["TEST"], ["TEST"]]
 
 
+def test_incomplete_daily_refresh_keeps_complete_cached_ivp(tmp_path: Path) -> None:
+    client = FakeSchwabClient(NOW)
+    first = scan_once(
+        now=NOW,
+        mode="rth",
+        client=client,  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=_ivp_fetcher,
+    )
+    second = scan_once(
+        now=NOW,
+        mode="daily",
+        client=client,  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=lambda symbols: _ivp_fetcher(  # type: ignore[arg-type]
+            symbols,
+            ivp_13w=None,
+            ivp_26w=None,
+        ),
+    )
+
+    assert first.document["top10"][0]["ivp_13w"] == 0.047619
+    assert second.document["top10"][0]["ivp_13w"] == 0.047619
+    assert second.document["counts"]["ivp_refreshed"] == 0
+    assert "ibkr_ivp:partial" not in second.document["data_quality"]["errors"]
+    assert second.document["scan_complete"] is True
+
+
 def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Path) -> None:
     client = FakeSchwabClient(NOW)
     deliveries: list[NotificationEnvelope] = []
