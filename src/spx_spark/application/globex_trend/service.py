@@ -164,19 +164,28 @@ def _es_price_observation(
     return None
 
 
-def alert_from_event(event: dict[str, Any]) -> Alert:
+def alert_from_event(
+    event: dict[str, Any],
+    *,
+    gth_bias_cooldown_seconds: float | None = None,
+) -> Alert:
     if event.get("event_type") in {"continuation", "advance"}:
         return continuation_alert_from_event(event)
     metrics = event.get("metrics") if isinstance(event.get("metrics"), dict) else {}
     target = str(event["to_regime"])
     prior = str(event["from_regime"])
     direction = "偏空" if target == "bearish" else "偏多"
+    direction_code = "DOWN" if target == "bearish" else "UP"
     observed_at = as_utc(datetime.fromisoformat(str(event["at"])))
-    session_label = "RTH" if DEFAULT_MARKET_CALENDAR.is_rth_open(observed_at) else "Globex"
+    is_rth = DEFAULT_MARKET_CALENDAR.is_rth_open(observed_at)
+    is_gth = DEFAULT_MARKET_CALENDAR.is_spx_gth_open(observed_at)
+    session_label = "RTH" if is_rth else "GTH" if is_gth else "Globex"
     session_context = (
         "当前处于 SPX 现金交易时段，ES 是连续领先确认源；不得按夜盘薄流动性解释。"
-        if session_label == "RTH"
-        else "当前处于现金盘外，ES 路径用于 Globex 连续价格发现。"
+        if is_rth
+        else "当前处于 SPX GTH，ES 路径用于盘外连续价格发现。"
+        if is_gth
+        else "当前处于 SPX 期权闭市窗口，ES 只用于 Globex 连续价格发现。"
     )
     detail = (
         f"ES {session_label} 趋势确认切换：{REGIME_LABELS_CN.get(prior, prior)} → "
@@ -196,22 +205,45 @@ def alert_from_event(event: dict[str, Any]) -> Alert:
             f"前序 GTH 方向机会 {invalidated_advisory_id} 已失效；"
             "不得继续按原 Call/Put advisory 管理。"
         )
+    is_gth_bias = is_gth and not invalidated_advisory_id
+    if is_gth_bias:
+        detail += (
+            f"GTH Bias {direction_code} · Observe；"
+            "等待当前关键水平出现接受/拒绝或突破回踩确认。"
+            "本卡不包含 SPXW 合约，不授权交易；"
+            "ACTION_AUTHORITY=NONE，EXECUTION_ELIGIBLE=NO，自动下单关闭。"
+        )
+    session_scope = str(event.get("session_id") or trend_context_id(observed_at))
     return Alert(
         severity="high",
-        kind=("gth_advisory_invalidated" if invalidated_advisory_id else "globex_trend_transition"),
+        kind=(
+            "gth_advisory_invalidated"
+            if invalidated_advisory_id
+            else "gth_bias_transition"
+            if is_gth_bias
+            else "globex_trend_transition"
+        ),
         instrument_id="future:ES",
-        title=f"ES {session_label} {REGIME_LABELS_CN.get(target, target)}确认",
+        title=(
+            f"GTH Bias · {direction_code} · Observe"
+            if is_gth_bias
+            else f"ES {session_label} {REGIME_LABELS_CN.get(target, target)}确认"
+        ),
         detail=detail,
         provider=str(event.get("provider") or ""),
         quality="live",
         value=float(event["price"]),
-        # A raw ES regime flip is audit context.  It becomes human-visible only
-        # when it explicitly invalidates an accepted advisory lifecycle.
-        research_only=not bool(invalidated_advisory_id),
-        source_gate="globex_trend_machine",
-        dedup_group=str(event["event_id"]),
+        # RTH and closed-window flips remain audit context. A confirmed GTH
+        # direction flip is a non-executable human bias card; Trade Ready stays
+        # owned by the strategy decision contract.
+        research_only=not bool(invalidated_advisory_id or is_gth_bias),
+        source_gate=("gth_bias_transition_v1" if is_gth_bias else "globex_trend_machine"),
+        dedup_group=(
+            f"gth-bias:{session_scope}:{target}" if is_gth_bias else str(event["event_id"])
+        ),
         event_id=str(event["event_id"]),
         source_at=str(event.get("source_at") or event["at"]),
+        cooldown_seconds=(gth_bias_cooldown_seconds if is_gth_bias else None),
         audit_context=(
             {
                 "invalidated_advisory_id": invalidated_advisory_id,
@@ -220,6 +252,16 @@ def alert_from_event(event: dict[str, Any]) -> Alert:
                 "automatic_ordering": False,
             }
             if invalidated_advisory_id
+            else {
+                "direction": "down" if target == "bearish" else "up",
+                "session_mode": "gth",
+                "action_authority": "none",
+                "execution_eligible": False,
+                "automatic_ordering": False,
+                "contract_id": None,
+                "entry_limit": None,
+            }
+            if is_gth_bias
             else None
         ),
     )
@@ -393,7 +435,10 @@ def run(
                 }
             )
             if pending is not None and not args.no_notify:
-                alert = alert_from_event(pending)
+                alert = alert_from_event(
+                    pending,
+                    gth_bias_cooldown_seconds=policy.continuation_cooldown_seconds,
+                )
                 payload = {
                     "created_at": evaluation_now.isoformat(),
                     "as_of": evaluation_now.isoformat(),

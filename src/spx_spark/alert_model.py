@@ -27,10 +27,13 @@ class Alert:
     event_id: str | None = None
     source_at: str | None = None
     source_event_key: str | None = None
+    cooldown_seconds: float | None = None
     audit_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
+        if self.cooldown_seconds is None:
+            payload.pop("cooldown_seconds")
         if self.audit_context is None:
             payload.pop("audit_context")
         return payload

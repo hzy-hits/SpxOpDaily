@@ -96,6 +96,7 @@ INTRADAY_DIRECT_PUSH_KINDS = frozenset(
         "call_wall_breakout_call",
         "gth_dip_reclaim_call",
         "gth_advisory_invalidated",
+        "gth_bias_transition",
     }
 )
 
@@ -286,6 +287,7 @@ MARKET_SIGNAL_ALERT_KINDS = frozenset(
         "intraday_price_shock",
         "intraday_price_reclaim",
         "globex_trend_transition",
+        "gth_bias_transition",
         "globex_trend_continuation",
         "gth_directional_advisory",
         "gth_advisory_management",

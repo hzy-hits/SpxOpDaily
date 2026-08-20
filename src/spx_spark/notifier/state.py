@@ -210,7 +210,15 @@ def select_alerts_for_notification(
             continue
         key = alert_key(alert)
         previous_ts = sent_at_by_key.get(key)
-        if previous_ts is not None and now_ts - previous_ts < settings.cooldown_seconds:
+        alert_cooldown = alert.get("cooldown_seconds")
+        effective_cooldown = (
+            float(alert_cooldown)
+            if isinstance(alert_cooldown, int | float)
+            and not isinstance(alert_cooldown, bool)
+            and alert_cooldown > 0
+            else float(settings.cooldown_seconds)
+        )
+        if previous_ts is not None and now_ts - previous_ts < effective_cooldown:
             continue
         if recent_intraday_shock_blocks_price_move(
             alert,

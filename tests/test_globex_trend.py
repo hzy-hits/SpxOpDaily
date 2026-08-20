@@ -235,6 +235,35 @@ def test_confirmed_globex_transition_is_audit_only() -> None:
     assert direct_push_alerts([alert]) == []
 
 
+def test_confirmed_gth_bias_transition_is_direct_but_non_executable() -> None:
+    event = {
+        "event_id": "globex-trend:2026-07-13:gth:2:bearish",
+        "session_id": "2026-07-13:gth",
+        "at": "2026-07-13T12:00:00+00:00",
+        "source_at": "2026-07-13T12:00:00+00:00",
+        "from_regime": "bullish",
+        "to_regime": "bearish",
+        "price": 7577.0,
+        "provider": "ibkr",
+        "metrics": {},
+    }
+
+    alert = alert_from_event(event, gth_bias_cooldown_seconds=1800)
+    payload = alert.to_dict()
+
+    assert alert.kind == "gth_bias_transition"
+    assert alert.title == "GTH Bias · DOWN · Observe"
+    assert alert.research_only is False
+    assert alert.cooldown_seconds == 1800
+    assert "等待当前关键水平" in alert.detail
+    assert "本卡不包含 SPXW 合约" in alert.detail
+    assert alert.audit_context is not None
+    assert alert.audit_context["action_authority"] == "none"
+    assert alert.audit_context["execution_eligible"] is False
+    assert alert.audit_context["contract_id"] is None
+    assert direct_push_alerts([payload]) == [payload]
+
+
 def test_confirmed_gth_advisory_events_are_audit_only() -> None:
     for kind in ("gth_directional_advisory", "gth_advisory_management"):
         alert = {
@@ -756,7 +785,7 @@ def test_runtime_delivers_confirmed_transition_once(tmp_path, monkeypatch) -> No
     assert delivered[0].endswith(":bearish")
 
 
-def test_es_transition_keeps_globex_semantics_outside_cash_session() -> None:
+def test_es_transition_uses_observe_only_bias_semantics_during_gth() -> None:
     event = {
         "event_id": "globex-trend:2026-07-13:1:bullish",
         "at": "2026-07-13T12:00:00+00:00",
@@ -768,10 +797,12 @@ def test_es_transition_keeps_globex_semantics_outside_cash_session() -> None:
         "metrics": {},
     }
 
-    alert = alert_from_event(event)
+    alert = alert_from_event(event, gth_bias_cooldown_seconds=1800)
 
-    assert alert.title == "ES Globex 多头趋势确认"
-    assert "现金盘外" in alert.detail
+    assert alert.kind == "gth_bias_transition"
+    assert alert.title == "GTH Bias · UP · Observe"
+    assert "当前处于 SPX GTH" in alert.detail
+    assert "EXECUTION_ELIGIBLE=NO" in alert.detail
 
 
 def test_neutral_session_advance_confirms_slow_grind_without_pullback() -> None:

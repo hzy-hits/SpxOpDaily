@@ -2455,6 +2455,7 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     )
     assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
     assert bark_title_for_alerts([{"kind": "globex_trend_transition"}]) == "SPX 价格异动"
+    assert bark_title_for_alerts([{"kind": "gth_bias_transition"}]) == "SPX GTH 方向提示"
     assert bark_title_for_alerts([{"kind": "globex_trend_continuation"}]) == "SPX GTH 方向提示"
     assert bark_title_for_alerts([{"kind": "gth_directional_advisory"}]) == "SPX GTH 方向提示"
     assert bark_title_for_alerts([{"kind": "gth_advisory_management"}]) == "SPX GTH 机会管理"
@@ -2464,6 +2465,54 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
         bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}])
         == "SPX Spark HIGH unknown_kind"
     )
+
+
+def test_alert_specific_cooldown_dedupes_same_gth_bias_but_allows_flip(
+    tmp_path,
+) -> None:
+    settings = make_settings(str(tmp_path / "notify-state.json"))
+    base = datetime(2026, 8, 20, 7, 25, tzinfo=timezone.utc)
+    down = {
+        "severity": "high",
+        "kind": "gth_bias_transition",
+        "instrument_id": "future:ES",
+        "title": "GTH Bias · DOWN · Observe",
+        "detail": "Observe only.",
+        "source_gate": "gth_bias_transition_v1",
+        "dedup_group": "gth-bias:2026-08-20:gth:bearish",
+        "cooldown_seconds": 1800,
+    }
+    payload = {"alerts": [down]}
+
+    selected, sent = select_alerts_for_notification(payload, settings, now=base)
+    assert selected == [down]
+    mark_alerts_sent(selected, sent, settings, now=base)
+
+    selected, _ = select_alerts_for_notification(
+        payload,
+        settings,
+        now=base + timedelta(minutes=20),
+    )
+    assert selected == []
+
+    up = {
+        **down,
+        "title": "GTH Bias · UP · Observe",
+        "dedup_group": "gth-bias:2026-08-20:gth:bullish",
+    }
+    selected, _ = select_alerts_for_notification(
+        {"alerts": [up]},
+        settings,
+        now=base + timedelta(minutes=20),
+    )
+    assert selected == [up]
+
+    selected, _ = select_alerts_for_notification(
+        payload,
+        settings,
+        now=base + timedelta(minutes=31),
+    )
+    assert selected == [down]
 
 
 def test_codex_prompt_hides_non_focus_market_context() -> None:

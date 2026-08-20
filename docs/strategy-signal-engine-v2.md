@@ -570,6 +570,10 @@ HMM、GEX 方向、旧 entry-quality 或历史方向 stick 门；它必须标记
 进入 Desk Map 与拒绝漏斗，但不再授权 Trade Ready；GTH 人读 Debit 只保留确认水平 /
 回踩收复证据。Desk Map 仍写不做。GTH 同方向锁定 30 分钟；同 setup/direction 卡片
 冷却 15 分钟；每个 session mode 每个方向最多接受 2 张卡。
+GTH 确认方向翻转另发一张 `GTH Bias UP/DOWN · Observe` 市场警示，
+同 session 同方向 30 分钟内去重。该卡不包含期权合约或入场限价，
+`action_authority=none` 且 `execution_eligible=false`；必须等关键水平接受/拒绝或突破回踩确认后，
+才可由统一策略决策升级为 Trade Ready。
 
 ### 7.2 BALANCED
 
