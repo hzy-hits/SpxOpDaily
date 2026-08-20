@@ -260,12 +260,12 @@ direction_confirmation_move_bps = { value = 5, description = "Minimum same-direc
 
 [growth_dislocation]
 enabled = { value = false, description = "Enables the additive Growth Dislocation LEAPS discovery job after its production shadow acceptance; disabled by default." }
-universe_path = { value = "config/growth_dislocation_universe.csv", description = "Tracked point-in-time union of official SPY, Nasdaq-100, and IWM constituents used for candidate discovery." }
+universe_path = { value = "config/growth_dislocation_universe.csv", description = "Tracked point-in-time union of official SPY, Nasdaq-100, IWB, and IWM constituents used for large/mid-cap fallen-angel discovery." }
 max_price_location_52w = { value = 0.20, description = "Hard upper bound for current price location within the Schwab 52-week high/low range." }
 max_dividend_yield = { value = 0.015, description = "Hard upper bound for annual dividend yield expressed as a fraction." }
 min_market_cap = { value = 3000000000.0, description = "Hard minimum market capitalization computed from Schwab shares outstanding and the current mark." }
-max_ivp_13w = { value = 0.10, description = "Hard maximum IBKR 13-week underlying implied-volatility percentile expressed as a fraction." }
-max_ivp_26w = { value = 0.10, description = "Hard maximum IBKR 26-week underlying implied-volatility percentile expressed as a fraction." }
+max_ivp_13w = { value = 0.20, description = "Hard maximum IBKR 13-week underlying implied-volatility percentile expressed as a fraction." }
+max_ivp_26w = { value = 0.20, description = "Hard maximum IBKR 26-week underlying implied-volatility percentile expressed as a fraction." }
 ibkr_history_timeout_seconds = { value = 8.0, description = "Per-symbol timeout for the read-only IBKR TWS daily OPTION_IMPLIED_VOLATILITY history request." }
 ibkr_history_concurrency = { value = 5, description = "Maximum concurrent IBKR daily IV-history requests during scanner cache refresh." }
 min_leaps_dte = { value = 365, description = "Minimum days to expiry for an option to count as a real LEAPS contract." }
@@ -273,8 +273,7 @@ preferred_leaps_dte = { value = 540, description = "Start of the preferred 18-to
 max_leaps_dte = { value = 730, description = "Maximum days to expiry considered by the target LEAPS selector." }
 target_delta_min = { value = 0.60, description = "Minimum call delta accepted by the target LEAPS selector." }
 target_delta_max = { value = 0.80, description = "Maximum call delta accepted by the target LEAPS selector." }
-max_leaps_spread_mid = { value = 0.10, description = "Preferred maximum bid/ask spread divided by mid used by the liquidity score." }
-hard_max_leaps_spread_mid = { value = 0.15, description = "Hard maximum bid/ask spread divided by mid for candidate eligibility." }
+max_leaps_spread_mid = { value = 0.12, description = "Hard maximum target-LEAPS bid/ask spread divided by mid for candidate eligibility." }
 rsi_oversold_threshold = { value = 30.0, description = "RSI threshold that proves the stock was recently oversold." }
 rsi_recovery_min = { value = 35.0, description = "First RSI recovery level used as a state confirmation." }
 rsi_recovery_optimal_low = { value = 40.0, description = "Lower edge of the preferred recovered RSI range." }

@@ -199,30 +199,35 @@ run has completed without missing IV history or provider errors.
   early-close behavior follow the exchange calendar rather than a fixed UTC offset.
 - Latest output: `data_root/latest/growth_dislocation_leaps.json`.
 - Runtime state: `data_root/runtime/growth_dislocation_state.json`. After the
-  Schwab price/fundamental prefilter, the scanner reuses the existing read-only
+  Schwab price prefilter, the scanner reuses the existing read-only
   IB Gateway socket on port 4002 to request one year of daily
   `OPTION_IMPLIED_VOLATILITY` bars. It calculates and caches 13/26/52-week IV
   percentile and rank values; RTH scans reuse a cache no older than one trading
   day, while the 20:00 ET run refreshes all current price-filter survivors. A
   first request supplies the complete lookback, so the scanner does not need to
   accumulate 52 weeks locally.
-- The hard volatility gate is `ivp_13w <= 0.10 and ivp_26w <= 0.10`; 52-week IV
-  percentile is bonus-only. Missing history, timeouts, connectivity loss, and
+- The universe is the tracked point-in-time union of official SPY, Nasdaq-100,
+  IWB (Russell 1000), and IWM holdings. The `market_cap >= $3B` hard gate turns
+  this into a large/mid-cap fallen-angel search rather than a small-cap screen.
+- Hard gates are `52W price location <= 0.20`, `ivp_13w <= 0.20`,
+  `ivp_26w <= 0.20`, `market_cap >= $3B`, `dividend_yield < 1.50%`, at least
+  365 DTE, valid target-LEAPS bid/ask, and spread/mid `<= 0.12`. The current
+  Schwab endpoints do not provide trustworthy underlying average option volume,
+  so V1 reports that field as unavailable and does not fabricate or gate on it.
+  Missing history, timeouts, connectivity loss, and
   error 10197 fail closed into data-quality rows. Requests use the existing IBKR
   snapshot client id and never read accounts, subscribe to continuous ticker
   lines, or place orders.
-- Candidates that pass the price hard filter receive source-aware soft
-  `GrowthQuality` and `Convexity` scores. Reported revenue growth, operating-margin
-  trend, return on investment, and balance-sheet inputs come from Schwab's
-  instrument fundamental projection. The first version leaves forward revenue
-  growth, FCF growth, and catalysts explicitly null because the current provider
-  entitlements do not supply them; missing values are never treated as zero.
-  Theme optionality is an issuer-level curated universe field, not a sector-wide
-  preference. These scores affect ranking only and never admit a symbol that
-  failed the price, IV, or LEAPS-liquidity hard gates.
-- Final ranking weights are 20% volatility, 18% relative strength, 12% RSI
-  recovery, 10% price recovery, 15% option liquidity, 8% market cap, 10% growth,
-  and 7% convexity. Human-visible numeric values render with two decimals.
+- `52W price location` is `(last - 52W low) / (52W high - 52W low)`. The selected
+  call remains 365–730 DTE with 0.60–0.80 delta, while the intended research
+  holding window is roughly two to three months; that holding horizon is not an
+  extra scanner score or an automatic exit rule.
+- Ranking is only 50% IV cheapness, 30% RSI recovery, and 20% sector-relative
+  strength. The 52-week IV percentile and IV rank remain context fields only.
+  `WATCH / ARMED / TRIGGER` is determined from oversold recovery, positive 5-day
+  sector relative strength, and close above MA10. Growth quality, convexity,
+  market cap, OI, and fundamentals do not enter the score. Human-visible numeric
+  values render with two decimals.
 - Manual diagnostic: `uv run spx job growth-dislocation --force`. This consumes
   live Schwab request budget and may queue a real notification.
 

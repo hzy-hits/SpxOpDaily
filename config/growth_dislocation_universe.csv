@@ -1,10 +1,10 @@
-# schema_version=growth_dislocation_universe.v2
+# schema_version=growth_dislocation_universe.v3
 # SPY holdings=As of 18-Aug-2026; source=https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx
 # NDX retrieved_at=2026-08-20; source=https://www.nasdaq.com/products/global-indexes/nasdaq-100/companies
+# IWB holdings=Aug 18, 2026; source=https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/latest-holdings.csv
 # IWM holdings=Aug 18, 2026; source=https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/latest-holdings.csv
 # classification=subindustry unavailable from official holdings; sector used as the explicit crowding fallback
-# growth_theme=curated issuer-level optionality taxonomy; blank is not a negative sector judgment
-symbol,provider_symbol,company,sector,subindustry,classification_level,sector_benchmark,memberships,growth_theme
+symbol,provider_symbol,company,sector,subindustry,classification_level,sector_benchmark,memberships
 A,A,AGILENT TECHNOLOGIES INC,Health Care,Health Care,sector,XLV,SPY
 AAMI,AAMI,ACADIAN ASSET MANAGEMENT INC,Financials,Financials,sector,XLF,IWM
 AAP,AAP,ADVANCE AUTO PARTS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
@@ -31,7 +31,7 @@ ACEL,ACEL,ACCEL ENTERTAINMENT INC CLASS A,Consumer Discretionary,Consumer Discre
 ACGL,ACGL,ARCH CAPITAL GROUP LTD,Financials,Financials,sector,XLF,SPY
 ACH,ACH,ACCENDRA HEALTH,Health Care,Health Care,sector,XLV,IWM
 ACHC,ACHC,ACADIA HEALTHCARE COMPANY,Health Care,Health Care,sector,XLV,IWM
-ACHR,ACHR,ARCHER AVIATION CLASS A,Industrials,Industrials,sector,XLI,IWM,evtol
+ACHR,ACHR,ARCHER AVIATION CLASS A,Industrials,Industrials,sector,XLI,IWM
 ACHV,ACHV,ACHIEVE LIFE SCIENCES,Health Care,Health Care,sector,XLV,IWM
 ACIC,ACIC,AMERICAN COASTAL INSURANCE CORP,Financials,Financials,sector,XLF,IWM
 ACIW,ACIW,ACI WORLDWIDE,Information Technology,Information Technology,sector,IWM,IWM
@@ -1224,7 +1224,7 @@ JJSF,JJSF,J AND J SNACK FOODS CORP,Consumer Staples,Consumer Staples,sector,XLP,
 JKHY,JKHY,JACK HENRY + ASSOCIATES INC,Financials,Financials,sector,XLF,SPY
 JMSB,JMSB,JOHN MARSHALL BANCORP INC,Financials,Financials,sector,XLF,IWM
 JNJ,JNJ,JOHNSON + JOHNSON,Health Care,Health Care,sector,XLV,SPY
-JOBY,JOBY,JOBY AVIATION CLASS A,Industrials,Industrials,sector,XLI,IWM,evtol
+JOBY,JOBY,JOBY AVIATION CLASS A,Industrials,Industrials,sector,XLI,IWM
 JOE,JOE,ST JOE,Real Estate,Real Estate,sector,XLRE,IWM
 JOUT,JOUT,JOHNSON OUTDOORS INC CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 JPM,JPM,JPMORGAN CHASE + CO,Financials,Financials,sector,XLF,SPY
@@ -1311,7 +1311,7 @@ LEG,LEG,LEGGETT & PLATT,Consumer Discretionary,Consumer Discretionary,sector,XLY
 LEGH,LEGH,LEGACY HOUSING CORP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 LEN,LEN,LENNAR CORP A,Consumer Discretionary,Consumer Discretionary,sector,XLY,SPY
 LENZ,LENZ,LENZ THERAPEUTICS,Health Care,Health Care,sector,XLV,IWM
-LEU,LEU,CENTRUS ENERGY CLASS A,Energy,Energy,sector,XLE,IWM,nuclear
+LEU,LEU,CENTRUS ENERGY CLASS A,Energy,Energy,sector,XLE,IWM
 LFCR,LFCR,LIFECORE BIOMEDICAL,Health Care,Health Care,sector,XLV,IWM
 LFMD,LFMD,LIFEMD INC,Health Care,Health Care,sector,XLV,IWM
 LFST,LFST,LIFESTANCE HEALTH GROUP,Health Care,Health Care,sector,XLV,IWM
@@ -1360,7 +1360,7 @@ LTRX,LTRX,LANTRONIX INC,Information Technology,Information Technology,sector,IWM
 LUCD,LUCD,LUCID DIAGNOSTICS INC,Health Care,Health Care,sector,XLV,IWM
 LULU,LULU,LULULEMON ATHLETICA INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,SPY
 LUMN,LUMN,LUMEN TECHNOLOGIES,Communication,Communication,sector,XLC,IWM
-LUNR,LUNR,INTUITIVE MACHINES INC CLASS A,Industrials,Industrials,sector,XLI,IWM,space
+LUNR,LUNR,INTUITIVE MACHINES INC CLASS A,Industrials,Industrials,sector,XLI,IWM
 LUV,LUV,SOUTHWEST AIRLINES CO,Industrials,Industrials,sector,XLI,SPY
 LVS,LVS,LAS VEGAS SANDS CORP,Consumer Discretionary,Consumer Discretionary,sector,XLY,SPY
 LVWR,LVWR,LIVEWIRE GROUP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
@@ -1567,7 +1567,7 @@ NMIH,NMIH,NMI HOLDINGS,Financials,Financials,sector,XLF,IWM
 NMRA,NMRA,NEUMORA THERAPEUTICS INC,Health Care,Health Care,sector,XLV,IWM
 NMRK,NMRK,NEWMARK GROUP INC CLASS A,Real Estate,Real Estate,sector,XLRE,IWM
 NN,NN,NEXTNAV,Information Technology,Information Technology,sector,IWM,IWM
-NNE,NNE,NANO NUCLEAR ENERGY,Industrials,Industrials,sector,XLI,IWM,nuclear
+NNE,NNE,NANO NUCLEAR ENERGY,Industrials,Industrials,sector,XLI,IWM
 NNI,NNI,NELNET CLASS A,Financials,Financials,sector,XLF,IWM
 NOC,NOC,NORTHROP GRUMMAN CORP,Industrials,Industrials,sector,XLI,SPY
 NODK,NODK,NI HOLDINGS INC,Financials,Financials,sector,XLF,IWM
@@ -1852,7 +1852,7 @@ PXED,PXED,PHOENIX EDUCATION PARTNERS,Consumer Discretionary,Consumer Discretiona
 PYPL,PYPL,PAYPAL HOLDINGS INC,Financials,Financials,sector,XLF,NDX|SPY
 PZZA,PZZA,PAPA JOHNS INTERNATIONAL INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 Q,Q,QNITY ELECTRONICS INC,Technology,Technology,sector,XLK,SPY
-QBTS,QBTS,D WAVE QUANTUM,Information Technology,Information Technology,sector,IWM,IWM,quantum
+QBTS,QBTS,D WAVE QUANTUM,Information Technology,Information Technology,sector,IWM,IWM
 QCOM,QCOM,QUALCOMM INC,Technology,Technology,sector,XLK,NDX|SPY
 QCRH,QCRH,QCR HOLDINGS INC,Financials,Financials,sector,XLF,IWM
 QDEL,QDEL,QUIDELORTHO CORP,Health Care,Health Care,sector,XLV,IWM
@@ -1883,7 +1883,7 @@ RDN,RDN,RADIAN GROUP,Financials,Financials,sector,XLF,IWM
 RDNT,RDNT,RADNET,Health Care,Health Care,sector,XLV,IWM
 RDNW,RDNW,RIDENOW GROUP INC CLASS B,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 RDVT,RDVT,RED VIOLET INC,Information Technology,Information Technology,sector,IWM,IWM
-RDW,RDW,REDWIRE,Industrials,Industrials,sector,XLI,IWM,space
+RDW,RDW,REDWIRE,Industrials,Industrials,sector,XLI,IWM
 RDZN,RDZN,ROADZEN INC,Information Technology,Information Technology,sector,IWM,IWM
 REAL,REAL,THE REALREAL,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 REAX,REAX,REAL BROKERAGE,Real Estate,Real Estate,sector,XLRE,IWM
@@ -1904,7 +1904,7 @@ RFIL,RFIL,RF INDUSTRIES LTD,Information Technology,Information Technology,sector
 RGCO,RGCO,RGC RESOURCES INC,Utilities,Utilities,sector,XLU,IWM
 RGNX,RGNX,REGENXBIO,Health Care,Health Care,sector,XLV,IWM
 RGR,RGR,STURM RUGER,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
-RGTI,RGTI,RIGETTI COMPUTING,Information Technology,Information Technology,sector,IWM,IWM,quantum
+RGTI,RGTI,RIGETTI COMPUTING,Information Technology,Information Technology,sector,IWM,IWM
 RH,RH,RH,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 RHLD,RHLD,RESOLUTE HOLDINGS MANAGEMENT INC,Industrials,Industrials,sector,XLI,IWM
 RHP,RHP,RYMAN HOSPITALITY PROPERTIES REIT,Real Estate,Real Estate,sector,XLRE,IWM
@@ -1915,7 +1915,7 @@ RILY,RILY,BRC GROUP HOLDINGS INC,Financials,Financials,sector,XLF,IWM
 RIOT,RIOT,RIOT PLATFORMS,Information Technology,Information Technology,sector,IWM,IWM
 RJET,RJET,REPUBLIC AIRWAYS HOLDINGS INC,Industrials,Industrials,sector,XLI,IWM
 RJF,RJF,RAYMOND JAMES FINANCIAL INC,Financials,Financials,sector,XLF,SPY
-RKLB,RKLB,Rocket Lab Corporation Common Stock,Unknown,Unknown,fallback,QQQ,NDX,space
+RKLB,RKLB,Rocket Lab Corporation Common Stock,Unknown,Unknown,fallback,QQQ,NDX
 RL,RL,RALPH LAUREN CORP,Consumer Discretionary,Consumer Discretionary,sector,XLY,SPY
 RLAY,RLAY,RELAY THERAPEUTICS,Health Care,Health Care,sector,XLV,IWM
 RLGT,RLGT,RADIANT LOGISTIC INC,Industrials,Industrials,sector,XLI,IWM
@@ -1997,7 +1997,7 @@ SEI,SEI,SOLARIS ENERGY INFRASTRUCTURE INC,Energy,Energy,sector,XLE,IWM
 SENEA,SENEA,SENECA FOODS CLASS A,Consumer Staples,Consumer Staples,sector,XLP,IWM
 SENS,SENS,SENSEONICS HOLDINGS INC,Health Care,Health Care,sector,XLV,IWM
 SEPN,SEPN,SEPTERNA,Health Care,Health Care,sector,XLV,IWM
-SERV,SERV,SERVE ROBOTICS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM,robotics
+SERV,SERV,SERVE ROBOTICS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 SES,SES,SES AI CLASS A,Industrials,Industrials,sector,XLI,IWM
 SEVN,SEVN,SEVEN HILLS REALTY TRUST,Financials,Financials,sector,XLF,IWM
 SEZL,SEZL,SEZZLE INC,Financials,Financials,sector,XLF,IWM
@@ -2057,7 +2057,7 @@ SMHI,SMHI,SEACOR MARINE HOLDINGS INC,Energy,Energy,sector,XLE,IWM
 SMID,SMID,SMITH MIDLAND CORP,Materials,Materials,sector,XLB,IWM
 SMP,SMP,STANDARD MOTOR PRODUCTS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWM
 SMPL,SMPL,THE SIMPLY GOOD FOODS COMPANY,Consumer Staples,Consumer Staples,sector,XLP,IWM
-SMR,SMR,NUSCALE POWER CORP CLASS A,Industrials,Industrials,sector,XLI,IWM,nuclear
+SMR,SMR,NUSCALE POWER CORP CLASS A,Industrials,Industrials,sector,XLI,IWM
 SMRT,SMRT,SMARTRENT INC CLASS A,Information Technology,Information Technology,sector,IWM,IWM
 SMTI,SMTI,SANARA MEDTECH INC,Health Care,Health Care,sector,XLV,IWM
 SNA,SNA,SNAP ON INC,Industrials,Industrials,sector,XLI,SPY
@@ -2483,3 +2483,520 @@ ZURA,ZURA,ZURA BIO LTD CLASS A,Health Care,Health Care,sector,XLV,IWM
 ZVRA,ZVRA,ZEVRA THERAPEUTICS INC,Health Care,Health Care,sector,XLV,IWM
 ZWS,ZWS,ZURN ELKAY WATER SOLUTIONS CORP,Industrials,Industrials,sector,XLI,IWM
 ZYME,ZYME,ZYMEWORKS,Health Care,Health Care,sector,XLV,IWM
+AA,AA,ALCOA CORP,Materials,Materials,sector,XLB,IWB
+AAL,AAL,AMERICAN AIRLINES GROUP,Industrials,Industrials,sector,XLI,IWB
+AAOI,AAOI,APPLIED OPTOELECTRONICS,Information Technology,Information Technology,sector,XLK,IWB
+AAON,AAON,AAON,Industrials,Industrials,sector,XLI,IWB
+ACI,ACI,ALBERTSONS COMPANY CLASS A,Consumer Staples,Consumer Staples,sector,XLP,IWB
+ACM,ACM,AECOM,Industrials,Industrials,sector,XLI,IWB
+ADC,ADC,AGREE REALTY REIT,Real Estate,Real Estate,sector,XLRE,IWB
+ADT,ADT,ADT INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+AEIS,AEIS,ADVANCED ENERGY INDUSTRIES,Information Technology,Information Technology,sector,XLK,IWB
+AFG,AFG,AMERICAN FINANCIAL GROUP,Financials,Financials,sector,XLF,IWB
+AFRM,AFRM,AFFIRM HOLDINGS CLASS A,Financials,Financials,sector,XLF,IWB
+AGCO,AGCO,AGCO,Industrials,Industrials,sector,XLI,IWB
+AGNC,AGNC,AGNC INVESTMENT REIT,Financials,Financials,sector,XLF,IWB
+AGO,AGO,ASSURED GUARANTY LTD,Financials,Financials,sector,XLF,IWB
+AHR,AHR,AMERICAN HEALTHCARE REIT,Real Estate,Real Estate,sector,XLRE,IWB
+AIT,AIT,APPLIED INDUSTRIAL TECHNOLOGIES IN,Industrials,Industrials,sector,XLI,IWB
+ALGM,ALGM,ALLEGRO MICROSYSTEMS INC,Information Technology,Information Technology,sector,XLK,IWB
+ALK,ALK,ALASKA AIR GROUP INC,Industrials,Industrials,sector,XLI,IWB
+ALLY,ALLY,ALLY FINANCIAL INC,Financials,Financials,sector,XLF,IWB
+ALM,ALM,ALMONTY INDUSTRIES,Materials,Materials,sector,XLB,IWB
+ALSN,ALSN,ALLISON TRANSMISSION HOLDINGS,Industrials,Industrials,sector,XLI,IWB
+AM,AM,ANTERO MIDSTREAM,Energy,Energy,sector,XLE,IWB
+AMG,AMG,AFFILIATED MANAGERS GROUP,Financials,Financials,sector,XLF,IWB
+AMH,AMH,AMERICAN HOMES RENT REIT CLASS A,Real Estate,Real Estate,sector,XLRE,IWB
+AMKR,AMKR,AMKOR TECHNOLOGY,Information Technology,Information Technology,sector,XLK,IWB
+AMTM,AMTM,AMENTUM HOLDINGS,Industrials,Industrials,sector,XLI,IWB
+AN,AN,AUTONATION,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+APG,APG,API GROUP,Industrials,Industrials,sector,XLI,IWB
+APLD,APLD,APPLIED DIGITAL CORP,Information Technology,Information Technology,sector,XLK,IWB
+APPF,APPF,APPFOLIO CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+AR,AR,ANTERO RESOURCES,Energy,Energy,sector,XLE,IWB
+ARMK,ARMK,ARAMARK,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+ARW,ARW,ARROW ELECTRONICS,Information Technology,Information Technology,sector,XLK,IWB
+ARWR,ARWR,ARROWHEAD PHARMACEUTICALS,Health Care,Health Care,sector,XLV,IWB
+AS,AS,AMER SPORTS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+ASND,ASND,ASCENDIS PHARMA,Health Care,Health Care,sector,XLV,IWB
+ASTS,ASTS,AST SPACEMOBILE CLASS A,Communication,Communication,sector,XLC,IWB
+ATI,ATI,ATI INC,Industrials,Industrials,sector,XLI,IWB
+ATR,ATR,APTARGROUP,Materials,Materials,sector,XLB,IWB
+AU,AU,ANGLOGOLD ASHANTI PLC,Materials,Materials,sector,XLB,IWB
+AUGO,AUGO,AURA MINERALS INC,Materials,Materials,sector,XLB,IWB
+AUR,AUR,AURORA INNOVATION CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+AVAV,AVAV,AEROVIRONMENT INC,Industrials,Industrials,sector,XLI,IWB
+AVT,AVT,AVNET INC,Information Technology,Information Technology,sector,XLK,IWB
+AVTR,AVTR,AVANTOR,Health Care,Health Care,sector,XLV,IWB
+AWI,AWI,ARMSTRONG WORLD INDUSTRIES,Industrials,Industrials,sector,XLI,IWB
+AXS,AXS,AXIS CAPITAL HOLDINGS,Financials,Financials,sector,XLF,IWB
+AXSM,AXSM,AXSOME THERAPEUTICS,Health Care,Health Care,sector,XLV,IWB
+AXTA,AXTA,AXALTA COATING SYSTEMS,Materials,Materials,sector,XLB,IWB
+AYI,AYI,ACUITY,Industrials,Industrials,sector,XLI,IWB
+BAH,BAH,BOOZ ALLEN HAMILTON HOLDING CLASS,Industrials,Industrials,sector,XLI,IWB
+BAM,BAM,BROOKFIELD ASSET MANAGEMENT VOTING,Financials,Financials,sector,XLF,IWB
+BBIO,BBIO,BRIDGEBIO PHARMA,Health Care,Health Care,sector,XLV,IWB
+BBWI,BBWI,BATH AND BODY WORKS,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+BC,BC,BRUNSWICK CORP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+BE,BE,BLOOM ENERGY CLASS A,Industrials,Industrials,sector,XLI,IWB
+BEPC,BEPC,BROOKFIELD RENEWABLE SUBORDINATE V,Utilities,Utilities,sector,XLU,IWB
+BFA,BFA,BROWN FORMAN CLASS A,Consumer Staples,Consumer Staples,sector,XLP,IWB
+BFAM,BFAM,BRIGHT HORIZONS FAMILY SOLUTIONS I,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+BHF,BHF,BRIGHTHOUSE FINANCIAL,Financials,Financials,sector,XLF,IWB
+BILL,BILL,BILL HOLDINGS,Information Technology,Information Technology,sector,XLK,IWB
+BIO,BIO,BIO RAD LABORATORIES CLASS A,Health Care,Health Care,sector,XLV,IWB
+BIRK,BIRK,BIRKENSTOCK HOLDING PLC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+BJ,BJ,BJS WHOLESALE CLUB HOLDINGS,Consumer Staples,Consumer Staples,sector,XLP,IWB
+BLSH,BLSH,BULLISH,Financials,Financials,sector,XLF,IWB
+BMNR,BMNR,BITMINE IMMERSION TECHNOLOGIES,Information Technology,Information Technology,sector,XLK,IWB
+BMRN,BMRN,BIOMARIN PHARMACEUTICAL,Health Care,Health Care,sector,XLV,IWB
+BOKF,BOKF,BOK FINANCIAL CORP,Financials,Financials,sector,XLF,IWB
+BPOP,BPOP,POPULAR INC,Financials,Financials,sector,XLF,IWB
+BRKR,BRKR,BRUKER,Health Care,Health Care,sector,XLV,IWB
+BROS,BROS,DUTCH BROS CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+BRX,BRX,BRIXMOR PROPERTY GROUP REIT INC,Real Estate,Real Estate,sector,XLRE,IWB
+BSY,BSY,BENTLEY SYSTEMS INC CLASS B,Information Technology,Information Technology,sector,XLK,IWB
+BURL,BURL,BURLINGTON STORES,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+BWA,BWA,BORGWARNER,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+BWXT,BWXT,BWX TECHNOLOGIES INC,Industrials,Industrials,sector,XLI,IWB
+BYD,BYD,BOYD GAMING,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CACC,CACC,CREDIT ACCEPTANCE CORP,Financials,Financials,sector,XLF,IWB
+CACI,CACI,CACI INTERNATIONAL INC CLASS A,Industrials,Industrials,sector,XLI,IWB
+CAG,CAG,CONAGRA BRANDS,Consumer Staples,Consumer Staples,sector,XLP,IWB
+CAI,CAI,CARIS LIFE SCIENCES,Health Care,Health Care,sector,XLV,IWB
+CAR,CAR,AVIS BUDGET GROUP INC,Industrials,Industrials,sector,XLI,IWB
+CART,CART,MAPLEBEAR,Consumer Staples,Consumer Staples,sector,XLP,IWB
+CAVA,CAVA,CAVA GROUP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CBC,CBC,CENTRAL BANCOMPANY CLASS A,Financials,Financials,sector,XLF,IWB
+CBSH,CBSH,COMMERCE BANCSHARES,Financials,Financials,sector,XLF,IWB
+CCC,CCC,CCC INTELLIGENT SOLUTIONS HOLDINGS,Information Technology,Information Technology,sector,XLK,IWB
+CCK,CCK,CROWN HOLDINGS INC,Materials,Materials,sector,XLB,IWB
+CDE,CDE,COEUR MINING,Materials,Materials,sector,XLB,IWB
+CE,CE,CELANESE CORP,Materials,Materials,sector,XLB,IWB
+CELH,CELH,CELSIUS HOLDINGS,Consumer Staples,Consumer Staples,sector,XLP,IWB
+CFR,CFR,CULLEN FROST BANKERS INC,Financials,Financials,sector,XLF,IWB
+CG,CG,CARLYLE GROUP INC,Financials,Financials,sector,XLF,IWB
+CGNX,CGNX,COGNEX,Information Technology,Information Technology,sector,XLK,IWB
+CHDN,CHDN,CHURCHILL DOWNS,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CHE,CHE,CHEMED CORP,Health Care,Health Care,sector,XLV,IWB
+CHH,CHH,CHOICE HOTELS INTERNATIONAL,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CHRD,CHRD,CHORD ENERGY,Energy,Energy,sector,XLE,IWB
+CHWY,CHWY,CHEWY INC CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CHYM,CHYM,CHIME FINANCIAL CLASS A,Financials,Financials,sector,XLF,IWB
+CLF,CLF,CLEVELAND CLIFFS INC,Materials,Materials,sector,XLB,IWB
+CLH,CLH,CLEAN HARBORS INC,Industrials,Industrials,sector,XLI,IWB
+CNA,CNA,CNA FINANCIAL CORP,Financials,Financials,sector,XLF,IWB
+CNH,CNH,CNH INDUSTRIAL N.V.,Industrials,Industrials,sector,XLI,IWB
+CNM,CNM,CORE & MAIN INC CLASS A,Industrials,Industrials,sector,XLI,IWB
+COKE,COKE,COCA COLA CONSOLIDATED INC,Consumer Staples,Consumer Staples,sector,XLP,IWB
+COLB,COLB,COLUMBIA BANKING SYSTEM INC,Financials,Financials,sector,XLF,IWB
+COLD,COLD,AMERICOLD REALTY INC TRUST,Real Estate,Real Estate,sector,XLRE,IWB
+COLM,COLM,COLUMBIA SPORTSWEAR,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CORT,CORT,CORCEPT THERAPEUTICS,Health Care,Health Care,sector,XLV,IWB
+CPB,CPB,CAMPBELL SOUP,Consumer Staples,Consumer Staples,sector,XLP,IWB
+CPNG,CPNG,COUPANG CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CR,CR,CRANE,Industrials,Industrials,sector,XLI,IWB
+CRBG,CRBG,COREBRIDGE FINANCIAL INC,Financials,Financials,sector,XLF,IWB
+CRCL,CRCL,CIRCLE INTERNET GROUP CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+CRDO,CRDO,CREDO TECHNOLOGY GROUP HOLDING LTD,Information Technology,Information Technology,sector,XLK,IWB
+CROX,CROX,CROCS,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+CRS,CRS,CARPENTER TECHNOLOGY CORP,Industrials,Industrials,sector,XLI,IWB
+CRUS,CRUS,CIRRUS LOGIC,Information Technology,Information Technology,sector,XLK,IWB
+CSL,CSL,CARLISLE COMPANIES,Industrials,Industrials,sector,XLI,IWB
+CUBE,CUBE,CUBESMART REIT,Real Estate,Real Estate,sector,XLRE,IWB
+CUZ,CUZ,COUSINS PROPERTIES REIT INC,Real Estate,Real Estate,sector,XLRE,IWB
+CW,CW,CURTISS WRIGHT,Industrials,Industrials,sector,XLI,IWB
+CWEN,CWEN,CLEARWAY ENERGY INC CLASS C,Utilities,Utilities,sector,XLU,IWB
+CZR,CZR,CAESARS ENTERTAINMENT INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+DAR,DAR,DARLING INGREDIENTS,Consumer Staples,Consumer Staples,sector,XLP,IWB
+DBX,DBX,DROPBOX INC CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+DCI,DCI,DONALDSON,Industrials,Industrials,sector,XLI,IWB
+DDS,DDS,DILLARDS INC CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+DINO,DINO,HF SINCLAIR,Energy,Energy,sector,XLE,IWB
+DKNG,DKNG,DRAFTKINGS CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+DKS,DKS,DICKS SPORTING,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+DLB,DLB,DOLBY LABORATORIES CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+DOCN,DOCN,DIGITALOCEAN HOLDINGS,Information Technology,Information Technology,sector,XLK,IWB
+DOCS,DOCS,DOXIMITY CLASS A,Health Care,Health Care,sector,XLV,IWB
+DOCU,DOCU,DOCUSIGN,Information Technology,Information Technology,sector,XLK,IWB
+DOX,DOX,AMDOCS,Information Technology,Information Technology,sector,XLK,IWB
+DRS,DRS,LEONARDO DRS INC,Industrials,Industrials,sector,XLI,IWB
+DT,DT,DYNATRACE INC,Information Technology,Information Technology,sector,XLK,IWB
+DTM,DTM,DT MIDSTREAM INC,Energy,Energy,sector,XLE,IWB
+DUOL,DUOL,DUOLINGO CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+DY,DY,DYCOM INDUSTRIES INC,Industrials,Industrials,sector,XLI,IWB
+ECG,ECG,EVERUS CONSTRUCTION GROUP,Industrials,Industrials,sector,XLI,IWB
+EEFT,EEFT,EURONET WORLDWIDE INC,Financials,Financials,sector,XLF,IWB
+EGP,EGP,EASTGROUP PROPERTIES REIT,Real Estate,Real Estate,sector,XLRE,IWB
+EHC,EHC,ENCOMPASS HEALTH CORP,Health Care,Health Care,sector,XLV,IWB
+ELAN,ELAN,ELANCO ANIMAL HEALTH,Health Care,Health Care,sector,XLV,IWB
+ELF,ELF,ELF BEAUTY,Consumer Staples,Consumer Staples,sector,XLP,IWB
+ELS,ELS,EQUITY LIFESTYLE PROPERTIES REIT I,Real Estate,Real Estate,sector,XLRE,IWB
+EMN,EMN,EASTMAN CHEMICAL,Materials,Materials,sector,XLB,IWB
+ENPH,ENPH,ENPHASE ENERGY,Information Technology,Information Technology,sector,XLK,IWB
+ENSG,ENSG,ENSIGN GROUP,Health Care,Health Care,sector,XLV,IWB
+ENTG,ENTG,ENTEGRIS INC,Information Technology,Information Technology,sector,XLK,IWB
+EPAM,EPAM,EPAM SYSTEMS,Information Technology,Information Technology,sector,XLK,IWB
+EPR,EPR,EPR PROPERTIES REIT,Real Estate,Real Estate,sector,XLRE,IWB
+EQH,EQH,EQUITABLE HOLDINGS INC,Financials,Financials,sector,XLF,IWB
+ESAB,ESAB,ESAB CORP,Industrials,Industrials,sector,XLI,IWB
+ESI,ESI,ELEMENT SOLUTIONS INC,Materials,Materials,sector,XLB,IWB
+ESTC,ESTC,ELASTIC,Information Technology,Information Technology,sector,XLK,IWB
+ETSY,ETSY,ETSY,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+EVR,EVR,EVERCORE CLASS A,Financials,Financials,sector,XLF,IWB
+EWBC,EWBC,EAST WEST BANCORP,Financials,Financials,sector,XLF,IWB
+EXEL,EXEL,EXELIXIS INC,Health Care,Health Care,sector,XLV,IWB
+EXLS,EXLS,EXLSERVICE HOLDINGS,Industrials,Industrials,sector,XLI,IWB
+EXP,EXP,EAGLE MATERIALS INC,Materials,Materials,sector,XLB,IWB
+FAF,FAF,FIRST AMERICAN FINANCIAL CORP,Financials,Financials,sector,XLF,IWB
+FBIN,FBIN,FORTUNE BRANDS INNOVATIONS INC,Industrials,Industrials,sector,XLI,IWB
+FCN,FCN,FTI CONSULTING INC,Industrials,Industrials,sector,XLI,IWB
+FCNCA,FCNCA,FIRST CITIZENS BANCSHARES INC CLAS,Financials,Financials,sector,XLF,IWB
+FHB,FHB,FIRST HAWAIIAN,Financials,Financials,sector,XLF,IWB
+FHN,FHN,FIRST HORIZON CORP,Financials,Financials,sector,XLF,IWB
+FIG,FIG,FIGMA CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+FIGR,FIGR,FIGURE TECHNOLOGY SOLUTIONS CLASS,Financials,Financials,sector,XLF,IWB
+FIVE,FIVE,FIVE BELOW,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+FLS,FLS,FLOWSERVE,Industrials,Industrials,sector,XLI,IWB
+FLUT,FLUT,FLUTTER ENTERTAINMENT PLC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+FN,FN,FABRINET,Information Technology,Information Technology,sector,XLK,IWB
+FNB,FNB,FNB CORP,Financials,Financials,sector,XLF,IWB
+FND,FND,FLOOR DECOR HOLDINGS CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+FNF,FNF,FIDELITY NATIONAL FINANCIAL INC,Financials,Financials,sector,XLF,IWB
+FORM,FORM,FORMFACTOR INC,Information Technology,Information Technology,sector,XLK,IWB
+FOUR,FOUR,SHIFT4 PAYMENTS CLASS A,Financials,Financials,sector,XLF,IWB
+FPS,FPS,FORGENT POWER SOLUTIONS CLASS A,Industrials,Industrials,sector,XLI,IWB
+FR,FR,FIRST INDUSTRIAL REALTY TRUST,Real Estate,Real Estate,sector,XLRE,IWB
+FRHC,FRHC,FREEDOM HOLDING CORP,Financials,Financials,sector,XLF,IWB
+FRMI,FRMI,FERMI INC,Real Estate,Real Estate,sector,XLRE,IWB
+FRPT,FRPT,FRESHPET,Consumer Staples,Consumer Staples,sector,XLP,IWB
+FTAI,FTAI,FTAI AVIATION,Industrials,Industrials,sector,XLI,IWB
+FTI,FTI,TECHNIPFMC PLC,Energy,Energy,sector,XLE,IWB
+FWONA,FWONA,LIBERTY MEDIA FORMULA ONE SERIES A,Communication,Communication,sector,XLC,IWB
+FWONK,FWONK,LIBERTY MEDIA FORMULA ONE SERIES C,Communication,Communication,sector,XLC,IWB
+G,G,GENPACT,Industrials,Industrials,sector,XLI,IWB
+GAP,GAP,GAP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+GFL,GFL,GFL ENVIRONMENTAL SUBORDINATE VOTI,Industrials,Industrials,sector,XLI,IWB
+GFS,GFS,GLOBALFOUNDRIES,Information Technology,Information Technology,sector,XLK,IWB
+GGG,GGG,GRACO,Industrials,Industrials,sector,XLI,IWB
+GH,GH,GUARDANT HEALTH,Health Care,Health Care,sector,XLV,IWB
+GLPI,GLPI,GAMING AND LEISURE PROPERTIES REIT,Real Estate,Real Estate,sector,XLRE,IWB
+GLXY,GLXY,GALAXY DIGITAL INC CLASS A,Financials,Financials,sector,XLF,IWB
+GME,GME,GAMESTOP CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+GMED,GMED,GLOBUS MEDICAL CLASS A,Health Care,Health Care,sector,XLV,IWB
+GNTX,GNTX,GENTEX,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+GPK,GPK,GRAPHIC PACKAGING HOLDING,Materials,Materials,sector,XLB,IWB
+GSAT,GSAT,GLOBALSTAR VOTING,Communication,Communication,sector,XLC,IWB
+GTES,GTES,GATES INDUSTRIAL PLC,Industrials,Industrials,sector,XLI,IWB
+GTLB,GTLB,GITLAB CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+GWRE,GWRE,GUIDEWIRE SOFTWARE,Information Technology,Information Technology,sector,XLK,IWB
+GXO,GXO,GXO LOGISTICS,Industrials,Industrials,sector,XLI,IWB
+H,H,HYATT HOTELS CORP CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+HALO,HALO,HALOZYME THERAPEUTICS,Health Care,Health Care,sector,XLV,IWB
+HAYW,HAYW,HAYWARD HOLDINGS,Industrials,Industrials,sector,XLI,IWB
+HEI,HEI,HEICO,Industrials,Industrials,sector,XLI,IWB
+HEI.A,HEI/A,HEICO CLASS A,Industrials,Industrials,sector,XLI,IWB
+HHH,HHH,HOWARD HUGHES HOLDINGS INC,Real Estate,Real Estate,sector,XLRE,IWB
+HL,HL,HECLA MINING,Materials,Materials,sector,XLB,IWB
+HLI,HLI,HOULIHAN LOKEY INC CLASS A,Financials,Financials,sector,XLF,IWB
+HLNE,HLNE,HAMILTON LANE CLASS A,Financials,Financials,sector,XLF,IWB
+HOLX,HOLX,HOLOGIC INC,Health Care,Health Care,sector,XLV,IWB
+HR,HR,HEALTHCARE REALTY TRUST INC CLASS,Real Estate,Real Estate,sector,XLRE,IWB
+HRB,HRB,H&R BLOCK INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+HUBS,HUBS,HUBSPOT,Information Technology,Information Technology,sector,XLK,IWB
+HXL,HXL,HEXCEL,Industrials,Industrials,sector,XLI,IWB
+IDA,IDA,IDACORP,Utilities,Utilities,sector,XLU,IWB
+IESC,IESC,IES INC,Industrials,Industrials,sector,XLI,IWB
+ILMN,ILMN,ILLUMINA INC,Health Care,Health Care,sector,XLV,IWB
+INGM,INGM,INGRAM MICRO HOLDING,Information Technology,Information Technology,sector,XLK,IWB
+INGR,INGR,INGREDION INC,Consumer Staples,Consumer Staples,sector,XLP,IWB
+INSM,INSM,INSMED INC,Health Care,Health Care,sector,XLV,IWB
+IONQ,IONQ,IONQ,Information Technology,Information Technology,sector,XLK,IWB
+IONS,IONS,IONIS PHARMACEUTICALS,Health Care,Health Care,sector,XLV,IWB
+IOT,IOT,SAMSARA CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+IPGP,IPGP,IPG PHOTONICS CORP,Information Technology,Information Technology,sector,XLK,IWB
+IRDM,IRDM,IRIDIUM COMMUNICATIONS,Communication,Communication,sector,XLC,IWB
+IREN,IREN,IREN,Information Technology,Information Technology,sector,XLK,IWB
+ITT,ITT,ITT INC,Industrials,Industrials,sector,XLI,IWB
+JAN,JAN,JANUS LIVING INC CLASS A,Real Estate,Real Estate,sector,XLRE,IWB
+JAZZ,JAZZ,JAZZ PHARMACEUTICALS PLC,Health Care,Health Care,sector,XLV,IWB
+JBS,JBS,JBS N V NV CLASS A,Consumer Staples,Consumer Staples,sector,XLP,IWB
+JEF,JEF,JEFFERIES FINANCIAL GROUP INC,Financials,Financials,sector,XLF,IWB
+JHX,JHX,JAMES HARDIE INDUSTRIES PLC,Materials,Materials,sector,XLB,IWB
+JLL,JLL,JONES LANG LASALLE,Real Estate,Real Estate,sector,XLRE,IWB
+KBR,KBR,KBR INC,Industrials,Industrials,sector,XLI,IWB
+KD,KD,KYNDRYL HOLDINGS,Information Technology,Information Technology,sector,XLK,IWB
+KEX,KEX,KIRBY CORP,Industrials,Industrials,sector,XLI,IWB
+KMX,KMX,CARMAX INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+KNSL,KNSL,KINSALE CAPITAL GROUP INC,Financials,Financials,sector,XLF,IWB
+KNX,KNX,KNIGHT-SWIFT TRANSPORTATION HOLDIN,Industrials,Industrials,sector,XLI,IWB
+KRC,KRC,KILROY REALTY REIT,Real Estate,Real Estate,sector,XLRE,IWB
+KRMN,KRMN,KARMAN HOLDINGS INC,Industrials,Industrials,sector,XLI,IWB
+KTOS,KTOS,KRATOS DEFENSE AND SECURITY SOLUTI,Industrials,Industrials,sector,XLI,IWB
+KVYO,KVYO,KLAVIYO SERIES A,Information Technology,Information Technology,sector,XLK,IWB
+LAD,LAD,LITHIA MOTORS INC CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+LAMR,LAMR,LAMAR ADVERTISING COMPANY CLAS,Real Estate,Real Estate,sector,XLRE,IWB
+LAZ,LAZ,LAZARD,Financials,Financials,sector,XLF,IWB
+LBRDA,LBRDA,LIBERTY BROADBAND CORP SERIES A,Communication,Communication,sector,XLC,IWB
+LBRDK,LBRDK,LIBERTY BROADBAND CORP SERIES C,Communication,Communication,sector,XLC,IWB
+LBTYA,LBTYA,LIBERTY GLOBAL LTD CLASS A,Communication,Communication,sector,XLC,IWB
+LBTYK,LBTYK,LIBERTY GLOBAL LTD CLASS C,Communication,Communication,sector,XLC,IWB
+LEA,LEA,LEAR,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+LECO,LECO,LINCOLN ELECTRIC HOLDINGS INC,Industrials,Industrials,sector,XLI,IWB
+LENB,LENB,LENNAR CORP CLASS B,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+LFUS,LFUS,LITTELFUSE,Information Technology,Information Technology,sector,XLK,IWB
+LINE,LINE,LINEAGE,Real Estate,Real Estate,sector,XLRE,IWB
+LKQ,LKQ,LKQ CORP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+LLYVA,LLYVA,LIBERTY LIVE HOLDINGS INC SERIES A,Communication,Communication,sector,XLC,IWB
+LLYVK,LLYVK,LIBERTY LIVE HOLDINGS INC SERIES C,Communication,Communication,sector,XLC,IWB
+LNC,LNC,LINCOLN NATIONAL CORP,Financials,Financials,sector,XLF,IWB
+LNG,LNG,CHENIERE ENERGY INC,Energy,Energy,sector,XLE,IWB
+LOAR,LOAR,LOAR HOLDINGS,Industrials,Industrials,sector,XLI,IWB
+LOPE,LOPE,GRAND CANYON EDUCATION INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+LPLA,LPLA,LPL FINANCIAL HOLDINGS,Financials,Financials,sector,XLF,IWB
+LPX,LPX,LOUISIANA PACIFIC,Industrials,Industrials,sector,XLI,IWB
+LSCC,LSCC,LATTICE SEMICONDUCTOR,Information Technology,Information Technology,sector,XLK,IWB
+LSTR,LSTR,LANDSTAR SYSTEM,Industrials,Industrials,sector,XLI,IWB
+LW,LW,LAMB WESTON HOLDINGS,Consumer Staples,Consumer Staples,sector,XLP,IWB
+LYFT,LYFT,LYFT CLASS A,Industrials,Industrials,sector,XLI,IWB
+M,M,MACYS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+MANH,MANH,MANHATTAN ASSOCIATES,Information Technology,Information Technology,sector,XLK,IWB
+MAT,MAT,MATTEL INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+MBGL,MBGL,MOBILITY GLOBAL INC,Industrials,Industrials,sector,XLI,IWB
+MDB,MDB,MONGODB CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+MDGL,MDGL,MADRIGAL PHARMACEUTICALS,Health Care,Health Care,sector,XLV,IWB
+MDLN,MDLN,MEDLINE CLASS A,Health Care,Health Care,sector,XLV,IWB
+MDU,MDU,MDU RESOURCES GROUP,Utilities,Utilities,sector,XLU,IWB
+MEDP,MEDP,MEDPACE HOLDINGS,Health Care,Health Care,sector,XLV,IWB
+MFP,MFP,MIDERA FOOD PROCESSING INC,Industrials,Industrials,sector,XLI,IWB
+MHK,MHK,MOHAWK INDUSTRIES,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+MIDD,MIDD,MIDDLEBY,Industrials,Industrials,sector,XLI,IWB
+MKL,MKL,MARKEL GROUP,Financials,Financials,sector,XLF,IWB
+MKSI,MKSI,MKS,Information Technology,Information Technology,sector,XLK,IWB
+MKTX,MKTX,MARKETAXESS HOLDINGS,Financials,Financials,sector,XLF,IWB
+MLI,MLI,MUELLER INDUSTRIES INC,Industrials,Industrials,sector,XLI,IWB
+MOD,MOD,MODINE MANUFACTURING,Industrials,Industrials,sector,XLI,IWB
+MOH,MOH,MOLINA HEALTHCARE INC,Health Care,Health Care,sector,XLV,IWB
+MORN,MORN,MORNINGSTAR,Financials,Financials,sector,XLF,IWB
+MP,MP,MP MATERIALS CORP CLASS A,Materials,Materials,sector,XLB,IWB
+MPT,MPT,MEDICAL PROPERTIES TRUST REIT INC,Real Estate,Real Estate,sector,XLRE,IWB
+MRP,MRP,MILLROSE PROPERTIES INC CLASS A,Real Estate,Real Estate,sector,XLRE,IWB
+MSA,MSA,MSA SAFETY,Industrials,Industrials,sector,XLI,IWB
+MSGS,MSGS,MADISON SQUARE GARDEN SPORTS CLASS,Communication,Communication,sector,XLC,IWB
+MSM,MSM,MSC INDUSTRIAL CLASS A,Industrials,Industrials,sector,XLI,IWB
+MTCH,MTCH,MATCH GROUP INC,Communication,Communication,sector,XLC,IWB
+MTDR,MTDR,MATADOR RESOURCES,Energy,Energy,sector,XLE,IWB
+MTG,MTG,MGIC INVESTMENT,Financials,Financials,sector,XLF,IWB
+MTN,MTN,VAIL RESORTS,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+MTSI,MTSI,MACOM TECHNOLOGY SOLUTIONS,Information Technology,Information Technology,sector,XLK,IWB
+MTZ,MTZ,MASTEC INC,Industrials,Industrials,sector,XLI,IWB
+MUSA,MUSA,MURPHY USA,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+MWH,MWH,SOLV ENERGY CLASS A INC,Industrials,Industrials,sector,XLI,IWB
+NBIX,NBIX,NEUROCRINE BIOSCIENCES,Health Care,Health Care,sector,XLV,IWB
+NET,NET,CLOUDFLARE CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+NEU,NEU,NEWMARKET,Materials,Materials,sector,XLB,IWB
+NFG,NFG,NATIONAL FUEL GAS,Utilities,Utilities,sector,XLU,IWB
+NIQ,NIQ,NIQ GLOBAL INTELLIGENCE PLC,Communication,Communication,sector,XLC,IWB
+NLY,NLY,ANNALY CAPITAL MANAGEMENT REIT INC,Financials,Financials,sector,XLF,IWB
+NNN,NNN,NNN REIT,Real Estate,Real Estate,sector,XLRE,IWB
+NOV,NOV,NOV INC,Energy,Energy,sector,XLE,IWB
+NTNX,NTNX,NUTANIX CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+NTRA,NTRA,NATERA,Health Care,Health Care,sector,XLV,IWB
+NU,NU,NU HOLDINGS CLASS A,Financials,Financials,sector,XLF,IWB
+NVST,NVST,ENVISTA HOLDINGS CORP,Health Care,Health Care,sector,XLV,IWB
+NVT,NVT,NVENT ELECTRIC PLC,Industrials,Industrials,sector,XLI,IWB
+NXST,NXST,NEXSTAR MEDIA GROUP INC,Communication,Communication,sector,XLC,IWB
+NXT,NXT,NEXTPOWER INC CLASS A,Industrials,Industrials,sector,XLI,IWB
+NYT,NYT,NEW YORK TIMES CLASS A,Communication,Communication,sector,XLC,IWB
+OC,OC,OWENS CORNING,Industrials,Industrials,sector,XLI,IWB
+OGE,OGE,OGE ENERGY,Utilities,Utilities,sector,XLU,IWB
+OGN,OGN,ORGANON,Health Care,Health Care,sector,XLV,IWB
+OHI,OHI,OMEGA HEALTHCARE INVESTORS REIT,Real Estate,Real Estate,sector,XLRE,IWB
+OKLO,OKLO,OKLO CLASS A,Utilities,Utilities,sector,XLU,IWB
+OKTA,OKTA,OKTA CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+OLED,OLED,UNIVERSAL DISPLAY CORP,Information Technology,Information Technology,sector,XLK,IWB
+OLLI,OLLI,OLLIES BARGAIN OUTLET HOLDINGS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+OLN,OLN,OLIN CORP,Materials,Materials,sector,XLB,IWB
+OMF,OMF,ONEMAIN HOLDINGS,Financials,Financials,sector,XLF,IWB
+ONON,ONON,ON HOLDING AG CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+ONTO,ONTO,ONTO INNOVATION,Information Technology,Information Technology,sector,XLK,IWB
+ORI,ORI,OLD REPUBLIC INTERNATIONAL,Financials,Financials,sector,XLF,IWB
+OSK,OSK,OSHKOSH CORP,Industrials,Industrials,sector,XLI,IWB
+OVV,OVV,OVINTIV,Energy,Energy,sector,XLE,IWB
+OWL,OWL,BLUE OWL CAPITAL CLASS A,Financials,Financials,sector,XLF,IWB
+OZK,OZK,BANK OZK,Financials,Financials,sector,XLF,IWB
+P,P,EVERPURE INC CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+PAG,PAG,PENSKE AUTOMOTIVE GROUP VOTING INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+PATH,PATH,UIPATH INC CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+PAYC,PAYC,PAYCOM SOFTWARE,Industrials,Industrials,sector,XLI,IWB
+PB,PB,PROSPERITY BANCSHARES,Financials,Financials,sector,XLF,IWB
+PCOR,PCOR,PROCORE TECHNOLOGIES INC,Information Technology,Information Technology,sector,XLK,IWB
+PCTY,PCTY,PAYLOCITY HOLDING CORP,Industrials,Industrials,sector,XLI,IWB
+PEGA,PEGA,PEGASYSTEMS,Information Technology,Information Technology,sector,XLK,IWB
+PEN,PEN,PENUMBRA,Health Care,Health Care,sector,XLV,IWB
+PFGC,PFGC,PERFORMANCE FOOD GROUP,Consumer Staples,Consumer Staples,sector,XLP,IWB
+PINS,PINS,PINTEREST CLASS A,Communication,Communication,sector,XLC,IWB
+PL,PL,PLANET LABS CLASS A,Industrials,Industrials,sector,XLI,IWB
+PLNT,PLNT,PLANET FITNESS INC CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+PNFP,PNFP,PINNACLE FINANCIAL PARTNERS,Financials,Financials,sector,XLF,IWB
+POOL,POOL,POOL,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+POST,POST,POST HOLDINGS,Consumer Staples,Consumer Staples,sector,XLP,IWB
+POWL,POWL,POWELL INDUSTRIES INC,Industrials,Industrials,sector,XLI,IWB
+PPC,PPC,PILGRIMS PRIDE CORP,Consumer Staples,Consumer Staples,sector,XLP,IWB
+PPLI,PPLI,PEOPLE,Communication,Communication,sector,XLC,IWB
+PR,PR,PERMIAN RESOURCES CLASS A,Energy,Energy,sector,XLE,IWB
+PRI,PRI,PRIMERICA,Financials,Financials,sector,XLF,IWB
+PRIM,PRIM,PRIMORIS SERVICES,Industrials,Industrials,sector,XLI,IWB
+PRMB,PRMB,PRIMO BRANDS CLASS A CORP,Consumer Staples,Consumer Staples,sector,XLP,IWB
+PSN,PSN,PARSONS CORP,Industrials,Industrials,sector,XLI,IWB
+PVH,PVH,PVH,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+QGEN,QGEN,QIAGEN,Health Care,Health Care,sector,XLV,IWB
+QRVO,QRVO,QORVO,Information Technology,Information Technology,sector,XLK,IWB
+QS,QS,QUANTUMSCAPE CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+QSR,QSR,RESTAURANTS BRANDS INTERNATIONAL,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+QXO,QXO,QXO INC,Industrials,Industrials,sector,XLI,IWB
+R,R,RYDER SYSTEM,Industrials,Industrials,sector,XLI,IWB
+RAL,RAL,RALLIANT,Information Technology,Information Technology,sector,XLK,IWB
+RBA,RBA,RB GLOBAL,Industrials,Industrials,sector,XLI,IWB
+RBC,RBC,RBC BEARINGS,Industrials,Industrials,sector,XLI,IWB
+RBLX,RBLX,ROBLOX CORP CLASS A,Communication,Communication,sector,XLC,IWB
+RBRK,RBRK,RUBRIK CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+REXR,REXR,REXFORD INDUSTRIAL REALTY REIT,Real Estate,Real Estate,sector,XLRE,IWB
+REYN,REYN,REYNOLDS CONSUMER PRODUCTS INC,Consumer Staples,Consumer Staples,sector,XLP,IWB
+RGA,RGA,REINSURANCE GROUP OF AMERICA,Financials,Financials,sector,XLF,IWB
+RGEN,RGEN,REPLIGEN,Health Care,Health Care,sector,XLV,IWB
+RGLD,RGLD,ROYAL GOLD,Materials,Materials,sector,XLB,IWB
+RHI,RHI,ROBERT HALF,Industrials,Industrials,sector,XLI,IWB
+RITM,RITM,RITHM CAPITAL CORP,Financials,Financials,sector,XLF,IWB
+RIVN,RIVN,RIVIAN AUTOMOTIVE INC CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+RKT,RKT,ROCKET COMPANIES INC CLASS A,Financials,Financials,sector,XLF,IWB
+RLI,RLI,RLI CORP,Financials,Financials,sector,XLF,IWB
+RMBS,RMBS,RAMBUS,Information Technology,Information Technology,sector,XLK,IWB
+RNG,RNG,RINGCENTRAL INC CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+RNR,RNR,RENAISSANCERE HOLDING,Financials,Financials,sector,XLF,IWB
+ROIV,ROIV,ROIVANT SCIENCES LTD,Health Care,Health Care,sector,XLV,IWB
+ROKU,ROKU,ROKU CLASS A,Communication,Communication,sector,XLC,IWB
+RPM,RPM,RPM INTERNATIONAL INC,Materials,Materials,sector,XLB,IWB
+RPRX,RPRX,ROYALTY PHARMA PLC CLASS A,Health Care,Health Care,sector,XLV,IWB
+RRC,RRC,RANGE RESOURCES,Energy,Energy,sector,XLE,IWB
+RRX,RRX,REGAL REXNORD,Industrials,Industrials,sector,XLI,IWB
+RS,RS,RELIANCE STEEL & ALUMINUM,Materials,Materials,sector,XLB,IWB
+RVMD,RVMD,REVOLUTION MEDICINES,Health Care,Health Care,sector,XLV,IWB
+RYAN,RYAN,RYAN SPECIALTY HOLDINGS INC CLASS,Financials,Financials,sector,XLF,IWB
+RYN,RYN,RAYONIER REIT,Real Estate,Real Estate,sector,XLRE,IWB
+S,S,SENTINELONE INC CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+SAIA,SAIA,SAIA INC,Industrials,Industrials,sector,XLI,IWB
+SAIC,SAIC,SCIENCE APPLICATIONS INTERNATIONAL,Industrials,Industrials,sector,XLI,IWB
+SAIL,SAIL,SAILPOINT,Information Technology,Information Technology,sector,XLK,IWB
+SANM,SANM,SANMINA CORP,Information Technology,Information Technology,sector,XLK,IWB
+SARO,SARO,STANDARDAERO,Industrials,Industrials,sector,XLI,IWB
+SCCO,SCCO,SOUTHERN COPPER CORP,Materials,Materials,sector,XLB,IWB
+SCI,SCI,SERVICE,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+SEB,SEB,SEABOARD,Consumer Staples,Consumer Staples,sector,XLP,IWB
+SEIC,SEIC,SEI INVESTMENTS,Financials,Financials,sector,XLF,IWB
+SF,SF,STIFEL FINANCIAL,Financials,Financials,sector,XLF,IWB
+SFD,SFD,SMITHFIELD FOODS INC,Consumer Staples,Consumer Staples,sector,XLP,IWB
+SFM,SFM,SPROUTS FARMERS MARKET INC,Consumer Staples,Consumer Staples,sector,XLP,IWB
+SGI,SGI,SOMNIGROUP INTERNATIONAL,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+SHC,SHC,SOTERA HEALTH COMPANY,Health Care,Health Care,sector,XLV,IWB
+SIRI,SIRI,SIRIUSXM HOLDINGS,Communication,Communication,sector,XLC,IWB
+SITE,SITE,SITEONE LANDSCAPE SUPPLY INC,Industrials,Industrials,sector,XLI,IWB
+SITM,SITM,SITIME,Information Technology,Information Technology,sector,XLK,IWB
+SLGN,SLGN,SILGAN HOLDINGS,Materials,Materials,sector,XLB,IWB
+SLM,SLM,SLM CORP,Financials,Financials,sector,XLF,IWB
+SMG,SMG,SCOTTS MIRACLE GRO,Materials,Materials,sector,XLB,IWB
+SMMT,SMMT,SUMMIT THERAPEUTICS,Health Care,Health Care,sector,XLV,IWB
+SMTC,SMTC,SEMTECH,Information Technology,Information Technology,sector,XLK,IWB
+SN,SN,SHARKNINJA,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+SNDR,SNDR,SCHNEIDER NATIONAL CLASS B,Industrials,Industrials,sector,XLI,IWB
+SNOW,SNOW,SNOWFLAKE,Information Technology,Information Technology,sector,XLK,IWB
+SNX,SNX,TD SYNNEX,Information Technology,Information Technology,sector,XLK,IWB
+SOFI,SOFI,SOFI TECHNOLOGIES,Financials,Financials,sector,XLF,IWB
+SOLS,SOLS,SOLSTICE ADVANCED MATERIALS INC,Materials,Materials,sector,XLB,IWB
+SON,SON,SONOCO PRODUCTS,Materials,Materials,sector,XLB,IWB
+SPOT,SPOT,SPOTIFY TECHNOLOGY,Communication,Communication,sector,XLC,IWB
+SPXC,SPXC,SPX TECHNOLOGIES INC,Industrials,Industrials,sector,XLI,IWB
+SSB,SSB,SOUTHSTATE BANK CORP,Financials,Financials,sector,XLF,IWB
+SSD,SSD,SIMPSON MANUFACTURING,Industrials,Industrials,sector,XLI,IWB
+SSNC,SSNC,SS AND C TECHNOLOGIES HOLDINGS,Industrials,Industrials,sector,XLI,IWB
+ST,ST,SENSATA TECHNOLOGIES HOLDING PLC,Industrials,Industrials,sector,XLI,IWB
+STAG,STAG,STAG INDUSTRIAL REIT,Real Estate,Real Estate,sector,XLRE,IWB
+STRL,STRL,STERLING INFRASTRUCTURE,Industrials,Industrials,sector,XLI,IWB
+STWD,STWD,STARWOOD PROPERTY TRUST REIT INC,Financials,Financials,sector,XLF,IWB
+SUI,SUI,SUN COMMUNITIES REIT INC,Real Estate,Real Estate,sector,XLRE,IWB
+SUNB,SUNB,SUNBELT RENTALS HOLDINGS INC,Industrials,Industrials,sector,XLI,IWB
+TEAM,TEAM,ATLASSIAN CORP CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+TEM,TEM,TEMPUS AI INC CLASS A,Health Care,Health Care,sector,XLV,IWB
+TFSL,TFSL,TFS FINANCIAL CORP,Financials,Financials,sector,XLF,IWB
+TFX,TFX,TELEFLEX,Health Care,Health Care,sector,XLV,IWB
+THC,THC,TENET HEALTHCARE CORP,Health Care,Health Care,sector,XLV,IWB
+THG,THG,HANOVER INSURANCE GROUP,Financials,Financials,sector,XLF,IWB
+THO,THO,THOR INDUSTRIES,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+TIGO,TIGO,MILLICOM INTERNATIONAL CELLULAR,Communication,Communication,sector,XLC,IWB
+TKR,TKR,TIMKEN,Industrials,Industrials,sector,XLI,IWB
+TLN,TLN,TALEN ENERGY CORP,Utilities,Utilities,sector,XLU,IWB
+TNL,TNL,TRAVEL LEISURE,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+TOL,TOL,TOLL BROTHERS INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+TOST,TOST,TOAST CLASS A,Financials,Financials,sector,XLF,IWB
+TPG,TPG,TPG INC CLASS A,Financials,Financials,sector,XLF,IWB
+TREX,TREX,TREX,Industrials,Industrials,sector,XLI,IWB
+TRU,TRU,TRANSUNION,Industrials,Industrials,sector,XLI,IWB
+TTC,TTC,TORO,Industrials,Industrials,sector,XLI,IWB
+TTEK,TTEK,TETRA TECH INC,Industrials,Industrials,sector,XLI,IWB
+TTMI,TTMI,TTM TECHNOLOGIES INC,Information Technology,Information Technology,sector,XLK,IWB
+TW,TW,TRADEWEB MARKETS INC CLASS A,Financials,Financials,sector,XLF,IWB
+TWLO,TWLO,TWILIO CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+TXRH,TXRH,TEXAS ROADHOUSE INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+U,U,UNITY SOFTWARE,Information Technology,Information Technology,sector,XLK,IWB
+UGI,UGI,UGI,Utilities,Utilities,sector,XLU,IWB
+UHAL,UHAL,U HAUL HOLDING,Industrials,Industrials,sector,XLI,IWB
+UHALB,UHALB,U HAUL NON VOTING SERIES N,Industrials,Industrials,sector,XLI,IWB
+UI,UI,UBIQUITI,Information Technology,Information Technology,sector,XLK,IWB
+ULS,ULS,UL SOLUTIONS INC CLASS A,Industrials,Industrials,sector,XLI,IWB
+UNM,UNM,UNUM,Financials,Financials,sector,XLF,IWB
+USFD,USFD,US FOODS HOLDING,Consumer Staples,Consumer Staples,sector,XLP,IWB
+UTHR,UTHR,UNITED THERAPEUTICS,Health Care,Health Care,sector,XLV,IWB
+UWMC,UWMC,UWM HOLDINGS CLASS A,Financials,Financials,sector,XLF,IWB
+VFC,VFC,VF CORP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+VIAV,VIAV,VIAVI SOLUTIONS,Information Technology,Information Technology,sector,XLK,IWB
+VICR,VICR,VICOR,Industrials,Industrials,sector,XLI,IWB
+VIK,VIK,VIKING HOLDINGS LTD,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+VIRT,VIRT,VIRTU FINANCIAL INC CLASS A,Financials,Financials,sector,XLF,IWB
+VKTX,VKTX,VIKING THERAPEUTICS,Health Care,Health Care,sector,XLV,IWB
+VMI,VMI,VALMONT INDS,Industrials,Industrials,sector,XLI,IWB
+VNO,VNO,VORNADO REALTY TRUST REIT,Real Estate,Real Estate,sector,XLRE,IWB
+VNOM,VNOM,VIPER ENERGY INC CLASS A,Energy,Energy,sector,XLE,IWB
+VNT,VNT,VONTIER,Information Technology,Information Technology,sector,XLK,IWB
+VOYA,VOYA,VOYA FINANCIAL,Financials,Financials,sector,XLF,IWB
+VSNT,VSNT,VERSANT MEDIA GROUP INC CLASS A,Communication,Communication,sector,XLC,IWB
+VVV,VVV,VALVOLINE INC,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+W,W,WAYFAIR CLASS A,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+WAL,WAL,WESTERN ALLIANCE,Financials,Financials,sector,XLF,IWB
+WBS,WBS,WEBSTER FINANCIAL,Financials,Financials,sector,XLF,IWB
+WCC,WCC,WESCO INTERNATIONAL,Industrials,Industrials,sector,XLI,IWB
+WEX,WEX,WEX,Financials,Financials,sector,XLF,IWB
+WFRD,WFRD,WEATHERFORD INTERNATIONAL PLC,Energy,Energy,sector,XLE,IWB
+WH,WH,WYNDHAM HOTELS RESORTS,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+WHR,WHR,WHIRLPOOL,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+WING,WING,WINGSTOP,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+WLK,WLK,WESTLAKE CORP,Materials,Materials,sector,XLB,IWB
+WMS,WMS,ADVANCED DRAINAGE SYSTEMS INC,Industrials,Industrials,sector,XLI,IWB
+WPC,WPC,W. P. CAREY REIT INC,Real Estate,Real Estate,sector,XLRE,IWB
+WSC,WSC,WILLSCOT HOLDINGS CLASS A,Industrials,Industrials,sector,XLI,IWB
+WSO,WSO,WATSCO,Industrials,Industrials,sector,XLI,IWB
+WTFC,WTFC,WINTRUST FINANCIAL CORP,Financials,Financials,sector,XLF,IWB
+WTM,WTM,WHITE MOUNTAINS INSURANCE GROUP,Financials,Financials,sector,XLF,IWB
+WTRG,WTRG,ESSENTIAL UTILITIES INC,Utilities,Utilities,sector,XLU,IWB
+WTS,WTS,WATTS WATER TECHNOLOGIES CLASS A,Industrials,Industrials,sector,XLI,IWB
+WU,WU,WESTERN UNION,Financials,Financials,sector,XLF,IWB
+WULF,WULF,TERAWULF,Information Technology,Information Technology,sector,XLK,IWB
+WWD,WWD,WOODWARD,Industrials,Industrials,sector,XLI,IWB
+XE,XE,X-ENERGY INC CLASS A,Industrials,Industrials,sector,XLI,IWB
+XP,XP,XP CLASS A INC,Financials,Financials,sector,XLF,IWB
+XPO,XPO,XPO INC,Industrials,Industrials,sector,XLI,IWB
+YETI,YETI,YETI HOLDINGS,Consumer Discretionary,Consumer Discretionary,sector,XLY,IWB
+Z,Z,ZILLOW GROUP CLASS C,Real Estate,Real Estate,sector,XLRE,IWB
+ZG,ZG,ZILLOW GROUP CLASS A,Real Estate,Real Estate,sector,XLRE,IWB
+ZION,ZION,ZIONS BANCORPORATION,Financials,Financials,sector,XLF,IWB
+ZM,ZM,ZOOM COMMUNICATIONS CLASS A,Information Technology,Information Technology,sector,XLK,IWB
+ZS,ZS,ZSCALER,Information Technology,Information Technology,sector,XLK,IWB

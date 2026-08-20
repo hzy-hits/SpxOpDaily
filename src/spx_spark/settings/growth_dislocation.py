@@ -24,7 +24,6 @@ class GrowthDislocationSettings:
     target_delta_min: float
     target_delta_max: float
     max_leaps_spread_mid: float
-    hard_max_leaps_spread_mid: float
     rsi_oversold_threshold: float
     rsi_recovery_min: float
     rsi_recovery_optimal_low: float
@@ -48,14 +47,11 @@ class GrowthDislocationSettings:
             ("target_delta_min", self.target_delta_min),
             ("target_delta_max", self.target_delta_max),
             ("max_leaps_spread_mid", self.max_leaps_spread_mid),
-            ("hard_max_leaps_spread_mid", self.hard_max_leaps_spread_mid),
         ):
             if not 0.0 < value <= 1.0:
                 raise ValueError(f"growth-dislocation {label} must be in (0, 1]")
         if self.target_delta_min >= self.target_delta_max:
             raise ValueError("growth-dislocation target delta range is invalid")
-        if self.max_leaps_spread_mid > self.hard_max_leaps_spread_mid:
-            raise ValueError("growth-dislocation spread thresholds are not ordered")
         if self.min_market_cap <= 0.0:
             raise ValueError("growth-dislocation min_market_cap must be positive")
         if self.ibkr_history_timeout_seconds <= 0.0:
@@ -114,7 +110,6 @@ def load_growth_dislocation_settings(
         target_delta_min=float(value("target_delta_min")),
         target_delta_max=float(value("target_delta_max")),
         max_leaps_spread_mid=float(value("max_leaps_spread_mid")),
-        hard_max_leaps_spread_mid=float(value("hard_max_leaps_spread_mid")),
         rsi_oversold_threshold=float(value("rsi_oversold_threshold")),
         rsi_recovery_min=float(value("rsi_recovery_min")),
         rsi_recovery_optimal_low=float(value("rsi_recovery_optimal_low")),

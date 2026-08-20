@@ -14,7 +14,6 @@ from spx_spark.schwab.verifier import SchwabClient
 QUOTE_PATH = "/marketdata/v1/quotes"
 PRICE_HISTORY_PATH = "/marketdata/v1/pricehistory"
 CHAIN_PATH = "/marketdata/v1/chains"
-INSTRUMENT_PATH = "/marketdata/v1/instruments"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,24 +56,6 @@ class LeapsChain:
     max_dte: int
     observed_volume: int
     delayed: bool
-
-
-@dataclass(frozen=True, slots=True)
-class GrowthFundamentals:
-    revenue_growth_yoy: float | None
-    revenue_growth_ttm: float | None
-    forward_revenue_growth: float | None
-    operating_margin_mrq: float | None
-    operating_margin_ttm: float | None
-    operating_margin_change: float | None
-    fcf_growth_yoy: float | None
-    fcf_positive: bool | None
-    return_on_investment: float | None
-    cash_flow_positive_proxy: bool | None
-    beta: float | None
-    current_ratio: float | None
-    total_debt_to_equity: float | None
-    fundamental_source: str
 
 
 def fetch_equity_quote_batch(
@@ -132,30 +113,6 @@ def fetch_daily_closes(client: SchwabClient, provider_symbol: str) -> tuple[Dail
         day = at.astimezone(ET).date()
         by_day[day] = DailyClose(day=day, close=close)
     return tuple(by_day[day] for day in sorted(by_day))
-
-
-def fetch_growth_fundamentals_batch(
-    client: SchwabClient,
-    provider_symbols: list[str],
-) -> dict[str, GrowthFundamentals]:
-    if not 1 <= len(provider_symbols) <= 500:
-        raise ValueError("Schwab fundamental batches must contain 1 to 500 symbols")
-    _status, payload = client.get_json(
-        INSTRUMENT_PATH,
-        {"symbol": ",".join(provider_symbols), "projection": "fundamental"},
-    )
-    instruments = payload.get("instruments") if isinstance(payload, Mapping) else None
-    if not isinstance(instruments, list):
-        return {}
-    normalized: dict[str, GrowthFundamentals] = {}
-    for instrument in instruments:
-        if not isinstance(instrument, Mapping):
-            continue
-        raw = _mapping(instrument.get("fundamental"))
-        symbol = str(instrument.get("symbol") or raw.get("symbol") or "").strip().upper()
-        if symbol and raw:
-            normalized[symbol] = _growth_fundamentals(raw)
-    return normalized
 
 
 def fetch_leaps_chain(
@@ -246,30 +203,6 @@ def _option_contract(raw: Mapping[str, Any], *, expiry: date) -> OptionContract 
     )
 
 
-def _growth_fundamentals(raw: Mapping[str, Any]) -> GrowthFundamentals:
-    margin_mrq = _percent_fraction(raw.get("operatingMarginMRQ"))
-    margin_ttm = _percent_fraction(raw.get("operatingMarginTTM"))
-    pcf_ratio = _finite_float(raw.get("pcfRatio"))
-    return GrowthFundamentals(
-        revenue_growth_yoy=_percent_fraction(raw.get("revChangeYear")),
-        revenue_growth_ttm=_percent_fraction(raw.get("revChangeTTM")),
-        forward_revenue_growth=None,
-        operating_margin_mrq=margin_mrq,
-        operating_margin_ttm=margin_ttm,
-        operating_margin_change=(
-            margin_mrq - margin_ttm if margin_mrq is not None and margin_ttm is not None else None
-        ),
-        fcf_growth_yoy=None,
-        fcf_positive=None,
-        return_on_investment=_percent_fraction(raw.get("returnOnInvestment")),
-        cash_flow_positive_proxy=(pcf_ratio > 0.0 if pcf_ratio is not None else None),
-        beta=_finite_float(raw.get("beta")),
-        current_ratio=_finite_float(raw.get("currentRatio")),
-        total_debt_to_equity=_percent_fraction(raw.get("totalDebtToEquity")),
-        fundamental_source="schwab_instrument_fundamental",
-    )
-
-
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -295,11 +228,6 @@ def _nonnegative_float(value: Any) -> float | None:
 def _nonnegative_int(value: Any) -> int | None:
     parsed = _finite_float(value)
     return int(parsed) if parsed is not None and parsed >= 0.0 else None
-
-
-def _percent_fraction(value: Any) -> float | None:
-    parsed = _finite_float(value)
-    return parsed / 100.0 if parsed is not None else None
 
 
 def _first_positive(values: Mapping[str, Any], *keys: str) -> float | None:

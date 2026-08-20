@@ -17,7 +17,6 @@ from urllib.error import HTTPError, URLError
 from spx_spark.analytics.growth_dislocation import (
     POLICY_VERSION,
     apply_crowding,
-    growth_convexity_profile,
     price_features,
     price_location_52w,
     score_candidate,
@@ -40,12 +39,10 @@ from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.schwab.growth_dislocation import (
     DailyClose,
     EquityQuote,
-    GrowthFundamentals,
     LeapsChain,
     OptionContract,
     fetch_daily_closes,
     fetch_equity_quote_batch,
-    fetch_growth_fundamentals_batch,
     fetch_leaps_chain,
 )
 from spx_spark.schwab.verifier import SchwabClient, build_schwab_client
@@ -57,9 +54,8 @@ from spx_spark.state_io import (
     read_json_object,
 )
 
-SCHEMA_VERSION = "growth_dislocation_leaps.v4"
+SCHEMA_VERSION = "growth_dislocation_leaps.v5"
 STATE_SCHEMA_VERSION = 2
-BENCHMARK_SYMBOL = "SPY"
 SCHEDULE_MINUTE = 30
 DAILY_SUMMARY_HOUR_ET = 20
 MAX_CLOSE_HISTORY = 270
@@ -83,12 +79,12 @@ class UniverseMember:
     classification_level: str
     sector_benchmark: str
     memberships: tuple[str, ...]
-    growth_theme: str | None = None
 
     @property
     def crowding_group(self) -> str:
-        label = self.subindustry if self.classification_level == "subindustry" else self.sector
-        return label if label and label != "Unknown" else f"fallback:{self.sector_benchmark}"
+        if self.classification_level == "subindustry" and self.subindustry != "Unknown":
+            return f"subindustry:{self.subindustry}"
+        return f"sector:{self.sector_benchmark}"
 
 @dataclass(frozen=True, slots=True)
 class Universe:
@@ -136,7 +132,6 @@ def load_universe(path: Path) -> Universe:
                 memberships=tuple(
                     item for item in str(row.get("memberships") or "").split("|") if item
                 ),
-                growth_theme=str(row.get("growth_theme") or "").strip().lower() or None,
             )
         )
     if not members:
@@ -240,12 +235,10 @@ def _build_document(
     budget = policy.rth_request_budget if mode == "rth" else policy.daily_request_budget
     requests_used = 0
     errors: list[str] = []
-    fundamental_notes: list[str] = []
     quotes: dict[str, EquityQuote] = {}
     provider_symbols = list(
         dict.fromkeys(
             [member.provider_symbol for member in universe.members]
-            + [BENCHMARK_SYMBOL]
             + [member.sector_benchmark for member in universe.members]
         )
     )
@@ -269,21 +262,6 @@ def _build_document(
             continue
         assert quote is not None and location is not None
         price_hard_survivors.append((member, quote, location))
-
-    fundamentals: dict[str, GrowthFundamentals] = {}
-    fundamental_symbols = [item[0].provider_symbol for item in price_hard_survivors]
-    for offset in range(0, len(fundamental_symbols), 500):
-        if requests_used >= budget:
-            fundamental_notes.append("request_budget")
-            break
-        batch = fundamental_symbols[offset : offset + 500]
-        requests_used += 1
-        try:
-            fundamentals.update(fetch_growth_fundamentals_batch(client, batch))
-        except ProviderError as exc:
-            fundamental_notes.append(type(exc).__name__)
-    if set(fundamental_symbols) - set(fundamentals):
-        fundamental_notes.append("partial")
 
     iv_cache = _mapping_state(state, "iv_percentiles")
     iv_snapshots = _fresh_iv_snapshots(iv_cache, trading_day=ny.date())
@@ -332,8 +310,7 @@ def _build_document(
     detail_cache = _mapping_state(state, "details")
     required_benchmarks = list(
         dict.fromkeys(
-            [BENCHMARK_SYMBOL]
-            + [member.sector_benchmark for member, _quote, _location in hard_survivors]
+            member.sector_benchmark for member, _quote, _location in hard_survivors
         )
     )
     for symbol in required_benchmarks:
@@ -409,7 +386,6 @@ def _build_document(
             mode=mode,
             detail_current=member.symbol in detailed_now,
             iv_snapshot=iv_snapshots.get(_ibkr_provider_symbol(member.symbol)),
-            fundamental=fundamentals.get(member.provider_symbol),
         )
         if reasons:
             warming.append(row)
@@ -438,7 +414,6 @@ def _build_document(
             mode=mode,
             detail_current=False,
             iv_snapshot=iv_snapshots.get(_ibkr_provider_symbol(member.symbol)),
-            fundamental=fundamentals.get(member.provider_symbol),
         )
         warming.append(row)
         for reason in reasons:
@@ -474,7 +449,6 @@ def _build_document(
             "detailed_this_run": len(detailed_now),
             "strict_candidates": len(strict_candidates),
             "warming_rows": len(warming),
-            "fundamentals_present": len(fundamentals),
         },
         "request_budget": budget,
         "requests_used": requests_used,
@@ -492,11 +466,9 @@ def _build_document(
             "request_limited": request_limited,
             "ivp_incomplete": ivp_incomplete,
             "errors": sorted(set(errors)),
-            "volatility_contract": "13-week and 26-week percentile calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; 52-week percentile is bonus-only",
+            "volatility_contract": "13-week and 26-week percentile calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; 52-week percentile is context-only",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
             "classification": "official sector fallback; subindustry unavailable",
-            "growth_fundamentals": "Schwab instrument fundamentals; forward revenue growth, FCF growth, and catalysts remain explicitly unavailable",
-            "growth_fundamental_notes": sorted(set(fundamental_notes)),
         },
     }
     fingerprint = _material_fingerprint(document)
@@ -563,21 +535,15 @@ def _candidate_row(
     mode: str,
     detail_current: bool,
     iv_snapshot: IvPercentileSnapshot | None,
-    fundamental: GrowthFundamentals | None,
 ) -> tuple[dict[str, Any], list[str]]:
     reasons: list[str] = []
     features = price_features([entry.close for entry in history])
     if features is None:
         reasons.append("price_history_warming")
         features = {}
-    market = price_features(
-        [entry.close for entry in _close_history(benchmark_histories.get(BENCHMARK_SYMBOL))]
-    )
     sector = price_features(
         [entry.close for entry in _close_history(benchmark_histories.get(member.sector_benchmark))]
     )
-    if market is None:
-        reasons.append("market_history_warming")
     if sector is None:
         reasons.append("sector_history_warming")
     if iv_snapshot is None:
@@ -639,12 +605,8 @@ def _candidate_row(
         "rsi14_min_20d": features.get("rsi14_min_20d"),
         "return_5d": features.get("return_5d"),
         "return_10d": features.get("return_10d"),
-        "market_return_5d": market.get("return_5d") if market else None,
-        "market_return_10d": market.get("return_10d") if market else None,
         "sector_return_5d": sector.get("return_5d") if sector else None,
         "sector_return_10d": sector.get("return_10d") if sector else None,
-        "rs_5d_market": None,
-        "rs_10d_market": None,
         "rs_5d_sector": None,
         "rs_10d_sector": None,
         "ma5": features.get("ma5"),
@@ -687,13 +649,6 @@ def _candidate_row(
         "data_quality_reasons": sorted(set(reasons)),
         "as_of_et": ny.isoformat(),
     }
-    row.update(
-        growth_convexity_profile(
-            asdict(fundamental) if fundamental is not None else {},
-            growth_theme=member.growth_theme,
-            drawdown_from_52w_high=float(quote.last) / float(quote.high_52w) - 1.0,
-        )
-    )
     return row, sorted(set(reasons))
 
 def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
@@ -719,8 +674,8 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         "",
         "## 严格候选 Top 10",
         "",
-        "| Symbol | State | Score | Type | Growth | Convexity | 52W位置 | IVP 13W/26W | RSI | LEAPS | Spread |",
-        "|---|---:|---:|---|---:|---:|---:|---:|---:|---|---:|",
+        "| Symbol | State | Score | 52W位置 | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
     top = document.get("top10")
     if isinstance(top, list) and top:
@@ -728,22 +683,20 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             if not isinstance(row, Mapping):
                 continue
             lines.append(
-                "| {symbol} | {state} | {score} | {growth_type} | {growth} | {convexity} | {location} | {ivp} | {rsi} | {contract} | {spread} |".format(
+                "| {symbol} | {state} | {score} | {location} | {ivp} | {rsi} | {sector_rs} | {contract} | {spread} |".format(
                     symbol=row.get("symbol", "-"),
                     state=row.get("state", "-"),
                     score=_fmt(row.get("final_score")),
-                    growth_type=row.get("growth_type", "Unclassified"),
-                    growth=_fmt(row.get("growth_score")),
-                    convexity=_fmt(row.get("convexity_score")),
                     location=_pct(row.get("price_location_52w")),
                     ivp=_iv_gate_label(row),
                     rsi=_fmt(row.get("rsi14")),
+                    sector_rs=_pct(row.get("rs_5d_sector")),
                     contract=row.get("leaps_symbol") or "-",
                     spread=_pct(row.get("leaps_spread_mid")),
                 )
             )
     else:
-        lines.append("| — | WATCH | — | — | — | — | — | 暂无严格候选 | — | — | — |")
+        lines.append("| — | WATCH | — | — | 暂无严格候选 | — | — | — | — |")
     return title, "\n".join(lines)
 
 def _detail_order(
@@ -900,12 +853,6 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
         "leaps_spread_mid",
         "data_quality",
         "data_quality_reasons",
-        "growth_type",
-        "growth_score",
-        "convexity_score",
-        "revenue_growth_yoy",
-        "forward_revenue_growth",
-        "fcf_growth_yoy",
     )
 
     def material_row(row: Mapping[str, Any]) -> dict[str, Any]:

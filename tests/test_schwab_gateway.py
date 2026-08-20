@@ -178,12 +178,6 @@ def test_gateway_loads_one_refreshing_client_and_proxies_only_market_data(
     )
     assert history.status == 200
     assert fake_client.requests[1][0].endswith("/marketdata/v1/pricehistory")
-    instruments = manager.request(
-        "/marketdata/v1/instruments",
-        [("symbol", "SPY"), ("projection", "fundamental")],
-    )
-    assert instruments.status == 200
-    assert fake_client.requests[2][0].endswith("/marketdata/v1/instruments")
     with pytest.raises(ValueError, match="Unsupported"):
         manager.request("/trader/v1/accounts", [])
 
