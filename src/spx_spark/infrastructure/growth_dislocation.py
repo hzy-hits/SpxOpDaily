@@ -762,7 +762,7 @@ def _fresh_iv_snapshots(
             raw_payload,
             fallback_symbol=str(raw_symbol),
         )
-        if snapshot is None:
+        if snapshot is None or snapshot.ivp_13w is None or snapshot.ivp_26w is None:
             continue
         basis_day = snapshot.as_of_date or snapshot.observed_at.astimezone(ET).date()
         age = DEFAULT_MARKET_CALENDAR.trading_days_elapsed(basis_day, trading_day)
