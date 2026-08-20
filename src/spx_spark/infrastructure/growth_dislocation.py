@@ -329,6 +329,8 @@ def _build_document(
 
     prioritized = _detail_order(hard_survivors, state)
     detailed_now: set[str] = set()
+    detail_evaluated_now: set[str] = set()
+    target_leaps_rejected: set[str] = set()
     for member, quote, _location in prioritized:
         if requests_used >= budget:
             break
@@ -358,10 +360,12 @@ def _build_document(
         except ProviderError as exc:
             errors.append(f"chain:{member.symbol}:{type(exc).__name__}")
             continue
+        detail_evaluated_now.add(member.symbol)
         target = select_target_leaps(chain.contracts, policy)
         if target is None:
             rejection_counts["target_leaps_missing"] += 1
             detail_cache.pop(member.symbol, None)
+            target_leaps_rejected.add(member.symbol)
             continue
         detail_cache[member.symbol] = _detail_payload(target, chain, fetched_at=now)
         detailed_now.add(member.symbol)
@@ -369,6 +373,8 @@ def _build_document(
     strict_candidates: list[dict[str, Any]] = []
     warming: list[dict[str, Any]] = []
     for member, quote, location in hard_survivors:
+        if member.symbol in target_leaps_rejected:
+            continue
         history = _close_history(histories.get(member.symbol))
         if quote.last is not None:
             history = _upsert_close(history, ny.date(), quote.last)
@@ -427,7 +433,7 @@ def _build_document(
             str(row["symbol"]),
         )
     )
-    request_limited = bool(hard_survivors) and len(detailed_now) < len(hard_survivors)
+    request_limited = bool(hard_survivors) and len(detail_evaluated_now) < len(hard_survivors)
     ivp_incomplete = bool(iv_warming_survivors)
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -446,7 +452,7 @@ def _build_document(
             "ivp_snapshots": sum(symbol in iv_snapshots for symbol in price_survivor_symbols),
             "ivp_refreshed": len(refreshed_iv_symbols),
             "hard_survivors": len(hard_survivors),
-            "detailed_this_run": len(detailed_now),
+            "detailed_this_run": len(detail_evaluated_now),
             "strict_candidates": len(strict_candidates),
             "warming_rows": len(warming),
         },

@@ -131,6 +131,18 @@ class FakeSchwabClient:
         ]
 
 
+class MissingLeapsClient(FakeSchwabClient):
+    def get_json(self, path: str, params: dict[str, object]):
+        if path.endswith("/chains"):
+            self.requests.append((path, params))
+            return 200, {
+                "status": "SUCCESS",
+                "isDelayed": False,
+                "callExpDateMap": {},
+            }
+        return super().get_json(path, params)
+
+
 def _policy():
     return load_app_settings().growth_dislocation
 
@@ -369,6 +381,24 @@ def test_direct_ibkr_ivp_hard_gate_rejects_expensive_regime(tmp_path: Path) -> N
 
     assert outcome.document["counts"]["strict_candidates"] == 0
     assert outcome.document["rejection_counts"]["ivp_13w_above_limit"] == 1
+
+
+def test_missing_target_leaps_is_hard_rejection_not_warming(tmp_path: Path) -> None:
+    outcome = scan_once(
+        now=NOW,
+        mode="rth",
+        client=MissingLeapsClient(NOW),  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=_ivp_fetcher,
+    )
+
+    assert outcome.document["scan_complete"] is True
+    assert outcome.document["counts"]["detailed_this_run"] == 1
+    assert outcome.document["counts"]["strict_candidates"] == 0
+    assert outcome.document["counts"]["warming_rows"] == 0
+    assert outcome.document["rejection_counts"]["target_leaps_missing"] == 1
 
 
 def test_missing_ibkr_ivp_fails_closed_to_watchlist(tmp_path: Path) -> None:
