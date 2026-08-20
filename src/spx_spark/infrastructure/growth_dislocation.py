@@ -692,7 +692,7 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         "",
         (
             f"- 严格候选 **{counts.get('strict_candidates', 0)}**；"
-            f"IV/数据预热 **{counts.get('warming_rows', 0)}**；"
+            f"未完成数据行（正文隐藏） **{counts.get('warming_rows', 0)}**；"
             f"本轮详细刷新 **{counts.get('detailed_this_run', 0)} / {counts.get('hard_survivors', 0)}**"
         ),
         f"- Schwab 请求 **{document.get('requests_used')} / {document.get('request_budget')}**；"
@@ -700,7 +700,7 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         f"- 本轮新增严格候选：{', '.join(str(item) for item in document.get('added_symbols', [])) or '无'}",
         "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
         "",
-        "## Top 10",
+        "## 严格候选 Top 10",
         "",
         "| Symbol | State | Score | 52W位置 | IVP 13W/26W | RSI | LEAPS | Spread |",
         "|---|---:|---:|---:|---:|---:|---|---:|",
@@ -724,15 +724,6 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             )
     else:
         lines.append("| — | WATCH | — | — | 暂无严格候选 | — | — | — |")
-    watchlist = document.get("watchlist")
-    if isinstance(watchlist, list) and watchlist:
-        lines.extend(["", "## Warming", ""])
-        for row in watchlist[:10]:
-            if isinstance(row, Mapping):
-                reasons = ", ".join(str(item) for item in row.get("data_quality_reasons", []))
-                lines.append(
-                    f"- **{row.get('symbol')}** · 52W {_pct(row.get('price_location_52w'), 1)} · {reasons}"
-                )
     return title, "\n".join(lines)
 
 

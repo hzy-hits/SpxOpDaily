@@ -11,6 +11,7 @@ from spx_spark.infrastructure.growth_dislocation import (
     Universe,
     UniverseMember,
     load_universe,
+    render_notification,
     scan_once,
     scheduled_mode,
 )
@@ -299,6 +300,10 @@ def test_missing_ibkr_ivp_fails_closed_to_watchlist(tmp_path: Path) -> None:
     assert "ibkr_iv_percentile_missing" in outcome.document["watchlist"][0][
         "data_quality_reasons"
     ]
+    _title, text = render_notification(outcome.document)
+    assert "未完成数据行（正文隐藏） **1**" in text
+    assert "## Warming" not in text
+    assert "**TEST**" not in text
 
 
 def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Path) -> None:
