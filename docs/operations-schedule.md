@@ -218,6 +218,10 @@ run has completed without missing IV history or provider errors.
   error 10197 fail closed into data-quality rows. Requests use the existing IBKR
   snapshot client id and never read accounts, subscribe to continuous ticker
   lines, or place orders.
+- A symbol with incomplete IV or price history stays out of the strict table and
+  is hidden from notification rows. Such a symbol does not block additions from
+  fully evaluated symbols; provider-wide failure or an exhausted Schwab request
+  budget still freezes membership updates to avoid false removal and re-entry.
 - `52W price location` is `(last - 52W low) / (52W high - 52W low)`. The selected
   call remains 365–730 DTE with 0.60–0.80 delta, while the intended research
   holding window is roughly two to three months; that holding horizon is not an

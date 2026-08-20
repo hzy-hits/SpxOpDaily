@@ -287,15 +287,6 @@ def _build_document(
                     iv_snapshots[symbol] = snapshot
                     iv_cache[symbol] = iv_percentile_snapshot_to_payload(snapshot)
                     refreshed_iv_symbols.add(symbol)
-                unresolved = {
-                    symbol
-                    for symbol in refresh_symbols
-                    if symbol not in iv_snapshots
-                    or iv_snapshots[symbol].ivp_13w is None
-                    or iv_snapshots[symbol].ivp_26w is None
-                }
-                if unresolved:
-                    errors.append("ibkr_ivp:partial")
             except ProviderError as exc:
                 errors.append(f"ibkr_ivp:{type(exc).__name__}")
 
@@ -445,7 +436,7 @@ def _build_document(
         "mode": mode,
         "timezone": "America/New_York",
         "universe_metadata": list(universe.metadata),
-        "scan_complete": not request_limited and not ivp_incomplete and not errors,
+        "scan_complete": not request_limited and not errors,
         "automatic_ordering": False,
         "research_only": True,
         "counts": {

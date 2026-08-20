@@ -384,7 +384,8 @@ def test_missing_ibkr_ivp_fails_closed_to_watchlist(tmp_path: Path) -> None:
 
     assert outcome.document["counts"]["strict_candidates"] == 0
     assert outcome.document["counts"]["warming_rows"] == 1
-    assert outcome.document["scan_complete"] is False
+    assert outcome.document["scan_complete"] is True
+    assert outcome.document["data_quality"]["status"] == "partial"
     assert "ibkr_iv_percentile_missing" in outcome.document["watchlist"][0]["data_quality_reasons"]
     _title, text = render_notification(outcome.document)
     assert "未完成数据行（正文隐藏） **1**" in text
