@@ -172,6 +172,12 @@ def test_gateway_loads_one_refreshing_client_and_proxies_only_market_data(
     assert calls == [("app-key", "app-secret")]
     assert fake_client.timeout == 12.0
     assert fake_client.requests[0][0] == "https://api.schwabapi.com/marketdata/v1/quotes"
+    history = manager.request(
+        "/marketdata/v1/pricehistory",
+        [("symbol", "SPY"), ("frequencyType", "daily")],
+    )
+    assert history.status == 200
+    assert fake_client.requests[1][0].endswith("/marketdata/v1/pricehistory")
     with pytest.raises(ValueError, match="Unsupported"):
         manager.request("/trader/v1/accounts", [])
 

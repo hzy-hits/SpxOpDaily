@@ -89,3 +89,11 @@ def iv_surface_context() -> None:
 
     if load_app_settings().runtime.iv_surface_enabled and iv_surface.run(["--json"]) != 0:
         raise RuntimeError("IV surface failed")
+
+
+@huey.periodic_task(crontab(minute="0,30", strict=True))
+def growth_dislocation_scan() -> None:
+    from spx_spark.infrastructure.growth_dislocation import run
+
+    if run() != 0:
+        raise RuntimeError("growth dislocation scan failed")

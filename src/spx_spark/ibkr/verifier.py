@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import math
 import sys
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -11,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.config import IbkrSettings, NY_TZ
-from spx_spark.ibkr.adapter import quote_from_ibkr_row
+from spx_spark.ibkr.adapter import (
+    IvPercentileSnapshot,
+    iv_percentile_snapshot_from_bars,
+    quote_from_ibkr_row,
+)
 
 
 DEFAULT_INDEX_EXCHANGES: dict[str, str] = {
@@ -40,6 +46,12 @@ KNOWN_INDEX_CONIDS: dict[str, int] = {
     "SKEW": 84597750,
     "NDX": 416843,
 }
+
+_FATAL_IV_HISTORY_ERROR_CODES = frozenset({10197, 1100, 1300})
+
+
+class IbkrHistoricalDataUnavailable(RuntimeError):
+    """The shared IB Gateway cannot safely supply historical underlying IV."""
 
 
 def clean_float(value: Any) -> float | None:
@@ -258,6 +270,87 @@ def connect_market_data_only(ib: Any, settings: IbkrSettings) -> None:
         readonly=True,
         fetchFields=StartupFetch(0),
     )
+
+
+def fetch_iv_percentile_snapshots(
+    symbols: Sequence[str],
+    *,
+    settings: IbkrSettings,
+    timeout_seconds: float,
+    concurrency: int,
+) -> dict[str, IvPercentileSnapshot]:
+    """Fetch one year of daily underlying IV and calculate rolling percentiles."""
+
+    requested = tuple(dict.fromkeys(_ibkr_stock_symbol(symbol) for symbol in symbols if symbol))
+    if not requested:
+        return {}
+    if timeout_seconds <= 0.0 or concurrency <= 0:
+        raise ValueError("IBKR IV-history timeout and concurrency must be positive")
+    try:
+        from ib_async import IB, Stock
+    except ImportError as exc:
+        raise IbkrHistoricalDataUnavailable("ib_async is unavailable") from exc
+
+    ib = IB()
+    prepare_ib_client(ib, request_timeout_seconds=settings.request_timeout_seconds)
+    fatal_codes: set[int] = set()
+
+    def on_error(_req_id: int, error_code: int, _message: str, _contract: Any) -> None:
+        if error_code in _FATAL_IV_HISTORY_ERROR_CODES:
+            fatal_codes.add(error_code)
+
+    async def fetch_all() -> list[IvPercentileSnapshot | None]:
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def fetch_one(symbol: str) -> IvPercentileSnapshot | None:
+            async with semaphore:
+                if fatal_codes:
+                    return None
+                try:
+                    bars = await ib.reqHistoricalDataAsync(
+                        Stock(symbol, "SMART", "USD"),
+                        endDateTime="",
+                        durationStr="1 Y",
+                        barSizeSetting="1 day",
+                        whatToShow="OPTION_IMPLIED_VOLATILITY",
+                        useRTH=True,
+                        formatDate=1,
+                        keepUpToDate=False,
+                        timeout=timeout_seconds,
+                    )
+                except Exception:  # noqa: BLE001 - provider boundary fails one symbol closed
+                    return None
+                return iv_percentile_snapshot_from_bars(
+                    bars,
+                    provider_symbol=symbol,
+                    observed_at=datetime.now(tz=timezone.utc),
+                )
+
+        return await asyncio.gather(*(fetch_one(symbol) for symbol in requested))
+
+    try:
+        ib.errorEvent += on_error
+        connect_market_data_only(ib, settings)
+        snapshots = ib.run(fetch_all())
+        if fatal_codes:
+            codes = ",".join(str(code) for code in sorted(fatal_codes))
+            raise IbkrHistoricalDataUnavailable(f"IBKR IV-history fatal error: {codes}")
+        return {
+            snapshot.provider_symbol: snapshot
+            for snapshot in snapshots
+            if snapshot is not None
+        }
+    except IbkrHistoricalDataUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - normalize all IB connection failures
+        raise IbkrHistoricalDataUnavailable("IBKR IV-history request failed") from exc
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+
+
+def _ibkr_stock_symbol(symbol: str) -> str:
+    return " ".join(symbol.strip().upper().replace(".", " ").replace("/", " ").split())
 
 
 def disable_startup_positions_fetch(ib: Any) -> None:

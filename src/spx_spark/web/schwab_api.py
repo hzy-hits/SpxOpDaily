@@ -117,6 +117,7 @@ def _add_gateway_routes(
 
     @app.get("/marketdata/v1/quotes")
     @app.get("/marketdata/v1/chains")
+    @app.get("/marketdata/v1/pricehistory")
     def market_data(request: Request) -> Response:
         return _market_data(manager, request)
 

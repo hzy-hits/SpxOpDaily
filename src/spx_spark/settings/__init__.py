@@ -14,6 +14,7 @@ from spx_spark.settings.loader import (
 )
 from spx_spark.settings.schema import AppSettings
 from spx_spark.settings.globex_trend import GlobexTrendSettings
+from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.market_data import MarketContextSettings
@@ -26,6 +27,7 @@ __all__ = [
     "AlertSettings",
     "AppSettings",
     "GlobexTrendSettings",
+    "GrowthDislocationSettings",
     "LevelDecisionPolicy",
     "MarketFeatureSettings",
     "MarketContextSettings",

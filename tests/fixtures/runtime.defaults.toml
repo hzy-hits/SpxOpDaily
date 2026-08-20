@@ -258,6 +258,35 @@ sector_unchanged_band_bps = { value = 2, description = "Absolute move from prior
 sector_directional_bias_score = { value = 0.55, description = "Absolute advancing-minus-declining sector breadth score required for a bullish or bearish observational bias." }
 direction_confirmation_move_bps = { value = 5, description = "Minimum same-direction SPY and RSP moves required to confirm a sector-breadth directional bias." }
 
+[growth_dislocation]
+enabled = { value = false, description = "Enables the additive Growth Dislocation LEAPS discovery job after its production shadow acceptance; disabled by default." }
+universe_path = { value = "config/growth_dislocation_universe.csv", description = "Tracked point-in-time union of official SPY, Nasdaq-100, and IWM constituents used for candidate discovery." }
+max_price_location_52w = { value = 0.20, description = "Hard upper bound for current price location within the Schwab 52-week high/low range." }
+max_dividend_yield = { value = 0.015, description = "Hard upper bound for annual dividend yield expressed as a fraction." }
+min_market_cap = { value = 3000000000.0, description = "Hard minimum market capitalization computed from Schwab shares outstanding and the current mark." }
+max_ivp_13w = { value = 0.10, description = "Hard maximum IBKR 13-week underlying implied-volatility percentile expressed as a fraction." }
+max_ivp_26w = { value = 0.10, description = "Hard maximum IBKR 26-week underlying implied-volatility percentile expressed as a fraction." }
+ibkr_history_timeout_seconds = { value = 8.0, description = "Per-symbol timeout for the read-only IBKR TWS daily OPTION_IMPLIED_VOLATILITY history request." }
+ibkr_history_concurrency = { value = 5, description = "Maximum concurrent IBKR daily IV-history requests during scanner cache refresh." }
+min_leaps_dte = { value = 365, description = "Minimum days to expiry for an option to count as a real LEAPS contract." }
+preferred_leaps_dte = { value = 540, description = "Start of the preferred 18-to-24-month LEAPS expiry range." }
+max_leaps_dte = { value = 730, description = "Maximum days to expiry considered by the target LEAPS selector." }
+target_delta_min = { value = 0.60, description = "Minimum call delta accepted by the target LEAPS selector." }
+target_delta_max = { value = 0.80, description = "Maximum call delta accepted by the target LEAPS selector." }
+max_leaps_spread_mid = { value = 0.10, description = "Preferred maximum bid/ask spread divided by mid used by the liquidity score." }
+hard_max_leaps_spread_mid = { value = 0.15, description = "Hard maximum bid/ask spread divided by mid for candidate eligibility." }
+rsi_oversold_threshold = { value = 30.0, description = "RSI threshold that proves the stock was recently oversold." }
+rsi_recovery_min = { value = 35.0, description = "First RSI recovery level used as a state confirmation." }
+rsi_recovery_optimal_low = { value = 40.0, description = "Lower edge of the preferred recovered RSI range." }
+rsi_recovery_optimal_high = { value = 55.0, description = "Upper edge of the preferred recovered RSI range." }
+chain_strike_count = { value = 20, description = "Number of strikes around spot requested for long-dated single-option chain discovery." }
+rth_request_budget = { value = 30, description = "Maximum Schwab requests for one RTH scanner run so the SPX collector retains its planned reserve." }
+daily_request_budget = { value = 90, description = "Maximum Schwab requests for the 20:00 ET daily scan while cash options are closed." }
+quote_max_age_seconds = { value = 300.0, description = "Maximum underlying Schwab quote age accepted as live during RTH." }
+option_quote_max_age_seconds = { value = 900.0, description = "Maximum target-LEAPS NBBO age accepted as live during RTH." }
+max_names_per_crowding_group = { value = 2, description = "Maximum names from one available sector or sub-industry classification in the displayed top list." }
+top_count = { value = 10, description = "Maximum strictly eligible candidates shown in the primary ranked table." }
+
 [service_loop]
 hyperliquid_enabled = { value = true, description = "Enables the lightweight overnight SPX proxy context collector." }
 ibkr_enabled = { value = false, description = "Enables the snapshot IBKR collector inside the shared loop; the dedicated stream service remains separate." }

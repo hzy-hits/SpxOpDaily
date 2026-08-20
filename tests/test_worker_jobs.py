@@ -90,6 +90,15 @@ def test_worker_schedules_match_the_documented_utc_crontabs(
     assert not jobs.iv_surface_context.task_class().validate_datetime(
         datetime(2026, 8, 7, 12, 6, tzinfo=utc)
     )
+    assert jobs.growth_dislocation_scan.task_class().validate_datetime(
+        datetime(2026, 8, 7, 13, 30, tzinfo=utc)
+    )
+    assert jobs.growth_dislocation_scan.task_class().validate_datetime(
+        datetime(2026, 8, 7, 14, 0, tzinfo=utc)
+    )
+    assert not jobs.growth_dislocation_scan.task_class().validate_datetime(
+        datetime(2026, 8, 7, 14, 15, tzinfo=utc)
+    )
 
 
 def test_slow_context_jobs_reuse_existing_entries_and_runtime_flags(

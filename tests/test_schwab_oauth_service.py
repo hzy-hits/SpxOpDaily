@@ -322,6 +322,15 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
     assert manager.requests[-1] == (
         "/marketdata/v1/quotes", [("symbols", "SPY"), ("symbols", "QQQ")]
     )
+    history = gateway.get(
+        "/marketdata/v1/pricehistory?symbol=SPY&frequencyType=daily",
+        headers={"Host": "localhost"},
+    )
+    assert history.status_code == 200
+    assert manager.requests[-1] == (
+        "/marketdata/v1/pricehistory",
+        [("symbol", "SPY"), ("frequencyType", "daily")],
+    )
     assert gateway.get("/healthz", headers={"Host": "public.example.com"}).status_code == 403
 
     output = capsys.readouterr()

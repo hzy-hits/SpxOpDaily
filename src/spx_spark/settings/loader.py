@@ -17,6 +17,7 @@ from spx_spark.settings.alerts import AlertSettings
 from spx_spark.settings.analytics import AnalyticsSettings
 from spx_spark.settings.env_overrides import env_override as _env_override
 from spx_spark.settings.globex_trend import GlobexTrendSettings
+from spx_spark.settings.growth_dislocation import load_growth_dislocation_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.settings.ibkr import IbkrSettingsSlice
 from spx_spark.settings.level_decision import LevelDecisionPolicy
@@ -542,6 +543,7 @@ def load_settings(
             recenter_drift_points=float(get("schwab.collection.hot_lane.recenter_drift_points")),
         ),
     )
+    growth_dislocation = load_growth_dislocation_settings(get)
     alerts = AlertSettings(
         steven_enabled=bool(get("steven.enabled")),
         steven_alert_context_enabled=bool(get("steven.alert_context_enabled")),
@@ -865,6 +867,7 @@ def load_settings(
         schwab=schwab,
         analytics=analytics,
         globex_trend=globex_trend,
+        growth_dislocation=growth_dislocation,
         market_features=market_features,
         spring_gamma_v3=spring_gamma_v3,
         strategy_distribution=strategy_distribution,

@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from spx_spark.settings.alerts import AlertSettings
 from spx_spark.settings.analytics import AnalyticsSettings
 from spx_spark.settings.globex_trend import GlobexTrendSettings
+from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 from spx_spark.settings.ibkr import IbkrSettingsSlice
 from spx_spark.settings.level_decision import LevelDecisionPolicy
 from spx_spark.settings.market_data import MarketContextSettings, MarketDataSettings
@@ -43,6 +44,7 @@ class AppSettings:
     schwab: SchwabSettingsSlice
     analytics: AnalyticsSettings
     globex_trend: GlobexTrendSettings
+    growth_dislocation: GrowthDislocationSettings
     market_features: MarketFeatureSettings
     spring_gamma_v3: SpringGammaV3Settings
     strategy_distribution: StrategyDistributionSettings

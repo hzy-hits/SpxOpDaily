@@ -30,7 +30,11 @@ from spx_spark.schwab.request_models import RequestWindow, SchwabRequestObservat
 
 
 ALLOWED_MARKET_DATA_PATHS = frozenset(
-    {"/marketdata/v1/quotes", "/marketdata/v1/chains"}
+    {
+        "/marketdata/v1/quotes",
+        "/marketdata/v1/chains",
+        "/marketdata/v1/pricehistory",
+    }
 )
 
 # HTTP protocol status boundaries are named here because they are standards,

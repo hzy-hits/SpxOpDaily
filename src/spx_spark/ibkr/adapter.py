@@ -6,8 +6,10 @@ here so that ``spx_spark.marketdata`` stays provider-agnostic.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, MarketCalendar
@@ -39,6 +41,159 @@ CFD_UNDERLIERS: dict[str, str] = {
     "IBUST100": "NDX",
     "IBUS2000": "RUT",
 }
+
+_MIN_IV_OBSERVATIONS = {13: 55, 26: 110, 52: 220}
+
+
+@dataclass(frozen=True, slots=True)
+class IvPercentileSnapshot:
+    """Normalized 0..1 percentile/rank calculated from IBKR underlying IV."""
+
+    provider_symbol: str
+    conid: int
+    observed_at: datetime
+    ivp_13w: float | None
+    ivp_26w: float | None
+    ivp_52w: float | None
+    iv_rank_13w: float | None
+    iv_rank_26w: float | None
+    iv_rank_52w: float | None
+    as_of_date: date | None = None
+
+
+def iv_percentile_snapshot_from_bars(
+    bars: Any,
+    *,
+    provider_symbol: str,
+    observed_at: datetime,
+    conid: int = 0,
+) -> IvPercentileSnapshot:
+    """Calculate 13/26/52-week IV percentile and rank from TWS daily bars."""
+
+    by_day: dict[date, float] = {}
+    for bar in bars or ():
+        day = _iv_bar_date(get_value(bar, "date"))
+        value = _positive_finite(get_value(bar, "close"))
+        if day is not None and value is not None:
+            by_day[day] = value
+    ordered = [(day, by_day[day]) for day in sorted(by_day)]
+    as_of_date = ordered[-1][0] if ordered else None
+
+    def metric(weeks: int) -> tuple[float | None, float | None]:
+        if as_of_date is None:
+            return None, None
+        cutoff = as_of_date - timedelta(weeks=weeks)
+        values = [value for day, value in ordered if day >= cutoff]
+        if len(values) < _MIN_IV_OBSERVATIONS[weeks]:
+            return None, None
+        current = values[-1]
+        percentile = sum(value < current for value in values) / len(values)
+        low = min(values)
+        high = max(values)
+        rank = (current - low) / (high - low) if high > low else 0.5
+        return percentile, rank
+
+    percentile_13w, rank_13w = metric(13)
+    percentile_26w, rank_26w = metric(26)
+    percentile_52w, rank_52w = metric(52)
+    return IvPercentileSnapshot(
+        provider_symbol=provider_symbol,
+        conid=conid,
+        observed_at=observed_at.astimezone(timezone.utc),
+        ivp_13w=percentile_13w,
+        ivp_26w=percentile_26w,
+        ivp_52w=percentile_52w,
+        iv_rank_13w=rank_13w,
+        iv_rank_26w=rank_26w,
+        iv_rank_52w=rank_52w,
+        as_of_date=as_of_date,
+    )
+
+
+def iv_percentile_snapshot_to_payload(snapshot: IvPercentileSnapshot) -> dict[str, Any]:
+    return {
+        "provider_symbol": snapshot.provider_symbol,
+        "conid": snapshot.conid,
+        "observed_at": snapshot.observed_at.isoformat(),
+        "as_of_date": snapshot.as_of_date.isoformat() if snapshot.as_of_date else None,
+        **{
+            field: getattr(snapshot, field)
+            for field in (
+                "ivp_13w",
+                "ivp_26w",
+                "ivp_52w",
+                "iv_rank_13w",
+                "iv_rank_26w",
+                "iv_rank_52w",
+            )
+        },
+    }
+
+
+def iv_percentile_snapshot_from_cached_payload(
+    payload: Mapping[str, Any],
+    *,
+    fallback_symbol: str,
+) -> IvPercentileSnapshot | None:
+    try:
+        observed_at = datetime.fromisoformat(str(payload["observed_at"]))
+        if observed_at.tzinfo is None:
+            return None
+        as_of = date.fromisoformat(str(payload["as_of_date"])) if payload.get("as_of_date") else None
+        conid = int(payload.get("conid") or 0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    fraction_fields = {
+        field: _optional_fraction(payload.get(field))
+        for field in (
+            "ivp_13w",
+            "ivp_26w",
+            "ivp_52w",
+            "iv_rank_13w",
+            "iv_rank_26w",
+            "iv_rank_52w",
+        )
+    }
+    return IvPercentileSnapshot(
+        provider_symbol=str(payload.get("provider_symbol") or fallback_symbol),
+        conid=conid,
+        observed_at=observed_at.astimezone(timezone.utc),
+        as_of_date=as_of,
+        **fraction_fields,
+    )
+
+
+def _iv_bar_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y%m%d").date()
+        except ValueError:
+            return None
+
+
+def _positive_finite(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0.0 else None
+
+
+def _optional_fraction(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and 0.0 <= parsed <= 1.0 else None
 
 
 def get_value(row: Any, key: str, default: Any = None) -> Any:

@@ -1,6 +1,7 @@
 # Operations Schedule
 
 Date: 2026-07-04
+Last updated: 2026-08-20
 
 ## Host Budget
 
@@ -177,6 +178,41 @@ Sampling:
 ## Daily Schedule
 
 Times are Asia/Shanghai.
+
+### Growth Dislocation LEAPS Scanner
+
+This additive research scanner runs in the existing Huey worker and uses the
+loopback Schwab gateway plus the unified Feishu/Bark outbox. It does not feed
+`strategy_decision` and cannot place orders.
+
+The tracked default remains disabled. Enable `growth_dislocation.enabled` in
+the gitignored runtime-local overlay only after one read-only IBKR/Schwab shadow
+run has completed without missing IV history or provider errors.
+
+- RTH: 09:30, 10:30, ..., 15:30 ET on exchange trading days. A push is queued
+  only when a symbol is added to the strict-candidate table (including re-entry
+  after leaving it). Score, quote, IV, state, ordering, and warming-row changes do
+  not by themselves send a push.
+- Daily: 20:00 ET on exchange trading days. One summary is queued even when the
+  material table is unchanged.
+- Schedule resolution is performed in `America/New_York`, so daylight-saving and
+  early-close behavior follow the exchange calendar rather than a fixed UTC offset.
+- Latest output: `data_root/latest/growth_dislocation_leaps.json`.
+- Runtime state: `data_root/runtime/growth_dislocation_state.json`. After the
+  Schwab price/fundamental prefilter, the scanner reuses the existing read-only
+  IB Gateway socket on port 4002 to request one year of daily
+  `OPTION_IMPLIED_VOLATILITY` bars. It calculates and caches 13/26/52-week IV
+  percentile and rank values; RTH scans reuse a cache no older than one trading
+  day, while the 20:00 ET run refreshes all current price-filter survivors. A
+  first request supplies the complete lookback, so the scanner does not need to
+  accumulate 52 weeks locally.
+- The hard volatility gate is `ivp_13w <= 0.10 and ivp_26w <= 0.10`; 52-week IV
+  percentile is bonus-only. Missing history, timeouts, connectivity loss, and
+  error 10197 fail closed into data-quality rows. Requests use the existing IBKR
+  snapshot client id and never read accounts, subscribe to continuous ticker
+  lines, or place orders.
+- Manual diagnostic: `uv run spx job growth-dislocation --force`. This consumes
+  live Schwab request budget and may queue a real notification.
 
 ### User Attention Model
 

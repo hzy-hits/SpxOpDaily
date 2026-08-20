@@ -172,6 +172,13 @@ def job(ctx: typer.Context) -> None:
         from spx_spark.post_close_review import run
     elif name == "rth-daily-acceptance":
         from spx_spark.application.order_map.rth_daily_acceptance import main as run
+    elif name == "growth-dislocation":
+        from spx_spark.infrastructure.growth_dislocation import run
+
+        if any(arg != "--force" for arg in args):
+            raise typer.BadParameter("growth-dislocation only accepts --force")
+        _finish(run(force="--force" in args))
+        return
     else:
         raise typer.BadParameter(f"unknown job: {name}")
     _finish(run(args))
