@@ -33,6 +33,7 @@ ALLOWED_MARKET_DATA_PATHS = frozenset(
     {
         "/marketdata/v1/quotes",
         "/marketdata/v1/chains",
+        "/marketdata/v1/instruments",
         "/marketdata/v1/pricehistory",
     }
 )

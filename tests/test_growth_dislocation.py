@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from spx_spark.analytics.growth_dislocation import candidate_state
+from spx_spark.analytics.growth_dislocation import candidate_state, growth_convexity_profile
 from spx_spark.ibkr.adapter import IvPercentileSnapshot
 from spx_spark.infrastructure.growth_dislocation import (
     Universe,
@@ -58,6 +58,28 @@ class FakeSchwabClient:
         if path.endswith("/quotes"):
             symbols = str(params["symbols"]).split(",")
             return 200, {symbol: self._quote(symbol) for symbol in symbols}
+        if path.endswith("/instruments"):
+            symbols = str(params["symbol"]).split(",")
+            return 200, {
+                "instruments": [
+                    {
+                        "symbol": symbol,
+                        "fundamental": {
+                            "symbol": symbol,
+                            "revChangeYear": 20.0,
+                            "revChangeTTM": 18.0,
+                            "operatingMarginMRQ": 12.0,
+                            "operatingMarginTTM": 10.0,
+                            "returnOnInvestment": 15.0,
+                            "pcfRatio": 20.0,
+                            "beta": 1.5,
+                            "currentRatio": 2.0,
+                            "totalDebtToEquity": 25.0,
+                        },
+                    }
+                    for symbol in symbols
+                ]
+            }
         if path.endswith("/pricehistory"):
             return 200, {"empty": False, "candles": self._candles(str(params["symbol"]))}
         if path.endswith("/chains"):
@@ -127,6 +149,14 @@ class FakeSchwabClient:
         ]
 
 
+class MissingFundamentalClient(FakeSchwabClient):
+    def get_json(self, path: str, params: dict[str, object]):
+        if path.endswith("/instruments"):
+            self.requests.append((path, params))
+            return 200, {"instruments": []}
+        return super().get_json(path, params)
+
+
 def _policy():
     return load_app_settings().growth_dislocation
 
@@ -162,26 +192,69 @@ def _universe() -> Universe:
 def test_candidate_state_requires_recovery_and_three_confirmations_for_trigger() -> None:
     policy = _policy()
 
-    assert candidate_state(
-        rsi_now=42.0,
-        rsi_min_20d=25.0,
-        ma5=101.0,
-        ma10=100.0,
-        rs5_market=0.01,
-        rs5_sector=-0.01,
-        distance_from_20d_low=0.08,
-        policy=policy,
-    ) == "TRIGGER"
-    assert candidate_state(
-        rsi_now=28.0,
-        rsi_min_20d=25.0,
-        ma5=99.0,
-        ma10=100.0,
-        rs5_market=-0.01,
-        rs5_sector=-0.01,
-        distance_from_20d_low=0.01,
-        policy=policy,
-    ) == "WATCH"
+    assert (
+        candidate_state(
+            rsi_now=42.0,
+            rsi_min_20d=25.0,
+            ma5=101.0,
+            ma10=100.0,
+            rs5_market=0.01,
+            rs5_sector=-0.01,
+            distance_from_20d_low=0.08,
+            policy=policy,
+        )
+        == "TRIGGER"
+    )
+    assert (
+        candidate_state(
+            rsi_now=28.0,
+            rsi_min_20d=25.0,
+            ma5=99.0,
+            ma10=100.0,
+            rs5_market=-0.01,
+            rs5_sector=-0.01,
+            distance_from_20d_low=0.01,
+            policy=policy,
+        )
+        == "WATCH"
+    )
+
+
+def test_growth_and_convexity_are_soft_source_aware_scores() -> None:
+    quality = growth_convexity_profile(
+        {
+            "revenue_growth_yoy": 0.10,
+            "operating_margin_change": 0.01,
+            "operating_margin_mrq": 0.20,
+            "return_on_investment": 0.20,
+            "cash_flow_positive_proxy": True,
+            "current_ratio": 2.0,
+            "total_debt_to_equity": 0.20,
+            "fundamental_source": "schwab_instrument_fundamental",
+        },
+        growth_theme=None,
+        drawdown_from_52w_high=-0.30,
+    )
+    optionality = growth_convexity_profile(
+        {"revenue_growth_yoy": -0.10},
+        growth_theme="nuclear",
+        drawdown_from_52w_high=-0.65,
+    )
+    ordinary = growth_convexity_profile(
+        {"revenue_growth_yoy": 0.02},
+        growth_theme=None,
+        drawdown_from_52w_high=-0.30,
+    )
+    missing = growth_convexity_profile({}, growth_theme=None, drawdown_from_52w_high=-0.30)
+
+    assert quality["growth_type"] == "QualityGrowth"
+    assert quality["forward_revenue_growth"] is None
+    assert optionality["growth_type"] == "ThemeOptionality"
+    assert optionality["convexity_score"] > ordinary["convexity_score"]
+    assert ordinary["growth_type"] == "Value/Other"
+    assert "Cyclical" not in ordinary["growth_types"]
+    assert missing["growth_type"] == "Unclassified"
+    assert missing["growth_score"] == 50.0
 
 
 def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
@@ -223,6 +296,7 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     assert first.document["counts"]["universe"] == 2
     assert first.document["counts"]["hard_survivors"] == 1
     assert first.document["counts"]["strict_candidates"] == 1
+    assert first.document["counts"]["fundamentals_present"] == 1
     assert first.document["top10"][0]["symbol"] == "TEST"
     assert first.document["top10"][0]["ivp_13w"] == 0.047619
     assert first.document["top10"][0]["ivp_26w"] == 0.06
@@ -231,11 +305,14 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     )
     assert first.document["top10"][0]["leaps_symbol"] == "TEST LEAPS"
     assert first.document["top10"][0]["option_quote_status"] == "live"
+    assert first.document["top10"][0]["growth_type"] == "HighGrowth/QualityGrowth"
+    assert first.document["top10"][0]["growth_score"] == 60.0
+    assert first.document["top10"][0]["convexity_score"] == 47.0
+    assert first.document["top10"][0]["forward_revenue_growth"] is None
+    assert first.document["top10"][0]["fcf_growth_yoy"] is None
     assert first.document["automatic_ordering"] is False
     assert first.document["added_symbols"] == ["TEST"]
-    assert first.document["material_fingerprint"] != second.document[
-        "material_fingerprint"
-    ]
+    assert first.document["material_fingerprint"] != second.document["material_fingerprint"]
     assert second.document["added_symbols"] == []
     assert second.notification is None
     assert len(deliveries) == 1
@@ -244,6 +321,8 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     _title, text = render_notification(first.document)
     candidate = first.document["top10"][0]
     assert f"{candidate['final_score']:.2f}" in text
+    assert f"{candidate['growth_score']:.2f}" in text
+    assert f"{candidate['convexity_score']:.2f}" in text
     assert f"{candidate['price_location_52w'] * 100.0:.2f}%" in text
     assert "4.76% / 6.00%" in text
     assert f"{candidate['rsi14']:.2f}" in text
@@ -275,6 +354,24 @@ def test_first_scan_uses_ibkr_iv_percentiles_without_multiweek_warmup(
     assert candidate["iv_data_notes"] == []
 
 
+def test_missing_growth_fundamentals_stay_soft_and_neutral(tmp_path: Path) -> None:
+    outcome = scan_once(
+        now=NOW,
+        mode="rth",
+        client=MissingFundamentalClient(NOW),  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=_ivp_fetcher,
+    )
+
+    candidate = outcome.document["top10"][0]
+    assert outcome.document["scan_complete"] is True
+    assert candidate["growth_type"] == "Unclassified"
+    assert candidate["growth_score"] == 50.0
+    assert outcome.document["data_quality"]["growth_fundamental_notes"] == ["partial"]
+
+
 def test_direct_ibkr_ivp_hard_gate_rejects_expensive_regime(tmp_path: Path) -> None:
     outcome = scan_once(
         now=NOW,
@@ -304,9 +401,7 @@ def test_missing_ibkr_ivp_fails_closed_to_watchlist(tmp_path: Path) -> None:
     assert outcome.document["counts"]["strict_candidates"] == 0
     assert outcome.document["counts"]["warming_rows"] == 1
     assert outcome.document["scan_complete"] is False
-    assert "ibkr_iv_percentile_missing" in outcome.document["watchlist"][0][
-        "data_quality_reasons"
-    ]
+    assert "ibkr_iv_percentile_missing" in outcome.document["watchlist"][0]["data_quality_reasons"]
     _title, text = render_notification(outcome.document)
     assert "未完成数据行（正文隐藏） **1**" in text
     assert "## Warming" not in text

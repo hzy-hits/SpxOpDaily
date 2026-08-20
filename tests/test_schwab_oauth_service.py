@@ -92,7 +92,9 @@ class FakeManager:
 def auth_factory(api_key: str, callback_url: str) -> AuthContext:
     assert api_key == "app-key"
     assert callback_url == CALLBACK_URL
-    return AuthContext(callback_url, "https://schwab.example/authorize?state=server-state", "server-state")
+    return AuthContext(
+        callback_url, "https://schwab.example/authorize?state=server-state", "server-state"
+    )
 
 
 def test_atomic_json_file_writes_private_file(tmp_path: Path) -> None:
@@ -295,19 +297,19 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
     )
     coordinator.authorize()
     callback = TestClient(create_app(coordinator))
-    gateway = TestClient(create_app(
-        coordinator,
-        gateway=True,
-        stream_health=lambda: {
-            "connected": True,
-            "subscribed_option_count": 160,
-            "message_counts": {"LEVELONE_OPTIONS": 0},
-        },
-    ))
-    assert callback.get("/healthz").json() == {"ok": True}
-    response = callback.get(
-        "/oauth/callback?code=sensitive-code&state=server-state"
+    gateway = TestClient(
+        create_app(
+            coordinator,
+            gateway=True,
+            stream_health=lambda: {
+                "connected": True,
+                "subscribed_option_count": 160,
+                "message_counts": {"LEVELONE_OPTIONS": 0},
+            },
+        )
     )
+    assert callback.get("/healthz").json() == {"ok": True}
+    response = callback.get("/oauth/callback?code=sensitive-code&state=server-state")
     assert response.status_code == 200
     assert response.headers["x-frame-options"] == "DENY"
     health = gateway.get("/healthz", headers={"Host": "127.0.0.1"}).json()
@@ -320,7 +322,8 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
     )
     assert quotes.status_code == 200
     assert manager.requests[-1] == (
-        "/marketdata/v1/quotes", [("symbols", "SPY"), ("symbols", "QQQ")]
+        "/marketdata/v1/quotes",
+        [("symbols", "SPY"), ("symbols", "QQQ")],
     )
     history = gateway.get(
         "/marketdata/v1/pricehistory?symbol=SPY&frequencyType=daily",
@@ -331,6 +334,15 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
         "/marketdata/v1/pricehistory",
         [("symbol", "SPY"), ("frequencyType", "daily")],
     )
+    instruments = gateway.get(
+        "/marketdata/v1/instruments?symbol=SPY&projection=fundamental",
+        headers={"Host": "localhost"},
+    )
+    assert instruments.status_code == 200
+    assert manager.requests[-1] == (
+        "/marketdata/v1/instruments",
+        [("symbol", "SPY"), ("projection", "fundamental")],
+    )
     assert gateway.get("/healthz", headers={"Host": "public.example.com"}).status_code == 403
 
     output = capsys.readouterr()
@@ -339,7 +351,8 @@ def test_servers_keep_gateway_local_and_never_log_callback_query(
 
 
 def test_servers_start_and_close_optional_stream_supervisor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = make_settings(tmp_path)
     manager = FakeManager(settings.token_file)

@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from spx_spark.analytics.growth_dislocation import (
     POLICY_VERSION,
     apply_crowding,
+    growth_convexity_profile,
     price_features,
     price_location_52w,
     score_candidate,
@@ -39,10 +40,12 @@ from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.schwab.growth_dislocation import (
     DailyClose,
     EquityQuote,
+    GrowthFundamentals,
     LeapsChain,
     OptionContract,
     fetch_daily_closes,
     fetch_equity_quote_batch,
+    fetch_growth_fundamentals_batch,
     fetch_leaps_chain,
 )
 from spx_spark.schwab.verifier import SchwabClient, build_schwab_client
@@ -53,7 +56,8 @@ from spx_spark.state_io import (
     exclusive_state_lock,
     read_json_object,
 )
-SCHEMA_VERSION = "growth_dislocation_leaps.v3"
+
+SCHEMA_VERSION = "growth_dislocation_leaps.v4"
 STATE_SCHEMA_VERSION = 2
 BENCHMARK_SYMBOL = "SPY"
 SCHEDULE_MINUTE = 30
@@ -68,6 +72,7 @@ ProviderError = (
     IbkrHistoricalDataUnavailable,
 )
 IvPercentileFetcher = Callable[[list[str]], Mapping[str, IvPercentileSnapshot]]
+
 @dataclass(frozen=True, slots=True)
 class UniverseMember:
     symbol: str
@@ -78,24 +83,22 @@ class UniverseMember:
     classification_level: str
     sector_benchmark: str
     memberships: tuple[str, ...]
+    growth_theme: str | None = None
 
     @property
     def crowding_group(self) -> str:
         label = self.subindustry if self.classification_level == "subindustry" else self.sector
         return label if label and label != "Unknown" else f"fallback:{self.sector_benchmark}"
 
-
 @dataclass(frozen=True, slots=True)
 class Universe:
     members: tuple[UniverseMember, ...]
     metadata: tuple[str, ...]
 
-
 @dataclass(frozen=True, slots=True)
 class ScanOutcome:
     document: dict[str, Any]
     notification: EnqueueResult | None
-
 
 def scheduled_mode(now: datetime) -> str | None:
     ny = _aware(now).astimezone(ET)
@@ -108,7 +111,6 @@ def scheduled_mode(now: datetime) -> str | None:
     if ny.minute == SCHEDULE_MINUTE and DEFAULT_MARKET_CALENDAR.is_rth_open(ny):
         return "rth"
     return None
-
 
 def load_universe(path: Path) -> Universe:
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -129,19 +131,17 @@ def load_universe(path: Path) -> Universe:
                 company=str(row.get("company") or "").strip(),
                 sector=str(row.get("sector") or "Unknown").strip(),
                 subindustry=str(row.get("subindustry") or "Unknown").strip(),
-                classification_level=str(
-                    row.get("classification_level") or "fallback"
-                ).strip(),
+                classification_level=str(row.get("classification_level") or "fallback").strip(),
                 sector_benchmark=str(row.get("sector_benchmark") or "SPY").strip().upper(),
                 memberships=tuple(
                     item for item in str(row.get("memberships") or "").split("|") if item
                 ),
+                growth_theme=str(row.get("growth_theme") or "").strip().lower() or None,
             )
         )
     if not members:
         raise ValueError("Growth-dislocation universe is empty")
     return Universe(tuple(members), metadata)
-
 
 def scan_once(
     *,
@@ -174,12 +174,8 @@ def scan_once(
             iv_percentile_fetcher=iv_percentile_fetcher,
         )
         current_symbols = {str(row["symbol"]) for row in document["all_candidates"]}
-        previous_symbols = {
-            str(symbol) for symbol in state.get("active_candidate_symbols", [])
-        }
-        pending_symbols = {
-            str(symbol) for symbol in state.get("pending_added_symbols", [])
-        }
+        previous_symbols = {str(symbol) for symbol in state.get("active_candidate_symbols", [])}
+        pending_symbols = {str(symbol) for symbol in state.get("pending_added_symbols", [])}
         complete = bool(document.get("scan_complete"))
         added_symbols = (
             sorted(((current_symbols - previous_symbols) | pending_symbols) & current_symbols)
@@ -220,9 +216,7 @@ def scan_once(
         state["policy_version"] = POLICY_VERSION
         state["last_scan_at"] = at.isoformat()
         state["last_scan_mode"] = mode
-        state["priority_symbols"] = [
-            row["symbol"] for row in document["all_candidates"]
-        ]
+        state["priority_symbols"] = [row["symbol"] for row in document["all_candidates"]]
         if complete:
             state["active_candidate_symbols"] = sorted(current_symbols)
             state["pending_added_symbols"] = sorted(pending_symbols & current_symbols)
@@ -231,7 +225,6 @@ def scan_once(
             state["pending_added_symbols"] = sorted(pending_symbols)
         atomic_write_json_secure(state_path, state)
     return ScanOutcome(document=document, notification=notification)
-
 
 def _build_document(
     *,
@@ -247,6 +240,7 @@ def _build_document(
     budget = policy.rth_request_budget if mode == "rth" else policy.daily_request_budget
     requests_used = 0
     errors: list[str] = []
+    fundamental_notes: list[str] = []
     quotes: dict[str, EquityQuote] = {}
     provider_symbols = list(
         dict.fromkeys(
@@ -276,11 +270,25 @@ def _build_document(
         assert quote is not None and location is not None
         price_hard_survivors.append((member, quote, location))
 
+    fundamentals: dict[str, GrowthFundamentals] = {}
+    fundamental_symbols = [item[0].provider_symbol for item in price_hard_survivors]
+    for offset in range(0, len(fundamental_symbols), 500):
+        if requests_used >= budget:
+            fundamental_notes.append("request_budget")
+            break
+        batch = fundamental_symbols[offset : offset + 500]
+        requests_used += 1
+        try:
+            fundamentals.update(fetch_growth_fundamentals_batch(client, batch))
+        except ProviderError as exc:
+            fundamental_notes.append(type(exc).__name__)
+    if set(fundamental_symbols) - set(fundamentals):
+        fundamental_notes.append("partial")
+
     iv_cache = _mapping_state(state, "iv_percentiles")
     iv_snapshots = _fresh_iv_snapshots(iv_cache, trading_day=ny.date())
     price_survivor_symbols = [
-        _ibkr_provider_symbol(member.symbol)
-        for member, _quote, _location in price_hard_survivors
+        _ibkr_provider_symbol(member.symbol) for member, _quote, _location in price_hard_survivors
     ]
     refresh_symbols = (
         price_survivor_symbols
@@ -401,6 +409,7 @@ def _build_document(
             mode=mode,
             detail_current=member.symbol in detailed_now,
             iv_snapshot=iv_snapshots.get(_ibkr_provider_symbol(member.symbol)),
+            fundamental=fundamentals.get(member.provider_symbol),
         )
         if reasons:
             warming.append(row)
@@ -429,6 +438,7 @@ def _build_document(
             mode=mode,
             detail_current=False,
             iv_snapshot=iv_snapshots.get(_ibkr_provider_symbol(member.symbol)),
+            fundamental=fundamentals.get(member.provider_symbol),
         )
         warming.append(row)
         for reason in reasons:
@@ -456,18 +466,15 @@ def _build_document(
         "research_only": True,
         "counts": {
             "universe": len(universe.members),
-            "quotes_present": sum(
-                member.provider_symbol in quotes for member in universe.members
-            ),
+            "quotes_present": sum(member.provider_symbol in quotes for member in universe.members),
             "price_hard_survivors": len(price_hard_survivors),
-            "ivp_snapshots": sum(
-                symbol in iv_snapshots for symbol in price_survivor_symbols
-            ),
+            "ivp_snapshots": sum(symbol in iv_snapshots for symbol in price_survivor_symbols),
             "ivp_refreshed": len(refreshed_iv_symbols),
             "hard_survivors": len(hard_survivors),
             "detailed_this_run": len(detailed_now),
             "strict_candidates": len(strict_candidates),
             "warming_rows": len(warming),
+            "fundamentals_present": len(fundamentals),
         },
         "request_budget": budget,
         "requests_used": requests_used,
@@ -488,12 +495,13 @@ def _build_document(
             "volatility_contract": "13-week and 26-week percentile calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; 52-week percentile is bonus-only",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
             "classification": "official sector fallback; subindustry unavailable",
+            "growth_fundamentals": "Schwab instrument fundamentals; forward revenue growth, FCF growth, and catalysts remain explicitly unavailable",
+            "growth_fundamental_notes": sorted(set(fundamental_notes)),
         },
     }
     fingerprint = _material_fingerprint(document)
     document["material_fingerprint"] = fingerprint
     return document, fingerprint
-
 
 def _hard_filter(
     member: UniverseMember,
@@ -519,9 +527,13 @@ def _hard_filter(
         if not quote.realtime:
             return "quote_delayed", None
         assert quote.quote_at is not None
-        if (now - quote.quote_at.astimezone(timezone.utc)).total_seconds() > policy.quote_max_age_seconds:
+        if (
+            now - quote.quote_at.astimezone(timezone.utc)
+        ).total_seconds() > policy.quote_max_age_seconds:
             return "quote_frozen", None
-    elif quote.quote_at is None or quote.quote_at.astimezone(ET).date() != now.astimezone(ET).date():
+    elif (
+        quote.quote_at is None or quote.quote_at.astimezone(ET).date() != now.astimezone(ET).date()
+    ):
         return "quote_frozen", None
     assert quote.last is not None and quote.low_52w is not None and quote.high_52w is not None
     location = price_location_52w(quote.last, quote.low_52w, quote.high_52w)
@@ -537,7 +549,6 @@ def _hard_filter(
         return "not_optionable", location
     return None, location
 
-
 def _candidate_row(
     *,
     member: UniverseMember,
@@ -552,6 +563,7 @@ def _candidate_row(
     mode: str,
     detail_current: bool,
     iv_snapshot: IvPercentileSnapshot | None,
+    fundamental: GrowthFundamentals | None,
 ) -> tuple[dict[str, Any], list[str]]:
     reasons: list[str] = []
     features = price_features([entry.close for entry in history])
@@ -562,10 +574,7 @@ def _candidate_row(
         [entry.close for entry in _close_history(benchmark_histories.get(BENCHMARK_SYMBOL))]
     )
     sector = price_features(
-        [
-            entry.close
-            for entry in _close_history(benchmark_histories.get(member.sector_benchmark))
-        ]
+        [entry.close for entry in _close_history(benchmark_histories.get(member.sector_benchmark))]
     )
     if market is None:
         reasons.append("market_history_warming")
@@ -678,12 +687,20 @@ def _candidate_row(
         "data_quality_reasons": sorted(set(reasons)),
         "as_of_et": ny.isoformat(),
     }
+    row.update(
+        growth_convexity_profile(
+            asdict(fundamental) if fundamental is not None else {},
+            growth_theme=member.growth_theme,
+            drawdown_from_52w_high=float(quote.last) / float(quote.high_52w) - 1.0,
+        )
+    )
     return row, sorted(set(reasons))
-
 
 def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
     mode = str(document.get("mode") or "rth")
-    title = "Growth Dislocation LEAPS · 日报" if mode == "daily" else "Growth Dislocation LEAPS · 新增"
+    title = (
+        "Growth Dislocation LEAPS · 日报" if mode == "daily" else "Growth Dislocation LEAPS · 新增"
+    )
     counts = _mapping(document.get("counts"))
     lines = [
         f"# {title}",
@@ -702,8 +719,8 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         "",
         "## 严格候选 Top 10",
         "",
-        "| Symbol | State | Score | 52W位置 | IVP 13W/26W | RSI | LEAPS | Spread |",
-        "|---|---:|---:|---:|---:|---:|---|---:|",
+        "| Symbol | State | Score | Type | Growth | Convexity | 52W位置 | IVP 13W/26W | RSI | LEAPS | Spread |",
+        "|---|---:|---:|---|---:|---:|---:|---:|---:|---|---:|",
     ]
     top = document.get("top10")
     if isinstance(top, list) and top:
@@ -711,10 +728,13 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             if not isinstance(row, Mapping):
                 continue
             lines.append(
-                "| {symbol} | {state} | {score} | {location} | {ivp} | {rsi} | {contract} | {spread} |".format(
+                "| {symbol} | {state} | {score} | {growth_type} | {growth} | {convexity} | {location} | {ivp} | {rsi} | {contract} | {spread} |".format(
                     symbol=row.get("symbol", "-"),
                     state=row.get("state", "-"),
                     score=_fmt(row.get("final_score")),
+                    growth_type=row.get("growth_type", "Unclassified"),
+                    growth=_fmt(row.get("growth_score")),
+                    convexity=_fmt(row.get("convexity_score")),
                     location=_pct(row.get("price_location_52w")),
                     ivp=_iv_gate_label(row),
                     rsi=_fmt(row.get("rsi14")),
@@ -723,9 +743,8 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
                 )
             )
     else:
-        lines.append("| — | WATCH | — | — | 暂无严格候选 | — | — | — |")
+        lines.append("| — | WATCH | — | — | — | — | — | 暂无严格候选 | — | — | — |")
     return title, "\n".join(lines)
-
 
 def _detail_order(
     survivors: list[tuple[UniverseMember, EquityQuote, float]],
@@ -746,7 +765,6 @@ def _detail_order(
         state["detail_cursor"] = (cursor + 1) % len(remaining)
     return [by_symbol[symbol] for symbol in priority] + remaining
 
-
 def _detail_payload(
     target: OptionContract,
     chain: LeapsChain,
@@ -763,7 +781,6 @@ def _detail_payload(
         "fetched_at": fetched_at.isoformat(),
     }
 
-
 def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
     if raw.get("schema_version") not in {None, STATE_SCHEMA_VERSION}:
         return {}
@@ -771,13 +788,11 @@ def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
         return {}
     return dict(raw)
 
-
 def _mapping_state(state: dict[str, Any], key: str) -> dict[str, Any]:
     value = state.get(key)
     resolved = dict(value) if isinstance(value, Mapping) else {}
     state[key] = resolved
     return resolved
-
 
 def _fresh_iv_snapshots(
     cache: Mapping[str, Any],
@@ -800,14 +815,11 @@ def _fresh_iv_snapshots(
             snapshots[_ibkr_provider_symbol(snapshot.provider_symbol)] = snapshot
     return snapshots
 
-
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
-
 def _ibkr_provider_symbol(symbol: str) -> str:
     return " ".join(symbol.strip().upper().replace(".", " ").replace("/", " ").split())
-
 
 def _close_history(value: Any) -> list[DailyClose]:
     rows = value if isinstance(value, list) else []
@@ -824,19 +836,15 @@ def _close_history(value: Any) -> list[DailyClose]:
             by_day[day] = DailyClose(day, close)
     return [by_day[day] for day in sorted(by_day)][-MAX_CLOSE_HISTORY:]
 
-
 def _close_history_payload(history: list[DailyClose]) -> list[dict[str, Any]]:
     return [
-        {"date": row.day.isoformat(), "close": row.close}
-        for row in history[-MAX_CLOSE_HISTORY:]
+        {"date": row.day.isoformat(), "close": row.close} for row in history[-MAX_CLOSE_HISTORY:]
     ]
-
 
 def _upsert_close(history: list[DailyClose], day: date, close: float) -> list[DailyClose]:
     by_day = {row.day: row for row in history}
     by_day[day] = DailyClose(day, close)
     return [by_day[key] for key in sorted(by_day)][-MAX_CLOSE_HISTORY:]
-
 
 def _parse_datetime(value: Any) -> datetime | None:
     try:
@@ -845,14 +853,12 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
 
-
 def _optional_float(value: Any) -> float | None:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
     return parsed if parsed == parsed else None
-
 
 def _option_status(
     *,
@@ -870,7 +876,6 @@ def _option_status(
     if mode == "daily":
         return "frozen"
     return "live" if (now - quote_at).total_seconds() <= max_age_seconds else "frozen"
-
 
 def _material_fingerprint(document: Mapping[str, Any]) -> str:
     keys = (
@@ -895,6 +900,12 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
         "leaps_spread_mid",
         "data_quality",
         "data_quality_reasons",
+        "growth_type",
+        "growth_score",
+        "convexity_score",
+        "revenue_growth_yoy",
+        "forward_revenue_growth",
+        "fcf_growth_yoy",
     )
 
     def material_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -913,28 +924,22 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     return hashlib.sha256(encoded).hexdigest()
 
-
 def _notification_id(mode: str, occurred_at: datetime, fingerprint: str) -> str:
     return f"growth-dislocation:{mode}:{occurred_at:%Y%m%dT%H%MZ}:{fingerprint[:16]}"
-
 
 def _aware(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Growth-dislocation timestamps must be timezone-aware")
     return value
 
-
 def _fmt(value: Any) -> str:
     return "—" if value is None else f"{float(value):.2f}"
-
 
 def _iv_gate_label(row: Mapping[str, Any]) -> str:
     return f"{_pct(row.get('ivp_13w'))} / {_pct(row.get('ivp_26w'))}"
 
-
 def _pct(value: Any) -> str:
     return "—" if value is None else f"{float(value) * 100.0:.2f}%"
-
 
 def run(*, now: datetime | None = None, force: bool = False) -> int:
     at = _aware(now or datetime.now(tz=timezone.utc))
@@ -982,7 +987,9 @@ def run(*, now: datetime | None = None, force: bool = False) -> int:
                 "requests_used": outcome.document["requests_used"],
                 "scan_complete": outcome.document["scan_complete"],
                 "notification_outcome": (
-                    outcome.notification.outcome if outcome.notification is not None else "unchanged"
+                    outcome.notification.outcome
+                    if outcome.notification is not None
+                    else "unchanged"
                 ),
             },
             sort_keys=True,

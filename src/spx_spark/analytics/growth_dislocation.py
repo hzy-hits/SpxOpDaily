@@ -10,7 +10,16 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v3"
+POLICY_VERSION = "growth_dislocation_leaps.v4"
+
+GROWTH_TYPE_BONUS = {
+    "HighGrowth": 100.0,
+    "QualityGrowth": 85.0,
+    "ThemeOptionality": 80.0,
+    "Cyclical": 40.0,
+    "Value/Other": 20.0,
+    "Unclassified": 50.0,
+}
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -34,11 +43,7 @@ def price_features(closes: Sequence[float]) -> dict[str, float] | None:
     if not recent_rsi or rsi_series[-1] is None:
         return None
     returns = [math.log(current / prior) for prior, current in zip(clean, clean[1:])]
-    rv20 = (
-        statistics.stdev(returns[-20:]) * math.sqrt(252.0)
-        if len(returns) >= 20
-        else None
-    )
+    rv20 = statistics.stdev(returns[-20:]) * math.sqrt(252.0) if len(returns) >= 20 else None
     low_20d = min(clean[-20:])
     return {
         "rsi14": float(rsi_series[-1]),
@@ -117,10 +122,7 @@ def score_candidate(
     )
     if any(data.get(key) is None for key in required):
         return None
-    if (
-        float(data["ivp_13w"]) > policy.max_ivp_13w
-        or float(data["ivp_26w"]) > policy.max_ivp_26w
-    ):
+    if float(data["ivp_13w"]) > policy.max_ivp_13w or float(data["ivp_26w"]) > policy.max_ivp_26w:
         return None
     spread = float(data["spread_mid"])
     if spread > policy.hard_max_leaps_spread_mid:
@@ -160,13 +162,21 @@ def score_candidate(
         policy,
     )
     market_cap_score = market_cap_quality_score(float(data["market_cap"]))
+    growth_value = _optional_number(data.get("growth_score"))
+    convexity_value = _optional_number(data.get("convexity_score"))
+    growth_score = clamp(growth_value if growth_value is not None else 50.0, 0.0, 100.0)
+    convexity_score = clamp(
+        convexity_value if convexity_value is not None else 50.0, 0.0, 100.0
+    )
     final_score = (
-        0.30 * iv_score
-        + 0.20 * rs_score
-        + 0.15 * rsi_score
+        0.20 * iv_score
+        + 0.18 * rs_score
+        + 0.12 * rsi_score
         + 0.10 * price_score
         + 0.15 * liquidity_score
-        + 0.10 * market_cap_score
+        + 0.08 * market_cap_score
+        + 0.10 * growth_score
+        + 0.07 * convexity_score
     )
     rs5_market = float(data["return_5d"]) - float(data["market_return_5d"])
     rs5_sector = float(data["return_5d"]) - float(data["sector_return_5d"])
@@ -187,6 +197,8 @@ def score_candidate(
         "price_recovery_score": price_score,
         "liquidity_score": liquidity_score,
         "market_cap_score": market_cap_score,
+        "growth_score": growth_score,
+        "convexity_score": convexity_score,
         "final_score": final_score,
         "state": state,
         "rs_5d_market": rs5_market,
@@ -206,7 +218,10 @@ def apply_crowding(
     counts: dict[str, int] = {}
     for candidate in ordered:
         group = str(candidate.get("crowding_group") or "Unknown")
-        if len(top) < policy.top_count and counts.get(group, 0) < policy.max_names_per_crowding_group:
+        if (
+            len(top) < policy.top_count
+            and counts.get(group, 0) < policy.max_names_per_crowding_group
+        ):
             top.append(candidate)
             counts[group] = counts.get(group, 0) + 1
         else:
@@ -255,7 +270,9 @@ def rsi_recovery_score(
     return 25.0 if rsi_now < policy.rsi_recovery_min else 35.0
 
 
-def price_recovery_score(last: float, low_20d: float, return_5d: float, ma5: float, ma10: float) -> float:
+def price_recovery_score(
+    last: float, low_20d: float, return_5d: float, ma5: float, ma10: float
+) -> float:
     recovery = last / low_20d - 1.0
     if 0.03 <= recovery <= 0.12:
         base = 100.0
@@ -278,12 +295,8 @@ def relative_strength_score(
     sector_ret_5d: float,
     sector_ret_10d: float,
 ) -> float:
-    rs_market = 0.6 * (stock_ret_5d - market_ret_5d) + 0.4 * (
-        stock_ret_10d - market_ret_10d
-    )
-    rs_sector = 0.6 * (stock_ret_5d - sector_ret_5d) + 0.4 * (
-        stock_ret_10d - sector_ret_10d
-    )
+    rs_market = 0.6 * (stock_ret_5d - market_ret_5d) + 0.4 * (stock_ret_10d - market_ret_10d)
+    rs_sector = 0.6 * (stock_ret_5d - sector_ret_5d) + 0.4 * (stock_ret_10d - sector_ret_10d)
     return clamp(50.0 + 0.5 * (rs_market + rs_sector) * 500.0, 0.0, 100.0)
 
 
@@ -351,6 +364,202 @@ def market_cap_quality_score(market_cap: float) -> float:
     )
 
 
+def growth_convexity_profile(
+    data: Mapping[str, Any],
+    *,
+    growth_theme: str | None,
+    drawdown_from_52w_high: float,
+) -> dict[str, Any]:
+    """Build source-aware soft growth and rerating scores without hard rejection."""
+
+    revenue_growth = _optional_number(data.get("revenue_growth_yoy"))
+    forward_growth = _optional_number(data.get("forward_revenue_growth"))
+    margin_change = _optional_number(data.get("operating_margin_change"))
+    fcf_growth = _optional_number(data.get("fcf_growth_yoy"))
+    fcf_positive = data.get("fcf_positive") if isinstance(data.get("fcf_positive"), bool) else None
+    roi = _optional_number(data.get("return_on_investment"))
+    cash_flow_proxy = data.get("cash_flow_positive_proxy") is True
+
+    growth_quality = 0.0
+    coverage = 0.0
+    if revenue_growth is not None:
+        coverage += 35.0
+        growth_quality += _revenue_growth_points(revenue_growth)
+    if forward_growth is not None:
+        coverage += 25.0
+        growth_quality += _forward_growth_points(forward_growth)
+    if margin_change is not None:
+        coverage += 20.0
+        growth_quality += _margin_trend_points(margin_change)
+    if fcf_growth is not None or fcf_positive is not None:
+        coverage += 20.0
+        growth_quality += _fcf_trend_points(fcf_growth, fcf_positive)
+
+    types: list[str] = []
+    classification_notes: list[str] = []
+    if revenue_growth is not None and revenue_growth >= 0.15:
+        if forward_growth is None or forward_growth >= 0.10:
+            types.append("HighGrowth")
+            if forward_growth is None:
+                classification_notes.append("high_growth_reported_revenue_only")
+    if (
+        revenue_growth is not None
+        and revenue_growth >= 0.08
+        and roi is not None
+        and roi >= 0.10
+        and cash_flow_proxy
+    ):
+        types.append("QualityGrowth")
+        classification_notes.append("positive_cash_flow_uses_pcf_proxy")
+    theme = str(growth_theme or "").strip().lower() or None
+    if theme is not None:
+        types.append("ThemeOptionality")
+    if not types:
+        types.append("Value/Other" if coverage > 0.0 else "Unclassified")
+    type_bonus = max(GROWTH_TYPE_BONUS[label] for label in types)
+    growth_score = (
+        50.0
+        if coverage == 0.0 and types == ["Unclassified"]
+        else min(growth_quality + 0.15 * type_bonus, 100.0)
+    )
+
+    margin_recovery = _margin_recovery_potential(data, margin_change)
+    balance_score = _balance_sheet_quality(data)
+    convexity = _drawdown_convexity_points(drawdown_from_52w_high)
+    if "HighGrowth" in types or "ThemeOptionality" in types:
+        convexity += 25.0
+    convexity += 20.0 if margin_recovery == "HIGH" else 10.0 if margin_recovery == "MEDIUM" else 0.0
+    has_catalyst = data.get("has_12m_catalyst")
+    if has_catalyst is True:
+        convexity += 20.0
+    if balance_score is not None and balance_score >= 70.0:
+        convexity += 10.0
+    convexity_coverage = 50.0
+    if margin_recovery != "UNAVAILABLE":
+        convexity_coverage += 20.0
+    if has_catalyst is not None:
+        convexity_coverage += 20.0
+    if balance_score is not None:
+        convexity_coverage += 10.0
+
+    notes = []
+    if forward_growth is None:
+        notes.append("forward_revenue_growth_unavailable")
+    if fcf_growth is None:
+        notes.append("fcf_growth_yoy_unavailable")
+    if has_catalyst is None:
+        notes.append("catalyst_unavailable")
+    return {
+        **{key: data.get(key) for key in _FUNDAMENTAL_OUTPUT_KEYS},
+        "growth_theme": theme,
+        "growth_type": "/".join(types),
+        "growth_types": types,
+        "growth_classification_notes": classification_notes,
+        "growth_quality_score": min(growth_quality, 100.0),
+        "growth_quality_coverage": coverage / 100.0,
+        "growth_type_bonus": type_bonus,
+        "growth_score": growth_score,
+        "drawdown_from_52w_high": drawdown_from_52w_high,
+        "margin_recovery_potential": margin_recovery,
+        "has_12m_catalyst": has_catalyst,
+        "balance_sheet_quality": balance_score,
+        "convexity_score": min(convexity, 100.0),
+        "convexity_coverage": convexity_coverage / 100.0,
+        "fundamental_data_notes": notes,
+    }
+
+
+_FUNDAMENTAL_OUTPUT_KEYS = (
+    "revenue_growth_yoy",
+    "revenue_growth_ttm",
+    "forward_revenue_growth",
+    "operating_margin_mrq",
+    "operating_margin_ttm",
+    "operating_margin_change",
+    "fcf_growth_yoy",
+    "fcf_positive",
+    "return_on_investment",
+    "cash_flow_positive_proxy",
+    "beta",
+    "current_ratio",
+    "total_debt_to_equity",
+    "fundamental_source",
+)
+
+
+def _revenue_growth_points(value: float) -> float:
+    if value >= 0.25:
+        return 35.0
+    if value >= 0.15:
+        return 30.0
+    if value >= 0.08:
+        return 22.0
+    return 10.0 if value >= 0.0 else 0.0
+
+
+def _forward_growth_points(value: float) -> float:
+    if value >= 0.20:
+        return 25.0
+    if value >= 0.10:
+        return 18.0
+    return 10.0 if value >= 0.05 else 0.0
+
+
+def _margin_trend_points(value: float) -> float:
+    if value > 0.03:
+        return 20.0
+    if value > 0.0:
+        return 15.0
+    return 8.0 if value > -0.03 else 0.0
+
+
+def _fcf_trend_points(value: float | None, positive: bool | None) -> float:
+    if value is not None:
+        return 20.0 if value > 0.20 else 12.0 if value > 0.0 else 6.0 if positive else 0.0
+    return 6.0 if positive else 0.0
+
+
+def _drawdown_convexity_points(value: float) -> float:
+    if value <= -0.60:
+        return 25.0
+    if value <= -0.40:
+        return 20.0
+    return 12.0 if value <= -0.25 else 0.0
+
+
+def _margin_recovery_potential(data: Mapping[str, Any], change: float | None) -> str:
+    margin = _optional_number(data.get("operating_margin_mrq"))
+    if margin is None or change is None:
+        return "UNAVAILABLE"
+    if margin < 0.0 and change > 0.03:
+        return "HIGH"
+    if margin < 0.0 and change > 0.0:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _balance_sheet_quality(data: Mapping[str, Any]) -> float | None:
+    current = _optional_number(data.get("current_ratio"))
+    debt = _optional_number(data.get("total_debt_to_equity"))
+    if current is None or debt is None:
+        return None
+    if current >= 1.5 and debt <= 0.5:
+        return 100.0
+    if current >= 1.0 and debt <= 1.0:
+        return 70.0
+    if current >= 0.75 and debt <= 2.0:
+        return 40.0
+    return 20.0
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def candidate_state(
     *,
     rsi_now: float,
@@ -362,7 +571,9 @@ def candidate_state(
     distance_from_20d_low: float,
     policy: GrowthDislocationSettings,
 ) -> str:
-    passed_recovery = rsi_min_20d < policy.rsi_oversold_threshold and rsi_now > policy.rsi_oversold_threshold
+    passed_recovery = (
+        rsi_min_20d < policy.rsi_oversold_threshold and rsi_now > policy.rsi_oversold_threshold
+    )
     confirmations = sum(
         (
             rsi_now >= policy.rsi_recovery_min,

@@ -178,6 +178,12 @@ def test_gateway_loads_one_refreshing_client_and_proxies_only_market_data(
     )
     assert history.status == 200
     assert fake_client.requests[1][0].endswith("/marketdata/v1/pricehistory")
+    instruments = manager.request(
+        "/marketdata/v1/instruments",
+        [("symbol", "SPY"), ("projection", "fundamental")],
+    )
+    assert instruments.status == 200
+    assert fake_client.requests[2][0].endswith("/marketdata/v1/instruments")
     with pytest.raises(ValueError, match="Unsupported"):
         manager.request("/trader/v1/accounts", [])
 
@@ -404,10 +410,7 @@ def test_request_policy_is_configurable_from_environment(
 
 def test_retry_after_supports_delta_seconds_and_http_dates() -> None:
     assert parse_retry_after_seconds("2.5", now=1_000.0) == 2.5
-    assert (
-        parse_retry_after_seconds("Thu, 01 Jan 1970 00:16:50 GMT", now=1_000.0)
-        == 10.0
-    )
+    assert parse_retry_after_seconds("Thu, 01 Jan 1970 00:16:50 GMT", now=1_000.0) == 10.0
     assert parse_retry_after_seconds("invalid", now=1_000.0) is None
 
 

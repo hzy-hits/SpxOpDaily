@@ -211,6 +211,18 @@ run has completed without missing IV history or provider errors.
   error 10197 fail closed into data-quality rows. Requests use the existing IBKR
   snapshot client id and never read accounts, subscribe to continuous ticker
   lines, or place orders.
+- Candidates that pass the price hard filter receive source-aware soft
+  `GrowthQuality` and `Convexity` scores. Reported revenue growth, operating-margin
+  trend, return on investment, and balance-sheet inputs come from Schwab's
+  instrument fundamental projection. The first version leaves forward revenue
+  growth, FCF growth, and catalysts explicitly null because the current provider
+  entitlements do not supply them; missing values are never treated as zero.
+  Theme optionality is an issuer-level curated universe field, not a sector-wide
+  preference. These scores affect ranking only and never admit a symbol that
+  failed the price, IV, or LEAPS-liquidity hard gates.
+- Final ranking weights are 20% volatility, 18% relative strength, 12% RSI
+  recovery, 10% price recovery, 15% option liquidity, 8% market cap, 10% growth,
+  and 7% convexity. Human-visible numeric values render with two decimals.
 - Manual diagnostic: `uv run spx job growth-dislocation --force`. This consumes
   live Schwab request budget and may queue a real notification.
 
