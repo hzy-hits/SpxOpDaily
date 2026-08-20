@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from spx_spark.analytics.growth_dislocation import (
     POLICY_VERSION,
     apply_crowding,
+    candidate_sort_key,
     price_features,
     price_location_52w,
     score_candidate,
@@ -463,8 +464,7 @@ def _build_document(
         "watchlist": warming[: max(policy.top_count * 3, policy.top_count)],
         "all_candidates": sorted(
             strict_candidates,
-            key=lambda row: float(row["final_score"]),
-            reverse=True,
+            key=candidate_sort_key,
         ),
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "data_quality": {
@@ -680,8 +680,8 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         "",
         "## 严格候选 Top 10",
         "",
-        "| Symbol | State | Score | 52W位置 | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---:|",
+        "| Symbol | State | Market Cap | Score | 52W位置 | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
     top = document.get("top10")
     if isinstance(top, list) and top:
@@ -689,9 +689,10 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             if not isinstance(row, Mapping):
                 continue
             lines.append(
-                "| {symbol} | {state} | {score} | {location} | {ivp} | {rsi} | {sector_rs} | {contract} | {spread} |".format(
+                "| {symbol} | {state} | {market_cap} | {score} | {location} | {ivp} | {rsi} | {sector_rs} | {contract} | {spread} |".format(
                     symbol=row.get("symbol", "-"),
                     state=row.get("state", "-"),
+                    market_cap=_market_cap(row.get("market_cap")),
                     score=_fmt(row.get("final_score")),
                     location=_pct(row.get("price_location_52w")),
                     ivp=_iv_gate_label(row),
@@ -702,7 +703,7 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
                 )
             )
     else:
-        lines.append("| — | WATCH | — | — | 暂无严格候选 | — | — | — | — |")
+        lines.append("| — | WATCH | — | — | — | 暂无严格候选 | — | — | — | — |")
     return title, "\n".join(lines)
 
 def _detail_order(
@@ -887,6 +888,15 @@ def _aware(value: datetime) -> datetime:
 
 def _fmt(value: Any) -> str:
     return "—" if value is None else f"{float(value):.2f}"
+
+
+def _market_cap(value: Any) -> str:
+    if value is None:
+        return "—"
+    market_cap = float(value)
+    if market_cap >= 1_000_000_000_000:
+        return f"${market_cap / 1_000_000_000_000:.2f}T"
+    return f"${market_cap / 1_000_000_000:.2f}B"
 
 def _iv_gate_label(row: Mapping[str, Any]) -> str:
     return f"{_pct(row.get('ivp_13w'))} / {_pct(row.get('ivp_26w'))}"

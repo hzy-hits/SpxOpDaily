@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from spx_spark.analytics.growth_dislocation import (
+    apply_crowding,
     candidate_state,
     score_candidate,
     select_target_leaps,
@@ -279,6 +280,38 @@ def test_target_leaps_prefers_the_tightest_executable_contract() -> None:
     assert select_target_leaps([wide, tight], _policy()) is tight
 
 
+def test_eligible_candidates_rank_by_market_cap_then_score() -> None:
+    candidates = [
+        {
+            "symbol": "SMALL_HIGH_SCORE",
+            "market_cap": 5_000_000_000.0,
+            "final_score": 99.0,
+            "crowding_group": "sector:XLY",
+        },
+        {
+            "symbol": "LARGE_LOW_SCORE",
+            "market_cap": 100_000_000_000.0,
+            "final_score": 20.0,
+            "crowding_group": "sector:XLK",
+        },
+        {
+            "symbol": "LARGE_HIGH_SCORE",
+            "market_cap": 100_000_000_000.0,
+            "final_score": 80.0,
+            "crowding_group": "sector:XLC",
+        },
+    ]
+
+    top, reserve = apply_crowding(candidates, _policy())
+
+    assert [row["symbol"] for row in top] == [
+        "LARGE_HIGH_SCORE",
+        "LARGE_LOW_SCORE",
+        "SMALL_HIGH_SCORE",
+    ]
+    assert reserve == []
+
+
 def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     tmp_path: Path,
 ) -> None:
@@ -337,6 +370,7 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     _title, text = render_notification(first.document)
     candidate = first.document["top10"][0]
     assert f"{candidate['final_score']:.2f}" in text
+    assert "$11.00B" in text
     assert f"{candidate['price_location_52w'] * 100.0:.2f}%" in text
     assert "4.76% / 6.00%" in text
     assert f"{candidate['rsi14']:.2f}" in text

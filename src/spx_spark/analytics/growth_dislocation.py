@@ -157,7 +157,7 @@ def apply_crowding(
     candidates: Sequence[dict[str, Any]],
     policy: GrowthDislocationSettings,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    ordered = sorted(candidates, key=lambda row: float(row["final_score"]), reverse=True)
+    ordered = sorted(candidates, key=candidate_sort_key)
     top: list[dict[str, Any]] = []
     reserve: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
@@ -172,6 +172,16 @@ def apply_crowding(
         else:
             reserve.append(candidate)
     return top, reserve
+
+
+def candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, str]:
+    """Prefer larger eligible issuers, then use the V1 signal score as a tiebreaker."""
+
+    return (
+        -float(candidate.get("market_cap") or 0.0),
+        -float(candidate.get("final_score") or 0.0),
+        str(candidate.get("symbol") or ""),
+    )
 
 
 def iv_cheapness_score(
