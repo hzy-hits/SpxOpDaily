@@ -241,6 +241,13 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     assert len(deliveries) == 1
     assert deliveries[0].lane == "growth_dislocation"
     assert (tmp_path / "latest" / "growth_dislocation_leaps.json").is_file()
+    _title, text = render_notification(first.document)
+    candidate = first.document["top10"][0]
+    assert f"{candidate['final_score']:.2f}" in text
+    assert f"{candidate['price_location_52w'] * 100.0:.2f}%" in text
+    assert "4.76% / 6.00%" in text
+    assert f"{candidate['rsi14']:.2f}" in text
+    assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 
 
 def test_first_scan_uses_ibkr_iv_percentiles_without_multiweek_warmup(

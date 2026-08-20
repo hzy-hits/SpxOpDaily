@@ -714,12 +714,12 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
                 "| {symbol} | {state} | {score} | {location} | {ivp} | {rsi} | {contract} | {spread} |".format(
                     symbol=row.get("symbol", "-"),
                     state=row.get("state", "-"),
-                    score=_fmt(row.get("final_score"), 1),
-                    location=_pct(row.get("price_location_52w"), 1),
+                    score=_fmt(row.get("final_score")),
+                    location=_pct(row.get("price_location_52w")),
                     ivp=_iv_gate_label(row),
-                    rsi=_fmt(row.get("rsi14"), 1),
+                    rsi=_fmt(row.get("rsi14")),
                     contract=row.get("leaps_symbol") or "-",
-                    spread=_pct(row.get("leaps_spread_mid"), 1),
+                    spread=_pct(row.get("leaps_spread_mid")),
                 )
             )
     else:
@@ -924,16 +924,16 @@ def _aware(value: datetime) -> datetime:
     return value
 
 
-def _fmt(value: Any, digits: int) -> str:
-    return "—" if value is None else f"{float(value):.{digits}f}"
+def _fmt(value: Any) -> str:
+    return "—" if value is None else f"{float(value):.2f}"
 
 
 def _iv_gate_label(row: Mapping[str, Any]) -> str:
-    return f"{_pct(row.get('ivp_13w'), 1)} / {_pct(row.get('ivp_26w'), 1)}"
+    return f"{_pct(row.get('ivp_13w'))} / {_pct(row.get('ivp_26w'))}"
 
 
-def _pct(value: Any, digits: int) -> str:
-    return "—" if value is None else f"{float(value) * 100.0:.{digits}f}%"
+def _pct(value: Any) -> str:
+    return "—" if value is None else f"{float(value) * 100.0:.2f}%"
 
 
 def run(*, now: datetime | None = None, force: bool = False) -> int:
