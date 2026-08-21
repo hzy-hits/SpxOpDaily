@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from spx_spark.analytics.growth_dislocation import (
     apply_crowding,
     candidate_state,
+    score_sort_key,
     score_candidate,
     select_target_leaps,
 )
@@ -312,6 +313,38 @@ def test_eligible_candidates_rank_by_market_cap_then_score() -> None:
     assert reserve == []
 
 
+def test_notification_candidates_rank_by_score_then_market_cap() -> None:
+    candidates = [
+        {
+            "symbol": "SMALL_HIGH_SCORE",
+            "market_cap": 5_000_000_000.0,
+            "final_score": 99.0,
+            "crowding_group": "sector:XLY",
+        },
+        {
+            "symbol": "LARGE_LOW_SCORE",
+            "market_cap": 100_000_000_000.0,
+            "final_score": 20.0,
+            "crowding_group": "sector:XLK",
+        },
+        {
+            "symbol": "LARGE_HIGH_SCORE",
+            "market_cap": 100_000_000_000.0,
+            "final_score": 80.0,
+            "crowding_group": "sector:XLC",
+        },
+    ]
+
+    top, reserve = apply_crowding(candidates, _policy(), sort_key=score_sort_key)
+
+    assert [row["symbol"] for row in top] == [
+        "SMALL_HIGH_SCORE",
+        "LARGE_HIGH_SCORE",
+        "LARGE_LOW_SCORE",
+    ]
+    assert reserve == []
+
+
 def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     tmp_path: Path,
 ) -> None:
@@ -352,6 +385,7 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     assert first.document["counts"]["hard_survivors"] == 1
     assert first.document["counts"]["strict_candidates"] == 1
     assert first.document["top10"][0]["symbol"] == "TEST"
+    assert first.document["notification_top10"][0]["symbol"] == "TEST"
     assert first.document["top10"][0]["ivp_13w"] == 0.047619
     assert first.document["top10"][0]["ivp_26w"] == 0.06
     assert first.document["top10"][0]["iv_filter_source"] == (

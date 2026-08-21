@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
@@ -156,8 +156,10 @@ def score_candidate(
 def apply_crowding(
     candidates: Sequence[dict[str, Any]],
     policy: GrowthDislocationSettings,
+    *,
+    sort_key: Callable[[Mapping[str, Any]], tuple[float, float, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    ordered = sorted(candidates, key=candidate_sort_key)
+    ordered = sorted(candidates, key=sort_key or candidate_sort_key)
     top: list[dict[str, Any]] = []
     reserve: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
@@ -180,6 +182,16 @@ def candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, str]
     return (
         -float(candidate.get("market_cap") or 0.0),
         -float(candidate.get("final_score") or 0.0),
+        str(candidate.get("symbol") or ""),
+    )
+
+
+def score_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, str]:
+    """Prefer the V1 signal score for human-facing notification order."""
+
+    return (
+        -float(candidate.get("final_score") or 0.0),
+        -float(candidate.get("market_cap") or 0.0),
         str(candidate.get("symbol") or ""),
     )
 

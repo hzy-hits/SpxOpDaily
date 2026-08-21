@@ -227,9 +227,11 @@ run has completed without missing IV history or provider errors.
   holding window is roughly two to three months; that holding horizon is not an
   extra scanner score or an automatic exit rule.
 - `FinalScore` is only 50% IV cheapness, 30% RSI recovery, and 20%
-  sector-relative strength. After all hard gates pass, the displayed candidate
-  order is market cap descending, with `FinalScore` used only as a tiebreaker;
-  market cap is not folded back into the score. The 52-week IV percentile and
+  sector-relative strength. After all hard gates pass, the stored candidate
+  priority remains market cap descending, with `FinalScore` used only as a
+  tiebreaker. Feishu and Bark render their Top 10 by `FinalScore` descending,
+  using market cap only as a tiebreaker and retaining the same crowding cap.
+  Market cap is not folded back into the score. The 52-week IV percentile and
   IV rank remain context fields only.
   `WATCH / ARMED / TRIGGER` is determined from oversold recovery, positive 5-day
   sector relative strength, and close above MA10. Growth quality, convexity,

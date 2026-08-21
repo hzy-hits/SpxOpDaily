@@ -20,6 +20,7 @@ from spx_spark.analytics.growth_dislocation import (
     candidate_sort_key,
     price_features,
     price_location_52w,
+    score_sort_key,
     score_candidate,
     select_target_leaps,
     spread_mid_ratio,
@@ -427,6 +428,11 @@ def _build_document(
             rejection_counts[reason] += 1
 
     top, reserve = apply_crowding(strict_candidates, policy)
+    notification_top, _notification_reserve = apply_crowding(
+        strict_candidates,
+        policy,
+        sort_key=score_sort_key,
+    )
     warming.sort(
         key=lambda row: (
             len(row.get("data_quality_reasons") or []),
@@ -460,6 +466,7 @@ def _build_document(
         "request_budget": budget,
         "requests_used": requests_used,
         "top10": top,
+        "notification_top10": notification_top,
         "reserve": reserve,
         "watchlist": warming[: max(policy.top_count * 3, policy.top_count)],
         "all_candidates": sorted(
@@ -678,12 +685,12 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         f"- 本轮新增严格候选：{', '.join(str(item) for item in document.get('added_symbols', [])) or '无'}",
         "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
         "",
-        "## 严格候选 Top 10",
+        "## 严格候选 Top 10（Score 排序）",
         "",
         "| Symbol | State | Market Cap | Score | 52W位置 | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
-    top = document.get("top10")
+    top = document.get("notification_top10", document.get("top10"))
     if isinstance(top, list) and top:
         for row in top:
             if not isinstance(row, Mapping):
@@ -871,6 +878,9 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
 
     payload = {
         "top10": [material_row(row) for row in document.get("top10", [])],
+        "notification_top10": [
+            material_row(row) for row in document.get("notification_top10", [])
+        ],
         "reserve": [material_row(row) for row in document.get("reserve", [])],
         "watchlist": [material_row(row) for row in document.get("watchlist", [])],
         "data_quality": document.get("data_quality"),
