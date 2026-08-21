@@ -31,12 +31,14 @@ from spx_spark.options_map import (
     group_spxw_option_quotes,
     interpolated_atm_iv,
     pair_by_strike,
+    render_open_interest_mirror_svg,
     select_underlier,
     signed_gex,
     structure_quality_ok,
     time_to_expiry_years,
     wing_iv_at_delta,
     zero_gamma_spot_scan,
+    write_open_interest_mirror_png,
 )
 from spx_spark.storage import LatestState
 
@@ -78,6 +80,75 @@ def make_option(
             model="test",
         ),
     )
+
+
+def test_open_interest_mirror_keeps_wall_rank_distinct_from_bar_value() -> None:
+    exposure = {
+        "as_of": "2026-08-20T15:00:00+00:00",
+        "underlier": {"price": 7655.0},
+        "expiries": [
+            {
+                "expiry": "20260820",
+                "quality": "ok",
+                "oi_quality": "ibkr_ok",
+                "freshness": {"open_interest": {"all": {"max_seconds": 90.0}}},
+                "strikes": [
+                    {"strike": 7650.0, "put_open_interest": 9000.0, "call_open_interest": 100.0},
+                    {"strike": 7655.0, "put_open_interest": 500.0, "call_open_interest": 600.0},
+                    {"strike": 7700.0, "put_open_interest": 200.0, "call_open_interest": 2000.0},
+                ],
+                "walls": {
+                    "wall_method": "oi_gex",
+                    "put_walls": [
+                        {"strike": 7655.0, "open_interest": 500.0, "gex": -2_000_000.0}
+                    ],
+                    "call_walls": [
+                        {"strike": 7700.0, "open_interest": 2000.0, "gex": 3_000_000.0}
+                    ],
+                },
+            }
+        ],
+    }
+
+    svg = render_open_interest_mirror_svg(exposure, window_points=100.0)
+
+    assert "Bars = open interest (same scale) · P1/C1 = OI-GEX wall rank" in svg
+    assert ">P1</text>" in svg
+    assert ">C1</text>" in svg
+    assert ">7,655    OI 500</text>" in svg
+    assert ">7,700    OI 2,000</text>" in svg
+    assert "OI quality: ibkr_ok · max source age 1.5m" in svg
+    assert "Not a direction or trade signal." in svg
+
+
+def test_open_interest_mirror_png_atomically_replaces_one_bark_safe_file(tmp_path) -> None:
+    exposure = {
+        "as_of": "2026-08-20T15:00:00+00:00",
+        "underlier": {"price": 7655.0},
+        "expiries": [
+            {
+                "expiry": "20260820",
+                "quality": "ok",
+                "strikes": [
+                    {"strike": 7655.0, "put_open_interest": 500.0, "call_open_interest": 600.0}
+                ],
+                "walls": {"put_walls": [], "call_walls": []},
+            }
+        ],
+    }
+    output = tmp_path / "oi" / "latest.png"
+
+    def convert(svg_path, png_path) -> None:
+        assert "ATM Mirror" in svg_path.read_text(encoding="utf-8")
+        png_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"projection")
+
+    written = write_open_interest_mirror_png(exposure, output, converter=convert)
+
+    assert written == output
+    assert output.read_bytes() == b"\x89PNG\r\n\x1a\nprojection"
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert list(output.parent.glob(".*.svg")) == []
+    assert list(output.parent.glob(".*.png")) == []
 
 
 def test_time_to_expiry_uses_early_close_session() -> None:

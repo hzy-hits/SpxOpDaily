@@ -17,7 +17,12 @@ from spx_spark.options_map.orchestration import (
     ibkr_provider_unavailable,
     select_underlier,
 )
-from spx_spark.options_map.render import format_number, print_options_map
+from spx_spark.options_map.render import (
+    format_number,
+    print_options_map,
+    render_open_interest_mirror_svg,
+    write_open_interest_mirror_png,
+)
 
 __all__ = [
     *_ANALYTICS_ALL,
@@ -30,6 +35,8 @@ __all__ = [
     "main",
     "parse_args",
     "print_options_map",
+    "render_open_interest_mirror_svg",
+    "write_open_interest_mirror_png",
     "run",
     "select_underlier",
 ]

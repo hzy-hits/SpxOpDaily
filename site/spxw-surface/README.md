@@ -17,9 +17,13 @@ The memorable shortcut redirects into that authenticated code-server route:
 - session replay: `https://spx.zh3nyu.com/replay`
 - Friday replay: `https://spx.zh3nyu.com/friday`
 
-The shortcut service exposes no dashboard data. It listens only on host
+The shortcut service exposes no dashboard or API data. It listens only on host
 loopback port `18084` and returns redirects; code-server still owns the login
-gate for the destination.
+gate for the destination. The sole exception is the derived, account-free OI
+image at `https://spx.zh3nyu.com/oi/latest.png`, used by Bark rich
+notifications. The exact-match nginx route exposes one atomically replaced PNG;
+`/oi/`, JSON projections, directory listings, account data, and order state
+remain unavailable.
 
 The corresponding managed-tunnel ingress is intentionally path-free:
 

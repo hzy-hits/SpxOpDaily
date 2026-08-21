@@ -271,7 +271,7 @@ def test_replay_legacy_diagnostic_is_launched_from_a_fixed_audit_overlay() -> No
     assert "legacyDiagnosticEntryState" in app
 
 
-def test_memorable_entry_is_redirect_only_and_loopback_bound() -> None:
+def test_memorable_entry_only_exposes_exact_oi_image_and_redirects_dashboard() -> None:
     entry = read("entry-nginx.conf")
     compose = read("compose.yaml")
 
@@ -286,7 +286,11 @@ def test_memorable_entry_is_redirect_only_and_loopback_bound() -> None:
         in entry
     )
     assert "location /" in entry and "return 404;" in entry
+    assert "location = /oi/latest.png" in entry
+    assert "alias /usr/share/nginx/data/oi/latest.png;" in entry
+    assert "location /oi/" not in entry
     assert '"127.0.0.1:18084:18084"' in compose
+    assert ":/usr/share/nginx/data:ro" in compose
     assert ":/usr/share/nginx/replay-runtime:ro" in compose
     assert "no-new-privileges:true" in compose
     assert "cap_drop:" in compose

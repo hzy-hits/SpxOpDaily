@@ -2253,6 +2253,73 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
     assert captured["fingerprint"] == {}
 
 
+def test_daily_open_interest_image_publishes_once_at_11_et(
+    monkeypatch, tmp_path
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    now = datetime(2026, 8, 20, 15, 0, tzinfo=timezone.utc)
+    slot = order_map_module.rth_report_slot(now)
+    assert slot is not None and slot.slot_at.strftime("%H:%M") == "11:00"
+    state = object()
+    front = SimpleNamespace(
+        expiry="20260820",
+        walls=SimpleNamespace(put_walls=(1, 2, 3), call_walls=(1, 2, 3)),
+    )
+    exposure = SimpleNamespace(
+        expiries=(front,),
+        as_of=now,
+        to_dict=lambda: {"expiries": []},
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "LatestStateStore",
+        lambda _settings: SimpleNamespace(load=lambda **_kwargs: state),
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "group_spxw_option_quotes",
+        lambda *_args, **_kwargs: {"20260820": []},
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "build_exposure_map",
+        lambda *_args, **_kwargs: exposure,
+    )
+
+    def write_png(_payload, output) -> None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"png")
+
+    monkeypatch.setattr(order_map_module, "write_open_interest_mirror_png", write_png)
+    settings = SimpleNamespace(data_root=str(tmp_path))
+
+    result = order_map_module.publish_daily_open_interest_image(
+        settings,
+        now=now,
+        current_rth_slot=slot,
+    )
+
+    assert result == {
+        "status": "published",
+        "as_of": now.isoformat(),
+        "expiry": "20260820",
+        "public_path": "/oi/latest.png",
+        "bytes": 3,
+    }
+    assert (tmp_path / "published/spxw-surface/oi/latest.png").read_bytes() == b"png"
+    assert (
+        order_map_module.publish_daily_open_interest_image(
+            settings,
+            now=now,
+            current_rth_slot=SimpleNamespace(
+                slot_at=now.astimezone(ZoneInfo("America/New_York")).replace(hour=10)
+            ),
+        )
+        is None
+    )
+
+
 def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapshot(
     monkeypatch, tmp_path
 ) -> None:
