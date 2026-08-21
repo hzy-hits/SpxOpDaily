@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from spx_spark.analytics.growth_dislocation import (
     apply_crowding,
     candidate_state,
+    rsi_recovery_score,
     score_sort_key,
     score_candidate,
     select_target_leaps,
@@ -213,6 +214,20 @@ def test_candidate_state_follows_watch_armed_trigger_contract() -> None:
         )
         == "WATCH"
     )
+
+
+def test_rsi_recovery_score_is_continuous_at_state_thresholds() -> None:
+    policy = _policy()
+
+    assert [
+        rsi_recovery_score(value, 25.0, policy)
+        for value in (20.0, 30.0, 35.0, 40.0, 55.0, 75.0)
+    ] == [20.0, 60.0, 80.0, 100.0, 100.0, 20.0]
+    for boundary in (30.0, 35.0, 40.0, 55.0):
+        below = rsi_recovery_score(boundary - 0.001, 25.0, policy)
+        above = rsi_recovery_score(boundary + 0.001, 25.0, policy)
+        assert abs(above - below) < 0.02
+    assert rsi_recovery_score(45.0, 30.0, policy) == 30.0
 
 
 def test_v1_score_uses_only_iv_rsi_recovery_and_sector_strength() -> None:

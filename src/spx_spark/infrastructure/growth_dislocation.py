@@ -751,7 +751,13 @@ def _detail_payload(
 def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
     if raw.get("schema_version") not in {None, STATE_SCHEMA_VERSION}:
         return {}
-    if raw.get("policy_version") not in {None, POLICY_VERSION}:
+    # V6 only smooths the score curve. V5 market data caches and candidate
+    # membership remain valid, avoiding an unnecessary production cold start.
+    if raw.get("policy_version") not in {
+        None,
+        "growth_dislocation_leaps.v5",
+        POLICY_VERSION,
+    }:
         return {}
     return dict(raw)
 

@@ -232,7 +232,10 @@ run has completed without missing IV history or provider errors.
   tiebreaker. Feishu and Bark render their Top 10 by `FinalScore` descending,
   using market cap only as a tiebreaker and retaining the same crowding cap.
   Market cap is not folded back into the score. The 52-week IV percentile and
-  IV rank remain context fields only.
+  IV rank remain context fields only. RSI recovery uses a continuous piecewise
+  linear curve through 20/30/35/40/55/75 RSI anchors, so crossing a display
+  threshold no longer creates a score jump; WATCH / ARMED / TRIGGER remains a
+  deliberately discrete state machine.
   `WATCH / ARMED / TRIGGER` is determined from oversold recovery, positive 5-day
   sector relative strength, and close above MA10. Growth quality, convexity,
   market cap, OI, and fundamentals do not enter the score. Human-visible numeric

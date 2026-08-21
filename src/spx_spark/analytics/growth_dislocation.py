@@ -10,7 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v5"
+POLICY_VERSION = "growth_dislocation_leaps.v6"
 IV_SCORE_CHEAP_CUTOFF = 0.10
 
 
@@ -209,15 +209,36 @@ def rsi_recovery_score(
     rsi_min_20d: float,
     policy: GrowthDislocationSettings,
 ) -> float:
-    if rsi_min_20d < policy.rsi_oversold_threshold:
-        if policy.rsi_recovery_optimal_low <= rsi_now <= policy.rsi_recovery_optimal_high:
-            return 100.0
-        if policy.rsi_recovery_min <= rsi_now < policy.rsi_recovery_optimal_low:
-            return 80.0
-        if policy.rsi_oversold_threshold <= rsi_now < policy.rsi_recovery_min:
-            return 60.0
-        return 20.0
-    return 30.0
+    if rsi_min_20d >= policy.rsi_oversold_threshold:
+        return 30.0
+    if rsi_now < policy.rsi_oversold_threshold:
+        lower_anchor = policy.rsi_oversold_threshold - 10.0
+        progress = clamp(
+            (rsi_now - lower_anchor) / (policy.rsi_oversold_threshold - lower_anchor),
+            0.0,
+            1.0,
+        )
+        return 20.0 + 40.0 * progress
+    if rsi_now < policy.rsi_recovery_min:
+        progress = (rsi_now - policy.rsi_oversold_threshold) / (
+            policy.rsi_recovery_min - policy.rsi_oversold_threshold
+        )
+        return 60.0 + 20.0 * progress
+    if rsi_now < policy.rsi_recovery_optimal_low:
+        progress = (rsi_now - policy.rsi_recovery_min) / (
+            policy.rsi_recovery_optimal_low - policy.rsi_recovery_min
+        )
+        return 80.0 + 20.0 * progress
+    if rsi_now <= policy.rsi_recovery_optimal_high:
+        return 100.0
+    upper_anchor = policy.rsi_recovery_optimal_high + 20.0
+    progress = clamp(
+        (rsi_now - policy.rsi_recovery_optimal_high)
+        / (upper_anchor - policy.rsi_recovery_optimal_high),
+        0.0,
+        1.0,
+    )
+    return 100.0 - 80.0 * progress
 
 
 def relative_strength_score(
