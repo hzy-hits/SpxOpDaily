@@ -229,10 +229,12 @@ run has completed without missing IV history or provider errors.
 - `FinalScore` is only 50% IV cheapness, 30% RSI recovery, and 20%
   sector-relative strength. After all hard gates pass, the stored candidate
   priority remains market cap descending, with `FinalScore` used only as a
-  tiebreaker. Feishu and Bark render their Top 10 by `FinalScore` descending,
-  using market cap only as a tiebreaker and retaining the same crowding cap.
-  Market cap is not folded back into the score. The 52-week IV percentile and
-  IV rank remain context fields only. RSI recovery uses a continuous piecewise
+  tiebreaker. Feishu and Bark render their Top 10 by a separate `PriorityScore`:
+  50% 52-week price dislocation plus 50% 52-week IV percentile cheapness. Both
+  components map 0%–20% linearly to 100–0 points; missing 52-week IV percentile
+  ranks after complete rows. `FinalScore`, then market cap, breaks ties while
+  retaining the same crowding cap. Market cap is not folded back into either
+  score. IV rank remains context-only. RSI recovery uses a continuous piecewise
   linear curve through 20/30/35/40/55/75 RSI anchors, so crossing a display
   threshold no longer creates a score jump; WATCH / ARMED / TRIGGER remains a
   deliberately discrete state machine.

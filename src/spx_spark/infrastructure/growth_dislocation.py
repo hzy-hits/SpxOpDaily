@@ -20,7 +20,7 @@ from spx_spark.analytics.growth_dislocation import (
     candidate_sort_key,
     price_features,
     price_location_52w,
-    score_sort_key,
+    priority_sort_key,
     score_candidate,
     select_target_leaps,
     spread_mid_ratio,
@@ -56,7 +56,7 @@ from spx_spark.state_io import (
     read_json_object,
 )
 
-SCHEMA_VERSION = "growth_dislocation_leaps.v5"
+SCHEMA_VERSION = "growth_dislocation_leaps.v6"
 STATE_SCHEMA_VERSION = 2
 SCHEDULE_MINUTE = 30
 DAILY_SUMMARY_HOUR_ET = 20
@@ -431,7 +431,7 @@ def _build_document(
     notification_top, _notification_reserve = apply_crowding(
         strict_candidates,
         policy,
-        sort_key=score_sort_key,
+        sort_key=priority_sort_key,
     )
     warming.sort(
         key=lambda row: (
@@ -479,7 +479,7 @@ def _build_document(
             "request_limited": request_limited,
             "ivp_incomplete": ivp_incomplete,
             "errors": sorted(set(errors)),
-            "volatility_contract": "13-week and 26-week percentile calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; 52-week percentile is context-only",
+            "volatility_contract": "13-week and 26-week percentile calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; 52-week percentile drives notification priority but is not a hard gate",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
             "classification": "official sector fallback; subindustry unavailable",
         },
@@ -685,10 +685,10 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         f"- 本轮新增严格候选：{', '.join(str(item) for item in document.get('added_symbols', [])) or '无'}",
         "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
         "",
-        "## 严格候选 Top 10（Score 排序）",
+        "## 严格候选 Top 10（52W低位 + IVP 52W）",
         "",
-        "| Symbol | State | Market Cap | Score | 52W位置 | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|",
+        "| Symbol | State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
     top = document.get("notification_top10", document.get("top10"))
     if isinstance(top, list) and top:
@@ -696,12 +696,14 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             if not isinstance(row, Mapping):
                 continue
             lines.append(
-                "| {symbol} | {state} | {market_cap} | {score} | {location} | {ivp} | {rsi} | {sector_rs} | {contract} | {spread} |".format(
+                "| {symbol} | {state} | {priority} | {market_cap} | {score} | {location} | {ivp_52w} | {ivp} | {rsi} | {sector_rs} | {contract} | {spread} |".format(
                     symbol=row.get("symbol", "-"),
                     state=row.get("state", "-"),
+                    priority=_fmt(row.get("priority_score")),
                     market_cap=_market_cap(row.get("market_cap")),
                     score=_fmt(row.get("final_score")),
                     location=_pct(row.get("price_location_52w")),
+                    ivp_52w=_pct(row.get("ivp_52w")),
                     ivp=_iv_gate_label(row),
                     rsi=_fmt(row.get("rsi14")),
                     sector_rs=_pct(row.get("rs_5d_sector")),
@@ -710,7 +712,9 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
                 )
             )
     else:
-        lines.append("| — | WATCH | — | — | — | 暂无严格候选 | — | — | — | — |")
+        lines.append(
+            "| — | WATCH | — | — | — | — | — | 暂无严格候选 | — | — | — | — |"
+        )
     return title, "\n".join(lines)
 
 def _detail_order(
@@ -751,11 +755,12 @@ def _detail_payload(
 def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
     if raw.get("schema_version") not in {None, STATE_SCHEMA_VERSION}:
         return {}
-    # V6 only smooths the score curve. V5 market data caches and candidate
-    # membership remain valid, avoiding an unnecessary production cold start.
+    # V6 only smoothed the score curve and V7 only changes notification
+    # priority. Their market data caches and membership remain valid.
     if raw.get("policy_version") not in {
         None,
         "growth_dislocation_leaps.v5",
+        "growth_dislocation_leaps.v6",
         POLICY_VERSION,
     }:
         return {}
@@ -855,6 +860,9 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
         "symbol",
         "state",
         "final_score",
+        "price_dislocation_score",
+        "ivp_52w_score",
+        "priority_score",
         "price_location_52w",
         "ivp_13w",
         "ivp_26w",

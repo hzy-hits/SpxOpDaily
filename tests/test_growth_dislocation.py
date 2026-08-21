@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from spx_spark.analytics.growth_dislocation import (
     apply_crowding,
     candidate_state,
+    priority_sort_key,
     rsi_recovery_score,
-    score_sort_key,
     score_candidate,
     select_target_leaps,
 )
@@ -244,6 +244,8 @@ def test_v1_score_uses_only_iv_rsi_recovery_and_sector_strength() -> None:
         "max_option_dte": 600,
         "ivp_13w": 0.05,
         "ivp_26w": 0.10,
+        "ivp_52w": 0.08,
+        "price_location_52w": 0.05,
     }
 
     scored = score_candidate(row, _policy())
@@ -253,6 +255,9 @@ def test_v1_score_uses_only_iv_rsi_recovery_and_sector_strength() -> None:
     assert scored["rsi_score"] == 100.0
     assert round(scored["rs_score"], 2) == 60.40
     assert round(scored["final_score"], 2) == 57.08
+    assert round(scored["price_dislocation_score"], 2) == 75.00
+    assert round(scored["ivp_52w_score"], 2) == 60.00
+    assert round(scored["priority_score"], 2) == 67.50
     assert scored["state"] == "TRIGGER"
 
 
@@ -328,34 +333,37 @@ def test_eligible_candidates_rank_by_market_cap_then_score() -> None:
     assert reserve == []
 
 
-def test_notification_candidates_rank_by_score_then_market_cap() -> None:
+def test_notification_candidates_rank_by_52w_priority_then_timing_score() -> None:
     candidates = [
         {
-            "symbol": "SMALL_HIGH_SCORE",
+            "symbol": "HIGH_52W_PRIORITY",
             "market_cap": 5_000_000_000.0,
-            "final_score": 99.0,
+            "final_score": 20.0,
+            "priority_score": 90.0,
             "crowding_group": "sector:XLY",
         },
         {
-            "symbol": "LARGE_LOW_SCORE",
+            "symbol": "LOW_52W_PRIORITY",
             "market_cap": 100_000_000_000.0,
-            "final_score": 20.0,
+            "final_score": 99.0,
+            "priority_score": 30.0,
             "crowding_group": "sector:XLK",
         },
         {
-            "symbol": "LARGE_HIGH_SCORE",
+            "symbol": "MISSING_52W_IVP",
             "market_cap": 100_000_000_000.0,
-            "final_score": 80.0,
+            "final_score": 100.0,
+            "priority_score": None,
             "crowding_group": "sector:XLC",
         },
     ]
 
-    top, reserve = apply_crowding(candidates, _policy(), sort_key=score_sort_key)
+    top, reserve = apply_crowding(candidates, _policy(), sort_key=priority_sort_key)
 
     assert [row["symbol"] for row in top] == [
-        "SMALL_HIGH_SCORE",
-        "LARGE_HIGH_SCORE",
-        "LARGE_LOW_SCORE",
+        "HIGH_52W_PRIORITY",
+        "LOW_52W_PRIORITY",
+        "MISSING_52W_IVP",
     ]
     assert reserve == []
 
@@ -419,9 +427,11 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     _title, text = render_notification(first.document)
     candidate = first.document["top10"][0]
     assert f"{candidate['final_score']:.2f}" in text
+    assert f"{candidate['priority_score']:.2f}" in text
     assert "$11.00B" in text
     assert f"{candidate['price_location_52w'] * 100.0:.2f}%" in text
     assert "4.76% / 6.00%" in text
+    assert "8.00%" in text
     assert f"{candidate['rsi14']:.2f}" in text
     assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 

@@ -10,7 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v6"
+POLICY_VERSION = "growth_dislocation_leaps.v7"
 IV_SCORE_CHEAP_CUTOFF = 0.10
 
 
@@ -133,6 +133,23 @@ def score_candidate(
         float(data["sector_return_10d"]),
     )
     final_score = 0.50 * iv_score + 0.30 * rsi_score + 0.20 * rs_score
+    price_dislocation_score: float | None = None
+    ivp_52w_score: float | None = None
+    priority_score: float | None = None
+    if data.get("price_location_52w") is not None and data.get("ivp_52w") is not None:
+        price_dislocation_score = 100.0 * clamp(
+            1.0 - float(data["price_location_52w"]) / policy.max_price_location_52w,
+            0.0,
+            1.0,
+        )
+        ivp_52w_score = 100.0 * clamp(
+            1.0
+            - float(data["ivp_52w"])
+            / max(policy.max_ivp_13w, policy.max_ivp_26w),
+            0.0,
+            1.0,
+        )
+        priority_score = 0.50 * price_dislocation_score + 0.50 * ivp_52w_score
     rs5_sector = float(data["return_5d"]) - float(data["sector_return_5d"])
     state = candidate_state(
         rsi_now=float(data["rsi14"]),
@@ -147,6 +164,9 @@ def score_candidate(
         "rs_score": rs_score,
         "rsi_score": rsi_score,
         "final_score": final_score,
+        "price_dislocation_score": price_dislocation_score,
+        "ivp_52w_score": ivp_52w_score,
+        "priority_score": priority_score,
         "state": state,
         "rs_5d_sector": rs5_sector,
         "rs_10d_sector": float(data["return_10d"]) - float(data["sector_return_10d"]),
@@ -157,7 +177,7 @@ def apply_crowding(
     candidates: Sequence[dict[str, Any]],
     policy: GrowthDislocationSettings,
     *,
-    sort_key: Callable[[Mapping[str, Any]], tuple[float, float, str]] | None = None,
+    sort_key: Callable[[Mapping[str, Any]], tuple[Any, ...]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     ordered = sorted(candidates, key=sort_key or candidate_sort_key)
     top: list[dict[str, Any]] = []
@@ -186,10 +206,13 @@ def candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, str]
     )
 
 
-def score_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, str]:
-    """Prefer the V1 signal score for human-facing notification order."""
+def priority_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, float, float, str]:
+    """Prefer complete 52-week dislocation and IVP priority for notifications."""
 
+    priority_score = candidate.get("priority_score")
     return (
+        1.0 if priority_score is None else 0.0,
+        -float(priority_score or 0.0),
         -float(candidate.get("final_score") or 0.0),
         -float(candidate.get("market_cap") or 0.0),
         str(candidate.get("symbol") or ""),
