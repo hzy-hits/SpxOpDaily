@@ -256,6 +256,24 @@ def test_strategy_risk_sheet_separates_q_payoff_and_physical_loss() -> None:
     assert "自动下单关闭" in svg
 
 
+def test_strategy_risk_sheet_prefers_complete_iron_condor_map() -> None:
+    decision = _strategy_risk_decision()
+    decision["why_not"] = {
+        "nearest_candidate": {
+            "strategy_type": "IRON_CONDOR",
+            "legs": decision["iron_condor_map"]["legs"],
+            "quote": {"credit": 2.0},
+        }
+    }
+
+    svg = render_strategy_risk_svg(decision)
+
+    assert "来源 strategy_decision.iron_condor_map" in svg
+    assert "铁鹰结构图 · 无交易授权" in svg
+    assert "亏损概率 50.0%" in svg
+    assert "历史路径净损益（执行管理规则后）" in svg
+
+
 @pytest.mark.parametrize(
     ("candidate", "label"),
     [

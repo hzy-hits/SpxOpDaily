@@ -381,9 +381,14 @@ def _strategy_risk_structure(decision: Mapping[str, object]) -> tuple[Mapping[st
     if candidate:
         return candidate, "strategy_decision.candidate"
     nearest = _mapping(_mapping(decision.get("why_not")).get("nearest_candidate"))
+    iron_condor = _mapping(decision.get("iron_condor_map"))
+    if (
+        nearest.get("strategy_type") == "IRON_CONDOR"
+        and iron_condor.get("status") == "ready"
+    ):
+        return iron_condor, "strategy_decision.iron_condor_map"
     if nearest and (nearest.get("legs") or nearest.get("long") or nearest.get("short")):
         return nearest, "strategy_decision.nearest_rejected"
-    iron_condor = _mapping(decision.get("iron_condor_map"))
     if iron_condor.get("status") == "ready":
         return iron_condor, "strategy_decision.iron_condor_map"
     return {}, "strategy_decision.no_structure"
