@@ -10,7 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v7"
+POLICY_VERSION = "growth_dislocation_leaps.v8"
 IV_SCORE_CHEAP_CUTOFF = 0.10
 
 

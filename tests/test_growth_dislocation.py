@@ -58,6 +58,7 @@ class FakeSchwabClient:
     def __init__(self, now: datetime, *, chain_iv_percent: float = 20.0) -> None:
         self.now = now
         self.chain_iv_percent = chain_iv_percent
+        self.test_last = 110.0
         self.requests: list[tuple[str, dict[str, object]]] = []
 
     def get_json(self, path: str, params: dict[str, object]):
@@ -89,7 +90,7 @@ class FakeSchwabClient:
         raise AssertionError(path)
 
     def _quote(self, symbol: str) -> dict[str, object]:
-        last = 110.0
+        last = self.test_last if symbol == "TEST" else 110.0
         low, high = (100.0, 150.0)
         if symbol == "HIGH":
             last = 145.0
@@ -368,7 +369,7 @@ def test_notification_candidates_rank_by_52w_priority_then_timing_score() -> Non
     assert reserve == []
 
 
-def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
+def test_rth_scanner_updates_today_state_without_changing_core_membership(
     tmp_path: Path,
 ) -> None:
     client = FakeSchwabClient(NOW)
@@ -417,23 +418,14 @@ def test_scanner_builds_strict_table_and_only_pushes_rth_candidate_additions(
     assert first.document["top10"][0]["leaps_symbol"] == "TEST LEAPS"
     assert first.document["top10"][0]["option_quote_status"] == "live"
     assert first.document["automatic_ordering"] is False
-    assert first.document["added_symbols"] == ["TEST"]
+    assert first.document["added_symbols"] == []
+    assert first.document["core_pool_status"] == "BOOTSTRAP_PENDING"
+    assert first.document["core_top_opportunities"] == []
     assert first.document["material_fingerprint"] != second.document["material_fingerprint"]
     assert second.document["added_symbols"] == []
     assert second.notification is None
-    assert len(deliveries) == 1
-    assert deliveries[0].lane == "growth_dislocation"
+    assert deliveries == []
     assert (tmp_path / "latest" / "growth_dislocation_leaps.json").is_file()
-    _title, text = render_notification(first.document)
-    candidate = first.document["top10"][0]
-    assert f"{candidate['final_score']:.2f}" in text
-    assert f"{candidate['priority_score']:.2f}" in text
-    assert "$11.00B" in text
-    assert f"{candidate['price_location_52w'] * 100.0:.2f}%" in text
-    assert "4.76% / 6.00%" in text
-    assert "8.00%" in text
-    assert f"{candidate['rsi14']:.2f}" in text
-    assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 
 
 def test_first_scan_uses_ibkr_iv_percentiles_without_multiweek_warmup(
@@ -614,8 +606,30 @@ def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Pa
         enqueue=enqueue,  # type: ignore[arg-type]
     )
 
-    assert len(deliveries) == 2
+    assert len(deliveries) == 1
     assert all(envelope.kind == "growth_dislocation_scan" for envelope in deliveries)
+    document = scan_once(
+        now=NOW.replace(hour=20, minute=0),
+        mode="daily",
+        client=client,  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=_ivp_fetcher,
+    ).document
+    assert document["core_pool_status"] == "ACTIVE"
+    assert document["added_symbols"] == []
+    assert document["core_top_opportunities"][0]["symbol"] == "TEST"
+    _title, text = render_notification(document)
+    candidate = document["core_top_opportunities"][0]
+    assert f"{candidate['final_score']:.2f}" in text
+    assert f"{candidate['priority_score']:.2f}" in text
+    assert "$11.00B" in text
+    assert f"{candidate['price_location_52w'] * 100.0:.2f}%" in text
+    assert "4.76% / 6.00%" in text
+    assert "8.00%" in text
+    assert f"{candidate['rsi14']:.2f}" in text
+    assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 
 
 def test_request_budget_fails_closed_to_partial_warming_table(tmp_path: Path) -> None:
@@ -645,9 +659,10 @@ def test_partial_scan_preserves_membership_and_does_not_create_false_reentry(
         deliveries.append(envelope)
         return SimpleNamespace(accepted=True, outcome="pending")
 
+    daily = NOW.replace(hour=20, minute=0)
     common = {
-        "now": NOW,
-        "mode": "rth",
+        "now": daily,
+        "mode": "daily",
         "client": client,
         "universe": _universe(),
         "data_root": tmp_path,
@@ -657,16 +672,86 @@ def test_partial_scan_preserves_membership_and_does_not_create_false_reentry(
     }
     first = scan_once(policy=_policy(), **common)  # type: ignore[arg-type]
     partial = scan_once(
-        policy=replace(_policy(), rth_request_budget=1),
+        policy=replace(_policy(), rth_request_budget=1, daily_request_budget=1),
         **common,  # type: ignore[arg-type]
     )
     recovered = scan_once(policy=_policy(), **common)  # type: ignore[arg-type]
 
     assert first.document["added_symbols"] == ["TEST"]
+    assert first.document["core_pool_status"] == "ACTIVE"
     assert partial.document["scan_complete"] is False
+    assert partial.document["core_pool_status"] == "FROZEN"
+    assert partial.document["core_changes"]["message"] == (
+        "Membership frozen due to partial scan"
+    )
+    assert partial.document["core_top_opportunities"][0]["symbol"] == "TEST"
+    assert partial.document["core_top_opportunities"][0]["today_state"] == "STALE"
     assert partial.document["added_symbols"] == []
     assert recovered.document["added_symbols"] == []
-    assert len(deliveries) == 1
+    assert len(deliveries) == 3
+
+
+def test_core_pool_requires_two_complete_daily_passes_after_bootstrap(tmp_path: Path) -> None:
+    client = FakeSchwabClient(NOW)
+    daily = NOW.replace(hour=20, minute=0)
+    common = {
+        "now": daily,
+        "mode": "daily",
+        "client": client,
+        "policy": _policy(),
+        "universe": _universe(),
+        "data_root": tmp_path,
+    }
+
+    bootstrap = scan_once(
+        iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, ivp_13w=0.21),
+        **common,  # type: ignore[arg-type]
+    )
+    first_pass = scan_once(
+        iv_percentile_fetcher=_ivp_fetcher,
+        **common,  # type: ignore[arg-type]
+    )
+    second_pass = scan_once(
+        iv_percentile_fetcher=_ivp_fetcher,
+        **common,  # type: ignore[arg-type]
+    )
+
+    assert bootstrap.document["counts"]["core_pool"] == 0
+    assert first_pass.document["counts"]["core_pool"] == 0
+    assert first_pass.document["core_entry_pending"] == [
+        {"symbol": "TEST", "complete_daily_passes": 1}
+    ]
+    assert second_pass.document["added_symbols"] == ["TEST"]
+    assert second_pass.document["counts"]["core_pool"] == 1
+
+
+def test_core_pool_exits_only_after_three_complete_price_recovery_scans(
+    tmp_path: Path,
+) -> None:
+    client = FakeSchwabClient(NOW)
+    daily = NOW.replace(hour=20, minute=0)
+    common = {
+        "now": daily,
+        "mode": "daily",
+        "client": client,
+        "policy": _policy(),
+        "universe": _universe(),
+        "data_root": tmp_path,
+        "iv_percentile_fetcher": _ivp_fetcher,
+    }
+
+    bootstrap = scan_once(**common)  # type: ignore[arg-type]
+    client.test_last = 120.0
+    first = scan_once(**common)  # type: ignore[arg-type]
+    second = scan_once(**common)  # type: ignore[arg-type]
+    third = scan_once(**common)  # type: ignore[arg-type]
+
+    assert bootstrap.document["added_symbols"] == ["TEST"]
+    assert first.document["core_pool"][0]["exit_streak"] == 1
+    assert first.document["core_pool"][0]["exit_reason"] == "PRICE_RECOVERED"
+    assert second.document["counts"]["core_pool"] == 1
+    assert third.document["exited_symbols"] == ["TEST"]
+    assert third.document["counts"]["core_pool"] == 0
 
 
 def test_schedule_is_exchange_local_and_daily_lane_bypasses_quiet_window() -> None:

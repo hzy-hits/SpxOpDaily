@@ -189,12 +189,13 @@ The tracked default remains disabled. Enable `growth_dislocation.enabled` in
 the gitignored runtime-local overlay only after one read-only IBKR/Schwab shadow
 run has completed without missing IV history or provider errors.
 
-- RTH: 09:30, 10:30, ..., 15:30 ET on exchange trading days. A push is queued
-  only when a symbol is added to the strict-candidate table (including re-entry
-  after leaving it). Score, quote, IV, state, ordering, and warming-row changes do
-  not by themselves send a push.
+- RTH: 09:30, 10:30, ..., 15:30 ET on exchange trading days. These scans refresh
+  WATCH / ARMED / TRIGGER and data quality only; they never change Core Pool
+  membership or its stored Top Opportunities ordering and do not queue a
+  membership-change push.
 - Daily: 20:00 ET on exchange trading days. One summary is queued even when the
-  material table is unchanged.
+  material table is unchanged. Only a complete daily scan may bootstrap, add,
+  pause, reactivate, or exit a Core Pool member.
 - Schedule resolution is performed in `America/New_York`, so daylight-saving and
   early-close behavior follow the exchange calendar rather than a fixed UTC offset.
 - Latest output: `data_root/latest/growth_dislocation_leaps.json`.
@@ -219,9 +220,18 @@ run has completed without missing IV history or provider errors.
   snapshot client id and never read accounts, subscribe to continuous ticker
   lines, or place orders.
 - A symbol with incomplete IV or price history stays out of the strict table and
-  is hidden from notification rows. Such a symbol does not block additions from
-  fully evaluated symbols; provider-wide failure or an exhausted Schwab request
-  budget still freezes membership updates to avoid false removal and re-entry.
+  is hidden from raw scanner notification rows. The Core Pool is bootstrapped
+  only by the first `Data Quality=complete` daily scan. After bootstrap, a new
+  symbol needs two consecutive complete daily passes. Any partial scan freezes
+  membership, entry/exit counters, and the stored Top Opportunities list; fresh
+  rows may update Today State while unrefreshed members display `STALE`.
+- IV above the entry limit, a spread above 12%, an unrefreshed contract, missing
+  provider data, or a non-triggering Today State pauses a member rather than
+  removing it. Exit hysteresis requires three complete daily observations of
+  one condition: 52-week price location above 30%, market cap below $2.50B,
+  dividend yield at least 2.00%, or no 365-DTE option depth. A confirmed
+  untradeable symbol or a symbol placed in the persisted manual research-reject
+  set exits immediately.
 - `52W price location` is `(last - 52W low) / (52W high - 52W low)`. The selected
   call remains 365–730 DTE with 0.60–0.80 delta, while the intended research
   holding window is roughly two to three months; that holding horizon is not an
@@ -238,7 +248,12 @@ run has completed without missing IV history or provider errors.
   linear curve through 20/30/35/40/55/75 RSI anchors, so crossing a display
   threshold no longer creates a score jump; WATCH / ARMED / TRIGGER remains a
   deliberately discrete state machine.
-  `WATCH / ARMED / TRIGGER` is determined from oversold recovery, positive 5-day
+- Notifications lead with stable Core Pool membership, Changes, and stored Top
+  Opportunities. A complete daily scan may rerank Core members by the same
+  52-week dislocation priority; RTH and partial scans preserve membership and
+  ordering. These lifecycle states remain research workflow controls, not an
+  order signal.
+- `WATCH / ARMED / TRIGGER` is determined from oversold recovery, positive 5-day
   sector relative strength, and close above MA10. Growth quality, convexity,
   market cap, OI, and fundamentals do not enter the score. Human-visible numeric
   values render with two decimals.

@@ -56,11 +56,16 @@ from spx_spark.state_io import (
     read_json_object,
 )
 
-SCHEMA_VERSION = "growth_dislocation_leaps.v6"
-STATE_SCHEMA_VERSION = 2
+SCHEMA_VERSION = "growth_dislocation_leaps.v7"
+STATE_SCHEMA_VERSION = 3
 SCHEDULE_MINUTE = 30
 DAILY_SUMMARY_HOUR_ET = 20
 MAX_CLOSE_HISTORY = 270
+CORE_ENTRY_CONFIRMATIONS = 2
+CORE_EXIT_CONFIRMATIONS = 3
+CORE_EXIT_PRICE_LOCATION_52W = 0.30
+CORE_EXIT_MARKET_CAP = 2_500_000_000.0
+CORE_EXIT_DIVIDEND_YIELD = 0.02
 ProviderError = (
     HTTPError,
     URLError,
@@ -172,14 +177,18 @@ def scan_once(
         )
         current_symbols = {str(row["symbol"]) for row in document["all_candidates"]}
         previous_symbols = {str(symbol) for symbol in state.get("active_candidate_symbols", [])}
-        pending_symbols = {str(symbol) for symbol in state.get("pending_added_symbols", [])}
         complete = bool(document.get("scan_complete"))
-        added_symbols = (
-            sorted(((current_symbols - previous_symbols) | pending_symbols) & current_symbols)
-            if complete
-            else []
+        added_symbols, exited_symbols = _apply_core_pool(
+            document=document,
+            state=state,
+            mode=mode,
+            at=at,
+            policy=policy,
         )
         document["added_symbols"] = added_symbols
+        document["exited_symbols"] = exited_symbols
+        fingerprint = _material_fingerprint(document)
+        document["material_fingerprint"] = fingerprint
         atomic_write_json_secure(latest_path, document)
         notification: EnqueueResult | None = None
         should_notify = mode == "daily" or bool(added_symbols)
@@ -203,12 +212,6 @@ def scan_once(
                 feishu_text=text,
                 enqueued_at=at,
             )
-            if notification.accepted:
-                pending_symbols.difference_update(added_symbols)
-            else:
-                pending_symbols.update(added_symbols)
-        elif added_symbols:
-            pending_symbols.update(added_symbols)
         state["schema_version"] = STATE_SCHEMA_VERSION
         state["policy_version"] = POLICY_VERSION
         state["last_scan_at"] = at.isoformat()
@@ -216,10 +219,9 @@ def scan_once(
         state["priority_symbols"] = [row["symbol"] for row in document["all_candidates"]]
         if complete:
             state["active_candidate_symbols"] = sorted(current_symbols)
-            state["pending_added_symbols"] = sorted(pending_symbols & current_symbols)
         else:
             state["active_candidate_symbols"] = sorted(previous_symbols)
-            state["pending_added_symbols"] = sorted(pending_symbols)
+        state.pop("pending_added_symbols", None)
         atomic_write_json_secure(state_path, state)
     return ScanOutcome(document=document, notification=notification)
 
@@ -255,10 +257,17 @@ def _build_document(
             errors.append(f"quotes:{type(exc).__name__}")
 
     rejection_counts: Counter[str] = Counter()
+    membership_observations: dict[str, dict[str, Any]] = {}
     price_hard_survivors: list[tuple[UniverseMember, EquityQuote, float]] = []
     for member in universe.members:
         quote = quotes.get(member.provider_symbol)
         reason, location = _hard_filter(member, quote, policy=policy, now=now, mode=mode)
+        membership_observations[member.symbol] = _membership_observation(
+            member=member,
+            quote=quote,
+            price_location=location,
+            screen_reason=reason,
+        )
         if reason is not None:
             rejection_counts[reason] += 1
             continue
@@ -297,15 +306,27 @@ def _build_document(
     for item in price_hard_survivors:
         member = item[0]
         snapshot = iv_snapshots.get(_ibkr_provider_symbol(member.symbol))
+        observation = membership_observations[member.symbol]
+        observation.update(
+            {
+                "ivp_13w": snapshot.ivp_13w if snapshot else None,
+                "ivp_26w": snapshot.ivp_26w if snapshot else None,
+                "ivp_52w": snapshot.ivp_52w if snapshot else None,
+            }
+        )
         if snapshot is None or snapshot.ivp_13w is None or snapshot.ivp_26w is None:
+            observation["screen_reason"] = "ibkr_iv_percentile_missing"
             iv_warming_survivors.append(item)
             continue
         if snapshot.ivp_13w > policy.max_ivp_13w:
+            observation["screen_reason"] = "ivp_13w_above_limit"
             rejection_counts["ivp_13w_above_limit"] += 1
             continue
         if snapshot.ivp_26w > policy.max_ivp_26w:
+            observation["screen_reason"] = "ivp_26w_above_limit"
             rejection_counts["ivp_26w_above_limit"] += 1
             continue
+        observation["screen_reason"] = None
         hard_survivors.append(item)
 
     histories = _mapping_state(state, "price_histories")
@@ -363,8 +384,15 @@ def _build_document(
             errors.append(f"chain:{member.symbol}:{type(exc).__name__}")
             continue
         detail_evaluated_now.add(member.symbol)
+        membership_observations[member.symbol].update(
+            {
+                "leaps_depth_refreshed": True,
+                "max_option_dte": chain.max_dte,
+            }
+        )
         target = select_target_leaps(chain.contracts, policy)
         if target is None:
+            membership_observations[member.symbol]["screen_reason"] = "target_leaps_missing"
             rejection_counts["target_leaps_missing"] += 1
             detail_cache.pop(member.symbol, None)
             target_leaps_rejected.add(member.symbol)
@@ -397,15 +425,31 @@ def _build_document(
         )
         if reasons:
             warming.append(row)
+            membership_observations[member.symbol].update(
+                {
+                    "data_quality_reasons": row["data_quality_reasons"],
+                    "screen_reason": row["data_quality_reasons"][0],
+                }
+            )
             for reason in reasons:
                 rejection_counts[reason] += 1
             continue
         scored = score_candidate(row, policy)
         if scored is None:
+            membership_observations[member.symbol]["screen_reason"] = (
+                "iv_or_liquidity_hard_filter"
+            )
             rejection_counts["iv_or_liquidity_hard_filter"] += 1
             continue
         row.update(scored)
         row["data_quality"] = "ready"
+        membership_observations[member.symbol].update(
+            {
+                "strict_eligible": True,
+                "today_state": row["state"],
+                "screen_reason": None,
+            }
+        )
         strict_candidates.append(row)
 
     for member, quote, location in iv_warming_survivors:
@@ -424,6 +468,16 @@ def _build_document(
             iv_snapshot=iv_snapshots.get(_ibkr_provider_symbol(member.symbol)),
         )
         warming.append(row)
+        membership_observations[member.symbol].update(
+            {
+                "data_quality_reasons": row["data_quality_reasons"],
+                "screen_reason": (
+                    row["data_quality_reasons"][0]
+                    if row["data_quality_reasons"]
+                    else "data_quality_incomplete"
+                ),
+            }
+        )
         for reason in reasons:
             rejection_counts[reason] += 1
 
@@ -473,6 +527,9 @@ def _build_document(
             strict_candidates,
             key=candidate_sort_key,
         ),
+        "membership_observations": [
+            membership_observations[symbol] for symbol in sorted(membership_observations)
+        ],
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "data_quality": {
             "status": "partial" if request_limited or ivp_incomplete or errors else "complete",
@@ -533,6 +590,332 @@ def _hard_filter(
     if not quote.optionable:
         return "not_optionable", location
     return None, location
+
+
+def _membership_observation(
+    *,
+    member: UniverseMember,
+    quote: EquityQuote | None,
+    price_location: float | None,
+    screen_reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "symbol": member.symbol,
+        "quote_observed": quote is not None,
+        "price_location_52w": price_location,
+        "market_cap": quote.market_cap if quote else None,
+        "dividend_yield": quote.dividend_yield if quote else None,
+        "optionable": quote.optionable if quote else None,
+        "ivp_13w": None,
+        "ivp_26w": None,
+        "ivp_52w": None,
+        "strict_eligible": False,
+        "today_state": "STALE",
+        "screen_reason": screen_reason,
+        "data_quality_reasons": [],
+        "leaps_depth_refreshed": False,
+        "max_option_dte": None,
+    }
+
+
+def _apply_core_pool(
+    *,
+    document: dict[str, Any],
+    state: dict[str, Any],
+    mode: str,
+    at: datetime,
+    policy: GrowthDislocationSettings,
+) -> tuple[list[str], list[str]]:
+    """Apply the approved daily-only Core Pool membership contract."""
+
+    core = _mapping_state(state, "core_pool")
+    members = _mapping_records(core.get("members"))
+    entry_streaks = {
+        str(symbol): max(0, int(count))
+        for symbol, count in _mapping(core.get("entry_streaks")).items()
+        if str(symbol)
+    }
+    archive = [dict(row) for row in core.get("archive", []) if isinstance(row, Mapping)]
+    rejected = {
+        str(symbol).upper() for symbol in core.get("research_rejected_symbols", []) if str(symbol)
+    }
+    candidates = {
+        str(row["symbol"]): dict(row)
+        for row in document.get("all_candidates", [])
+        if isinstance(row, Mapping) and row.get("symbol")
+    }
+    warming = {
+        str(row["symbol"]): dict(row)
+        for row in document.get("watchlist", [])
+        if isinstance(row, Mapping) and row.get("symbol")
+    }
+    observations = {
+        str(row["symbol"]): dict(row)
+        for row in document.get("membership_observations", [])
+        if isinstance(row, Mapping) and row.get("symbol")
+    }
+    quality_complete = _mapping(document.get("data_quality")).get("status") == "complete"
+    complete_daily = mode == "daily" and quality_complete
+    initialized = bool(core.get("initialized"))
+    added: list[dict[str, str]] = []
+    exited: list[dict[str, str]] = []
+    at_label = at.isoformat()
+
+    if not initialized and complete_daily:
+        for symbol, row in sorted(candidates.items()):
+            members[symbol] = _new_core_member(row, at=at_label, reason="BOOTSTRAP")
+            added.append({"symbol": symbol, "reason": "BOOTSTRAP"})
+        initialized = True
+        entry_streaks.clear()
+        core["bootstrapped_at"] = at_label
+    elif initialized and complete_daily:
+        for symbol in list(members):
+            member = members[symbol]
+            observation = observations.get(symbol, {})
+            exit_reason, immediate = _core_exit_signal(
+                symbol=symbol,
+                observation=observation,
+                rejected=rejected,
+                policy=policy,
+            )
+            if exit_reason is None:
+                member["exit_reason"] = None
+                member["exit_streak"] = 0
+            else:
+                prior_reason = member.get("exit_reason")
+                member["exit_reason"] = exit_reason
+                member["exit_streak"] = (
+                    int(member.get("exit_streak") or 0) + 1 if prior_reason == exit_reason else 1
+                )
+            should_exit = immediate or int(member.get("exit_streak") or 0) >= CORE_EXIT_CONFIRMATIONS
+            if should_exit:
+                reason = str(member.get("exit_reason") or "UNTRADEABLE")
+                exited.append({"symbol": symbol, "reason": reason})
+                archive.append(
+                    {
+                        "symbol": symbol,
+                        "entered_at": member.get("entered_at"),
+                        "exited_at": at_label,
+                        "reason": reason,
+                    }
+                )
+                members.pop(symbol)
+                entry_streaks.pop(symbol, None)
+                continue
+            if symbol in candidates:
+                member["lifecycle_status"] = "CORE_ACTIVE"
+                member["pause_reason"] = None
+                member["snapshot"] = candidates[symbol]
+                member["last_eligible_at"] = at_label
+            else:
+                member["lifecycle_status"] = "CORE_PAUSED"
+                member["pause_reason"] = str(
+                    observation.get("screen_reason") or "not_strict_candidate"
+                )
+            member["last_complete_observed_at"] = at_label
+
+        eligible_nonmembers = set(candidates) - set(members) - rejected
+        for symbol in list(entry_streaks):
+            if symbol not in eligible_nonmembers:
+                entry_streaks.pop(symbol, None)
+        for symbol in sorted(eligible_nonmembers):
+            count = entry_streaks.get(symbol, 0) + 1
+            if count < CORE_ENTRY_CONFIRMATIONS:
+                entry_streaks[symbol] = count
+                continue
+            members[symbol] = _new_core_member(
+                candidates[symbol],
+                at=at_label,
+                reason="TWO_COMPLETE_DAILY_PASSES",
+            )
+            added.append({"symbol": symbol, "reason": "TWO_COMPLETE_DAILY_PASSES"})
+            entry_streaks.pop(symbol, None)
+
+    if complete_daily:
+        ranked, _reserve = apply_crowding(
+            [row for symbol, row in candidates.items() if symbol in members],
+            policy,
+            sort_key=priority_sort_key,
+        )
+        core["top_opportunities"] = ranked
+        core["last_complete_daily_at"] = at_label
+
+    stored_top = [
+        dict(row) for row in core.get("top_opportunities", []) if isinstance(row, Mapping)
+    ]
+    displayed_top = [
+        _core_display_row(
+            member=members.get(str(row.get("symbol")), {}),
+            stored=row,
+            current=candidates.get(str(row.get("symbol"))),
+            warming=warming.get(str(row.get("symbol"))),
+            observation=observations.get(str(row.get("symbol"))),
+            quality_complete=quality_complete,
+        )
+        for row in stored_top
+    ]
+    core_rows = [
+        _core_display_row(
+            member=member,
+            stored=_mapping(member.get("snapshot")),
+            current=candidates.get(symbol),
+            warming=warming.get(symbol),
+            observation=observations.get(symbol),
+            quality_complete=quality_complete,
+        )
+        for symbol, member in members.items()
+    ]
+    core_rows.sort(key=priority_sort_key)
+
+    core.update(
+        {
+            "initialized": initialized,
+            "members": members,
+            "entry_streaks": entry_streaks,
+            "archive": archive,
+            "last_scan_at": at_label,
+        }
+    )
+    core_status = (
+        "BOOTSTRAP_PENDING"
+        if not initialized
+        else "FROZEN"
+        if not quality_complete
+        else "ACTIVE"
+    )
+    if not initialized:
+        change_message = "Waiting for the first complete daily scan"
+    elif not quality_complete:
+        change_message = "Membership frozen due to partial scan"
+    elif mode == "rth":
+        change_message = "RTH scan updates Today State only"
+    else:
+        change_message = "Membership evaluated from complete daily scan"
+    document["core_pool_status"] = core_status
+    document["core_membership_updated"] = complete_daily
+    document["core_pool"] = core_rows
+    document["core_top_opportunities"] = displayed_top
+    document["core_entry_pending"] = [
+        {"symbol": symbol, "complete_daily_passes": count}
+        for symbol, count in sorted(entry_streaks.items())
+    ]
+    document["core_changes"] = {
+        "added": added,
+        "exited": exited,
+        "frozen": not quality_complete,
+        "message": change_message,
+    }
+    counts = dict(_mapping(document.get("counts")))
+    counts.update(
+        {
+            "core_pool": len(members),
+            "core_active": sum(
+                member.get("lifecycle_status") == "CORE_ACTIVE" for member in members.values()
+            ),
+            "core_paused": sum(
+                member.get("lifecycle_status") == "CORE_PAUSED" for member in members.values()
+            ),
+            "core_entry_pending": len(entry_streaks),
+        }
+    )
+    document["counts"] = counts
+    return [row["symbol"] for row in added], [row["symbol"] for row in exited]
+
+
+def _mapping_records(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(symbol): dict(row)
+        for symbol, row in value.items()
+        if str(symbol) and isinstance(row, Mapping)
+    }
+
+
+def _new_core_member(row: Mapping[str, Any], *, at: str, reason: str) -> dict[str, Any]:
+    return {
+        "symbol": str(row["symbol"]),
+        "lifecycle_status": "CORE_ACTIVE",
+        "pause_reason": None,
+        "entered_at": at,
+        "entry_reason": reason,
+        "last_eligible_at": at,
+        "last_complete_observed_at": at,
+        "exit_streak": 0,
+        "exit_reason": None,
+        "snapshot": dict(row),
+    }
+
+
+def _core_exit_signal(
+    *,
+    symbol: str,
+    observation: Mapping[str, Any],
+    rejected: set[str],
+    policy: GrowthDislocationSettings,
+) -> tuple[str | None, bool]:
+    if symbol in rejected:
+        return "RESEARCH_REJECTED", True
+    if observation.get("quote_observed") and observation.get("optionable") is False:
+        return "UNTRADEABLE", True
+    price_location = _optional_float(observation.get("price_location_52w"))
+    if price_location is not None and price_location > CORE_EXIT_PRICE_LOCATION_52W:
+        return "PRICE_RECOVERED", False
+    market_cap = _optional_float(observation.get("market_cap"))
+    if market_cap is not None and market_cap < CORE_EXIT_MARKET_CAP:
+        return "MARKET_CAP_LOST", False
+    dividend_yield = _optional_float(observation.get("dividend_yield"))
+    if dividend_yield is not None and dividend_yield >= CORE_EXIT_DIVIDEND_YIELD:
+        return "DIVIDEND_PROFILE_CHANGED", False
+    max_dte = _optional_float(observation.get("max_option_dte"))
+    if observation.get("leaps_depth_refreshed") and (
+        max_dte is None or max_dte < policy.min_leaps_dte
+    ):
+        return "LEAPS_DEPTH_LOST", False
+    return None, False
+
+
+def _core_display_row(
+    *,
+    member: Mapping[str, Any],
+    stored: Mapping[str, Any],
+    current: Mapping[str, Any] | None,
+    warming: Mapping[str, Any] | None,
+    observation: Mapping[str, Any] | None,
+    quality_complete: bool,
+) -> dict[str, Any]:
+    row = dict(current or stored)
+    if current is not None:
+        today_state = str(current.get("state") or "WATCH")
+    elif warming is not None or not quality_complete:
+        today_state = "STALE"
+    else:
+        today_state = "PAUSED"
+    row.update(
+        {
+            "core_status": member.get("lifecycle_status", "CORE_PAUSED"),
+            "today_state": today_state,
+            "pause_reason": member.get("pause_reason"),
+            "entry_reason": member.get("entry_reason"),
+            "entered_at": member.get("entered_at"),
+            "exit_streak": int(member.get("exit_streak") or 0),
+            "exit_reason": member.get("exit_reason"),
+        }
+    )
+    if current is None and observation is not None:
+        for key in (
+            "price_location_52w",
+            "market_cap",
+            "dividend_yield",
+            "ivp_13w",
+            "ivp_26w",
+            "ivp_52w",
+        ):
+            if observation.get(key) is not None:
+                row[key] = observation[key]
+    if warming is not None:
+        row["data_quality_reasons"] = warming.get("data_quality_reasons", [])
+    return row
 
 def _candidate_row(
     *,
@@ -667,11 +1050,26 @@ def _candidate_row(
 def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
     mode = str(document.get("mode") or "rth")
     title = (
-        "Growth Dislocation LEAPS · 日报" if mode == "daily" else "Growth Dislocation LEAPS · 新增"
+        "Growth Dislocation LEAPS · 日报"
+        if mode == "daily"
+        else "Growth Dislocation LEAPS · 状态更新"
     )
     counts = _mapping(document.get("counts"))
+    changes = _mapping(document.get("core_changes"))
+    added = _change_label(changes.get("added"))
+    exited = _change_label(changes.get("exited"))
     lines = [
         f"# {title}",
+        "",
+        "## Core Pool",
+        "",
+        f"- 状态 **{document.get('core_pool_status', 'BOOTSTRAP_PENDING')}**；"
+        f"成员 **{counts.get('core_pool', 0)}**；"
+        f"Active **{counts.get('core_active', 0)}**；"
+        f"Paused **{counts.get('core_paused', 0)}**；"
+        f"Entry Pending **{counts.get('core_entry_pending', 0)}**",
+        f"- Changes：新增 {added}；退出 {exited}",
+        f"- {changes.get('message', 'Membership state unavailable')}",
         "",
         "## Scanner 状态",
         "",
@@ -682,15 +1080,14 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         ),
         f"- Schwab 请求 **{document.get('requests_used')} / {document.get('request_budget')}**；"
         f"Data Quality **{_mapping(document.get('data_quality')).get('status', 'unknown')}**",
-        f"- 本轮新增严格候选：{', '.join(str(item) for item in document.get('added_symbols', [])) or '无'}",
         "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
         "",
-        "## 严格候选 Top 10（52W低位 + IVP 52W）",
+        "## Top Opportunities（52W低位 + IVP 52W）",
         "",
-        "| Symbol | State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
+        "| Symbol | Today State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
-    top = document.get("notification_top10", document.get("top10"))
+    top = document.get("core_top_opportunities", [])
     if isinstance(top, list) and top:
         for row in top:
             if not isinstance(row, Mapping):
@@ -698,7 +1095,7 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             lines.append(
                 "| {symbol} | {state} | {priority} | {market_cap} | {score} | {location} | {ivp_52w} | {ivp} | {rsi} | {sector_rs} | {contract} | {spread} |".format(
                     symbol=row.get("symbol", "-"),
-                    state=row.get("state", "-"),
+                    state=row.get("today_state", row.get("state", "-")),
                     priority=_fmt(row.get("priority_score")),
                     market_cap=_market_cap(row.get("market_cap")),
                     score=_fmt(row.get("final_score")),
@@ -713,9 +1110,19 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             )
     else:
         lines.append(
-            "| — | WATCH | — | — | — | — | — | 暂无严格候选 | — | — | — | — |"
+            "| — | WATCH | — | — | — | — | — | Core Pool 尚无可展示候选 | — | — | — | — |"
         )
     return title, "\n".join(lines)
+
+
+def _change_label(value: Any) -> str:
+    rows = value if isinstance(value, list) else []
+    labels = [
+        f"{row.get('symbol')} ({row.get('reason')})"
+        for row in rows
+        if isinstance(row, Mapping) and row.get("symbol")
+    ]
+    return ", ".join(labels) or "无"
 
 def _detail_order(
     survivors: list[tuple[UniverseMember, EquityQuote, float]],
@@ -753,14 +1160,15 @@ def _detail_payload(
     }
 
 def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
-    if raw.get("schema_version") not in {None, STATE_SCHEMA_VERSION}:
+    if raw.get("schema_version") not in {None, 2, STATE_SCHEMA_VERSION}:
         return {}
-    # V6 only smoothed the score curve and V7 only changes notification
-    # priority. Their market data caches and membership remain valid.
+    # V6 smoothed the score curve, V7 changed notification priority, and V8
+    # adds the Core Pool while preserving all market-data caches.
     if raw.get("policy_version") not in {
         None,
         "growth_dislocation_leaps.v5",
         "growth_dislocation_leaps.v6",
+        "growth_dislocation_leaps.v7",
         POLICY_VERSION,
     }:
         return {}
@@ -898,6 +1306,11 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
         "reserve": [material_row(row) for row in document.get("reserve", [])],
         "watchlist": [material_row(row) for row in document.get("watchlist", [])],
         "data_quality": document.get("data_quality"),
+        "core_pool_status": document.get("core_pool_status"),
+        "core_top_opportunities": [
+            material_row(row) for row in document.get("core_top_opportunities", [])
+        ],
+        "core_changes": document.get("core_changes"),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     return hashlib.sha256(encoded).hexdigest()
