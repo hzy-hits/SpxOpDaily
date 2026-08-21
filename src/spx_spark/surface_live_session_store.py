@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tarfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -109,17 +109,22 @@ class LiveSessionStateStore:
         )
 
     def load_boundaries(self, session_date: date | str) -> tuple[dict[str, Any], ...]:
+        return tuple(self.iter_boundaries(session_date))
+
+    def iter_boundaries(self, session_date: date | str) -> Iterator[dict[str, Any]]:
+        """Yield verified boundaries without retaining a second in-memory copy."""
+
         directory = self.boundaries_dir(session_date)
         paths = tuple(sorted(directory.glob("end=*.json"))) if directory.is_dir() else ()
         if paths:
-            rows: list[dict[str, Any]] = []
             for path in paths:
                 row = self._read(path, expected_kind="spxw_live_session_boundary")
                 if row is not None:
-                    rows.append(row)
-            return tuple(rows)
+                    yield row
+            return
         archive_path = self.boundaries_archive_path(session_date)
-        return self._read_boundary_archive(archive_path) if archive_path.is_file() else ()
+        if archive_path.is_file():
+            yield from self._read_boundary_archive(archive_path)
 
     def archive_boundaries(self, session_date: date | str) -> tuple[int, int, int]:
         """Gzip one closed session's immutable boundaries and remove verified sources."""

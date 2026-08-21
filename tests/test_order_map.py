@@ -2320,6 +2320,46 @@ def test_daily_open_interest_image_publishes_once_at_11_et(
     )
 
 
+def test_strategy_risk_image_publishes_for_trade_ready_delivery(
+    monkeypatch, tmp_path
+) -> None:
+    import spx_spark.application.order_map.delivery as delivery_module
+
+    now = datetime(2026, 8, 21, 15, 15, tzinfo=timezone.utc)
+    decision = {
+        "decision_id": "strategy:risk-image",
+        "decision_type": "CALL_DEBIT_VERTICAL",
+        "available_at": now.isoformat(),
+    }
+
+    def write_png(payload, output) -> None:
+        assert payload == decision
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"risk-png")
+
+    monkeypatch.setattr(delivery_module, "write_strategy_risk_png", write_png)
+    settings = SimpleNamespace(data_root=str(tmp_path))
+
+    result = delivery_module.publish_strategy_risk_image(
+        settings,
+        decision=decision,
+        now=now,
+    )
+
+    assert result == {
+        "status": "published",
+        "as_of": now.isoformat(),
+        "decision_id": "strategy:risk-image",
+        "strategy_type": "CALL_DEBIT_VERTICAL",
+        "public_path": "/strategy-risk/latest.png",
+        "public_url": "https://spx.zh3nyu.com/strategy-risk/latest.png",
+        "bytes": 8,
+    }
+    assert (
+        tmp_path / "published/spxw-surface/strategy-risk/latest.png"
+    ).read_bytes() == b"risk-png"
+
+
 def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapshot(
     monkeypatch, tmp_path
 ) -> None:
@@ -4748,6 +4788,66 @@ def test_unified_strategy_candidate_enqueues_once_on_trade_ready_lane(
                       "outcome": "outbox_already_accepted",
                       "event_id": "strategy-opportunity:test:ready"}
     assert calls["count"] == 1
+
+
+def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from spx_spark.application.order_map import delivery as delivery_module
+
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    settings = make_settings(str(tmp_path / "strategy-link.json"))
+    decision = _strategy_decision_payload(now)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(delivery_module, "notification_event_exists", lambda *_args: False)
+    monkeypatch.setattr(delivery_module, "_flood_control_block", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        delivery_module,
+        "call_strategy_idea_memo",
+        lambda *_args, **_kwargs: (None, "disabled"),
+    )
+
+    def publish(storage_settings, *, decision, now):
+        captured["storage"] = storage_settings
+        captured["decision"] = decision
+        return {
+            "status": "published",
+            "public_url": "https://spx.zh3nyu.com/strategy-risk/latest.png",
+        }
+
+    def enqueue(_settings, envelope, **kwargs):
+        captured["text"] = kwargs["text"]
+        captured["feishu_text"] = kwargs["feishu_text"]
+        return SimpleNamespace(
+            accepted=True,
+            inserted=True,
+            duplicate=False,
+            outcome="pending",
+            envelope=envelope,
+            targets=("feishu",),
+        )
+
+    monkeypatch.setattr(delivery_module, "publish_strategy_risk_image", publish)
+    monkeypatch.setattr(delivery_module, "enqueue_notification", enqueue)
+    storage = SimpleNamespace(data_root=str(tmp_path))
+
+    result = delivery_module.enqueue_strategy_decision(
+        decision,
+        now=now,
+        storage_settings=storage,
+    )
+
+    expected_link = (
+        "[查看概率、结构与损益图]"
+        "(https://spx.zh3nyu.com/strategy-risk/latest.png)"
+    )
+    assert captured["storage"] is storage
+    assert captured["decision"] == decision
+    assert expected_link in str(captured["text"])
+    assert captured["text"] == captured["feishu_text"]
+    assert result["strategy_risk_image"]["status"] == "published"
 
 
 def _strategy_decision_payload(now: datetime) -> dict[str, object]:

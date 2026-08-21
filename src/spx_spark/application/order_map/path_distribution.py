@@ -25,7 +25,9 @@ from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
     IRON_CONDOR_MANAGEMENT_POLICY,
     PolicyMark,
+    management_policy_for_candidate,
     policy_mark_horizon_end,
+    risk_adjusted_cvar_objective,
     simulate_management_policy,
 )
 from spx_spark.application.market_features.physical_followthrough import (
@@ -38,9 +40,14 @@ from spx_spark.application.market_features.physical_followthrough import (
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
-METHOD = "physical_path_management_policy.v2"
+METHOD = "physical_path_management_policy.v3"
 IRON_CONDOR_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v1"
-SUPPORTED_VERTICALS = {"CALL_DEBIT_VERTICAL", "PUT_DEBIT_VERTICAL"}
+SUPPORTED_DEBITS = {
+    "CALL_DEBIT_VERTICAL",
+    "PUT_DEBIT_VERTICAL",
+    "CALL_BUTTERFLY",
+    "PUT_BUTTERFLY",
+}
 IRON_CONDOR_TYPE = "IRON_CONDOR"
 MAX_PATHS = 4000
 NEW_YORK = ZoneInfo("America/New_York")
@@ -157,11 +164,9 @@ def estimate_path_distribution(
     del policy
     started = perf_counter()
     strategy_type = str(candidate.get("strategy_type") or "")
-    if strategy_type.endswith("_BUTTERFLY"):
-        return _unavailable("butterfly_path_not_in_v1")
     if strategy_type == IRON_CONDOR_TYPE:
         return _unavailable("iron_condor_uses_clearing_overlay")
-    if strategy_type not in SUPPORTED_VERTICALS:
+    if strategy_type not in SUPPORTED_DEBITS:
         return _unavailable("unsupported_strategy_type")
 
     spot = _number(_map(facts.get("spot")).get("spx"))
@@ -204,7 +209,7 @@ def estimate_path_distribution(
         minutes_to_close=minutes_to_close,
         horizon_minutes=horizon,
     )
-    credit = strategy_type == IRON_CONDOR_TYPE
+    credit = False
     close_seed = _number(quote.get("ask")) if credit else _number(quote.get("bid"))
     if close_seed is None:
         return _unavailable("path_mark_seed_unavailable")
@@ -229,6 +234,7 @@ def estimate_path_distribution(
     hit_invalidation = 0
     tp_before_stop = 0
     premium_stops = 0
+    management_policy = management_policy_for_candidate(candidate)
     for index in range(len(paths)):
         projected = tuple(float(value) for value in combo_bids["spots"][index])
         if invalidation is not None and invalidation(projected):
@@ -242,7 +248,7 @@ def estimate_path_distribution(
             entry_ask=entry,
             leg_count=len(priced_legs),
             entry_at=now_utc,
-            policy=DEFAULT_MANAGEMENT_POLICY,
+            policy=management_policy,
         )
         pnls.append(label.policy_pnl_points)
         if label.exit_at is not None:
@@ -280,6 +286,12 @@ def estimate_path_distribution(
         if invalidation is None
         else round(hit_invalidation / count, 4)
     )
+    objective = _risk_objective(
+        pnls,
+        candidate=candidate,
+        quote=quote,
+        session_count=len(sessions),
+    )
     return {
         "status": status,
         "method": METHOD,
@@ -290,6 +302,8 @@ def estimate_path_distribution(
         "p10_net_pnl": _dollars(p10),
         "p50_net_pnl": _dollars(p50),
         "p90_net_pnl": _dollars(p90),
+        "pnl_histogram": _pnl_histogram(pnls),
+        "risk_objective": objective,
         "hit_invalidation_rate": hit_rate,
         "tp_before_stop_rate": round(tp_before_stop / count, 4),
         "premium_stop_rate": round(premium_stops / count, 4),
@@ -304,6 +318,8 @@ def estimate_path_distribution(
         "remaining_expected_move": remaining_em,
         "compute_ms": round((perf_counter() - started) * 1000.0, 1),
         "reason_codes": reasons,
+        "management_policy_version": management_policy.policy_version,
+        "hard_exit_et": management_policy.hard_exit_et,
     }
 
 
@@ -432,6 +448,12 @@ def estimate_iron_condor_clearing_distribution(
     if status == "insufficient_sample":
         reasons.append("physical_sample_below_minimum")
     hit_rate = None if invalidation is None else round(hit_invalidation / count, 4)
+    objective = _risk_objective(
+        pnls,
+        candidate=candidate,
+        quote=quote,
+        session_count=len(sessions),
+    )
     return {
         "status": status,
         "method": IRON_CONDOR_CLEARING_METHOD,
@@ -442,6 +464,8 @@ def estimate_iron_condor_clearing_distribution(
         "p10_net_pnl": _dollars(p10),
         "p50_net_pnl": _dollars(p50),
         "p90_net_pnl": _dollars(p90),
+        "pnl_histogram": _pnl_histogram(pnls),
+        "risk_objective": objective,
         "hit_invalidation_rate": hit_rate,
         "tp_before_stop_rate": round(tp_before_stop / count, 4),
         "premium_stop_rate": round(premium_stops / count, 4),
@@ -630,6 +654,8 @@ def _leg_quantity(leg: Mapping[str, Any], *, index: int, total: int) -> int:
         return explicit
     if total == 2:
         return 1 if index == 0 else -1
+    if total == 3:
+        return (1, -2, 1)[index]
     if total == 4:
         return (1, -1, -1, 1)[index]
     return 1
@@ -742,7 +768,7 @@ def _invalidation_touch(
     candidate: Mapping[str, Any], *, credit: bool, spot: float
 ) -> tuple[Any, str | None]:
     raw = candidate.get("invalidation_spx")
-    if credit and isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         low = _number(raw[0] if len(raw) > 0 else None)
         high = _number(raw[1] if len(raw) > 1 else None)
         if low is None or high is None or not low < spot < high:
@@ -789,6 +815,72 @@ def _percentiles(values: Sequence[float], points: Sequence[float]) -> tuple[floa
     return tuple(result)
 
 
+def _risk_objective(
+    pnls: Sequence[float],
+    *,
+    candidate: Mapping[str, Any],
+    quote: Mapping[str, Any],
+    session_count: int,
+) -> dict[str, Any]:
+    max_loss = _number(_map(candidate.get("economics")).get("max_loss_points"))
+    bid = _number(quote.get("bid"))
+    ask = _number(quote.get("ask"))
+    if max_loss is None or max_loss <= 0 or bid is None or ask is None or ask < bid:
+        return {
+            "status": "unavailable",
+            "authority": "advisory_only",
+            "evidence_status": "research_unvalidated",
+            "automatic_ordering": False,
+            "reason_codes": ["risk_objective_inputs_unavailable"],
+        }
+    result = risk_adjusted_cvar_objective(
+        pnls,
+        max_loss_points=max_loss,
+        quote_width_points=ask - bid,
+        session_count=session_count,
+    )
+    return {"status": "available", **result, "reason_codes": []}
+
+
+def _pnl_histogram(values: Sequence[float]) -> list[dict[str, float | int]]:
+    """Return a compact empirical PnL mass function in points and dollars."""
+
+    if not values:
+        return []
+    low, high = min(values), max(values)
+    if math.isclose(low, high, rel_tol=0.0, abs_tol=1e-12):
+        half_width = max(abs(low) * 0.005, 0.005)
+        return [
+            {
+                "lower_pnl_points": round(low - half_width, 6),
+                "upper_pnl_points": round(high + half_width, 6),
+                "lower_net_pnl": round((low - half_width) * 100.0, 2),
+                "upper_net_pnl": round((high + half_width) * 100.0, 2),
+                "probability": 1.0,
+                "count": len(values),
+            }
+        ]
+    bin_count = min(12, max(5, math.ceil(math.sqrt(len(values)))))
+    counts, edges = np.histogram(np.asarray(values, dtype=float), bins=bin_count)
+    total = float(len(values))
+    rows: list[dict[str, float | int]] = []
+    for index, count in enumerate(counts):
+        if count <= 0:
+            continue
+        lower, upper = float(edges[index]), float(edges[index + 1])
+        rows.append(
+            {
+                "lower_pnl_points": round(lower, 6),
+                "upper_pnl_points": round(upper, 6),
+                "lower_net_pnl": round(lower * 100.0, 2),
+                "upper_net_pnl": round(upper * 100.0, 2),
+                "probability": round(float(count) / total, 6),
+                "count": int(count),
+            }
+        )
+    return rows
+
+
 def _expiry_from_legs(legs: Sequence[Mapping[str, Any]]) -> str | None:
     for leg in legs:
         parts = str(leg.get("contract_id") or "").split(":")
@@ -819,6 +911,14 @@ def _unavailable(reason: str) -> dict[str, Any]:
         "p10_net_pnl": None,
         "p50_net_pnl": None,
         "p90_net_pnl": None,
+        "pnl_histogram": [],
+        "risk_objective": {
+            "status": "unavailable",
+            "authority": "advisory_only",
+            "evidence_status": "research_unvalidated",
+            "automatic_ordering": False,
+            "reason_codes": [reason],
+        },
         "n_paths": 0,
         "n_sessions": 0,
         "reason_codes": ["research_unvalidated", reason],

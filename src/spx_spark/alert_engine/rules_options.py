@@ -376,6 +376,11 @@ def magnitude_bucket(value: float, threshold: float) -> str:
     return f"{direction}:{bucket}"
 
 
+def format_vol_points(value: float) -> str:
+    """Render decimal IV changes in signed, human-readable volatility points."""
+    return f"{value * 100:+.2f}"
+
+
 def iv_surface_movement_detail(body: str, *, degraded: bool) -> str:
     if degraded:
         return f"[degraded IV coverage] {body}"
@@ -415,10 +420,13 @@ def iv_surface_alerts(
                 severity=severity_for_priority(window.priority),
                 kind="iv_term_gap",
                 instrument_id="iv_surface:SPXW",
-                title=f"0DTE vs next ATM IV gap {surface.front_vs_next_atm_iv_gap:.3f}",
+                title=(
+                    "0DTE vs next ATM IV gap "
+                    f"{format_vol_points(surface.front_vs_next_atm_iv_gap)} vol pts"
+                ),
                 detail=(
-                    "Front SPXW ATM IV differs from next-expiry ATM IV by "
-                    f"{surface.front_vs_next_atm_iv_gap:.3f}."
+                    "Front-minus-next SPXW ATM IV gap is "
+                    f"{format_vol_points(surface.front_vs_next_atm_iv_gap)} vol points."
                 ),
                 value=surface.front_vs_next_atm_iv_gap,
                 threshold=settings.term_gap_threshold,
@@ -461,9 +469,14 @@ def iv_surface_alerts(
                     ),
                     kind="atm_iv_jump_5m",
                     instrument_id=instrument_id,
-                    title=f"SPXW {expiry.expiry} ATM IV jump {expiry.atm_iv_jump_5m:.3f}",
+                    title=(
+                        f"SPXW {expiry.expiry} ATM IV jump "
+                        f"{format_vol_points(expiry.atm_iv_jump_5m)} vol pts"
+                    ),
                     detail=iv_surface_movement_detail(
-                        f"ATM IV changed {expiry.atm_iv_jump_5m:.3f} since the previous surface snapshot.",
+                        "ATM IV changed "
+                        f"{format_vol_points(expiry.atm_iv_jump_5m)} vol points "
+                        "since the previous surface snapshot.",
                         degraded=degraded,
                     ),
                     value=expiry.atm_iv_jump_5m,
@@ -496,10 +509,11 @@ def iv_surface_alerts(
                     instrument_id=instrument_id,
                     title=(
                         f"SPXW {expiry.expiry} put skew steepening "
-                        f"{expiry.put_skew_25d_change_5m:.3f}"
+                        f"{format_vol_points(expiry.put_skew_25d_change_5m)} vol pts"
                     ),
                     detail=iv_surface_movement_detail(
-                        f"Put 25-delta skew widened {expiry.put_skew_25d_change_5m:.3f} vol points "
+                        "Put 25-delta skew widened "
+                        f"{format_vol_points(expiry.put_skew_25d_change_5m)} vol points "
                         "since the previous surface snapshot (skew_source=delta_25).",
                         degraded=degraded,
                     ),
@@ -525,9 +539,12 @@ def iv_surface_alerts(
                     ),
                     kind="put_skew_steepening_5m",
                     instrument_id=instrument_id,
-                    title=f"SPXW {expiry.expiry} put skew steepening {expiry.put_skew_steepening_5m:.3f}",
+                    title=(
+                        f"SPXW {expiry.expiry} put skew ratio change "
+                        f"{expiry.put_skew_steepening_5m:+.2f}"
+                    ),
                     detail=iv_surface_movement_detail(
-                        f"Put skew ratio increased {expiry.put_skew_steepening_5m:.3f} "
+                        f"Put skew ratio increased by {expiry.put_skew_steepening_5m:.2f} "
                         "since the previous surface snapshot (skew_source=ratio).",
                         degraded=degraded,
                     ),
@@ -556,9 +573,13 @@ def iv_surface_alerts(
                     ),
                     kind="iv_surface_shift_5m",
                     instrument_id=instrument_id,
-                    title=f"SPXW {expiry.expiry} surface shift {expiry.iv_surface_shift_5m:.3f}",
+                    title=(
+                        f"SPXW {expiry.expiry} surface shift "
+                        f"{format_vol_points(expiry.iv_surface_shift_5m)} vol pts"
+                    ),
                     detail=iv_surface_movement_detail(
-                        f"Average raw-grid IV shifted {expiry.iv_surface_shift_5m:.3f} "
+                        "Average raw-grid IV shifted "
+                        f"{format_vol_points(expiry.iv_surface_shift_5m)} vol points "
                         "since the previous surface snapshot.",
                         degraded=degraded,
                     ),
@@ -602,9 +623,13 @@ def iv_surface_alerts(
                             ),
                             kind="iv_surface_shift_1h",
                             instrument_id=instrument_id,
-                            title=f"SPXW {expiry_name} 1h surface shift {shift_value:.3f}",
+                            title=(
+                                f"SPXW {expiry_name} 1h surface shift "
+                                f"{format_vol_points(shift_value)} vol pts"
+                            ),
                             detail=iv_surface_movement_detail(
-                                f"Average raw-grid IV shifted {shift_value:.3f} over the last hour.",
+                                "Average raw-grid IV shifted "
+                                f"{format_vol_points(shift_value)} vol points over the last hour.",
                                 degraded=degraded,
                             ),
                             value=shift_value,
@@ -631,9 +656,13 @@ def iv_surface_alerts(
                             ),
                             kind="atm_iv_change_1h",
                             instrument_id=instrument_id,
-                            title=f"SPXW {expiry_name} 1h ATM IV change {atm_value:.3f}",
+                            title=(
+                                f"SPXW {expiry_name} 1h ATM IV change "
+                                f"{format_vol_points(atm_value)} vol pts"
+                            ),
                             detail=iv_surface_movement_detail(
-                                f"ATM IV changed {atm_value:.3f} over the last hour.",
+                                f"ATM IV changed {format_vol_points(atm_value)} vol points "
+                                "over the last hour.",
                                 degraded=degraded,
                             ),
                             value=atm_value,

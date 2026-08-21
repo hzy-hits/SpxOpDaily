@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from spx_spark.application.notifications.report_enqueue import (
@@ -33,7 +34,7 @@ from spx_spark.application.order_map.strategy_regime import (
     pin_watch_center,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.config import NotificationSettings
+from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.llm_writer import (
     call_hypothesis_critic,
     call_strategy_idea_memo,
@@ -42,6 +43,11 @@ from spx_spark.notifier.llm_writer import (
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.options_map import write_strategy_risk_png
+
+
+STRATEGY_RISK_IMAGE_PUBLIC_PATH = "/strategy-risk/latest.png"
+STRATEGY_RISK_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/strategy-risk/latest.png"
 
 
 def enqueue_pin_stable_watch(
@@ -108,7 +114,10 @@ def enqueue_pin_stable_watch(
 
 
 def enqueue_strategy_decision(
-    decision: dict[str, Any], *, now: datetime
+    decision: dict[str, Any],
+    *,
+    now: datetime,
+    storage_settings: StorageSettings | None = None,
 ) -> dict[str, Any]:
     """Send one deterministic unified candidate through the existing trade-ready lane."""
 
@@ -135,6 +144,11 @@ def enqueue_strategy_decision(
     flood = _flood_control_block(decision, candidate, settings, now=now)
     if flood is not None:
         return flood
+    strategy_risk_image = (
+        publish_strategy_risk_image(storage_settings, decision=decision, now=now)
+        if storage_settings is not None
+        else None
+    )
     text = _render_strategy_candidate(decision, candidate)
     # Memo is research-only and must never block trade_ready delivery.
     memo = None
@@ -145,6 +159,8 @@ def enqueue_strategy_decision(
         memo, memo_error = None, f"idea_memo_exception:{type(exc).__name__}"
     if memo is not None:
         text = f"{text}\n\n{_render_strategy_idea_memo(memo)}"
+    if strategy_risk_image and strategy_risk_image.get("status") == "published":
+        text = f"{text}\n\n## 策略图\n[查看概率、结构与损益图]({strategy_risk_image['public_url']})"
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -172,7 +188,46 @@ def enqueue_strategy_decision(
     }
     if memo is None:
         outcome["idea_memo"] = f"omitted:{memo_error or 'unavailable'}"
+    if strategy_risk_image is not None:
+        outcome["strategy_risk_image"] = strategy_risk_image
     return outcome
+
+
+def publish_strategy_risk_image(
+    storage_settings: StorageSettings,
+    *,
+    decision: dict[str, Any],
+    now: datetime,
+) -> dict[str, object]:
+    """Publish the latest pushed manual candidate without affecting delivery authority."""
+
+    try:
+        output = (
+            Path(storage_settings.data_root)
+            / "published"
+            / "spxw-surface"
+            / "strategy-risk"
+            / "latest.png"
+        )
+        if not decision:
+            raise ValueError("strategy decision unavailable")
+        write_strategy_risk_png(decision, output)
+    except Exception as exc:  # noqa: BLE001 - image failure must not block trade-ready delivery
+        return {
+            "status": "failed",
+            "error": f"{type(exc).__name__}:{exc}",
+            "public_path": STRATEGY_RISK_IMAGE_PUBLIC_PATH,
+            "public_url": STRATEGY_RISK_IMAGE_PUBLIC_URL,
+        }
+    return {
+        "status": "published",
+        "as_of": str(decision.get("available_at") or now.isoformat()),
+        "decision_id": decision.get("decision_id"),
+        "strategy_type": decision.get("decision_type"),
+        "public_path": STRATEGY_RISK_IMAGE_PUBLIC_PATH,
+        "public_url": STRATEGY_RISK_IMAGE_PUBLIC_URL,
+        "bytes": output.stat().st_size,
+    }
 
 
 def _pin_watch_title(regime: Mapping[str, Any], center: float) -> str:

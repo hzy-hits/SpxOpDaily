@@ -156,7 +156,10 @@ def test_winner_path_distribution_is_ordered_and_does_not_change_score(tmp_path:
     assert distribution["n_paths"] >= 30
     assert distribution["p10_pnl_points"] <= distribution["p50_pnl_points"] <= distribution["p90_pnl_points"]
     assert candidate["selection_score"] == 1.25
-    assert distribution["method"] == "physical_path_management_policy.v2"
+    assert distribution["method"] == "physical_path_management_policy.v3"
+    assert distribution["risk_objective"]["status"] == "available"
+    assert distribution["risk_objective"]["authority"] == "advisory_only"
+    assert distribution["pnl_histogram"]
     assert distribution["horizon_minutes"] > 20
     assert "invalidation_not_protective" not in distribution["reason_codes"]
     text = path_distribution_desk_text(distribution)
@@ -181,16 +184,51 @@ def test_trigger_level_is_not_counted_as_a_protective_stop(tmp_path: Path) -> No
     assert "invalidation_not_protective" in distribution["reason_codes"]
 
 
-def test_butterfly_is_skipped_in_first_slice() -> None:
+def _call_butterfly() -> dict[str, object]:
+    legs = [
+        _leg(7740.0, "C", 11.2, 11.4),
+        _leg(7750.0, "C", 6.2, 6.4),
+        _leg(7760.0, "C", 2.6, 2.8),
+    ]
+    return {
+        "strategy_type": "CALL_BUTTERFLY",
+        "setup_kind": "STABLE_PIN",
+        "right": "C",
+        "direction": "NEUTRAL",
+        "center": 7750.0,
+        "width": 10.0,
+        "legs": legs,
+        "quote": {"status": "ready", "bid": 0.4, "ask": 0.8},
+        "economics": {
+            "width_points": 10.0,
+            "max_loss_points": 0.8,
+            "max_gain_points": 9.2,
+        },
+        "invalidation_spx": [7740.0, 7760.0],
+    }
+
+
+def test_butterfly_uses_three_leg_path_and_pin_management_policy(tmp_path: Path) -> None:
+    _write_session(
+        tmp_path, "2026-08-04", start_et=time(9, 30), prices=_full_rth_prices(7750.0, 0.03)
+    )
+    _write_session(
+        tmp_path, "2026-08-05", start_et=time(9, 30), prices=_full_rth_prices(7750.0, -0.03)
+    )
     distribution = estimate_path_distribution(
-        {"strategy_type": "CALL_BUTTERFLY", "quote": {"ask": 1.0}, "legs": []},
+        _call_butterfly(),
         _facts(now=RTH_NOW),
-        data_root=None,
-        probability_settings=None,
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
         now=RTH_NOW,
     )
-    assert distribution["status"] == "unavailable"
-    assert "butterfly_path_not_in_v1" in distribution["reason_codes"]
+
+    assert distribution["status"] == "estimated_uncalibrated"
+    assert distribution["method"] == "physical_path_management_policy.v3"
+    assert distribution["management_policy_version"] == "management_policy.pin_butterfly.hold_1545.v1"
+    assert distribution["premium_stop_rate"] == 0.0
+    assert distribution["pnl_histogram"]
+    assert distribution["risk_objective"]["status"] == "available"
 
 
 def test_missing_data_root_returns_unavailable_without_raising() -> None:
@@ -223,6 +261,11 @@ def _iron_condor() -> dict[str, object]:
         "put_short": {"strike": 7690.0, "delta": -0.20},
         "call_short": {"strike": 7810.0, "delta": 0.20},
         "quote": {"status": "ready", "bid": 0.6, "ask": 1.0, "credit": 0.8},
+        "economics": {
+            "width_points": 10.0,
+            "max_loss_points": 9.2,
+            "max_gain_points": 0.8,
+        },
         "invalidation_spx": [7690.0, 7810.0],
     }
 
@@ -278,6 +321,9 @@ def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) ->
     assert distribution["time_stop_rate"] == 0.0
     assert distribution["median_hold_minutes"] > 20
     assert distribution["p10_pnl_points"] <= distribution["p50_pnl_points"] <= distribution["p90_pnl_points"]
+    assert distribution["pnl_histogram"]
+    assert distribution["risk_objective"]["status"] == "available"
+    assert distribution["risk_objective"]["automatic_ordering"] is False
     text = path_distribution_desk_text(distribution)
     assert text is not None
     assert text.startswith("持有至12:30ET 路径 P10/P50/P90 $")

@@ -321,8 +321,13 @@ def build_market_fact_pack(
             "flip_zone": structure.get("flip_zone") or payload.get("flip_zone"),
             "put_wall": _number(structure.get("put_wall")),
             "call_wall": _number(structure.get("call_wall")),
+            "q_p10": _number(density.get("p10")),
+            "q_p25": _number(density.get("p25")),
             "q_median": _number(density.get("median")),
+            "q_p75": _number(density.get("p75")),
+            "q_p90": _number(density.get("p90")),
             "q_mode": _number(density.get("mode")),
+            "q_strike_range": list(density.get("strike_range") or ()),
             "q_local_mass_5pt": dict(_map(density.get("local_mass_5pt"))),
             "q_clipped_mass_fraction": _number(density.get("clipped_mass_fraction")),
             "strike_differential_context": dict(

@@ -516,12 +516,12 @@ def run(
     )
     # Delivery may cross a process/network boundary.  Never open or close a
     # lifecycle episode from the evaluation clock or the earlier quote snapshot.
-    action_now = as_utc(resolved_action_clock())
-    action_latest = LatestStateStore(storage).load(now=action_now)
+    action_snapshot_at = as_utc(resolved_action_clock())
+    action_latest = LatestStateStore(storage).load(now=action_snapshot_at)
     try:
         strategy_outcome_observation = observe_due_strategy_outcomes(
             action_latest,
-            now=action_now,
+            now=action_snapshot_at,
             data_root=storage.data_root,
         )
     except Exception as exc:
@@ -529,7 +529,11 @@ def run(
             "observed": 0,
             "error": f"{type(exc).__name__}:{exc}",
         }
-    action_macro_event = macro_event_state(action_now, data_root=storage.data_root)
+    # Freeze the authority clock only after the action snapshot and due outcomes
+    # have been read.  The failover controller runs independently in this same
+    # process; reusing the earlier snapshot clock can otherwise make its newly
+    # published control state appear to come from the future during a slow cycle.
+    action_now = as_utc(resolved_action_clock())
     action_provider_entry_control = _provider_entry_control(
         failover_settings,
         now=action_now,
@@ -538,6 +542,7 @@ def run(
         storage.data_root,
         now=action_now,
     )
+    action_macro_event = macro_event_state(action_now, data_root=storage.data_root)
     gth_entries_allowed = bool(
         action_provider_entry_control["allowed"] is True
         and action_gth_ibkr_entry_control["allowed"] is True
@@ -709,7 +714,11 @@ def run(
             strategy_decision,
         )
         try:
-            strategy_delivery = enqueue_strategy_decision(strategy_decision, now=action_now)
+            strategy_delivery = enqueue_strategy_decision(
+                strategy_decision,
+                now=action_now,
+                storage_settings=storage,
+            )
         except Exception as exc:  # delivery diagnostics must not stop feature collection
             strategy_delivery = {
                 "accepted": False,

@@ -2,10 +2,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::{Days, NaiveDate, Utc};
+use chrono::{DateTime, Days, NaiveDate, Utc};
+use serde::Serialize;
 use spx_core::{CoreConfig, NotificationTargetConfig, ReadinessConfig};
 use spx_domain::{DeliveryChannel, IngressEnvelopeV1, Token, Validate, canonical_json_hash};
 use tempfile::TempDir;
+
+#[derive(Serialize)]
+struct TestRawRecord<'a> {
+    observed_at: DateTime<Utc>,
+    payload_sha256: &'a str,
+    payload: &'a IngressEnvelopeV1,
+}
 
 fn config(temp: &TempDir, raw_log_dir: &Path) -> CoreConfig {
     CoreConfig {
@@ -68,12 +76,12 @@ fn write_valid_segment(raw_log_dir: &Path, date: NaiveDate) {
     .expect("valid envelope");
     envelope.validate().expect("valid envelope contract");
     let payload_sha256 = canonical_json_hash(&envelope).expect("payload hash");
-    let mut encoded = serde_json::to_vec(&serde_json::json!({
-        "observed_at": date.and_hms_opt(12, 0, 0).expect("time").and_utc(),
-        "payload_sha256": payload_sha256,
-        "payload": envelope,
-    }))
-    .expect("encode record");
+    let record = TestRawRecord {
+        observed_at: date.and_hms_opt(12, 0, 0).expect("time").and_utc(),
+        payload_sha256: &payload_sha256,
+        payload: &envelope,
+    };
+    let mut encoded = serde_json::to_vec(&record).expect("encode record");
     encoded.push(b'\n');
     fs::write(raw_log_dir.join(format!("{date}.0000.ndjson")), encoded).expect("write segment");
 }

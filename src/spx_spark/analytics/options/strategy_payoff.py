@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -9,6 +10,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 NEW_YORK = ZoneInfo("America/New_York")
+
+RISK_OBJECTIVE_VERSION = "risk_adjusted_cvar.v1"
+RISK_OBJECTIVE_FORMULA = "E[PnL] - 0.50*CVaR10 - 1.00*quote_width - 0.25*uncertainty"
+RISK_OBJECTIVE_TAIL_PROBABILITY = 0.10
+RISK_OBJECTIVE_TAIL_LAMBDA = 0.50
+RISK_OBJECTIVE_SLIPPAGE_MU = 1.00
+RISK_OBJECTIVE_UNCERTAINTY_NU = 0.25
+RISK_OBJECTIVE_MIN_SESSIONS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,8 +261,98 @@ def iron_condor_economics(
     }
 
 
+def iron_condor_payoff(
+    settlement: float,
+    *,
+    put_long: float,
+    put_short: float,
+    call_short: float,
+    call_long: float,
+    net_credit: float,
+) -> float:
+    """Expiry payoff for one defined-risk short iron condor."""
+
+    if not put_long < put_short < call_short < call_long:
+        raise ValueError("iron condor strikes must be strictly ordered")
+    intrinsic = (
+        max(put_short - settlement, 0.0)
+        - max(put_long - settlement, 0.0)
+        + max(settlement - call_short, 0.0)
+        - max(settlement - call_long, 0.0)
+    )
+    return net_credit - intrinsic
+
+
 def butterfly_payoff(settlement: float, *, center: float, width: float, net_debit: float) -> float:
     return max(width - abs(settlement - center), 0.0) - net_debit
+
+
+def risk_adjusted_cvar_objective(
+    pnl_points: Sequence[float],
+    *,
+    max_loss_points: float,
+    quote_width_points: float,
+    session_count: int,
+    minimum_sessions: int = RISK_OBJECTIVE_MIN_SESSIONS,
+) -> dict[str, Any]:
+    """Return the frozen one-structure shadow objective from causal PnL paths.
+
+    Strike selection remains discrete.  For one already enumerated structure,
+    its non-negative size has a linear objective and ``NO_TRADE`` is the zero-
+    size solution.  The result is advisory only and cannot authorize an order.
+    """
+
+    values = [float(value) for value in pnl_points]
+    if not values or any(not math.isfinite(value) for value in values):
+        raise ValueError("risk objective requires finite PnL paths")
+    if not math.isfinite(max_loss_points) or max_loss_points <= 0:
+        raise ValueError("risk objective max loss must be positive")
+    if not math.isfinite(quote_width_points) or quote_width_points < 0:
+        raise ValueError("risk objective quote width must be non-negative")
+    if type(session_count) is not int or session_count < 0:
+        raise ValueError("risk objective session count must be a non-negative integer")
+    if type(minimum_sessions) is not int or minimum_sessions <= 0:
+        raise ValueError("risk objective minimum sessions must be positive")
+
+    expected = sum(values) / len(values)
+    tail_count = max(1, math.ceil(len(values) * RISK_OBJECTIVE_TAIL_PROBABILITY))
+    worst_tail = sorted(values)[:tail_count]
+    cvar_loss = max(-(sum(worst_tail) / len(worst_tail)), 0.0)
+    losses = [-value for value in values if value < 0.0]
+    loss_probability = len(losses) / len(values)
+    conditional_loss = sum(losses) / len(losses) if losses else 0.0
+    uncertainty_fraction = max(1.0 - min(session_count / minimum_sessions, 1.0), 0.0)
+    uncertainty = max_loss_points * uncertainty_fraction
+    tail_penalty = RISK_OBJECTIVE_TAIL_LAMBDA * cvar_loss
+    slippage_penalty = RISK_OBJECTIVE_SLIPPAGE_MU * quote_width_points
+    uncertainty_penalty = RISK_OBJECTIVE_UNCERTAINTY_NU * uncertainty
+    objective = expected - tail_penalty - slippage_penalty - uncertainty_penalty
+    return {
+        "version": RISK_OBJECTIVE_VERSION,
+        "formula": RISK_OBJECTIVE_FORMULA,
+        "authority": "advisory_only",
+        "evidence_status": "research_unvalidated",
+        "automatic_ordering": False,
+        "tail_probability": RISK_OBJECTIVE_TAIL_PROBABILITY,
+        "tail_lambda": RISK_OBJECTIVE_TAIL_LAMBDA,
+        "slippage_mu": RISK_OBJECTIVE_SLIPPAGE_MU,
+        "uncertainty_nu": RISK_OBJECTIVE_UNCERTAINTY_NU,
+        "expected_pnl_points": round(expected, 6),
+        "cvar10_loss_points": round(cvar_loss, 6),
+        "quote_width_points": round(quote_width_points, 6),
+        "model_uncertainty_points": round(uncertainty, 6),
+        "tail_penalty_points": round(tail_penalty, 6),
+        "slippage_penalty_points": round(slippage_penalty, 6),
+        "uncertainty_penalty_points": round(uncertainty_penalty, 6),
+        "objective_points": round(objective, 6),
+        "objective_dollars": round(objective * 100.0, 2),
+        "loss_probability": round(loss_probability, 6),
+        "conditional_loss_points": round(conditional_loss, 6),
+        "n_paths": len(values),
+        "n_sessions": session_count,
+        "minimum_sessions": minimum_sessions,
+        "shadow_choice": "STRUCTURE" if objective > 0.0 else "NO_TRADE",
+    }
 
 
 def vertical_entry_quality(

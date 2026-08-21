@@ -6,6 +6,7 @@ from spx_spark.provider_failover import (
     FailoverState,
     FailoverThresholds,
     advance_failover,
+    new_entry_control_decision,
 )
 
 
@@ -157,3 +158,28 @@ def test_transition_id_is_unique_after_daily_state_reset() -> None:
     assert second.transition is not None
     assert first.transition.sequence == second.transition.sequence == 1
     assert first.transition.transition_id != second.transition.transition_id
+
+
+def test_entry_control_accepts_only_bounded_concurrent_clock_skew() -> None:
+    now = datetime(2026, 8, 21, 10, 50, tzinfo=UTC)
+    base = {
+        "monitoring_active": True,
+        "new_entries_allowed": True,
+        "mode": FailoverMode.IBKR_FALLBACK.value,
+    }
+
+    concurrent = new_entry_control_decision(
+        {**base, "updated_at": (now + timedelta(seconds=5)).isoformat()},
+        now=now,
+        max_age_seconds=30.0,
+    )
+    future = new_entry_control_decision(
+        {**base, "updated_at": (now + timedelta(seconds=5, microseconds=1)).isoformat()},
+        now=now,
+        max_age_seconds=30.0,
+    )
+
+    assert concurrent["allowed"] is True
+    assert concurrent["reason"] == "allowed"
+    assert future["allowed"] is False
+    assert future["reason"] == "control_timestamp_in_future"

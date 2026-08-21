@@ -36,7 +36,7 @@ if [[ "$core_ready" != true ]]; then
 fi
 
 sessions_json="$(
-  curl --silent --show-error --fail --max-time 10 \
+  curl --silent --show-error --fail --max-time 30 \
     --unix-socket "$SOCKET_PATH" \
     http://localhost/api/v1/replay/sessions
 )"
@@ -53,7 +53,7 @@ fi
 
 latest_session="${session_dates[0]}"
 timeline_json="$(
-  curl --silent --show-error --fail --max-time 30 \
+  curl --silent --show-error --fail --max-time 60 \
     --unix-socket "$SOCKET_PATH" \
     "http://localhost/api/v1/replay/sessions/$latest_session/timeline?step_minutes=5"
 )"
@@ -68,7 +68,7 @@ if (( ${#frame_times[@]} == 0 )); then
 fi
 
 latest_landing_time="${frame_times[-1]}"
-curl --silent --show-error --fail --max-time 90 \
+curl --silent --show-error --fail --max-time 180 \
   --unix-socket "$SOCKET_PATH" \
   --get \
   --data-urlencode "at=$latest_landing_time" \

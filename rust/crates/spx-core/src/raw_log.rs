@@ -1491,12 +1491,12 @@ mod tests {
         .expect("valid envelope");
         envelope.validate().expect("valid envelope contract");
         let payload_sha256 = canonical_json_hash(&envelope).expect("payload hash");
-        let mut encoded = serde_json::to_vec(&serde_json::json!({
-            "observed_at": observed_at,
-            "payload_sha256": payload_sha256,
-            "payload": envelope,
-        }))
-        .expect("encode raw record");
+        let record = RawRecord {
+            observed_at,
+            payload_sha256: &payload_sha256,
+            payload: &envelope,
+        };
+        let mut encoded = serde_json::to_vec(&record).expect("encode raw record");
         encoded.push(b'\n');
         write_segment(directory, name, &encoded);
     }

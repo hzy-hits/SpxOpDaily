@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 import hashlib
 
 from spx_spark.config import NotificationSettings
-from spx_spark.notifier.deepseek import deepseek_usage_limited, run_deepseek_reviewer
+from spx_spark.notifier.deepseek import (
+    deepseek_temporarily_unavailable,
+    deepseek_usage_limited,
+    run_deepseek_reviewer,
+)
 from spx_spark.notifier.dispatcher import dispatch_notification, enqueue_notification
 from spx_spark.notifier.llm_writer import load_previous_push, record_push
 from spx_spark.notifier.model import CommandRunner, NotificationResult, SinkResult, default_runner
@@ -509,6 +513,21 @@ def _handle_reviewer_failure(
         for alert in review_candidates
         if alert not in delivered_failopen and alert not in low_priority_consumed
     ]
+    fallback_enabled = bool(settings.openclaw_agent_enabled or settings.codex_enabled)
+    unavailable_suppressed: list[dict[str, object]] = []
+    if (
+        result.sink == "deepseek_reviewer"
+        and deepseek_temporarily_unavailable(result.error)
+        and not fallback_enabled
+    ):
+        # These are time-sensitive observations, not durable Trade Ready
+        # decisions.  After deterministic safety alerts have failed open,
+        # replaying an ordinary IV/GEX observation through three 30-second LLM
+        # attempts creates stale noise and worker backlog.  Consume it into the
+        # normal per-alert cooldown; parser/contract failures remain pending.
+        unavailable_suppressed = list(remaining)
+        alerts_marked_sent.extend(unavailable_suppressed)
+        remaining = []
     append_review_audit(
         settings,
         at=now_utc,
@@ -518,7 +537,9 @@ def _handle_reviewer_failure(
         parser_verdict="not_run",
         scope_ok=None,
         outcome=(
-            "review_failed_pending"
+            "review_unavailable_suppressed"
+            if unavailable_suppressed
+            else "review_failed_pending"
             if remaining
             else "review_failed_correlated_suppressed"
             if suppressed and not _notification_handled(failopen_sinks)
@@ -531,6 +552,7 @@ def _handle_reviewer_failure(
             "failopen_delivered_count": len(delivered_failopen) - len(suppressed),
             "suppressed_count": len(suppressed),
             "pending_count": len(remaining),
+            "unavailable_suppressed_count": len(unavailable_suppressed),
         },
     )
     return remaining

@@ -1,8 +1,9 @@
 # SPXW Exposure Surface Site
 
-This directory serves the live, read-only SPXW exposure-surface projection and
-the Session Replay player. It does not expose account data, order state, or the
-general `latest/` directory.
+This directory serves the live, read-only SPXW exposure-surface projection. The
+public Session Replay page and replay HTTP API are retired; the causal replay
+implementation and data remain available internally for research and tests. It
+does not expose account data, order state, or the general `latest/` directory.
 
 ## Access
 
@@ -14,16 +15,20 @@ on port `18082`:
 The memorable shortcut redirects into that authenticated code-server route:
 
 - live: `https://spx.zh3nyu.com/`
-- session replay: `https://spx.zh3nyu.com/replay`
-- Friday replay: `https://spx.zh3nyu.com/friday`
+- retired replay aliases (`/replay`, `/replay/`, `/sessions`, `/friday`): HTTP 410
 
 The shortcut service exposes no dashboard or API data. It listens only on host
 loopback port `18084` and returns redirects; code-server still owns the login
 gate for the destination. The sole exception is the derived, account-free OI
-image at `https://spx.zh3nyu.com/oi/latest.png`, used by Bark rich
-notifications. The exact-match nginx route exposes one atomically replaced PNG;
-`/oi/`, JSON projections, directory listings, account data, and order state
-remain unavailable.
+images at `https://spx.zh3nyu.com/oi/latest.png` and
+`https://spx.zh3nyu.com/strategy-risk/latest.png`, used by Bark rich
+notifications. The exact-match nginx routes expose two atomically replaced
+PNGs; parent directories, JSON projections, account data, and order state
+remain unavailable. The strategy-risk sheet is advisory-only: it renders the
+latest pushed manual candidate, Q local mass, expiry payoff, physical-path PnL
+and the frozen shadow objective without changing strategy authority. It is
+replaced only by the next Trade Ready strategy card, so ordinary NO_TRADE
+status cycles do not change the linked image.
 
 The corresponding managed-tunnel ingress is intentionally path-free:
 
@@ -63,7 +68,8 @@ Viewport movement never extends a lease or manufactures future values: expired
 and unavailable intervals remain Missing. Replay continues to show its full
 session clock.
 
-Replay uses read-only API resources:
+The public replay API returns HTTP 410. Internal tooling may continue to use the
+same read-only resources directly through `runtime/core-api.sock`:
 
 - `api/v1/replay/sessions`
 - `api/v1/replay/sessions/YYYY-MM-DD/timeline?step_minutes=5`
@@ -92,13 +98,13 @@ seconds need not be `00`. Derived state is stored under:
 /srv/data/spx-spark/data/published/spxw-surface/trend-cache/
 ```
 
-The original checked Friday v2 replay remains at the exact archival endpoint
-`api/v1/replays/2026-07-17T183500Z` and maps to:
+The original checked Friday v2 replay remains stored internally at:
 
 `/srv/data/spx-spark/data/published/spxw-surface/replays/2026-07-17T183500Z.json`
 
-Unknown routes and every other `/api/` or `/data/` path return 404. Replay mode
-stops the live polling loop and cannot be mistaken for a valid live lease.
+The former exact archival HTTP endpoint and every `/api/v1/replay/` path return
+410. Unknown routes and every other `/api/` or `/data/` path return 404. Replay
+mode stops the live polling loop and cannot be mistaken for a valid live lease.
 
 Historical Schwab data lacks a real response-finished/availability clock.
 Policy v3 therefore labels every frame `bounded_not_proven`, reports the

@@ -171,7 +171,6 @@ def receipt_store_check(
     if database is not None and database.exists():
         try:
             with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-                quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0]).lower()
                 tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -182,6 +181,17 @@ def receipt_store_check(
                     "notification_events",
                     "notification_attempts",
                 } <= tables
+                if schema_present:
+                    quick_check = str(
+                        connection.execute(
+                            "PRAGMA quick_check('notification_attempts')"
+                        ).fetchone()[0]
+                    ).lower()
+                    foreign_key_error = connection.execute(
+                        "PRAGMA foreign_key_check('notification_attempts')"
+                    ).fetchone()
+                    if foreign_key_error is not None:
+                        quick_check = "foreign_key_error"
         except (OSError, sqlite3.Error) as exc:
             error = f"{type(exc).__name__}:{exc}"
     passed = quick_check == "ok" and schema_present
@@ -194,7 +204,10 @@ def receipt_store_check(
             "schema_present": schema_present,
             "error": error,
         },
-        threshold="spx.sqlite quick_check=ok and notification event/attempt schema present",
+        threshold=(
+            "notification attempt table quick_check=ok, foreign keys valid, "
+            "and notification event/attempt schema present"
+        ),
         passed=passed,
         reason=(
             "unified notification attempt store healthy"

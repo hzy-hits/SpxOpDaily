@@ -41,6 +41,28 @@ def deepseek_usage_limited(error: str | None) -> bool:
     return "429" in lowered or "rate limit" in lowered or "usage limit" in lowered
 
 
+def deepseek_temporarily_unavailable(error: str | None) -> bool:
+    """Classify provider/transport failures that should not replay stale alerts."""
+
+    lowered = (error or "").lower()
+    return deepseek_usage_limited(error) or any(
+        token in lowered
+        for token in (
+            "timed out",
+            "timeout",
+            "read operation timed out",
+            "connection reset",
+            "connection refused",
+            "temporary failure",
+            "service unavailable",
+            "http=500",
+            "http=502",
+            "http=503",
+            "http=504",
+        )
+    )
+
+
 def run_deepseek_reviewer(
     settings: NotificationSettings,
     prompt: str,

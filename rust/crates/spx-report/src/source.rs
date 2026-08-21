@@ -239,7 +239,7 @@ fn is_weekday(weekday: Weekday) -> bool {
 }
 
 fn is_quarter_minute(time: NaiveTime) -> bool {
-    time.minute() % 15 == 0
+    time.minute().is_multiple_of(15)
 }
 
 fn is_rth_session_time(time: NaiveTime) -> bool {

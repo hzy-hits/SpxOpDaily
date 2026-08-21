@@ -1136,6 +1136,65 @@ def test_iv_surface_history_emits_1h_shift_alert() -> None:
     kinds = {alert.kind for alert in alerts}
     assert "iv_surface_shift_1h" in kinds
     assert "atm_iv_change_1h" not in kinds
+    shift_alert = next(alert for alert in alerts if alert.kind == "iv_surface_shift_1h")
+    assert "+9.00 vol pts" in shift_alert.title
+    assert "+9.00 vol points" in shift_alert.detail
+    assert shift_alert.value == pytest.approx(0.09)
+
+
+def test_iv_surface_alerts_render_human_values_with_two_decimals() -> None:
+    now = datetime(2026, 7, 7, 3, 15, tzinfo=BJ_TZ)
+    base = make_surface(as_of=now)
+    expiry = replace(
+        base.expiries[0],
+        atm_iv_jump_5m=-0.076,
+        iv_surface_shift_5m=0.076,
+        put_skew_steepening_5m=0.126,
+    )
+    surface = replace(
+        base,
+        front_vs_next_atm_iv_gap=0.076,
+        expiries=(expiry,),
+    )
+    history = {
+        "expiries": [
+            {
+                "expiry": "20260707",
+                "iv_surface_level_change_1h": 0.076,
+                "atm_iv_change_1h": -0.043,
+                "surface_fit_quality": "raw_grid",
+            }
+        ]
+    }
+
+    alerts = iv_surface_alerts(surface, window=active_window(now), history_1h=history)
+    by_kind = {alert.kind: alert for alert in alerts}
+
+    assert "+7.60 vol pts" in by_kind["iv_term_gap"].title
+    assert "-7.60 vol pts" in by_kind["atm_iv_jump_5m"].title
+    assert "+0.13" in by_kind["put_skew_steepening_5m"].title
+    assert "+7.60 vol pts" in by_kind["iv_surface_shift_5m"].title
+    assert "+7.60 vol pts" in by_kind["iv_surface_shift_1h"].title
+    assert "-4.30 vol pts" in by_kind["atm_iv_change_1h"].title
+    assert by_kind["iv_surface_shift_1h"].value == pytest.approx(0.076)
+
+    delta_25_surface = replace(
+        surface,
+        expiries=(
+            replace(
+                expiry,
+                skew_method="delta_25",
+                put_skew_25d_change_5m=0.031,
+            ),
+        ),
+    )
+    delta_25_alerts = iv_surface_alerts(delta_25_surface, window=active_window(now))
+    delta_25_skew = next(
+        alert for alert in delta_25_alerts if alert.kind == "put_skew_steepening_5m"
+    )
+    assert "+3.10 vol pts" in delta_25_skew.title
+    assert "+3.10 vol points" in delta_25_skew.detail
+    assert delta_25_skew.value == pytest.approx(0.031)
 
 
 def test_run_persists_system_events_when_notifications_disabled(tmp_path, monkeypatch) -> None:

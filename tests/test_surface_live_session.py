@@ -556,6 +556,18 @@ def test_mid_session_missing_boundaries_are_never_backfilled(tmp_path: Path) -> 
         sequence=1,
     )
     boundaries_before = accumulator.store.load_boundaries(SESSION_DATE)
+    assert accumulator._boundaries
+    assert all(
+        set(row)
+        == {
+            "session_date",
+            "start_at",
+            "end_at",
+            "previous_boundary_sha256",
+            "artifact_sha256",
+        }
+        for row in accumulator._boundaries
+    )
     expected_ends = [
         iso(SESSION_WINDOW_START + timedelta(minutes=LIVE_BUCKET_MINUTES * (index + 1)))
         for index in range(_bucket_end_index(_at(13, 40)))

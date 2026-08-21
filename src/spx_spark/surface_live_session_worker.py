@@ -50,6 +50,21 @@ DEFAULT_POLL_SECONDS = 0.25
 MAX_CANDLE_SAMPLES = 4_096
 
 
+def _boundary_index(boundary: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one verified immutable boundary to its resident chain index."""
+
+    return {
+        key: boundary.get(key)
+        for key in (
+            "session_date",
+            "start_at",
+            "end_at",
+            "previous_boundary_sha256",
+            "artifact_sha256",
+        )
+    }
+
+
 def _session_buckets(
     start: datetime,
     end: datetime,
@@ -307,6 +322,11 @@ class LiveSessionAccumulator:
         self._active_date: date | None = None
         self._manifest: dict[str, Any] | None = None
         self._runtime: dict[str, Any] | None = None
+        # Keep only the hash-chain index resident.  A full session contains
+        # hundreds of immutable ~100 KiB surface boundaries; retaining every
+        # decoded payload here made the consolidated Core swap-thrash.  Full
+        # rows remain authoritative on disk and are loaded only for a surface
+        # request.
         self._boundaries: list[dict[str, Any]] = []
         self._input_identity: tuple[int, int, int, int] | None = None
         self._input_status = "waiting"
@@ -346,7 +366,9 @@ class LiveSessionAccumulator:
         self._active_date = session_date
         self._manifest = manifest
         self._runtime = runtime
-        self._boundaries = list(self.store.load_boundaries(session_date))
+        self._boundaries = [
+            _boundary_index(row) for row in self.store.iter_boundaries(session_date)
+        ]
         self._validate_persisted_contract()
         self._validate_boundary_chain(repair_runtime=True)
 
@@ -516,7 +538,9 @@ class LiveSessionAccumulator:
         self._active_date = session_date
         self._manifest = self.store.load_manifest(session_date)
         self._runtime = self.store.load_runtime(session_date)
-        self._boundaries = list(self.store.load_boundaries(session_date))
+        self._boundaries = [
+            _boundary_index(row) for row in self.store.iter_boundaries(session_date)
+        ]
 
     def _write_runtime(self, now: datetime) -> None:
         if self._active_date is None or self._runtime is None:
@@ -663,7 +687,7 @@ class LiveSessionAccumulator:
             )
             if stored is None:
                 raise LiveSessionError("live_boundary_write_lost")
-            self._boundaries.append(stored)
+            self._boundaries.append(_boundary_index(stored))
             existing_ends.add(iso(bucket_end))
             frozen_through = bucket_end
             changed = True
@@ -940,7 +964,7 @@ class LiveSessionAccumulator:
             active_date = self._active_date
             manifest = self._manifest
             runtime = copy.deepcopy(self._runtime)
-            boundaries = tuple(self._boundaries)
+            boundaries = self.store.load_boundaries(active_date)
         with self._projection_lock:
             return build_live_session_surface(
                 selector=selector,

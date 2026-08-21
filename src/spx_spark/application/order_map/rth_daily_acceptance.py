@@ -582,7 +582,17 @@ def _outbox_check(path: str | Path | None) -> OperationalCheck:
         )
     try:
         with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0]).lower()
+            # The unified spx.sqlite also stores the multi-gigabyte market
+            # ledger.  A database-wide quick_check made this daily notification
+            # acceptance exceed its 15 minute service budget.  Integrity of the
+            # notification owner is proven by a table-scoped check here; the
+            # targeted queries below additionally exercise its live indexes and
+            # rows without rescanning unrelated market tables.
+            quick_check = str(
+                connection.execute(
+                    "PRAGMA quick_check('notification_events')"
+                ).fetchone()[0]
+            ).lower()
             journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
             scope_params = (*human_channels, *internal_sources)
             dead_letters = int(

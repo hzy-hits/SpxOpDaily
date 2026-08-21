@@ -16,7 +16,9 @@ from spx_spark.analytics.options.strategy_payoff import (
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
     debit_vertical_reach_reasons,
+    iron_condor_payoff,
     management_policy_for_candidate,
+    risk_adjusted_cvar_objective,
     simulate_management_policy,
     vertical_economics,
     vertical_payoff,
@@ -51,6 +53,41 @@ from spx_spark.marketdata import (
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 from spx_spark.storage import LatestState
+
+
+def test_risk_adjusted_cvar_objective_reconciles_and_keeps_no_trade_solution() -> None:
+    objective = risk_adjusted_cvar_objective(
+        [-2.0, -1.0, 1.0, 2.0],
+        max_loss_points=4.0,
+        quote_width_points=0.2,
+        session_count=10,
+    )
+
+    assert objective["expected_pnl_points"] == 0.0
+    assert objective["cvar10_loss_points"] == 2.0
+    assert objective["model_uncertainty_points"] == 2.0
+    assert objective["objective_points"] == pytest.approx(-1.7)
+    assert objective["loss_probability"] == 0.5
+    assert objective["shadow_choice"] == "NO_TRADE"
+    assert objective["authority"] == "advisory_only"
+    assert objective["automatic_ordering"] is False
+
+
+def test_iron_condor_payoff_is_bounded_by_credit_and_wing_loss() -> None:
+    values = [
+        iron_condor_payoff(
+            settlement,
+            put_long=7680.0,
+            put_short=7690.0,
+            call_short=7810.0,
+            call_long=7820.0,
+            net_credit=2.0,
+        )
+        for settlement in (7600.0, 7685.0, 7750.0, 7815.0, 7900.0)
+    ]
+
+    assert min(values) == pytest.approx(-8.0)
+    assert max(values) == pytest.approx(2.0)
 
 
 @given(

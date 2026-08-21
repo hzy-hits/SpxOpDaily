@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from spx_spark.marketdata import as_utc, parse_timestamp
+from spx_spark.marketdata import (
+    FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
+    as_utc,
+    parse_timestamp,
+)
 
 
 class FailoverMode(str, Enum):
@@ -295,7 +299,10 @@ def new_entry_control_decision(
         reason = "unsafe_failover_mode"
     elif updated_at is None:
         reason = "control_timestamp_missing"
-    elif age_seconds is None or age_seconds < 0:
+    elif (
+        age_seconds is None
+        or age_seconds < -FUTURE_TIMESTAMP_TOLERANCE_SECONDS
+    ):
         reason = "control_timestamp_in_future"
     elif age_seconds > max_age_seconds:
         reason = "control_state_stale"

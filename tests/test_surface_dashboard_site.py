@@ -12,23 +12,20 @@ def read(relative: str) -> str:
     return (SITE / relative).read_text(encoding="utf-8")
 
 
-def test_site_exposes_live_snapshot_archived_frame_and_read_only_replay_api() -> None:
+def test_site_exposes_live_snapshot_and_retires_public_replay() -> None:
     nginx = read("nginx.conf")
 
     assert "location = /api/v1/snapshot" in nginx
     assert "location = /api/v1/replays/2026-07-17T183500Z" in nginx
-    assert (
-        "alias /usr/share/nginx/data/replays/2026-07-17T183500Z.json;"
-        in nginx
-    )
     assert "location ^~ /api/v1/replay/" in nginx
-    assert "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:;" in nginx
+    assert nginx.count("return 410;") >= 4
+    assert "alias /usr/share/nginx/data/replays/" not in nginx
+    assert "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:;" not in nginx
     assert (
         "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:/healthz;"
         in nginx
     )
     assert "proxy_hide_header Cache-Control;" in nginx
-    assert "private, no-cache" in nginx
     assert "location = /live" in nginx
     assert "location = /replay" in nginx
     assert "location ^~ /api/" in nginx
@@ -271,24 +268,21 @@ def test_replay_legacy_diagnostic_is_launched_from_a_fixed_audit_overlay() -> No
     assert "legacyDiagnosticEntryState" in app
 
 
-def test_memorable_entry_only_exposes_exact_oi_image_and_redirects_dashboard() -> None:
+def test_memorable_entry_exposes_images_live_redirect_and_retires_replay() -> None:
     entry = read("entry-nginx.conf")
     compose = read("compose.yaml")
 
     assert "listen 18084 default_server" in entry
     assert "return 302 https://code.zh3nyu.com/proxy/18082/live;" in entry
-    assert (
-        "return 302 https://code.zh3nyu.com/proxy/18082/replay$is_args$args;"
-        in entry
-    )
-    assert (
-        "return 302 https://code.zh3nyu.com/proxy/18082/replay?date=2026-07-17"
-        in entry
-    )
+    assert entry.count("return 410;") == 4
+    assert "proxy/18082/replay" not in entry
     assert "location /" in entry and "return 404;" in entry
     assert "location = /oi/latest.png" in entry
     assert "alias /usr/share/nginx/data/oi/latest.png;" in entry
     assert "location /oi/" not in entry
+    assert "location = /strategy-risk/latest.png" in entry
+    assert "alias /usr/share/nginx/data/strategy-risk/latest.png;" in entry
+    assert "location /strategy-risk/" not in entry
     assert '"127.0.0.1:18084:18084"' in compose
     assert ":/usr/share/nginx/data:ro" in compose
     assert ":/usr/share/nginx/replay-runtime:ro" in compose

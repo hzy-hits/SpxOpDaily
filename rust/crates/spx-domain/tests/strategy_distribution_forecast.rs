@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use spx_domain::{
-    DistributionActionAuthority, EstimateStatus, ProbabilityMeasure, ShadowAction,
+    DistributionActionAuthority, EstimateStatus, NonNegativeF64, ProbabilityMeasure, ShadowAction,
     StrategyDistributionForecastV1, Validate, canonical_json_hash,
 };
 
@@ -41,7 +41,7 @@ fn python_to_dict_fixture_is_strict_valid_and_canonical() {
     assert_eq!(forecast.p_event.session_count, Some(8));
     assert_eq!(forecast.p_event.n_raw, Some(40));
     assert_eq!(
-        forecast.p_event.n_effective.map(|value| value.get()),
+        forecast.p_event.n_effective.map(NonNegativeF64::get),
         Some(8.0)
     );
     assert_eq!(forecast.p_event.historical_sessions.len(), 8);

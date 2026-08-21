@@ -45,6 +45,9 @@ def test_post_close_timer_warms_only_latest_landing_surface() -> None:
     assert '"bucket_minutes=5"' in warmer
     assert '"price_step=5"' in warmer
     assert "/session-surface" in warmer
+    assert "--max-time 30" in warmer
+    assert "--max-time 60" in warmer
+    assert "--max-time 180" in warmer
     assert "/trend?" not in warmer
     assert "/frame?" not in warmer
     warm_unit = read("systemd/spx-spark-surface-replay-warm.service")

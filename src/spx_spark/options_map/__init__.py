@@ -21,7 +21,9 @@ from spx_spark.options_map.render import (
     format_number,
     print_options_map,
     render_open_interest_mirror_svg,
+    render_strategy_risk_svg,
     write_open_interest_mirror_png,
+    write_strategy_risk_png,
 )
 
 __all__ = [
@@ -36,7 +38,9 @@ __all__ = [
     "parse_args",
     "print_options_map",
     "render_open_interest_mirror_svg",
+    "render_strategy_risk_svg",
     "write_open_interest_mirror_png",
+    "write_strategy_risk_png",
     "run",
     "select_underlier",
 ]

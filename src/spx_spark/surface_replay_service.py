@@ -132,7 +132,18 @@ class ReplayCatalog:
         self._generation_lock = threading.BoundedSemaphore(value=1)
         self._trend_lock = threading.BoundedSemaphore(value=1)
         self._session_surface_lock = threading.BoundedSemaphore(value=1)
-        self._session_surface_build_cache = SessionSurfaceBuildCache()
+        # Replay artifacts are durably cached on disk.  The consolidated Core
+        # only needs a small adjacent-playhead working set; the class defaults
+        # are appropriate for a standalone replay process but retained several
+        # hundred decoded frames/kernels and pushed the live decision process
+        # into cgroup swap.
+        self._session_surface_build_cache = SessionSurfaceBuildCache(
+            max_kernel_entries=16,
+            max_frame_entries=32,
+            max_spx_sessions=2,
+            max_gth_frame_entries=32,
+            max_gth_contexts=2,
+        )
         self._source_hash_lock = threading.Lock()
         self._source_hash_memory: OrderedDict[str, dict[str, str]] = OrderedDict()
         self._scan_lock = threading.Lock()

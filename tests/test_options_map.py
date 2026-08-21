@@ -32,6 +32,7 @@ from spx_spark.options_map import (
     interpolated_atm_iv,
     pair_by_strike,
     render_open_interest_mirror_svg,
+    render_strategy_risk_svg,
     select_underlier,
     signed_gex,
     structure_quality_ok,
@@ -39,6 +40,7 @@ from spx_spark.options_map import (
     wing_iv_at_delta,
     zero_gamma_spot_scan,
     write_open_interest_mirror_png,
+    write_strategy_risk_png,
 )
 from spx_spark.storage import LatestState
 
@@ -149,6 +151,190 @@ def test_open_interest_mirror_png_atomically_replaces_one_bark_safe_file(tmp_pat
     assert output.stat().st_mode & 0o777 == 0o600
     assert list(output.parent.glob(".*.svg")) == []
     assert list(output.parent.glob(".*.png")) == []
+
+
+def _strategy_risk_decision() -> dict[str, object]:
+    return {
+        "decision_id": "strategy:test-risk",
+        "decision_type": "NO_TRADE",
+        "available_at": "2026-08-21T15:00:00+00:00",
+        "action_authority": "none",
+        "automatic_ordering": False,
+        "candidate": None,
+        "market_facts": {
+            "spot": {"spx": 7750.0},
+            "structure": {
+                "put_wall": 7690.0,
+                "call_wall": 7810.0,
+                "zero_gamma": 7755.0,
+                "q_p10": 7700.0,
+                "q_median": 7752.0,
+                "q_p90": 7800.0,
+                "q_clipped_mass_fraction": 0.02,
+                "q_local_mass_5pt": {
+                    "7730": 0.04,
+                    "7740": 0.08,
+                    "7750": 0.12,
+                    "7760": 0.09,
+                    "7770": 0.05,
+                },
+            },
+        },
+        "iron_condor_map": {
+            "status": "ready",
+            "strategy_type": "IRON_CONDOR",
+            "strikes": [7680.0, 7690.0, 7810.0, 7820.0],
+            "legs": [
+                {"strike": 7680.0, "right": "P"},
+                {"strike": 7690.0, "right": "P"},
+                {"strike": 7810.0, "right": "C"},
+                {"strike": 7820.0, "right": "C"},
+            ],
+            "quote": {"bid": 2.0, "ask": 2.6, "credit": 2.0},
+            "economics": {
+                "max_gain_points": 2.0,
+                "max_loss_points": 8.0,
+                "breakeven_low": 7688.0,
+                "breakeven_high": 7812.0,
+            },
+            "path_distribution": {
+                "status": "estimated_uncalibrated",
+                "method": "physical_path_iron_condor_clear_1230.v1",
+                "n_paths": 40,
+                "n_sessions": 12,
+                "p10_net_pnl": -420.0,
+                "p50_net_pnl": 80.0,
+                "p90_net_pnl": 190.0,
+                "pnl_histogram": [
+                    {
+                        "lower_net_pnl": -500.0,
+                        "upper_net_pnl": -250.0,
+                        "probability": 0.2,
+                    },
+                    {
+                        "lower_net_pnl": -250.0,
+                        "upper_net_pnl": 0.0,
+                        "probability": 0.3,
+                    },
+                    {
+                        "lower_net_pnl": 0.0,
+                        "upper_net_pnl": 200.0,
+                        "probability": 0.5,
+                    },
+                ],
+                "risk_objective": {
+                    "status": "available",
+                    "formula": "E[PnL] - 0.50*CVaR10 - 1.00*quote_width - 0.25*uncertainty",
+                    "expected_pnl_points": 0.4,
+                    "cvar10_loss_points": 4.2,
+                    "quote_width_points": 0.6,
+                    "model_uncertainty_points": 3.2,
+                    "objective_points": -3.1,
+                    "loss_probability": 0.5,
+                    "shadow_choice": "NO_TRADE",
+                },
+            },
+        },
+    }
+
+
+def test_strategy_risk_sheet_separates_q_payoff_and_physical_loss() -> None:
+    svg = render_strategy_risk_svg(_strategy_risk_decision())
+
+    assert "SPXW 交易策略风险" in svg
+    assert "铁鹰结构图 · 无交易授权" in svg
+    assert "期权隐含结算分布 Q（5点分箱）" in svg
+    assert "到期损益（按保守入场价）" in svg
+    assert "历史路径净损益（执行管理规则后）" in svg
+    assert "K1 7680" in svg
+    assert "K2 7690" in svg
+    assert "K3 7810" in svg
+    assert "K4 7820" in svg
+    assert "亏损概率 50.0%" in svg
+    assert "暂不交易 · 路径亏损概率 50.0%" in svg
+    assert "Q 是期权隐含的风险中性结算分布，不是真实涨跌概率" in svg
+    assert "自动下单关闭" in svg
+
+
+@pytest.mark.parametrize(
+    ("candidate", "label"),
+    [
+        (
+            {
+                "strategy_type": "CALL_DEBIT_VERTICAL",
+                "right": "C",
+                "long": {"strike": 7750.0, "right": "C"},
+                "short": {"strike": 7760.0, "right": "C"},
+                "quote": {"bid": 0.6, "ask": 0.8},
+                "economics": {
+                    "max_gain_points": 9.2,
+                    "max_loss_points": 0.8,
+                    "breakeven_spx": 7750.8,
+                },
+            },
+            "Call 方向价差",
+        ),
+        (
+            {
+                "strategy_type": "CALL_BUTTERFLY",
+                "right": "C",
+                "center": 7750.0,
+                "width": 10.0,
+                "legs": [
+                    {"strike": 7740.0, "right": "C"},
+                    {"strike": 7750.0, "right": "C"},
+                    {"strike": 7760.0, "right": "C"},
+                ],
+                "quote": {"bid": 0.5, "ask": 0.9},
+                "economics": {
+                    "max_gain_points": 9.1,
+                    "max_loss_points": 0.9,
+                    "breakeven_low": 7740.9,
+                    "breakeven_high": 7759.1,
+                },
+            },
+            "Call 蝶式",
+        ),
+    ],
+)
+def test_strategy_risk_sheet_supports_directional_and_butterfly_payoffs(
+    candidate, label
+) -> None:
+    decision = _strategy_risk_decision()
+    path = decision["iron_condor_map"]["path_distribution"]
+    candidate = {**candidate, "edge": {"path_distribution": path}}
+    decision.update(
+        {
+            "candidate": candidate,
+            "decision_type": candidate["strategy_type"],
+            "action_authority": "manual",
+        }
+    )
+
+    svg = render_strategy_risk_svg(decision)
+
+    assert label in svg
+    assert "人工候选 · 自动下单关闭" in svg
+    assert "当前没有可展示的结构损益。" not in svg
+
+
+def test_strategy_risk_png_uses_the_shared_atomic_writer(tmp_path) -> None:
+    output = tmp_path / "strategy-risk" / "latest.png"
+
+    def convert(svg_path, png_path) -> None:
+        svg = svg_path.read_text(encoding="utf-8")
+        assert "SPXW 交易策略风险" in svg
+        png_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"strategy-risk")
+
+    written = write_strategy_risk_png(
+        _strategy_risk_decision(),
+        output,
+        converter=convert,
+    )
+
+    assert written == output
+    assert output.read_bytes().endswith(b"strategy-risk")
+    assert output.stat().st_mode & 0o777 == 0o600
 
 
 def test_time_to_expiry_uses_early_close_session() -> None:

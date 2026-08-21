@@ -481,9 +481,14 @@ def test_notifier_consumes_data_quality_alert_without_llm(tmp_path, monkeypatch)
     assert second.selected_count == 0
 
 
-def test_notifier_keeps_high_iv_pending_when_reviewer_is_rate_limited(
+@pytest.mark.parametrize(
+    "review_error",
+    ("429 usage limit reached", "The read operation timed out"),
+)
+def test_notifier_consumes_high_iv_when_reviewer_is_temporarily_unavailable(
     tmp_path,
     monkeypatch,
+    review_error: str,
 ) -> None:
     attempts = 0
 
@@ -495,8 +500,8 @@ def test_notifier_keeps_high_iv_pending_when_reviewer_is_rate_limited(
                 sink="deepseek_reviewer",
                 attempted=True,
                 ok=False,
-                exit_code=429,
-                error="429 usage limit reached",
+                exit_code=429 if review_error.startswith("429") else None,
+                error=review_error,
             ),
             "",
         )
@@ -533,19 +538,19 @@ def test_notifier_keeps_high_iv_pending_when_reviewer_is_rate_limited(
     assert first.selected_count == 1
     assert first.sent_count == 0
     assert [sink.sink for sink in first.sinks] == ["deepseek_reviewer"]
+    assert first.outcome == "consumed"
 
     second = notify_payload(
         payload,
         settings=settings,
         now=now + timedelta(seconds=60),
     )
-    assert second.selected_count == 1
+    assert second.selected_count == 0
     assert second.sent_count == 0
-    assert attempts == 2
+    assert attempts == 1
     entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert [entry["outcome"] for entry in entries] == [
-        "review_failed_pending",
-        "review_failed_pending",
+        "review_unavailable_suppressed",
     ]
     assert all(entry["candidates"][0]["kind"] == "iv_term_gap" for entry in entries)
 
