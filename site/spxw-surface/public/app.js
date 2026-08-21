@@ -351,8 +351,7 @@ const app = {
 };
 
 function initialModeFromQuery() {
-  const view = new URLSearchParams(window.location.search).get("view");
-  return /\/(?:replay|friday)\/?$/.test(window.location.pathname) || ["replay", "friday"].includes(view)
+  return /\/(?:replay|friday)\/?$/.test(window.location.pathname)
     ? "replay"
     : "live";
 }

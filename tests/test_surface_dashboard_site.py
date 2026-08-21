@@ -19,6 +19,7 @@ def test_site_exposes_live_snapshot_and_retires_public_replay() -> None:
     assert "location = /api/v1/replays/2026-07-17T183500Z" in nginx
     assert "location ^~ /api/v1/replay/" in nginx
     assert nginx.count("return 410;") >= 4
+    assert "$arg_view ~* ^(replay|friday)$" in nginx
     assert "alias /usr/share/nginx/data/replays/" not in nginx
     assert "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:;" not in nginx
     assert (
@@ -123,7 +124,8 @@ def test_frontend_keeps_live_and_replay_clock_contracts_separate() -> None:
     assert 'id="replay-next"' in page
     assert '<option value="4">4×</option>' in page
     assert '<option value="live">' in page
-    assert '<option value="replay">' in page
+    assert '<option value="replay">' not in page
+    assert '["replay", "friday"].includes(view)' not in app
     assert "2026-07-17T183500Z" not in app
     assert "frame contract not yet verified" in app
     assert 'window.history[push ? "pushState" : "replaceState"]' in app
