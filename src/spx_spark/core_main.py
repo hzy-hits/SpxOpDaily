@@ -4,12 +4,10 @@ import asyncio
 import signal
 import threading
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
 from datetime import datetime, timezone
 from functools import partial
-import uvicorn
-from spx_spark import alert_engine, provider_failover_controller, surface_dashboard
-from spx_spark.app_settings import AppSettings, get_settings
+from spx_spark import alert_engine, provider_failover_controller
+from spx_spark.app_settings import get_settings
 from spx_spark.application.globex_trend import service as globex_trend
 from spx_spark.application.realtime.composition import run_realtime_engine_cycle
 from spx_spark.application.runtime import (
@@ -24,7 +22,6 @@ from spx_spark.config import StorageSettings
 from spx_spark.logging_setup import configure_logging
 from spx_spark.settings import current_app_settings
 from spx_spark.strategy import steven
-from spx_spark.web.live_api import create_default_app
 async def _run_owner(name: str, runner: Callable[[], int],
                      shutdown: asyncio.Event) -> None:
     code = await asyncio.to_thread(runner)
@@ -42,25 +39,6 @@ async def _run_periodic(name: str, runner: Callable[[], int],
             await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
         except TimeoutError:
             pass
-async def _serve_api(settings: AppSettings, shutdown: asyncio.Event) -> None:
-    server = uvicorn.Server(uvicorn.Config(create_default_app(),
-                            uds=str(settings.core_socket_path), access_log=False,
-                            log_config=None))
-    server.capture_signals = lambda: nullcontext()  # type: ignore[method-assign]
-    serve_task = asyncio.create_task(server.serve())
-    stop_task = asyncio.create_task(shutdown.wait())
-    try:
-        done, _pending = await asyncio.wait((serve_task, stop_task),
-                                            return_when=asyncio.FIRST_COMPLETED)
-        if serve_task in done and not shutdown.is_set():
-            await serve_task
-            raise RuntimeError("spx-core API exited unexpectedly")
-        server.should_exit = True
-        await serve_task
-    finally:
-        server.should_exit = True
-        stop_task.cancel()
-
 def _regime_publisher() -> Callable[[Mapping[str, object], Mapping[str, object]], None]:
     storage = StorageSettings.from_env()
     policy = current_app_settings().market_data
@@ -82,7 +60,6 @@ async def main() -> None:
     settings = get_settings()
     configure_logging("spx-core", settings.log_level)
     settings.core_lock_root.mkdir(parents=True, exist_ok=True)
-    settings.core_socket_path.parent.mkdir(parents=True, exist_ok=True)
     stop_event = threading.Event()
     shutdown = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -117,10 +94,6 @@ async def main() -> None:
             tasks.create_task(_run_owner("market_features_hot_worker", partial(
                 feature_runner, stop_event=stop_event, lock_path=str(
                     settings.core_lock_root / market_features_hot_worker.LOCK_FILE_NAME)), shutdown))
-            tasks.create_task(_run_owner("surface_dashboard", partial(
-                surface_dashboard.run_loop, storage_settings=storage,
-                interval_seconds=5.0, output_path=f"{storage.data_root}/published/spxw-surface/snapshot.json",
-                stop_event=stop_event), shutdown))
             if runtime.provider_failover_enabled:
                 tasks.create_task(_run_periodic(
                     "provider_failover", partial(
@@ -159,6 +132,5 @@ async def main() -> None:
                 tasks.create_task(_run_periodic(
                     "steven", partial(steven.run, ["--json"]),
                     runtime.alert_interval_seconds, shutdown))
-            tasks.create_task(_serve_api(settings, shutdown))
     finally:
         request_shutdown()

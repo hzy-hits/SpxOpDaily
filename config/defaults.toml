@@ -1,4 +1,3 @@
 data_root = "/srv/data/spx-spark"
 log_level = "INFO"
-core_socket_path = "/tmp/spx-core.sock"
 core_lock_root = "/tmp"

@@ -175,7 +175,7 @@ def test_core_cutover_retires_all_legacy_realtime_units() -> None:
     installer = read("scripts/install-spx-spark-services.sh")
 
     assert ".venv/bin/spx core run" in core
-    assert "runtime/core-api.sock" in core
+    assert "runtime/core-api.sock" not in core
     assert "enable spx-core.service" in installer
     assert "restart spx-core.service" in installer
     for unit in (
@@ -216,12 +216,12 @@ def test_notification_delivery_uses_the_single_huey_worker() -> None:
     assert not (ROOT / "scripts/run-schwab-reauth-reminder.sh").exists()
 
 
-def test_core_publishes_the_surface_projection_for_its_live_api() -> None:
+def test_core_does_not_run_the_retired_surface_projection_or_api() -> None:
     core = read("src/spx_spark/core_main.py")
 
-    assert "surface_dashboard.run_loop" in core
-    assert "published/spxw-surface/snapshot.json" in core
-    assert "from spx_spark.web.live_api import create_default_app" in core
+    assert "surface_dashboard.run_loop" not in core
+    assert "published/spxw-surface/snapshot.json" not in core
+    assert "spx_spark.web.live_api" not in core
 
 
 def test_compaction_runner_has_a_non_blocking_whole_run_lock() -> None:

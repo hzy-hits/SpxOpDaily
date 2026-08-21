@@ -349,14 +349,13 @@ ranking, or limits. Delivered snapshots are persisted under
 `data/features/spxw_0dte_greeks_reference/` and summarized in the post-close
 review. See [docs/zero-dte-greeks-reference.md](docs/zero-dte-greeks-reference.md).
 
-The read-only `SPXW 0DTE Decision Surface` projects the front and next actual
-SPXW expiries across a bounded spot-by-time grid. It provides OI- and
-volume-weighted signed/gross Gamma, Charm, and Vanna views with explicit
-coverage and freshness. Signed views use a call-positive / put-negative proxy;
-dealer positioning, participant identity, and signed flow remain unknown. The
-private dashboard is served behind code-server on port `18082`; see
-[docs/spxw-surface-dashboard.md](docs/spxw-surface-dashboard.md) for the model,
-safety contract, frozen Friday replay, and short `spx.zh3nyu.com` entry point.
+The former read-only `SPXW 0DTE Decision Surface` Live/Replay website is
+retired. Production no longer runs its projection loop, FastAPI surface API,
+Nginx dashboard container or replay warmer. Historical artifacts and explicit
+research tooling remain available, while `spx.zh3nyu.com` serves only the fixed
+OI and strategy-risk PNGs used by notifications. See
+[site/spxw-surface/README.md](site/spxw-surface/README.md) for the reduced
+deployment boundary.
 
 The same 5-second SPX/ES path monitor now freezes the pre-move flip band and
 call wall. Two fresh synchronized confirmations can produce a short-lived

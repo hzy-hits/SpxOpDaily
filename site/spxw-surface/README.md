@@ -1,188 +1,40 @@
-# SPXW Exposure Surface Site
+# SPXW Notification Image Entry
 
-This directory serves the live, read-only SPXW exposure-surface projection. The
-public Session Replay page and replay HTTP API are retired; the causal replay
-implementation and data remain available internally for research and tests. It
-does not expose account data, order state, or the general `latest/` directory.
+The Live Surface and Session Replay websites are retired. Production no longer
+runs the `spxw-surface` dashboard container, the Core surface projection loop,
+the Live/Replay HTTP API, or the replay warmer timer.
 
-## Access
+The remaining `spxw-surface-entry` container exists only for two fixed,
+account-free notification images:
 
-The nginx sidecar shares the existing code-server network namespace and listens
-on port `18082`:
+- `https://spx.zh3nyu.com/oi/latest.png`
+- `https://spx.zh3nyu.com/strategy-risk/latest.png`
 
-`https://code.zh3nyu.com/proxy/18082/live`
+Each exact-match route exposes one atomically replaced PNG. Parent directories,
+JSON projections, account data, order state and directory listings remain
+unavailable. The strategy-risk sheet is advisory-only and cannot change
+strategy authority or enable automatic ordering.
 
-The memorable shortcut redirects into that authenticated code-server route:
+Dashboard aliases `/`, `/live`, `/live/`, `/replay`, `/replay/`, `/sessions`
+and `/friday` return HTTP 410. All other unknown routes return 404.
 
-- live: `https://spx.zh3nyu.com/`
-- retired replay aliases (`/replay`, `/replay/`, `/sessions`, `/friday`): HTTP 410
-
-The shortcut service exposes no dashboard or API data. It listens only on host
-loopback port `18084` and returns redirects; code-server still owns the login
-gate for the destination. The sole exception is the derived, account-free OI
-images at `https://spx.zh3nyu.com/oi/latest.png` and
-`https://spx.zh3nyu.com/strategy-risk/latest.png`, used by Bark rich
-notifications. The exact-match nginx routes expose two atomically replaced
-PNGs; parent directories, JSON projections, account data, and order state
-remain unavailable. The strategy-risk sheet is advisory-only: it renders the
-latest pushed manual candidate, Q local mass, expiry payoff, physical-path PnL
-and the frozen shadow objective without changing strategy authority. It is
-replaced only by the next Trade Ready strategy card, so ordinary NO_TRADE
-status cycles do not change the linked image.
-
-The corresponding managed-tunnel ingress is intentionally path-free:
+The managed-tunnel ingress remains path-free:
 
 ```yaml
 - hostname: spx.zh3nyu.com
   service: http://127.0.0.1:18084
 ```
 
-Keep this rule before the final catch-all ingress and validate both the tunnel
-rule and the unauthenticated 302/401 chain after recovery on a new host.
-
-Live Cockpit polls the leased Session Surface endpoint every five seconds:
-
-```text
-api/v1/live/session-surface?role=front&weighting=oi_weighted&bucket_minutes=1&price_step=5
-```
-
-The host accumulator validates the publisher self hash, freezes completed
-one-minute Live columns durably, and serves the shared Live/Replay matrix contract
-over `runtime/core-api.sock`. The legacy rolling scenario diagnostic reads
-`api/v1/snapshot` only when its drawer is opened. That endpoint maps only to the
-dedicated publisher output:
-
-`/srv/data/spx-spark/data/published/spxw-surface/snapshot.json`
-
-Live schema 2 covers the complete SPXW session: preceding-day 20:15 ET GTH,
-the 09:25–09:30 scheduled closed gap, and RTH through the actual close. GTH uses
-the IBKR partial chain with a dashed, degraded chain-implied SPX reference; RTH
-requires direct SPX. A GTH lease is never carried across the gap and relabeled
-as RTH. Replay schema 2 keeps its independent v5 ES-basis reference contract.
-
-The service and signed payload retain that complete immutable session grid. The
-Live browser presents it through an auto-following two-hour viewport: 90 minutes
-of history and a 30-minute horizon. Drag Gamma or Charm horizontally, or use the
-arrow keys, to browse the session; `Home` and **回到现在** restore auto-follow.
-Viewport movement never extends a lease or manufactures future values: expired
-and unavailable intervals remain Missing. Replay continues to show its full
-session clock.
-
-The public replay API returns HTTP 410. Internal tooling may continue to use the
-same read-only resources directly through `runtime/core-api.sock`:
-
-- `api/v1/replay/sessions`
-- `api/v1/replay/sessions/YYYY-MM-DD/timeline?step_minutes=5`
-- `api/v1/replay/sessions/YYYY-MM-DD/trend?role=front&weighting=oi_weighted&metric=signed_gamma`
-- `api/v1/replay/sessions/YYYY-MM-DD/frame?at=...`
-
-The compact trend artifact combines the observed intraday SPX path with the
-zero-forward-minute Gamma slice from each validated keyframe. The browser draws
-a smooth, approximately 30-fps playhead over those real observations; 30 fps is
-rendering frequency, not market-data frequency. SPX is held from the latest
-known observation and Gamma is held only through its declared validity window,
-with gaps shown explicitly. The separate spot-by-forward-time surface is a
-collapsed scenario diagnostic. The Y-axis uses a first-observation fixed window
-instead of future session extrema. Gamma intensity is normalized per keyframe,
-so its sign and location are comparable over time but color depth is not an
-absolute cross-time magnitude.
-
-The host service discovers sessions from Parquet, stores an atomic five-minute
-bucket catalog, and generates policy-v3 frames on demand. Actual
-frame cutoffs are the last complete observed chain in each bucket, so their
-seconds need not be `00`. Derived state is stored under:
-
-```text
-/srv/data/spx-spark/data/published/spxw-surface/replay-catalog/
-/srv/data/spx-spark/data/published/spxw-surface/replay-cache/policy=v3/lookback=*/projection=*/source=*/
-/srv/data/spx-spark/data/published/spxw-surface/trend-cache/
-```
-
-The original checked Friday v2 replay remains stored internally at:
-
-`/srv/data/spx-spark/data/published/spxw-surface/replays/2026-07-17T183500Z.json`
-
-The former exact archival HTTP endpoint and every `/api/v1/replay/` path return
-410. Unknown routes and every other `/api/` or `/data/` path return 404. Replay
-mode stops the live polling loop and cannot be mistaken for a valid live lease.
-
-Historical Schwab data lacks a real response-finished/availability clock.
-Policy v3 therefore labels every frame `bounded_not_proven`, reports the
-availability clock as unavailable, still filters all five known clocks, and
-requires zero selected lookahead rows. A session appears only after a two-hour
-post-close grace period, but that is not proof that compaction finished; the
-catalog reports `data_finalization_proven=false`. Do not relabel these artifacts
-as strict/proven point-in-time data or finalized source data.
-
-The host directory, rather than the JSON inode, is mounted because the publisher
-uses atomic rename. The file remains owner-only (`0600`); nginx runs as the same
-configurable UID/GID and does not require broader permissions.
-
-## Run
-
-The live producer must publish at least one validated GTH or RTH snapshot before
-the Session Canvas endpoint can return 200. Weekends, holidays, the scheduled
-closed gap, and a missing or expired lease remain fail-closed. Install the
-consolidated Core service and the replay warmer first:
+## Deployment
 
 ```bash
-install -m 0644 \
-  /home/ubuntu/spx-spark/systemd/spx-core.service \
-  /home/ubuntu/spx-spark/systemd/spx-spark-surface-replay-warm.service \
-  /home/ubuntu/spx-spark/systemd/spx-spark-surface-replay-warm.timer \
-  /home/ubuntu/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now spx-core.service
-systemctl --user enable --now spx-spark-surface-replay-warm.timer
-curl --unix-socket \
-  /srv/data/spx-spark/data/published/spxw-surface/runtime/core-api.sock \
-  http://localhost/healthz
-```
-
-Then start or recreate the read-only sidecars so nginx receives the runtime
-socket-directory mount:
-
-```bash
-docker compose -f /home/ubuntu/spx-spark/site/spxw-surface/compose.yaml up -d
+docker compose -f /home/ubuntu/spx-spark/site/spxw-surface/compose.yaml \
+  up -d --remove-orphans spxw-surface-entry
 docker compose -f /home/ubuntu/spx-spark/site/spxw-surface/compose.yaml ps
 ```
 
-The consolidated Core owns the replay routes; the warmer runs with low CPU/IO
-weight and a single advisory generation
-lock. The persistent coordination inode is never removed as a stale-lock fix;
-kernel `flock` ownership is released when the process exits. It
-does not expose TCP; nginx connects through
-`published/spxw-surface/runtime/core-api.sock`. Nginx mounts both the publish and
-runtime directories read-only. The timer checks the newest post-close-grace
-session catalog at 21:20, 22:20, and 23:20 UTC on weekdays (covering New York
-DST), then materializes the default compact trend artifact. It does not touch
-live strategy state. Frame and trend URLs use private revalidation.
-
-For a non-production manual QA directory, set `SPXW_SURFACE_PUBLISH_DIR` and
-`SPXW_SURFACE_REPLAY_RUNTIME_DIR` before starting Compose. Test fixtures must
-never be copied into `public/`; unavailable data produces an empty state.
-
-The archival one-frame generator remains available for an explicitly named
-cutoff:
-
-```bash
-.venv/bin/python -m spx_spark.surface_dashboard_replay \
-  --as-of 2026-07-17T18:35:00Z \
-  --data-root /srv/data/spx-spark/data \
-  --output-path /srv/data/spx-spark/data/published/spxw-surface/replays/2026-07-17T183500Z.json
-```
-
-The generator refuses to overwrite an existing replay. `--force` is reserved
-for an explicitly audited replacement. Session Replay never uses `--force`;
-lookback, projection-policy, or source-version changes write to a new cache
-namespace.
-
-Live-v2 one-minute state is retained under
-`published/spxw-surface/live/policy=live-v2/bucket=1m/session=YYYY-MM-DD/`. The
-former five-minute v2 namespace remains at
-`published/spxw-surface/live/policy=live-v2/session=YYYY-MM-DD/`, and v1 remains
-at `published/spxw-surface/live/session=YYYY-MM-DD/`. Do not delete any namespace
-during restart or rollback: the
-immutable boundaries are evidence that later snapshots did not rewrite earlier
-columns. Operational details and the exact clock/proxy contract are documented in
-[`docs/spxw-live-session-surface-2026-07-19.md`](../../docs/spxw-live-session-surface-2026-07-19.md).
+Verify the two images return 200, retired dashboard paths return 410, and the
+entry container is healthy. Historical surface and replay data are deliberately
+retained under `/srv/data/spx-spark/data/published/spxw-surface`; retirement does
+not authorize deleting those artifacts. Replay modules remain available as
+explicit internal research tooling but have no production HTTP owner or warmer.

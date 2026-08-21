@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 
 
@@ -12,12 +10,12 @@ def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_replay_routes_share_the_resource_bounded_core_socket() -> None:
+def test_core_keeps_resource_bounds_without_the_retired_surface_socket() -> None:
     unit = read("systemd/spx-core.service")
 
     assert ".venv/bin/spx core run" in unit
-    assert "runtime/core-api.sock" in unit
-    assert "ExecStartPre=/usr/bin/install -d -m 0700" in unit
+    assert "runtime/core-api.sock" not in unit
+    assert "ExecStartPre=/usr/bin/install -d -m 0700" not in unit
     assert "MemoryMax=2G" in unit
     assert "ProtectSystem=strict" in unit
     assert "PrivateNetwork=true" in unit
@@ -25,128 +23,12 @@ def test_replay_routes_share_the_resource_bounded_core_socket() -> None:
     assert "ReadWritePaths=/srv/data/spx-spark/data %t" in unit
 
 
-def test_post_close_timer_warms_only_latest_landing_surface() -> None:
-    timer = read("systemd/spx-spark-surface-replay-warm.timer")
-    warmer = read("scripts/warm-spxw-surface-replay-catalog.sh")
-
-    assert "21:20:00 UTC" in timer
-    assert "22:20:00 UTC" in timer
-    assert "23:20:00 UTC" in timer
-    assert "$RUNTIME_DIR/core-api.sock" in warmer
-    assert "replay-api.sock" not in warmer
-    assert 'latest_session="${session_dates[0]}"' in warmer
-    assert 'latest_landing_time="${frame_times[-1]}"' in warmer
-    assert "session finalizer is active" in warmer
-    assert "/timeline?step_minutes=5" in warmer
-    assert 'payload.get("surface_frames") or payload.get("frames", [])' in warmer
-    assert 'row["at"]' in warmer
-    assert '"role=front"' in warmer
-    assert '"weighting=oi_weighted"' in warmer
-    assert '"bucket_minutes=5"' in warmer
-    assert '"price_step=5"' in warmer
-    assert "/session-surface" in warmer
-    assert "--max-time 30" in warmer
-    assert "--max-time 60" in warmer
-    assert "--max-time 180" in warmer
-    assert "/trend?" not in warmer
-    assert "/frame?" not in warmer
-    warm_unit = read("systemd/spx-spark-surface-replay-warm.service")
-    assert "EnvironmentFile=" not in warm_unit
-    assert "PrivateNetwork=true" in warm_unit
-    assert "RestrictAddressFamilies=AF_UNIX" in warm_unit
-
-
-def test_replay_shell_entrypoints_parse() -> None:
-    for relative in (
-        "scripts/warm-spxw-surface-replay-catalog.sh",
-    ):
-        subprocess.run(
-            ["bash", "-n", str(ROOT / relative)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-
-def test_catalog_warmer_lands_latest_session_once(
-    tmp_path: Path,
-) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_curl = fake_bin / "curl"
-    fake_curl.write_text(
-        """#!/usr/bin/env python3
-import json
-import os
-from pathlib import Path
-import sys
-
-args = sys.argv[1:]
-url = next(value for value in args if value.startswith("http://"))
-log = Path(os.environ["WARM_TEST_LOG"])
-if url.endswith("/api/v1/replay/sessions"):
-    print(json.dumps({"sessions": [
-        {"session_date": "2026-07-17"},
-        {"session_date": "2026-07-16"},
-    ]}))
-elif url.endswith("/healthz"):
-    print(json.dumps({"status": "ok"}))
-elif "/timeline?" in url:
-    session = url.split("/sessions/", 1)[1].split("/", 1)[0]
-    surface_frames = (
-        ["2026-07-17T00:20:00Z", "2026-07-17T14:35:00Z"]
-        if session == "2026-07-17"
-        else ["2026-07-16T00:20:00Z", "2026-07-16T14:30:00Z"]
-    )
-    with log.open("a", encoding="utf-8") as stream:
-        stream.write(f"timeline:{session}\\n")
-    print(json.dumps({
-        "frames": [{"at": "2099-01-01T00:00:00Z"}],
-        "surface_frames": [{"at": value} for value in surface_frames],
-    }))
-else:
-    session = url.split("/sessions/", 1)[1].split("/", 1)[0]
-    encoded = [
-        args[index + 1]
-        for index, value in enumerate(args)
-        if value == "--data-urlencode"
-    ]
-    at = next(value.removeprefix("at=") for value in encoded if value.startswith("at="))
-    with log.open("a", encoding="utf-8") as stream:
-        stream.write(f"surface:{session}:{at}\\n")
-    print("{}")
-""",
-        encoding="utf-8",
-    )
-    fake_curl.chmod(0o755)
-    log = tmp_path / "warm.log"
-    env = os.environ.copy()
-    env.update(
-        {
-            "PATH": f"{fake_bin}:{env['PATH']}",
-            "WARM_TEST_LOG": str(log),
-            "MARKET_DATA_DATA_ROOT": str(tmp_path / "data"),
-        }
-    )
-
-    completed = subprocess.run(
-        ["bash", str(ROOT / "scripts/warm-spxw-surface-replay-catalog.sh")],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        "timeline:2026-07-17",
-        "surface:2026-07-17:2026-07-17T14:35:00Z",
-    ]
-    assert "warmed latest replay timeline and landing surface: 2026-07-17" in completed.stdout
-
-
-def test_replay_transport_has_one_fastapi_factory_and_no_console_script() -> None:
+def test_replay_transport_remains_internal_tooling_only() -> None:
     project = read("pyproject.toml")
     api = read("src/spx_spark/web/replay_api.py")
 
     assert "def create_app(" in api
     assert "spx-spark-surface-replay-service" not in project
+    assert not (ROOT / "scripts" / "warm-spxw-surface-replay-catalog.sh").exists()
+    assert not (ROOT / "systemd" / "spx-spark-surface-replay-warm.service").exists()
+    assert not (ROOT / "systemd" / "spx-spark-surface-replay-warm.timer").exists()

@@ -45,11 +45,11 @@
 | `systemd/spx-spark-spx-minute-sampler.service` | unit | `application.runtime.spx_minute_sampler` | user systemd | `spx-core` TaskGroup | P3-1 |
 | `systemd/spx-spark-storage-pressure.service` | unit | `session_finalize --pressure-check` | `spx-spark-storage-pressure.timer` | `spx-worker` periodic task | P4 |
 | `systemd/spx-spark-storage-pressure.timer` | unit | user systemd timer | `spx-spark-storage-pressure.service` | `spx-worker` periodic task | P4 |
-| `systemd/spx-spark-surface-dashboard.service` | unit | `surface_dashboard` | user systemd | `spx-core` FastAPI | P3-1 |
-| `systemd/spx-spark-surface-live.service` | unit | `surface_live_session_http` | user systemd | `spx-core` FastAPI | P3-1 |
-| `systemd/spx-spark-surface-replay-warm.service` | unit | replay catalog warmer | `spx-spark-surface-replay-warm.timer` | `spx-worker` periodic task | P4 |
-| `systemd/spx-spark-surface-replay-warm.timer` | unit | user systemd timer | `spx-spark-surface-replay-warm.service` | `spx-worker` periodic task | P4 |
-| `systemd/spx-spark-surface-replay.service` | unit | `surface_replay_service` | user systemd | `spx-core` FastAPI | P3-1 |
+| `systemd/spx-spark-surface-dashboard.service` | retired unit | `surface_dashboard` | none | 用户于 2026-08-21 明确退役 | 已删除 |
+| `systemd/spx-spark-surface-live.service` | retired unit | `surface_live_session_http` | none | 用户于 2026-08-21 明确退役 | 已删除 |
+| `systemd/spx-spark-surface-replay-warm.service` | retired unit | replay catalog warmer | none | 用户于 2026-08-21 明确退役 | 已删除 |
+| `systemd/spx-spark-surface-replay-warm.timer` | retired unit | user systemd timer | none | 用户于 2026-08-21 明确退役 | 已删除 |
+| `systemd/spx-spark-surface-replay.service` | retired unit | `surface_replay_service` | none | 用户于 2026-08-21 明确退役 | 已删除 |
 | `rust/systemd/spx-core.service.example` | unit template | `spx-core` | deployment tooling | 无；Rust 控制面退役 | P6 |
 | `rust/systemd/spx-delivery.service.example` | unit template | `spx-delivery` | deployment tooling | 无；Rust 控制面退役 | P6 |
 | `rust/systemd/spx-report.service.example` | unit template | `spx-report` | deployment tooling | 无；Rust 控制面退役 | P6 |

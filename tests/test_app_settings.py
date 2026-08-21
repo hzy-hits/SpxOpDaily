@@ -42,14 +42,12 @@ def test_unknown_toml_key_is_rejected(settings_cwd: Path) -> None:
         AppSettings()
 
 
-def test_core_runtime_paths_are_typed_and_cli_is_registered(
+def test_core_lock_path_is_typed_and_cli_is_registered(
     settings_cwd: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SPX_CORE_SOCKET_PATH", "/run/user/1001/spx-core.sock")
     monkeypatch.setenv("SPX_CORE_LOCK_ROOT", "/run/user/1001")
     settings = AppSettings()
 
-    assert settings.core_socket_path == Path("/run/user/1001/spx-core.sock")
     assert settings.core_lock_root == Path("/run/user/1001")
     result = CliRunner().invoke(app, ["core", "--help"])
     assert result.exit_code == 0

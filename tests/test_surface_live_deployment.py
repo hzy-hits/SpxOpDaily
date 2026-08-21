@@ -11,7 +11,7 @@ def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_live_routes_are_owned_by_the_single_core_unix_socket() -> None:
+def test_core_no_longer_owns_a_surface_api_socket() -> None:
     unit = read("systemd/spx-core.service")
     core = read("src/spx_spark/core_main.py")
 
@@ -21,32 +21,22 @@ def test_live_routes_are_owned_by_the_single_core_unix_socket() -> None:
     assert "NoNewPrivileges=true" in unit
     assert "RestrictAddressFamilies=AF_UNIX" in unit
     assert "PrivateNetwork=true" in unit
-    assert "runtime/core-api.sock" in unit
-    assert "from spx_spark.web.live_api import create_default_app" in core
+    assert "runtime/core-api.sock" not in unit
+    assert "SPX_CORE_SOCKET_PATH" not in unit
+    assert "spx_spark.web.live_api" not in core
+    assert "surface_dashboard.run_loop" not in core
 
 
-def test_nginx_proxies_only_read_only_live_surface_and_independent_health() -> None:
-    nginx = read("site/spxw-surface/nginx.conf")
+def test_only_notification_images_remain_served() -> None:
+    entry = read("site/spxw-surface/entry-nginx.conf")
     compose = read("site/spxw-surface/compose.yaml")
 
-    assert 'location = /api/v1/live/healthz {' in nginx
-    assert 'location = /api/v1/live/session-surface {' in nginx
-    assert nginx.count("limit_except GET") >= 8
-    assert (
-        "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:/healthz;"
-        in nginx
-    )
-    assert (
-        "proxy_pass http://unix:/usr/share/nginx/replay-runtime/core-api.sock:"
-        "/api/v1/live/session-surface;" in nginx
-    )
-    assert "proxy_read_timeout 15s;" in nginx
-    assert '~^/api/v1/live/ "private, no-store, max-age=0";' in nginx
-    assert "replay-api.sock" not in nginx
-    assert "CMD-SHELL" in compose
-    assert "http://127.0.0.1:18082/healthz" in compose
-    assert "http://127.0.0.1:18082/api/v1/live/healthz" in compose
-    assert ":/usr/share/nginx/replay-runtime:ro" in compose
+    assert "\n  spxw-surface:\n" not in compose
+    assert "container_name: spxw-surface-entry" in compose
+    assert "network_mode: container:code-server" not in compose
+    assert "location = /oi/latest.png" in entry
+    assert "location = /strategy-risk/latest.png" in entry
+    assert entry.count("return 410;") == 7
 
 
 def test_live_deployment_shell_entrypoints_parse() -> None:

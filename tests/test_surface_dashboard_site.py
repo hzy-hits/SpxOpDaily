@@ -270,13 +270,13 @@ def test_replay_legacy_diagnostic_is_launched_from_a_fixed_audit_overlay() -> No
     assert "legacyDiagnosticEntryState" in app
 
 
-def test_memorable_entry_exposes_images_live_redirect_and_retires_replay() -> None:
+def test_memorable_entry_exposes_only_images_and_retires_dashboards() -> None:
     entry = read("entry-nginx.conf")
     compose = read("compose.yaml")
 
     assert "listen 18084 default_server" in entry
-    assert "return 302 https://code.zh3nyu.com/proxy/18082/live;" in entry
-    assert entry.count("return 410;") == 4
+    assert "proxy/18082/live" not in entry
+    assert entry.count("return 410;") == 7
     assert "proxy/18082/replay" not in entry
     assert "location /" in entry and "return 404;" in entry
     assert "location = /oi/latest.png" in entry
@@ -287,7 +287,8 @@ def test_memorable_entry_exposes_images_live_redirect_and_retires_replay() -> No
     assert "location /strategy-risk/" not in entry
     assert '"127.0.0.1:18084:18084"' in compose
     assert ":/usr/share/nginx/data:ro" in compose
-    assert ":/usr/share/nginx/replay-runtime:ro" in compose
+    assert ":/usr/share/nginx/replay-runtime:ro" not in compose
+    assert "\n  spxw-surface:\n" not in compose
     assert "no-new-privileges:true" in compose
     assert "cap_drop:" in compose
     assert "read_only: true" in compose

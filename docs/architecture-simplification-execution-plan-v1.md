@@ -87,9 +87,9 @@ receipt 验收。继续清理剩余 helper 的边际收益已经低于变更风�
 | `spx-spark-schwab-marketdata.service`、`spx-spark-schwab-oauth.service` | `spx-schwab.service` |
 | `spx-spark-24h.service`（service_loop） | 拆解：热任务入 `spx-core`，慢任务入 `spx-worker`，然后删除 |
 | `spx-spark-es-bar-sampler`、`spx-spark-spx-minute-sampler`、`spx-spark-market-features-hot`、`spx-spark-intraday-shock-hot`、`spx-spark-market-regime-signal` | `spx-core` 内 `asyncio.TaskGroup` 任务 |
-| `spx-spark-surface-dashboard`、`spx-spark-surface-live`、`spx-spark-surface-replay` | `spx-core` FastAPI app |
+| `spx-spark-surface-dashboard`、`spx-spark-surface-live`、`spx-spark-surface-replay` | 2026-08-21 经用户明确决定退役；无生产 owner，历史数据与显式研究工具保留 |
 | `spx-spark-notification-delivery.service` | `spx-worker`（Huey consumer） |
-| `spx-spark-morning-map.*`、`order-map.*`、`order-map-status.*`、`post-close-review.*`、`session-finalize.*`、`rth-daily-acceptance.*`、`backtest-weekly.*`、`data-compact.*`、`data-compact-weekend.*`、`maintenance-daily.*`、`maintenance-weekly.*`、`storage-pressure.*`、`surface-replay-warm.*`、`schwab-reauth-reminder.*`、`spx-ibkr-verifier.*` | `spx-worker` 内 Huey periodic task（timer 全部删除） |
+| `spx-spark-morning-map.*`、`order-map.*`、`order-map-status.*`、`post-close-review.*`、`session-finalize.*`、`rth-daily-acceptance.*`、`backtest-weekly.*`、`data-compact.*`、`data-compact-weekend.*`、`maintenance-daily.*`、`maintenance-weekly.*`、`storage-pressure.*`、`schwab-reauth-reminder.*`、`spx-ibkr-verifier.*` | `spx-worker` 内 Huey periodic task（timer 全部删除） |
 | `rust/systemd/` 全部 9 个 unit | Phase 6 退役 |
 
 ### 1.4 43 个 console scripts 的处置原则
