@@ -164,7 +164,6 @@ def test_data_command_forwards_to_existing_owners(
         ("spx_spark.strategy.micopedia.run", ["report", "micopedia"]),
         ("spx_spark.options_map.run", ["report", "options-map"]),
         ("spx_spark.strategy.steven_replay.run", ["replay", "steven"]),
-        ("spx_spark.surface_dashboard_replay.run", ["replay", "surface"]),
         ("spx_spark.ibkr.collector.run", ["ibkr", "collect"]),
         ("spx_spark.ibkr.stream.cli.run", ["ibkr", "stream"]),
         ("spx_spark.ibkr.farm_health.run_probe_cli", ["ibkr", "farm-probe"]),

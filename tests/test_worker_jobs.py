@@ -55,7 +55,6 @@ def test_jobs_use_one_sqlite_queue_and_delegate_to_existing_entries(
 
     assert jobs.huey.storage.filename == str(tmp_path / "huey.sqlite")
     assert calls == [
-        ("maintenance", ["cache-prune", "--execute"]),
         ("maintenance", ["dry-run"]),
         ("storage", ["--date", "auto", "--json", "--pressure-check"]),
         ("reauth", None),
@@ -143,7 +142,7 @@ def test_nonzero_existing_entry_fails_the_huey_task(
     jobs = load_jobs(tmp_path, monkeypatch)
     monkeypatch.setattr("spx_spark.maintenance.run", lambda argv: 1)
 
-    with pytest.raises(RuntimeError, match="surface cache maintenance failed"):
+    with pytest.raises(RuntimeError, match="maintenance daily failed"):
         jobs.maintenance_daily.call_local()
 
 

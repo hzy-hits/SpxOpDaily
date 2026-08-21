@@ -87,7 +87,7 @@ receipt 验收。继续清理剩余 helper 的边际收益已经低于变更风�
 | `spx-spark-schwab-marketdata.service`、`spx-spark-schwab-oauth.service` | `spx-schwab.service` |
 | `spx-spark-24h.service`（service_loop） | 拆解：热任务入 `spx-core`，慢任务入 `spx-worker`，然后删除 |
 | `spx-spark-es-bar-sampler`、`spx-spark-spx-minute-sampler`、`spx-spark-market-features-hot`、`spx-spark-intraday-shock-hot`、`spx-spark-market-regime-signal` | `spx-core` 内 `asyncio.TaskGroup` 任务 |
-| `spx-spark-surface-dashboard`、`spx-spark-surface-live`、`spx-spark-surface-replay` | 2026-08-21 经用户明确决定退役；无生产 owner，历史数据与显式研究工具保留 |
+| `spx-spark-surface-dashboard`、`spx-spark-surface-live`、`spx-spark-surface-replay` | 2026-08-21 经用户明确决定退役并删除实现；历史数据保留，通知图片入口独立保留 |
 | `spx-spark-notification-delivery.service` | `spx-worker`（Huey consumer） |
 | `spx-spark-morning-map.*`、`order-map.*`、`order-map-status.*`、`post-close-review.*`、`session-finalize.*`、`rth-daily-acceptance.*`、`backtest-weekly.*`、`data-compact.*`、`data-compact-weekend.*`、`maintenance-daily.*`、`maintenance-weekly.*`、`storage-pressure.*`、`schwab-reauth-reminder.*`、`spx-ibkr-verifier.*` | `spx-worker` 内 Huey periodic task（timer 全部删除） |
 | `rust/systemd/` 全部 9 个 unit | Phase 6 退役 |
@@ -417,6 +417,10 @@ payoff 示例；S2 已在 `tests/test_strategy_payoff.py` 建立 Hypothesis payo
 - 禁止：一次替换所有重试点；给 tenacity 包 wrapper（直接用装饰器）；用 Hypothesis 重写与本卡无关的测试文件。
 
 ### Phase 2：HTTP 统一（P2-1 → P2-2 → P2-3，严格按序）
+
+> 2026-08-21 状态覆盖：P2-1/P2-2 对应的 Surface 网站、API、投影与回放实现
+> 已按用户决定完整删除，以下两张卡仅作迁移历史，不得据此恢复运行；P2-3 Schwab
+> 仍有效。
 
 三张卡共用施工模式（每张卡内按 1→5 执行）：
 

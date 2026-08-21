@@ -8,8 +8,8 @@ from spx_spark.core_main import _run_owner, _run_periodic
 
 
 def test_owned_core_loop_exit_fails_for_systemd_restart() -> None:
-    with pytest.raises(RuntimeError, match="surface_dashboard exited unexpectedly"):
-        asyncio.run(_run_owner("surface_dashboard", lambda: 0, asyncio.Event()))
+    with pytest.raises(RuntimeError, match="test_owner exited unexpectedly"):
+        asyncio.run(_run_owner("test_owner", lambda: 0, asyncio.Event()))
 
 
 def test_periodic_core_task_stops_without_an_extra_cycle() -> None:

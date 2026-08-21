@@ -412,7 +412,6 @@ compact_pct = { value = 80.0, description = "Disk budget usage percent where com
 degraded_pct = { value = 85.0, description = "Disk budget usage percent where service state is considered degraded." }
 prune_pct = { value = 90.0, description = "Disk budget usage percent where pruning is allowed by policy." }
 critical_pct = { value = 95.0, description = "Disk budget usage percent where storage pressure is critical." }
-surface_cache_retention_days = { value = 2, description = "Retention for rebuildable SPXW replay and session-surface JSON caches; live causal boundaries are excluded." }
 
 [storage]
 raw_file_name = { value = "quotes.jsonl", description = "File name used for raw normalized quote landing files." }

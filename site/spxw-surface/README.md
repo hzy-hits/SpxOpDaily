@@ -1,8 +1,7 @@
 # SPXW Notification Image Entry
 
-The Live Surface and Session Replay websites are retired. Production no longer
-runs the `spxw-surface` dashboard container, the Core surface projection loop,
-the Live/Replay HTTP API, or the replay warmer timer.
+The Live Surface and Session Replay websites and their projection/replay code
+are deleted. Production only retains this fixed notification-image entry.
 
 The remaining `spxw-surface-entry` container exists only for two fixed,
 account-free notification images:
@@ -36,5 +35,4 @@ docker compose -f /home/ubuntu/spx-spark/site/spxw-surface/compose.yaml ps
 Verify the two images return 200, retired dashboard paths return 410, and the
 entry container is healthy. Historical surface and replay data are deliberately
 retained under `/srv/data/spx-spark/data/published/spxw-surface`; retirement does
-not authorize deleting those artifacts. Replay modules remain available as
-explicit internal research tooling but have no production HTTP owner or warmer.
+not authorize deleting those artifacts.

@@ -68,7 +68,6 @@ class MaintenanceSettings:
     degraded_pct: float
     prune_pct: float
     critical_pct: float
-    surface_cache_retention_days: int = 2
 
     @classmethod
     def from_env(cls) -> "MaintenanceSettings":
@@ -135,9 +134,5 @@ class MaintenanceSettings:
             ),
             critical_pct=env_float(
                 "MAINTENANCE_CRITICAL_PCT", float(settings_value("maintenance.critical_pct"))
-            ),
-            surface_cache_retention_days=env_int(
-                "MAINTENANCE_SURFACE_CACHE_RETENTION_DAYS",
-                int(settings_value("maintenance.surface_cache_retention_days")),
             ),
         )

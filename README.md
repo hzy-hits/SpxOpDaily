@@ -349,11 +349,10 @@ ranking, or limits. Delivered snapshots are persisted under
 `data/features/spxw_0dte_greeks_reference/` and summarized in the post-close
 review. See [docs/zero-dte-greeks-reference.md](docs/zero-dte-greeks-reference.md).
 
-The former read-only `SPXW 0DTE Decision Surface` Live/Replay website is
-retired. Production no longer runs its projection loop, FastAPI surface API,
-Nginx dashboard container or replay warmer. Historical artifacts and explicit
-research tooling remain available, while `spx.zh3nyu.com` serves only the fixed
-OI and strategy-risk PNGs used by notifications. See
+The former read-only `SPXW 0DTE Decision Surface` Live/Replay website and its
+projection/replay implementation are deleted. Historical artifacts remain
+untouched, while `spx.zh3nyu.com` serves only the fixed OI and strategy-risk
+PNGs used by notifications. See
 [site/spxw-surface/README.md](site/spxw-surface/README.md) for the reduced
 deployment boundary.
 

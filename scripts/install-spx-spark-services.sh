@@ -44,9 +44,6 @@ retired_units=(
   spx-spark-market-features-hot.service
   spx-spark-market-regime-signal.service
   spx-spark-intraday-shock-hot.service
-  spx-spark-surface-dashboard.service
-  spx-spark-surface-live.service
-  spx-spark-surface-replay.service
   spx-spark-notification-delivery.service
   spx-spark-maintenance-daily.service
   spx-spark-maintenance-daily.timer

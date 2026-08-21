@@ -97,10 +97,10 @@
 | `spx-spark-schwab-collector` | script | `schwab.collector:main` | service-loop registry | `spx-schwab` direct call | P3 |
 | `spx-spark-schwab-marketdata` | script | `schwab.collector:loop_main` | marketdata wrapper/unit | `spx-schwab` service | P5 |
 | `spx-spark-schwab-oauth` | script | `schwab.oauth_service:main` | OAuth wrapper/unit | `spx-schwab` service | P5 |
-| `spx-spark-surface-dashboard` | script | `surface_dashboard:main` | dashboard wrapper/unit | `spx-core` FastAPI | P3-1 |
-| `spx-spark-surface-dashboard-replay` | script | `surface_dashboard_replay:main` | human/operator tooling | `spx replay` command | P5 |
-| `spx-spark-surface-replay-service` | script | `surface_replay_service:main` | replay wrapper/unit | `spx-core` FastAPI | P3-1 |
-| `spx-spark-surface-live-service` | script | `surface_live_session_http:main` | live wrapper/unit | `spx-core` FastAPI | P3-1 |
+| `spx-spark-surface-dashboard` | retired script | none | none | 用户于 2026-08-21 明确删除 | 已删除 |
+| `spx-spark-surface-dashboard-replay` | retired script | none | none | 用户于 2026-08-21 明确删除 | 已删除 |
+| `spx-spark-surface-replay-service` | retired script | none | none | 用户于 2026-08-21 明确删除 | 已删除 |
+| `spx-spark-surface-live-service` | retired script | none | none | 用户于 2026-08-21 明确删除 | 已删除 |
 | `/srv/data/spx-spark/data/ledger/notification_delivery_outbox.sqlite` | db | `notifier.delivery_outbox` | `notifier.delivery_worker` | `spx.sqlite.notification_events/attempts` | P4-2 |
 | `/srv/data/spx-spark/data/ledger/notification_delivery.sqlite` | db | `notifier.receipts` | notification reporting | `spx.sqlite.notification_attempts` | P4-2 |
 | `/srv/data/spx-spark/data/ledger/domain_event_outbox.sqlite` | db | `infrastructure.ledger.outbox` | realtime application | `spx.sqlite` domain tables | P5-1 |

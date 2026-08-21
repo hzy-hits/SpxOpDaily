@@ -1,4 +1,7 @@
-# SPXW Live Session Surface
+# SPXW Live Session Surface（历史记录）
+
+> 2026-08-21：相关网站、API、session accumulator 与投影代码已删除；
+> 本文不再是生产运行说明。
 
 ## Scope
 

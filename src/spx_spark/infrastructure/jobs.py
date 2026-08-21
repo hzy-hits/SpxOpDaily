@@ -42,8 +42,6 @@ def recover_notification_delivery_tasks() -> None:
 def maintenance_daily() -> None:
     from spx_spark.maintenance import run
 
-    if run(["cache-prune", "--execute"]) != 0:
-        raise RuntimeError("surface cache maintenance failed")
     if run(["dry-run"]) != 0:
         raise RuntimeError("maintenance daily failed")
 

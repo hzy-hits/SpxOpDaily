@@ -106,12 +106,10 @@ def report(ctx: typer.Context) -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
 def replay(ctx: typer.Context) -> None:
-    """Run a Steven-strategy or surface-dashboard replay."""
+    """Run a strategy replay."""
     name, args = _tool_args(ctx)
     if name == "steven":
         from spx_spark.strategy.steven_replay import run
-    elif name == "surface":
-        from spx_spark.surface_dashboard_replay import run
     else:
         raise typer.BadParameter(f"unknown replay tool: {name}")
     _finish(run(args))

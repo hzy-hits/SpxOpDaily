@@ -1,4 +1,7 @@
-# SPXW 0DTE Decision Surface
+# SPXW 0DTE Decision Surface（历史记录）
+
+> 2026-08-21：网站、Live/Replay API、投影与回放实现已按用户决定删除。
+> 本文仅保留为历史设计记录，不再是运行或部署说明。
 
 This dashboard is a read-only research projection for the front SPXW expiry and
 the next actual SPXW trading expiry. It turns the existing option-chain snapshot
