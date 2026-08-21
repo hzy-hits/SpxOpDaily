@@ -517,13 +517,17 @@ def run_candidate_retry(
         "build_options_map",
         lambda state: make_options_map(make_front_expiry()),
     )
-    monkeypatch.setattr(order_map_module.time_module, "monotonic", lambda: elapsed[0])
-
     def sleep(seconds: float) -> None:
         sleeps.append(seconds)
         elapsed[0] += seconds
 
-    monkeypatch.setattr(order_map_module.time_module, "sleep", sleep)
+    # Replace this module's clock seam without patching process-global
+    # ``time.sleep`` used by renderer/font-library background work.
+    monkeypatch.setattr(
+        order_map_module,
+        "time_module",
+        SimpleNamespace(sleep=sleep, monotonic=lambda: elapsed[0]),
+    )
     monkeypatch.setattr(order_map_module, "attach_es_volume_signal", lambda *a, **k: None)
     monkeypatch.setattr(order_map_module, "attach_hl_volume_signal", lambda *a, **k: None)
 

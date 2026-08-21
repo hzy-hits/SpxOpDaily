@@ -667,6 +667,32 @@ fn visible_fields_may_be_shorter_than_source_transcript_fields() {
 }
 
 #[test]
+fn strategy_lane_outcomes_are_restored_when_writer_omits_them() {
+    let mut source = semantic_message_value();
+    source["structure"] = json!(
+        "Gamma职责：只描述反馈机制\n策略状态·方向价差  偏空背景已识别，但尚无授权入场信号\n策略状态·蝶式  未形成（需 PIN_STABLE）\n策略状态·铁鹰  7610/7620/7705/7715 贷记未过门"
+    );
+    let projection = projection_with_direction(&source, "none");
+    let mut compressed = semantic_message_value();
+    compressed["structure"] = json!("Gamma只描述已观察运动的反馈机制");
+    let client = ReportWriterClient::new(
+        config(true, 64_000),
+        true,
+        RecordingTransport::new(TransportResponse::new(
+            200,
+            response(&serde_json::to_string(&compressed).unwrap(), "stop"),
+        )),
+    )
+    .unwrap();
+
+    let output = client.write_desk_map(&projection).unwrap();
+
+    for marker in ["策略状态·方向价差", "策略状态·蝶式", "策略状态·铁鹰"] {
+        assert!(output.message.structure.as_str().contains(marker));
+    }
+}
+
+#[test]
 fn required_research_disclosure_is_added_without_a_data_quality_byte_floor() {
     let source = message_value();
     let projection = projection_with_message(&source);

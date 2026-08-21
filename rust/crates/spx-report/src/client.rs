@@ -13,7 +13,7 @@ use crate::{
 
 pub const DEEPSEEK_MODEL_ID: &str = "deepseek-v4-flash";
 pub const RESEARCH_UNAVAILABLE_DISCLOSURE: &str =
-    "Research context: unavailable; no HMM, range, close-location, or market-maker inference.";
+    "研究上下文暂不可用；不影响上方执行数据状态，不提供 HMM、区间或收盘位置推断。";
 pub const RESEARCH_ADVISORY_DISCLOSURE: &str =
     "研究：HMM/区间为未校准 advisory，仅辅助 Base Case，不产生交易方向或授权 READY。";
 
@@ -33,14 +33,16 @@ research_context_status=embedded_contract_valid means only that the wire contrac
 GTH and RTH desk maps are different products. When session is gth, do not mention cash SPX/NDX/DJI/RUT, RTH close or high/low forecasts, close-location, HMM/bootstrap research, or ES/SPY cash confirmation. GTH facts are the chain-implied or ES coordinate, live option walls, ES 15m/60m flow, and whether price has accepted or rejected a level. Expected overnight N/A is not a data outage.
 When research_context_status is gth_not_applicable, omit research entirely; data_quality must not say research is unavailable.
 When session is gth, the 15-minute card is a live structure scan: show the 5-20Δ short / 10-wide iron condor map and the width-scan result. It is not an empty health heartbeat and not a trade ticket. desk_view and execution must not say 可看 or READY, and must not name an unpassed Call/Put debit spread as the action. A Flip zone is structure, not a debit vertical. Ranked winners are delivered on a separate trade_ready card. Preserve NO TRADE when the source decision is NO_TRADE.
-When research_context_status is unavailable, data_quality must explicitly say research is unavailable and must make no HMM, range, or close-location claim.
+When research_context_status is unavailable, data_quality must explicitly say the optional research context is unavailable and does not change the execution-data status; make no HMM, range, or close-location claim.
 Direction may come only from an explicit price trigger confirmed by ES flow in the source projection. Gamma describes only the feedback mechanism that may suppress or amplify an already observed move; Gamma must never be presented as the source of an up or down direction.
+An explicit source-supplied 市场偏向/偏多观察/偏空观察 may be preserved as non-actionable path context when it is labeled 未授权入场 or 不等于入场授权. It is not typed trade direction.
 Dealer sign is unknown. Do not claim that market makers are buying, selling, forced to hedge, or causing a directional move.
 Preserve 方向来源 in primary_path and NO TRADE in desk_view when the source contains them. Do not require Gamma, dealer-sign, HMM or P/Q prose in the visible report.
 When typed direction is none, title, desk_view, and execution must not say LONG, SHORT, 做多, or 做空, and execution must not say READY. An unvalidated research bias may still be stated as advisory context when it is clearly separated from trade direction. When an up source contains LONG / CALL, or a down source contains SHORT / PUT, preserve that exact label in desk_view.
 Preserve READY, HOLD, PAUSED, WAIT, and CLOSED from source execution in output execution. Shorten source fields aggressively when doing so does not remove an active trigger, invalidation, target, exact-leg limit, TTL or R/R.
 Lead with the human decision and its reason. Translate lifecycle and quality into plain language; do not expose schema names, raw field names, hashes, internal identifiers, action_authority, automatic_ordering, or raw enum dumps unless they change what the operator may safely do.
-In data_quality, state the single most important human impact first. Never expose raw audit codes or reason-code lists in any visible field; they remain in the source artifact for audit.
+In data_quality, state the single most important human impact first: execution-data readiness first and optional research/advisory degradation second. Never turn optional research unavailability into an execution-data outage. Never expose raw audit codes or reason-code lists in any visible field; they remain in the source artifact for audit.
+Preserve all source structure lines beginning with 策略状态· so directional vertical, butterfly, and iron-condor lane outcomes remain visible even when they are rejected.
 Keep one useful sentence in each section and enough concrete evidence to support the Base Case. Do not invent orders, fills, positions, probabilities, or market-maker behavior.
 A Flip zone is structure, not a debit vertical. If 最近候选 is 无, do not mention a retained Put/Call spread, 待评估 candidate, or parked opportunity ID.";
 
@@ -476,6 +478,7 @@ impl<T: Transport> ReportWriterClient<T> {
             )
         })?;
         apply_research_disclosure(&mut message, projection, &output.metadata)?;
+        apply_strategy_lane_disclosure(&mut message, projection, &output.metadata)?;
         validate_rendered_message(&message, projection, &output.metadata)?;
         Ok(DeskReportOutput {
             message,
@@ -493,6 +496,38 @@ impl<T: Transport> ReportWriterClient<T> {
             ))
         }
     }
+}
+
+fn apply_strategy_lane_disclosure(
+    message: &mut DeskMessageV2,
+    projection: &DeskMapProjectionV1,
+    metadata: &ResponseMetadata,
+) -> Result<(), ReportWriterError> {
+    let missing = projection
+        .message
+        .structure
+        .as_str()
+        .lines()
+        .filter(|line| line.starts_with("策略状态·"))
+        .filter(|line| {
+            let marker = line.split_whitespace().next().unwrap_or(line);
+            !message.structure.as_str().contains(marker)
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    message.structure = Token::new(
+        format!("{}\n{}", message.structure, missing.join("\n")),
+        "desk report strategy lane disclosure",
+    )
+    .map_err(|_| {
+        ReportWriterError::with_metadata(
+            ReportWriterErrorCode::DeskMessageInvalidContract,
+            metadata.clone(),
+        )
+    })?;
+    Ok(())
 }
 
 fn apply_research_disclosure(

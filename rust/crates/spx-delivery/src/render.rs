@@ -1,5 +1,8 @@
 use spx_domain::{DeskMessageV1, DeskMessageV2, OperatorNotificationRole, OperatorNotificationV1};
 
+const STRATEGY_RISK_IMAGE_URL: &str = "https://spx.zh3nyu.com/strategy-risk/latest.png";
+const OPEN_INTEREST_IMAGE_URL: &str = "https://spx.zh3nyu.com/oi/latest.png";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedMessage {
     pub title: String,
@@ -21,8 +24,10 @@ pub fn render_desk_message(message: &DeskMessageV1) -> RenderedMessage {
 
 pub fn render_desk_message_v2(message: &DeskMessageV2) -> RenderedMessage {
     let body = format!(
-        "{}\n\n位置  {}\n\n结构  {}\n\n触发  {}\n\n失效  {}\n\n目标  {}\n\n执行  {}\n\n数据  {}",
+        "{}\n\n图表  策略风险 {}\nOI结构 {}\n\n位置  {}\n\n结构  {}\n\n触发  {}\n\n失效  {}\n\n目标  {}\n\n执行  {}\n\n数据  {}",
         message.desk_view.as_str(),
+        STRATEGY_RISK_IMAGE_URL,
+        OPEN_INTEREST_IMAGE_URL,
         message.location.as_str(),
         message.structure.as_str(),
         message.primary_path.as_str(),
@@ -289,6 +294,8 @@ mod tests {
 
         assert_eq!(rendered.title, "SPX RTH Desk Map · 10:00 ET");
         assert!(rendered.body.contains("Bullish  above VWAP"));
+        assert!(rendered.body.contains(STRATEGY_RISK_IMAGE_URL));
+        assert!(rendered.body.contains(OPEN_INTEREST_IMAGE_URL));
         assert!(rendered.body.contains("位置  SPX 7568 | OR15 7565"));
         assert!(rendered.body.contains("结构  Put 7525"));
         assert!(rendered.body.contains(&format!("触发  {long_primary}")));

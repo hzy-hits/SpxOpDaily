@@ -40,7 +40,10 @@ from spx_spark.application.order_map.convexity_idea_radar import (
 from spx_spark.application.order_map.decision_consistency import (
     apply_decision_projections,
 )
-from spx_spark.application.order_map.delivery import send_order_map
+from spx_spark.application.order_map.delivery import (
+    publish_strategy_risk_image,
+    send_order_map,
+)
 from spx_spark.application.order_map.desk_projection_export import (
     persist_desk_map_projection,
     rust_report_owner_enabled,
@@ -565,6 +568,12 @@ def run_status(
         return 0
 
     rust_owner = rust_report_owner_enabled()
+    strategy_decision = payload.get("strategy_decision")
+    strategy_risk_image = publish_strategy_risk_image(
+        storage_settings,
+        decision=strategy_decision if isinstance(strategy_decision, dict) else {},
+        now=now,
+    )
     rust_projection = persist_desk_map_projection(
         payload,
         [] if rust_owner else changes,
@@ -604,6 +613,7 @@ def run_status(
         }
         if oi_image is not None:
             snapshot_result["oi_image"] = oi_image
+        snapshot_result["strategy_risk_image"] = strategy_risk_image
         persist_order_map_pricing_audit(
             payload,
             storage_settings,
@@ -637,6 +647,7 @@ def run_status(
         }
         if oi_image is not None:
             mirrored_result["oi_image"] = oi_image
+        mirrored_result["strategy_risk_image"] = strategy_risk_image
         persist_order_map_pricing_audit(
             payload,
             storage_settings,
@@ -694,6 +705,7 @@ def run_status(
             }
             if oi_image is not None:
                 rejected_result["oi_image"] = oi_image
+            rejected_result["strategy_risk_image"] = strategy_risk_image
             persist_order_map_pricing_audit(
                 payload,
                 storage_settings,
@@ -720,6 +732,7 @@ def run_status(
         }
         if oi_image is not None:
             duplicate_result["oi_image"] = oi_image
+        duplicate_result["strategy_risk_image"] = strategy_risk_image
         persist_order_map_pricing_audit(
             payload,
             storage_settings,
@@ -754,6 +767,7 @@ def run_status(
     )
     if oi_image is not None:
         result["oi_image"] = oi_image
+    result["strategy_risk_image"] = strategy_risk_image
     persist_order_map_pricing_audit(
         payload,
         storage_settings,

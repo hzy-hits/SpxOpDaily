@@ -31,6 +31,8 @@ from spx_spark.application.order_map.desk_strategy_view import (
     stage_label,
     strategy_candidate_is_watchable,
     strategy_decision_desk_view,
+    strategy_lane_status_lines,
+    strategy_market_bias,
     strategy_reason_line,
     thesis_label,
     volume_alignment_text,
@@ -140,11 +142,11 @@ def build_desk_message_sections(
         alternative_path=(
             f"Evidence · {guidance.invalidation_text}"
             if projection.direction in {"up", "down"}
-            else "Evidence · 尚无单边方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算"
+            else "Evidence · 尚无已授权入场方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算"
         ),
         targets=_targets_line(payload, projection).removeprefix("Targets  "),
         execution=_execution_line(payload, projection, guidance).removeprefix("Execution  "),
-        data_quality=_data_quality_line(projection).removeprefix("Data Quality  "),
+        data_quality=_data_quality_line(payload, projection).removeprefix("Data Quality  "),
     )
 
 
@@ -515,7 +517,12 @@ def _primary_path(
         else:
             trigger = humanize_operator_trigger(guidance.trigger_text)
     else:
-        basis = f"方向来源  尚无价格接受/拒绝确认；{guidance.bias}仅为 ES/量价背景"
+        strategy_bias = strategy_market_bias(_mapping(payload.get("strategy_decision")))
+        bias = strategy_bias if strategy_bias != "中性/未定" else guidance.bias
+        basis = (
+            "方向来源  入场方向尚无价格接受/拒绝确认；"
+            f"市场偏向 {bias}观察（不等于入场授权）"
+        )
         trigger = _observing_trigger(payload)
     flow_parts = [
         (
@@ -604,9 +611,11 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
     if change_line:
         parts.append(change_line)
     parts.append(f"Gamma职责  {_gamma_feedback_text(payload)}")
-    iron_condor = _mapping(_mapping(payload.get("strategy_decision")).get("iron_condor_map"))
-    if iron_condor or current_session_is_gth(payload, decision):
-        parts.append(f"铁鹰  {iron_condor_desk_line(iron_condor)}")
+    lane_lines = strategy_lane_status_lines(payload)
+    if lane_lines:
+        parts.extend(lane_lines)
+    elif current_session_is_gth(payload, decision):
+        parts.append(f"铁鹰  {iron_condor_desk_line({})}")
     return "\n".join(parts)
 
 
@@ -964,12 +973,6 @@ def _data_quality(
         reasons.append("market_frame:unavailable")
     elif market_quality != "ready":
         reasons.append(f"market_frame:{market_quality}")
-    market_diagnostics = _mapping(market.get("diagnostics"))
-    market_state = _mapping(market_diagnostics.get("rth_market_state"))
-    if str(market_state.get("status") or "").lower() in {"provisional", "uncertain"}:
-        _extend_reasons(reasons, market_state.get("reasons"), prefix="market_state:")
-    _extend_reasons(reasons, market_diagnostics.get("warnings"))
-
     frame = _mapping(payload.get("option_structure_frame"))
     frame_quality = str(frame.get("quality") or "").lower()
     if not frame:
@@ -980,7 +983,6 @@ def _data_quality(
         reasons.append(f"option_frame:{frame_quality}")
     exposure = _mapping(frame.get("exposure"))
     structure = _mapping(frame.get("structure"))
-    density = _mapping(frame.get("density"))
     l1 = _mapping(frame.get("l1"))
     l1_quality = str(l1.get("quality") or "").lower()
     if not l1:
@@ -995,19 +997,16 @@ def _data_quality(
     gex_quality = str(structure.get("gex_quality") or "")
     if gex_quality and gex_quality != "open_interest_gex":
         reasons.append(f"gex:{gex_quality}")
-    clipped = finite_float(density.get("clipped_mass_fraction"))
-    if clipped is not None and clipped >= 0.10:
-        reasons.append(f"density_clipped:{clipped:.0%}")
-    for section in (
-        frame.get("diagnostics"),
-        exposure,
-        structure,
-        density,
-        l1.get("diagnostics"),
-    ):
-        _extend_reasons(reasons, _mapping(section).get("warnings"))
-    warnings = payload.get("warnings")
-    _extend_reasons(reasons, warnings)
+    strategy_quality = _mapping(_mapping(payload.get("strategy_decision")).get("data_quality"))
+    if strategy_quality and str(strategy_quality.get("status") or "").lower() != "ready":
+        _extend_reasons(reasons, strategy_quality.get("reasons"), prefix="strategy:")
+        if not strategy_quality.get("reasons"):
+            reasons.append("strategy:data_quality_degraded")
+    if current_session_is_gth(payload, decision):
+        for warning in payload.get("warnings") or ():
+            token = str(warning or "").strip()
+            if token == "ibkr_feed_unavailable" or "ibkr feed unavailable" in token.lower():
+                reasons.append(token)
     if current_session_is_gth(payload, decision):
         reasons = [reason for reason in reasons if not _rth_only_quality_reason(reason)]
     else:
@@ -1018,9 +1017,45 @@ def _data_quality(
     return ("DEGRADED", unique) if unique else ("READY", ())
 
 
-def _data_quality_line(projection: DeskMapProjection) -> str:
+def _advisory_quality_reasons(
+    payload: Mapping[str, Any], decision: Mapping[str, Any]
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    market = _mapping(payload.get("minute_market_frame"))
+    market_diagnostics = _mapping(market.get("diagnostics"))
+    market_state = _mapping(market_diagnostics.get("rth_market_state"))
+    if str(market_state.get("status") or "").lower() in {"provisional", "uncertain"}:
+        _extend_reasons(reasons, market_state.get("reasons"), prefix="market_state:")
+    _extend_reasons(reasons, market_diagnostics.get("warnings"))
+
+    frame = _mapping(payload.get("option_structure_frame"))
+    density = _mapping(frame.get("density"))
+    clipped = finite_float(density.get("clipped_mass_fraction"))
+    if clipped is not None and clipped >= 0.10:
+        reasons.append(f"density_clipped:{clipped:.0%}")
+    for section in (
+        frame.get("diagnostics"),
+        _mapping(frame.get("exposure")),
+        _mapping(frame.get("structure")),
+        density,
+        _mapping(frame.get("l1")).get("diagnostics"),
+    ):
+        _extend_reasons(reasons, _mapping(section).get("warnings"))
+    _extend_reasons(reasons, payload.get("warnings"))
+    if current_session_is_gth(payload, decision):
+        reasons = [reason for reason in reasons if not _rth_only_quality_reason(reason)]
+    else:
+        reasons = [
+            reason for reason in reasons if not _rth_expected_ibkr_absent_reason(reason)
+        ]
+    return tuple(dict.fromkeys(reason for reason in reasons if reason))
+
+
+def _data_quality_line(
+    payload: Mapping[str, Any], projection: DeskMapProjection
+) -> str:
     if not projection.quality_reasons:
-        status = "READY · 决策坐标与结构快照可用"
+        status = "执行数据 READY · 决策坐标、结构与实时报价可用"
     else:
         primary = quality_reason_text(projection.quality_reasons[0])
         count = len(projection.quality_reasons)
@@ -1029,7 +1064,13 @@ def _data_quality_line(projection: DeskMapProjection) -> str:
             if count >= 2
             else ""
         )
-        status = f"{projection.data_quality} · 主要影响：{primary}{secondary} · 共 {count} 项"
+        status = f"执行数据 {projection.data_quality} · 主要影响：{primary}{secondary} · 共 {count} 项"
+    advisory = _advisory_quality_reasons(payload, _mapping(payload.get("level_decision")))
+    if advisory:
+        status += (
+            f"\n研究层 DEGRADED · {quality_reason_text(advisory[0])}"
+            "（不改变 NO TRADE/READY 授权）"
+        )
     return f"Data Quality  {status}"
 
 def _opening_range_text(payload: Mapping[str, Any]) -> str:

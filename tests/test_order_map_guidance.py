@@ -314,19 +314,21 @@ def test_operator_status_brief_keeps_decision_facts_and_drops_research_density()
     assert "OR 上沿上方确认（ORL 7578 / ORH 7595）" in rendered
     assert "EM ±28.1pt" in rendered
     assert "GTH 已用" not in rendered
-    assert "Primary  Evidence · 方向来源  尚无价格接受/拒绝确认；趋势偏空仅为 ES/量价背景" in rendered
+    assert "Primary  Evidence · 方向来源  入场方向尚无价格接受/拒绝确认" in rendered
+    assert "市场偏向 趋势偏空观察（不等于入场授权）" in rendered
     assert "下一触发  等待当前 Flip 7560–7565 的接受或拒绝；确认前 NO TRADE" in rendered
     assert "流确认  ES 15m -2pt / 60m -7pt" in rendered
     assert "量价 同向确认 · ES/SPY 同向确认" in rendered
-    assert "Alternative  Evidence · 尚无单边方向；当前不存在交易失效位" in rendered
+    assert "Alternative  Evidence · 尚无已授权入场方向；当前不存在交易失效位" in rendered
     assert "Structure  Put/Flip/Call 7550 / 7560–7565 / 7600 · event=live" in rendered
     assert "Gamma职责  Gamma 过渡" in rendered
     assert "dealer sign unknown" in rendered
     assert "价格选边前 NO TRADE" in rendered
     assert "Targets  当前无交易目标 · 实时结构 Put 7550 / Call 7600" in rendered
     assert "Execution  WAIT · 尚无确定性结构入场" in rendered
-    assert "Data Quality  DEGRADED · 主要影响：rth heartbeat degraded snapshot" in rendered
-    assert "共 1 项" in rendered
+    assert "Data Quality  执行数据 READY" in rendered
+    assert "研究层 DEGRADED · 盘中研究状态快照不完整" in rendered
+    assert "不改变 NO TRADE/READY 授权" in rendered
     assert "rth_heartbeat_degraded_snapshot" not in rendered
     assert "ATM IV 0DTE" not in rendered
     assert "IVΔ 5/15/60m" not in rendered
@@ -406,6 +408,47 @@ def test_desk_map_primary_conclusion_comes_from_strategy_decision_blockers() -> 
     assert "原因  精确双边报价需要刷新" in rendered
 
 
+def test_desk_map_separates_bearish_bias_from_authority_and_lists_all_lanes() -> None:
+    payload = _payload()
+    payload["strategy_decision"] = {
+        "decision_type": "NO_TRADE",
+        "candidate": None,
+        "action_authority": "none",
+        "execution": {"action": "WAIT"},
+        "regime": {
+            "path_direction": "DOWN",
+            "path_state": "TREND",
+            "terminal_state": "PIN_MIGRATING",
+        },
+        "market_facts": {"path": {"market_state": "TREND_DOWN"}},
+        "iron_condor_map": {
+            "status": "ready",
+            "strategy_type": "IRON_CONDOR",
+            "strikes": [7610.0, 7620.0, 7705.0, 7715.0],
+            "short_abs_delta": 0.15,
+            "wing_width": 10.0,
+            "quote": {"credit": 0.85},
+            "economics": {"max_loss_points": 9.15},
+        },
+        "why_not": {
+            "reasons": ["iron_condor_credit_fraction"],
+            "nearest_candidate": {
+                "strategy_type": "IRON_CONDOR",
+                "failed_gates": [{"gate": "iron_condor_credit_fraction"}],
+            },
+        },
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "不做 · 偏空观察（未授权入场）" in sections.desk_view
+    assert "市场偏向 偏空观察（不等于入场授权）" in sections.primary_path
+    assert "策略状态·方向价差  偏空背景已识别，但尚无授权入场信号" in sections.structure
+    assert "策略状态·蝶式  未形成（当前 PIN_MIGRATING，需 PIN_STABLE）" in sections.structure
+    assert "策略状态·铁鹰" in sections.structure
+    assert "卡在：铁鹰贷记相对翼宽不在可接受区间" in sections.structure
+
+
 def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
     sections = build_desk_message_sections(_payload(), NOW)
 
@@ -414,7 +457,7 @@ def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
     assert "EM unavailable" in sections.location
     assert "流确认  ES 15m unavailable / 60m unavailable" in sections.primary_path
     assert "量价 unavailable · ES/SPY unavailable" in sections.primary_path
-    assert sections.data_quality == "READY · 决策坐标与结构快照可用"
+    assert sections.data_quality == "执行数据 READY · 决策坐标、结构与实时报价可用"
 
 
 def test_missing_live_spx_labels_latched_decision_spot_as_non_actionable_reference() -> None:
@@ -558,12 +601,12 @@ def test_gth_desk_map_does_not_mix_rth_cash_confirmation_or_analytical_only_nois
     assert "ES/SPY" not in sections.primary_path
     assert "ES 15m +0.5pt / 60m +2pt" in sections.primary_path
     assert "量价 同向确认" in sections.primary_path
-    assert sections.data_quality == "READY · 决策坐标与结构快照可用"
+    assert sections.data_quality == "执行数据 READY · 决策坐标、结构与实时报价可用"
     assert "analytical" not in sections.data_quality.lower()
     assert "cash_index" not in sections.data_quality
 
 
-def test_rth_desk_map_still_flags_analytical_only_legs_as_degraded() -> None:
+def test_rth_desk_map_keeps_analytical_only_legs_out_of_execution_quality() -> None:
     payload = _payload()
     frame = dict(payload["option_structure_frame"])  # type: ignore[arg-type]
     frame["exposure"] = {
@@ -575,11 +618,10 @@ def test_rth_desk_map_still_flags_analytical_only_legs_as_degraded() -> None:
     projection = build_desk_map_projection(payload)
     sections = build_desk_message_sections(payload, NOW)
 
-    assert projection.data_quality == "DEGRADED"
-    assert projection.quality_reasons == (
-        "analytical_leg_rejected:analytical_only_non_executable:3",
-    )
+    assert projection.data_quality == "READY"
+    assert projection.quality_reasons == ()
     assert "ES/SPY" in sections.primary_path
+    assert "研究层 DEGRADED" in sections.data_quality
     assert "结构腿仅分析用、不可当作执行报价" in sections.data_quality
 
 
@@ -807,7 +849,7 @@ def test_rth_desk_stays_ready_when_ibkr_is_down_and_schwab_frames_are_live() -> 
 
     assert projection.data_quality == "READY"
     assert projection.quality_reasons == ()
-    assert sections.data_quality == "READY · 决策坐标与结构快照可用"
+    assert sections.data_quality == "执行数据 READY · 决策坐标、结构与实时报价可用"
 
 
 def test_current_rth_phase_overrides_latched_globex_decision_for_quality() -> None:
@@ -830,9 +872,10 @@ def test_current_rth_phase_overrides_latched_globex_decision_for_quality() -> No
 
     projection = build_desk_map_projection(payload)
 
-    assert "market_state:price_vs_vwap_missing" in projection.quality_reasons
-    assert "market_state:classification_gate_failed" in projection.quality_reasons
-    assert "rth_heartbeat_degraded_snapshot" in projection.quality_reasons
+    assert projection.quality_reasons == ("market_frame:degraded",)
+    sections = build_desk_message_sections(payload, NOW)
+    assert "研究层 DEGRADED" in sections.data_quality
+    assert "price vs vwap missing" in sections.data_quality
 
 
 def test_expected_move_usage_requires_matching_horizon_contract() -> None:
@@ -1128,7 +1171,7 @@ def test_missing_required_frames_cannot_report_ready_data_quality() -> None:
         "option_frame:unavailable",
         "option_l1:unavailable",
     )
-    assert sections.data_quality.startswith("DEGRADED")
+    assert sections.data_quality.startswith("执行数据 DEGRADED")
     assert "Frames market=" not in sections.data_quality
 
 
@@ -1223,11 +1266,6 @@ def test_desk_data_quality_keeps_raw_reasons_in_projection_but_summarizes_human_
         "option_l1:degraded",
         "oi:missing",
         "gex:no_open_interest_gex",
-        "density_clipped:28%",
-        "wall_source_frozen",
-        "exposure_coverage_low",
-        "nbbo_sparse",
-        *(f"payload_warning_{index}" for index in range(1, 7)),
     }
     assert expected.issubset(set(projection.quality_reasons))
     assert "schwab_unverified" not in projection.quality_reasons
@@ -1235,6 +1273,7 @@ def test_desk_data_quality_keeps_raw_reasons_in_projection_but_summarizes_human_
     assert "次要影响：期权结构帧降级" in sections.data_quality
     assert f"共 {len(projection.quality_reasons)} 项" in sections.data_quality
     assert "payload_warning_6" not in sections.data_quality
+    assert "研究层 DEGRADED" in sections.data_quality
     assert "审计码" not in sections.data_quality
 
 

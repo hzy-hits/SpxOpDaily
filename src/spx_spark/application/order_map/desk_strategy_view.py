@@ -69,7 +69,12 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     elif pin_center is not None:
         conclusion = f"观察 · 今日中轴 {pin_center:g}"
     else:
-        conclusion = "不做"
+        bias = strategy_market_bias(decision)
+        conclusion = (
+            f"不做 · {bias}观察（未授权入场）"
+            if bias in {"偏多", "偏空"}
+            else "不做 · 市场偏向中性/未定"
+        )
     primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
     if pin_center is not None and not watchable:
         facts = _mapping(decision.get("market_facts"))
@@ -97,6 +102,110 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
             f"最近候选  {nearest_line}",
             f"下一步  {reauthorize}",
         )
+    )
+
+
+def strategy_market_bias(decision: Mapping[str, Any]) -> str:
+    """Return advisory market bias without granting entry direction authority."""
+
+    regime = _mapping(decision.get("regime"))
+    facts = _mapping(decision.get("market_facts"))
+    path = _mapping(facts.get("path"))
+    raw_direction = str(
+        regime.get("path_direction")
+        or regime.get("cross_direction")
+        or ""
+    ).upper()
+    if raw_direction == "UP":
+        return "偏多"
+    if raw_direction == "DOWN":
+        return "偏空"
+    market_state = str(path.get("market_state") or "").upper()
+    if market_state == "TREND_UP":
+        return "偏多"
+    if market_state == "TREND_DOWN":
+        return "偏空"
+    return "中性/未定"
+
+
+def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Explain each supported strategy lane even when no candidate is authorized."""
+
+    decision = _mapping(payload.get("strategy_decision"))
+    if not decision:
+        return ()
+    candidate = _mapping(decision.get("candidate"))
+    why_not = _mapping(decision.get("why_not"))
+    nearest_rows = [
+        row
+        for row in why_not.get("nearest_candidates") or ()
+        if isinstance(row, Mapping)
+    ]
+    nearest = _mapping(why_not.get("nearest_candidate"))
+    if nearest and nearest not in nearest_rows:
+        nearest_rows.insert(0, nearest)
+    rows = ([candidate] if candidate else []) + nearest_rows
+
+    vertical = next(
+        (
+            row
+            for row in rows
+            if str(row.get("strategy_type") or "").upper().endswith("_DEBIT_VERTICAL")
+        ),
+        None,
+    )
+    butterfly = next(
+        (
+            row
+            for row in rows
+            if str(row.get("strategy_type") or "").upper().endswith("_BUTTERFLY")
+        ),
+        None,
+    )
+    iron_condor = _mapping(decision.get("iron_condor_map"))
+
+    bias = strategy_market_bias(decision)
+    if vertical is not None:
+        vertical_reasons = _failed_gate_codes(vertical, [])
+        vertical_text = _nearest_candidate_line(vertical, vertical_reasons)
+    elif bias in {"偏多", "偏空"}:
+        vertical_text = f"{bias}背景已识别，但尚无授权入场信号"
+    else:
+        vertical_text = "当前中性/未定，尚无授权入场信号"
+
+    if butterfly is not None:
+        butterfly_reasons = _failed_gate_codes(butterfly, [])
+        butterfly_text = _nearest_candidate_line(butterfly, butterfly_reasons)
+    else:
+        terminal_state = str(_mapping(decision.get("regime")).get("terminal_state") or "NONE")
+        butterfly_text = (
+            "PIN_STABLE 已形成，但报价/几何尚未通过"
+            if terminal_state == "PIN_STABLE"
+            else f"未形成（当前 {terminal_state}，需 PIN_STABLE）"
+        )
+
+    if iron_condor:
+        condor_text = iron_condor_desk_line(iron_condor)
+        condor_gate = next(
+            (
+                row
+                for row in rows
+                if str(row.get("strategy_type") or "").upper() == "IRON_CONDOR"
+            ),
+            None,
+        )
+        gate_codes = _failed_gate_codes(condor_gate or {}, [])
+        if gate_codes:
+            condor_text += f"（卡在：{humanize_strategy_reason(gate_codes[0])}）"
+        elif decision.get("action_authority") != "manual":
+            condor_text += "（仅 Desk Map，无交易授权）"
+    else:
+        condor_text = "尚未形成可评估四腿报价"
+
+    return (
+        f"策略状态·方向价差  {vertical_text}",
+        f"策略状态·蝶式  {butterfly_text}",
+        f"策略状态·铁鹰  {condor_text}",
     )
 
 
@@ -300,6 +409,7 @@ def quality_reason_text(reason: str) -> str:
         "unknown_level_phase": "状态机阶段非法",
         "market_frame:unavailable": "市场帧不可用，ES 流确认不能验证",
         "market_frame:degraded": "市场帧降级，ES 流确认需谨慎",
+        "rth_heartbeat_degraded_snapshot": "盘中研究状态快照不完整",
         "ready_opportunity_mismatch": "READY 不属于当前价格事件，旧机会与旧目标已禁用",
         "ready_required_frame_unavailable": "必需数据帧缺失，READY 已暂停",
         "ready_without_current_confirmed_path": "旧 READY 与当前价格路径不一致，已禁止执行",
@@ -310,6 +420,10 @@ def quality_reason_text(reason: str) -> str:
     lowered = token.lower()
     if token.startswith("analytical_leg_rejected:analytical_only_non_executable"):
         return "结构腿仅分析用、不可当作执行报价"
+    if token.startswith("analytical_leg_rejected:core_pricing_observation_stale"):
+        return "研究定价观测陈旧"
+    if token.startswith("analytical_leg_rejected:pricing_feed_not_live"):
+        return "研究定价源非实时"
     if "ibkr feed unavailable" in lowered or "stale spxw option quotes suppressed" in lowered:
         return "IBKR 源不可用，已抑制陈旧 SPXW 报价"
     if token.startswith("density_clipped:"):
