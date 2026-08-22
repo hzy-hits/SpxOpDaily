@@ -167,7 +167,7 @@ def _strategy_risk_decision() -> dict[str, object]:
         "automatic_ordering": False,
         "candidate": None,
         "market_facts": {
-            "spot": {"spx": 7750.0},
+            "spot": {"spx": 7750.0, "pricing_source": "index:SPX"},
             "structure": {
                 "put_wall": 7690.0,
                 "call_wall": 7810.0,
@@ -246,10 +246,11 @@ def _strategy_risk_decision() -> dict[str, object]:
 def test_strategy_risk_sheet_separates_q_payoff_and_physical_loss() -> None:
     svg = render_strategy_risk_svg(_strategy_risk_decision())
 
-    assert "SPX 位置与策略风险" in svg
+    assert "SPX 决策快照与策略风险" in svg
+    assert "决策时 SPX 7,750.00 · index:SPX" in svg
     assert "铁鹰结构图 · 无交易授权" in svg
     assert "SPX 关键位置尺" in svg
-    assert "当前 SPX 7,750.00" in svg
+    assert "决策时 SPX 7,750.00" in svg
     assert "7,690.0  (-60.0pt)" in svg
     assert "7,755.0  (+5.0pt)" in svg
     assert "7,752.0  (+2.0pt)" in svg
@@ -275,9 +276,24 @@ def test_strategy_risk_sheet_omits_empty_risk_panels() -> None:
 
     assert "暂无可执行结构" in svg
     assert "SPX 关键位置尺" in svg
-    assert "当前 SPX 7,750.00" in svg
+    assert "决策时 SPX 7,750.00" in svg
     assert "到期损益（按保守入场价）" not in svg
     assert "历史路径净损益（执行管理规则后）" not in svg
+
+
+def test_strategy_risk_sheet_hides_unreliable_q_quantiles() -> None:
+    decision = _strategy_risk_decision()
+    decision["iron_condor_map"] = {}
+    structure = decision["market_facts"]["structure"]
+    structure["q_clipped_mass_fraction"] = 0.416
+    structure["q_median"] = 7572.8
+
+    svg = render_strategy_risk_svg(decision)
+
+    assert "Q 质量不足" in svg
+    assert "边界截断 41.6%" in svg
+    assert ">Q50</text>" not in svg
+    assert "7,572.8" not in svg
 
 
 def test_strategy_risk_sheet_prefers_complete_iron_condor_map() -> None:
@@ -365,7 +381,7 @@ def test_strategy_risk_png_uses_the_shared_atomic_writer(tmp_path) -> None:
 
     def convert(svg_path, png_path) -> None:
         svg = svg_path.read_text(encoding="utf-8")
-        assert "SPX 位置与策略风险" in svg
+        assert "SPX 决策快照与策略风险" in svg
         png_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"strategy-risk")
 
     written = write_strategy_risk_png(

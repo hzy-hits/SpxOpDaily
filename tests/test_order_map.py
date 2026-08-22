@@ -2364,6 +2364,93 @@ def test_strategy_risk_image_publishes_for_trade_ready_delivery(
     ).read_bytes() == b"risk-png"
 
 
+def test_strategy_risk_image_rejects_misaligned_market_facts(
+    monkeypatch, tmp_path
+) -> None:
+    import spx_spark.application.order_map.delivery as delivery_module
+
+    now = datetime(2026, 8, 21, 20, 0, tzinfo=timezone.utc)
+    decision = {
+        "decision_id": "strategy:misaligned-risk-image",
+        "decision_at": now.isoformat(),
+        "market_facts": {
+            "decision_at": (now - timedelta(minutes=15)).isoformat(),
+            "spot": {"spx": 7683.61},
+        },
+    }
+    monkeypatch.setattr(
+        delivery_module,
+        "write_strategy_risk_png",
+        lambda *args, **kwargs: pytest.fail("misaligned image must not be written"),
+    )
+
+    result = delivery_module.publish_strategy_risk_image(
+        SimpleNamespace(data_root=str(tmp_path)),
+        decision=decision,
+        now=now,
+    )
+
+    assert result["status"] == "failed"
+    assert "not time-aligned" in result["error"]
+
+
+def test_rth_close_status_refreshes_image_without_notification(
+    monkeypatch, tmp_path
+) -> None:
+    import spx_spark.application.order_map.service as order_map_module
+
+    now = datetime(2026, 8, 21, 20, 0, 8, tzinfo=timezone.utc)
+    payload = {"strategy_decision": {"decision_id": "strategy:close"}}
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(order_map_module, "within_status_window", lambda value: True)
+    monkeypatch.setattr(
+        order_map_module, "within_rth_close_snapshot_window", lambda value: True
+    )
+    monkeypatch.setattr(order_map_module, "load_order_map_state", lambda path: {})
+    monkeypatch.setattr(
+        order_map_module,
+        "build_order_payload_with_retry",
+        lambda *args, **kwargs: payload,
+    )
+    monkeypatch.setattr(order_map_module, "render_status_template", lambda *args: "status")
+    monkeypatch.setattr(
+        order_map_module.StorageSettings,
+        "from_env",
+        classmethod(lambda cls: SimpleNamespace(data_root=str(tmp_path))),
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "publish_strategy_risk_image",
+        lambda *args, **kwargs: {"status": "published", "decision_id": "strategy:close"},
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "persist_order_map_pricing_audit",
+        lambda *args, **kwargs: captured.update(result=kwargs["result"]),
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "persist_desk_map_projection",
+        lambda *args, **kwargs: pytest.fail("close capture must not publish a desk projection"),
+    )
+    monkeypatch.setattr(
+        order_map_module,
+        "enqueue_order_map_status",
+        lambda *args, **kwargs: pytest.fail("close capture must not enqueue a notification"),
+    )
+
+    result = order_map_module.run_status(
+        SimpleNamespace(force=False, dry_run=False),
+        now=now,
+        state_path=str(tmp_path / "state.json"),
+        trading_date="2026-08-21",
+    )
+
+    assert result == 0
+    assert captured["result"]["reason"] == "rth_close_image_snapshot"
+    assert captured["result"]["strategy_risk_image"]["status"] == "published"
+
+
 def test_gth_status_delivers_degraded_heartbeat_instead_of_skipping_thin_snapshot(
     monkeypatch, tmp_path
 ) -> None:
@@ -4398,6 +4485,24 @@ def test_within_status_window_and_minutes_to_open() -> None:
     assert within_status_window(saturday) is False
     holiday_morning = datetime(2026, 7, 2, 23, 30, tzinfo=timezone.utc)
     assert within_status_window(holiday_morning) is False
+
+
+def test_rth_close_snapshot_window_is_bounded_and_calendar_aware() -> None:
+    from spx_spark.application.order_map.state import within_rth_close_snapshot_window
+
+    et = ZoneInfo("America/New_York")
+    assert within_rth_close_snapshot_window(
+        datetime(2026, 8, 21, 16, 0, 8, tzinfo=et)
+    )
+    assert not within_rth_close_snapshot_window(
+        datetime(2026, 8, 21, 15, 59, 59, tzinfo=et)
+    )
+    assert not within_rth_close_snapshot_window(
+        datetime(2026, 8, 21, 16, 2, 1, tzinfo=et)
+    )
+    assert within_rth_close_snapshot_window(
+        datetime(2026, 11, 27, 13, 0, 8, tzinfo=et)
+    )
 
 
 def test_minutes_to_open_after_close_targets_next_trading_session() -> None:

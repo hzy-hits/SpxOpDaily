@@ -31,6 +31,7 @@ _Q_COLOR = "#7C3AED"
 _SPOT_COLOR = "#D97706"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _MAX_PNG_BYTES = 2_000_000
+_MAX_Q_DISPLAY_CLIPPED_MASS_FRACTION = 0.10
 
 SvgToPng = Callable[[Path, Path], None]
 
@@ -270,15 +271,27 @@ def render_open_interest_mirror_svg(
 def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
     """Render a mobile-readable location and risk sheet without trading authority."""
     facts = _mapping(strategy_decision.get("market_facts"))
-    spot = _number(_mapping(facts.get("spot")).get("spx"))
+    spot_facts = _mapping(facts.get("spot"))
+    spot = _number(spot_facts.get("spx"))
+    spot_source = str(
+        spot_facts.get("pricing_source") or spot_facts.get("kind") or "source unknown"
+    ).replace("_", " ")
     structure, source = _strategy_risk_structure(strategy_decision)
     strategy_type = str(structure.get("strategy_type") or "NO_SUPPORTED_STRUCTURE")
     path_distribution = _strategy_path_distribution(structure)
     objective = _mapping(path_distribution.get("risk_objective"))
     structure_facts = _mapping(facts.get("structure"))
     q_rows = _q_mass_rows(structure_facts.get("q_local_mass_5pt"))
+    q_clipped = _number(structure_facts.get("q_clipped_mass_fraction"))
+    q_usable = bool(q_rows) and (
+        q_clipped is None or q_clipped < _MAX_Q_DISPLAY_CLIPPED_MASS_FRACTION
+    )
     domain = _strategy_price_domain(
-        structure, structure_facts=structure_facts, q_rows=q_rows, spot=spot
+        structure,
+        structure_facts=structure_facts,
+        q_rows=q_rows if q_usable else (),
+        spot=spot,
+        include_q=q_usable,
     )
     payoff_series = _strategy_payoff_series(structure, domain=domain)
     histogram = [_mapping(row) for row in _sequence(path_distribution.get("pnl_histogram"))]
@@ -291,7 +304,8 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
     )
     authority = _strategy_risk_authority(strategy_decision, source=source)
     as_of = _format_as_of(
-        strategy_decision.get("available_at") or strategy_decision.get("decision_at")
+        facts.get("available_at") or strategy_decision.get("available_at")
+        or strategy_decision.get("decision_at")
     )
     objective_points = _number(objective.get("objective_points"))
     shadow_choice = str(objective.get("shadow_choice") or "UNAVAILABLE")
@@ -329,9 +343,9 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
         "</style>",
         f'<rect width="{width}" height="{height}" fill="#F8FAFC"/>',
         f'<rect x="34" y="28" width="1132" height="{header_height:.0f}" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
-        '<text x="60" y="76" font-size="34" font-weight="700">SPX 位置与策略风险</text>',
+        '<text x="60" y="76" font-size="34" font-weight="700">SPX 决策快照与策略风险</text>',
         f'<text x="60" y="112" class="body muted">{escape(strategy_label)} · '
-        f'SPX {spot:,.2f} · {escape(as_of)}</text>' if spot is not None else
+        f'决策时 SPX {spot:,.2f} · {escape(spot_source)} · {escape(as_of)}</text>' if spot is not None else
         f'<text x="60" y="112" class="body muted">{escape(strategy_label)} · '
         f'SPX 暂缺 · {escape(as_of)}</text>',
         f'<rect x="820" y="54" width="314" height="42" rx="12" fill="{_authority_background(source)}"/>',
@@ -342,12 +356,15 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
     if objective_available:
         parts.extend(_strategy_objective_cards(objective, y=214, objective_points=objective_points))
     parts.extend(
-        _strategy_location_panel(structure_facts, spot=spot, domain=domain, y=location_y)
+        _strategy_location_panel(
+            structure_facts, spot=spot, domain=domain, y=location_y,
+            include_q=q_usable,
+        )
     )
     parts.extend(
         _strategy_q_panel(
             q_rows, structure=structure, structure_facts=structure_facts,
-            spot=spot, domain=domain, y=q_y,
+            spot=spot, domain=domain, y=q_y, q_usable=q_usable,
         )
     )
     if payoff_y is not None:
@@ -355,6 +372,7 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
             _strategy_payoff_panel(
                 structure, structure_facts=structure_facts, spot=spot,
                 domain=domain, y=payoff_y, series=payoff_series,
+                q_usable=q_usable,
             )
         )
     if pnl_y is not None:
@@ -523,6 +541,7 @@ def _strategy_location_panel(
     spot: float | None,
     domain: tuple[float, float],
     y: float,
+    include_q: bool,
 ) -> list[str]:
     """Draw an uncluttered, directly labelled SPX price ruler."""
     left, right = 82.0, 1130.0
@@ -530,7 +549,11 @@ def _strategy_location_panel(
     levels = [
         ("Put Wall", _number(structure_facts.get("put_wall")), _WALL_PUT_COLOR),
         ("Zero Gamma", _number(structure_facts.get("zero_gamma")), "#64748B"),
-        ("Q50", _number(structure_facts.get("q_median")), _Q_COLOR),
+        (
+            "Q50",
+            _number(structure_facts.get("q_median")) if include_q else None,
+            _Q_COLOR,
+        ),
         ("Call Wall", _number(structure_facts.get("call_wall")), _WALL_CALL_COLOR),
     ]
     visible = sorted(
@@ -568,7 +591,7 @@ def _strategy_location_panel(
                 f'<polygon points="{spot_x - 8:.1f},{axis_y - 1:.1f} {spot_x + 8:.1f},{axis_y - 1:.1f} {spot_x:.1f},{axis_y + 11:.1f}" fill="{_SPOT_COLOR}"/>',
                 f'<line x1="{spot_x:.1f}" y1="{y + 211:.1f}" x2="{badge_x + 126:.1f}" y2="{y + 211:.1f}" stroke="{_SPOT_COLOR}" stroke-width="2"/>',
                 f'<rect x="{badge_x:.1f}" y="{y + 190:.1f}" width="252" height="48" rx="12" fill="{_SPOT_COLOR}"/>',
-                f'<text x="{badge_x + 126:.1f}" y="{y + 222:.1f}" font-size="24" font-weight="700" text-anchor="middle" fill="#FFFFFF">当前 SPX {spot:,.2f}</text>',
+                f'<text x="{badge_x + 126:.1f}" y="{y + 222:.1f}" font-size="24" font-weight="700" text-anchor="middle" fill="#FFFFFF">决策时 SPX {spot:,.2f}</text>',
             ]
         )
     parts.extend(_price_axis(domain, left=left, right=right, y=y + 180.0))
@@ -583,6 +606,7 @@ def _strategy_q_panel(
     spot: float | None,
     domain: tuple[float, float],
     y: float,
+    q_usable: bool,
 ) -> list[str]:
     left, right = 82.0, 1130.0
     top, bottom = y + 72.0, y + 208.0
@@ -593,7 +617,11 @@ def _strategy_q_panel(
         f'<line x1="{left}" y1="{bottom}" x2="{right}" y2="{bottom}" stroke="#94A3B8"/>',
     ]
     visible = [(strike, mass) for strike, mass in q_rows if domain[0] <= strike <= domain[1]]
-    if visible:
+    if not q_usable:
+        parts.append(
+            f'<text x="600" y="{y + 142}" class="body muted" text-anchor="middle">Q 质量不足：边界截断 {_percent(_number(structure_facts.get("q_clipped_mass_fraction")))}，不展示分位数与概率形状。</text>'
+        )
+    elif visible:
         maximum = max(mass for _strike, mass in visible) or 1.0
         bar_width = max(8.0, min(42.0, (right - left) * 4.0 / (domain[1] - domain[0])))
         points: list[str] = []
@@ -622,6 +650,7 @@ def _strategy_q_panel(
             top=top,
             bottom=bottom,
             labels=False,
+            include_q=q_usable,
         )
     )
     parts.extend(_price_axis(domain, left=left, right=right, y=bottom + 24.0))
@@ -636,6 +665,7 @@ def _strategy_payoff_panel(
     domain: tuple[float, float],
     y: float,
     series: Sequence[tuple[float, float]],
+    q_usable: bool,
 ) -> list[str]:
     left, right = 82.0, 1130.0
     top, bottom = y + 104.0, y + 312.0
@@ -689,6 +719,7 @@ def _strategy_payoff_panel(
             top=top,
             bottom=bottom,
             labels=False,
+            include_q=q_usable,
         )
     )
     parts.extend(
@@ -777,14 +808,15 @@ def _strategy_price_domain(
     structure_facts: Mapping[str, object],
     q_rows: Sequence[tuple[float, float]],
     spot: float | None,
+    include_q: bool,
 ) -> tuple[float, float]:
     values = [strike for strike, _mass in q_rows]
     values.extend(
         value
         for value in (
             spot,
-            _number(structure_facts.get("q_p10")),
-            _number(structure_facts.get("q_p90")),
+            _number(structure_facts.get("q_p10")) if include_q else None,
+            _number(structure_facts.get("q_p90")) if include_q else None,
             _number(structure_facts.get("put_wall")),
             _number(structure_facts.get("zero_gamma")),
             _number(structure_facts.get("call_wall")),
@@ -905,13 +937,18 @@ def _price_markers(
     top: float,
     bottom: float,
     labels: bool = True,
+    include_q: bool = True,
 ) -> list[str]:
     markers: list[tuple[str, float | None, str]] = [
         ("SPX", spot, _SPOT_COLOR),
         ("PW", _number(structure_facts.get("put_wall")), _WALL_PUT_COLOR),
         ("ZG", _number(structure_facts.get("zero_gamma")), "#64748B"),
         ("CW", _number(structure_facts.get("call_wall")), _WALL_CALL_COLOR),
-        ("Q50", _number(structure_facts.get("q_median")), _Q_COLOR),
+        (
+            "Q50",
+            _number(structure_facts.get("q_median")) if include_q else None,
+            _Q_COLOR,
+        ),
     ]
     markers.extend(
         (f"K{index + 1} {format_number(_number(leg.get('strike')), 0)}", _number(leg.get("strike")), "#0F172A")
@@ -994,7 +1031,7 @@ def _structure_strike_summary(
         for index, leg in enumerate(legs)
         if (value := _number(leg.get("strike"))) is not None
     )
-    spot_label = "SPX 暂缺" if spot is None else f"当前 SPX {spot:,.2f}"
+    spot_label = "SPX 暂缺" if spot is None else f"决策时 SPX {spot:,.2f}"
     return f"{strikes or '执行价暂缺'} · {spot_label}"
 
 

@@ -37,6 +37,7 @@ def default_state_path(settings: StorageSettings) -> str:
 REFRESH_COOLDOWN_SECONDS_DEFAULT = 1500.0
 MATERIAL_LEVEL_MOVE_POINTS = 5.0
 MATERIAL_EM_REL_CHANGE = 0.20
+RTH_CLOSE_SNAPSHOT_GRACE_SECONDS = 120.0
 
 
 def payload_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -119,7 +120,23 @@ def within_status_window(now_utc: datetime) -> bool:
 
     if now_utc.tzinfo is None or now_utc.utcoffset() is None:
         return False
-    return DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now_utc) or rth_report_slot(now_utc) is not None
+    return (
+        DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now_utc)
+        or rth_report_slot(now_utc) is not None
+        or within_rth_close_snapshot_window(now_utc)
+    )
+
+
+def within_rth_close_snapshot_window(now_utc: datetime) -> bool:
+    """Allow one image-only capture just after the exchange-local RTH close."""
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        return False
+    ny = now_utc.astimezone(NY_TZ)
+    session = DEFAULT_MARKET_CALENDAR.session(ny.date())
+    if session is None:
+        return False
+    delay_seconds = (ny - session.close_at).total_seconds()
+    return 0.0 <= delay_seconds <= RTH_CLOSE_SNAPSHOT_GRACE_SECONDS
 
 
 def exchange_session_relevant(now_utc: datetime) -> bool:

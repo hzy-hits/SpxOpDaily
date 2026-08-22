@@ -162,6 +162,7 @@ def test_order_map_status_timer_covers_full_exchange_local_rth() -> None:
 
     assert "OnCalendar=Mon..Fri *-*-* 09:00,15,30,45:00 America/New_York" in timer
     assert "OnCalendar=Mon..Fri *-*-* 10..15:00,15,30,45:00 America/New_York" in timer
+    assert "OnCalendar=Mon..Fri *-*-* 16:00:00 America/New_York" in timer
     assert "AccuracySec=1s" in timer
     assert "Asia/Shanghai" not in timer
     assert 'ln -sfn "$ROOT/systemd/spx-spark-order-map-status.service"' in installer

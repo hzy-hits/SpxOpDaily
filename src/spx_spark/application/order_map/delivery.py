@@ -211,6 +211,19 @@ def publish_strategy_risk_image(
         )
         if not decision:
             raise ValueError("strategy decision unavailable")
+        facts = (
+            decision.get("market_facts")
+            if isinstance(decision.get("market_facts"), dict)
+            else {}
+        )
+        decision_at = _timestamp(decision.get("decision_at"))
+        facts_at = _timestamp(facts.get("decision_at"))
+        if (
+            decision_at is not None
+            and facts_at is not None
+            and abs((decision_at - facts_at).total_seconds()) > 1.0
+        ):
+            raise ValueError("strategy risk decision and market facts are not time-aligned")
         write_strategy_risk_png(decision, output)
     except Exception as exc:  # noqa: BLE001 - image failure must not block trade-ready delivery
         return {

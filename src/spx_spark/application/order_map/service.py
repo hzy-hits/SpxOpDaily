@@ -108,6 +108,7 @@ from spx_spark.application.order_map.state import (
     mark_sent,
     session_phase,
     within_refresh_window,
+    within_rth_close_snapshot_window,
     within_send_window,
     within_status_window,
 )
@@ -542,6 +543,7 @@ def run_status(
         print(json.dumps({"skipped": True, "reason": "outside_status_window"}))
         return 0
 
+    close_snapshot = within_rth_close_snapshot_window(now)
     previous = load_order_map_state(state_path)
     storage_settings = StorageSettings.from_env()
     payload = build_order_payload_with_retry(storage_settings, now=now)
@@ -567,13 +569,35 @@ def run_status(
         print(json.dumps({"dry_run": True, "changes": changes}, ensure_ascii=False))
         return 0
 
-    rust_owner = rust_report_owner_enabled()
     strategy_decision = payload.get("strategy_decision")
     strategy_risk_image = publish_strategy_risk_image(
         storage_settings,
         decision=strategy_decision if isinstance(strategy_decision, dict) else {},
         now=now,
     )
+    if close_snapshot:
+        snapshot_result = {
+            "skipped": True,
+            "reason": "rth_close_image_snapshot",
+            "text": "",
+            "writer": "deterministic_snapshot_only",
+            "delivery_outcome": "suppressed_snapshot_only",
+            "changes": changes,
+            "report_slot_key": f"{trading_date}:close",
+            "strategy_risk_image": strategy_risk_image,
+        }
+        persist_order_map_pricing_audit(
+            payload,
+            storage_settings,
+            now=now,
+            report_kind="status_snapshot",
+            template=template,
+            result=snapshot_result,
+        )
+        print(json.dumps(snapshot_result, ensure_ascii=False))
+        return 0
+
+    rust_owner = rust_report_owner_enabled()
     rust_projection = persist_desk_map_projection(
         payload,
         [] if rust_owner else changes,
