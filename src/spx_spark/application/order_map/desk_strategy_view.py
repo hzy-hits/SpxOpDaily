@@ -8,9 +8,9 @@ from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.state import current_session_is_gth
 from spx_spark.application.order_map.strategy_regime import (
-    pin_stable_center,
     pin_stable_next_step_text,
     pin_stable_watch_phase,
+    pin_trade_center,
     pin_watch_center,
 )
 
@@ -61,7 +61,13 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
         return _gth_scan_desk_view(payload, decision, reasons)
     regime = _mapping(decision.get("regime"))
     pin_center = pin_watch_center(regime)
-    trade_center = pin_stable_center(regime)
+    trade_center = pin_trade_center(regime)
+    pin = _mapping(regime.get("pin"))
+    center_confirming = (
+        regime.get("terminal_state") == "PIN_STABLE"
+        and pin_center is not None
+        and trade_center is None
+    )
     if watchable:
         conclusion = f"可看 · {strategy_candidate_label(candidate)}"
     elif trade_center is not None:
@@ -76,7 +82,16 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
             else "不做 · 市场偏向中性/未定"
         )
     primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
-    if pin_center is not None and not watchable:
+    if center_confirming:
+        count = int(finite_float(pin.get("center_confirmation_count")) or 0)
+        required = int(finite_float(pin.get("center_confirmation_required")) or 0)
+        age_minutes = (finite_float(pin.get("center_confirmation_age_seconds")) or 0.0) / 60.0
+        required_minutes = (finite_float(pin.get("center_confirmation_min_seconds")) or 0.0) / 60.0
+        primary = (
+            f"中轴确认中 {count}/{required} · "
+            f"持续 {age_minutes:.1f}/{required_minutes:.0f} 分钟"
+        )
+    elif pin_center is not None and not watchable:
         facts = _mapping(decision.get("market_facts"))
         if pin_stable_watch_phase(finite_float(facts.get("minutes_to_close"))) == "look":
             primary = (
@@ -91,7 +106,9 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
         else _nearest_candidate_line(nearest, failed_gates)
     )
     reauthorize = str(why_not.get("reauthorize_on") or "").strip()
-    if not reauthorize or _looks_like_machine_token(reauthorize):
+    if center_confirming:
+        reauthorize = "等待同一中轴完成快照数与持续时间确认，再刷新三腿报价"
+    elif not reauthorize or _looks_like_machine_token(reauthorize):
         reauthorize = _pin_stable_next_step(decision, pin_center) or (
             "等待价格触发、精确报价与赔率同时通过后再评估"
         )
@@ -357,6 +374,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "gth_vertical_requires_aligned_trend": "夜盘方向价差要求路径同向（TREND 或 TRANSITION）",
         "directional_spread_blocked_by_pin_watch": "中轴观察或稳定钉住时不发方向价差",
         "butterfly_requires_pin_stable": "蝶式要求稳定钉住环境",
+        "butterfly_center_confirming": "中轴仍在确认，暂不生成新的蝶式交易卡",
         "butterfly_shock_veto": "冲击状态未平复，禁止新开蝶式",
         "butterfly_body_far_from_value_center": "蝶式身体偏离价值中枢过远",
         "butterfly_body_far_from_q_mode": "蝶式身体偏离概率峰值过远",
@@ -373,6 +391,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "butterfly_expiry_unavailable": "蝶式缺少到期日",
         "shock_active": "盘中冲击进行中",
         "shock_post_shock_discovery": "冲击后中枢重建中",
+        "rth_pin_winner_stick_center_locked": "已推送蝶式仍在 15 分钟中心锁定期",
     }
     if token in exact:
         return exact[token]

@@ -85,15 +85,16 @@ def session_direction_lock(
     """Return the active same-session direction lock, or None once it expires.
 
     The lock starts at the earliest card in the latest same-direction streak.
-    Later reprints of the same winner do not extend it. GTH may lock
-    UP/DOWN/NEUTRAL. RTH only locks UP/DOWN so a pin fly cannot freeze
-    the next momentum card.
+    Later reprints of the same winner do not extend it. GTH and RTH may lock
+    UP/DOWN/NEUTRAL. The selector bypasses an RTH neutral lock once no
+    STABLE_PIN candidate remains, so a dead pin cannot freeze the next
+    independent momentum card.
     """
 
     mode = str(session_mode or "").strip().lower()
     if stick_seconds <= 0 or mode not in {"gth", "rth"}:
         return None
-    allowed = {"UP", "DOWN", "NEUTRAL"} if mode == "gth" else {"UP", "DOWN"}
+    allowed = {"UP", "DOWN", "NEUTRAL"}
     now = _utc(now)
     matched: list[dict[str, Any]] = []
     for row in cards:
@@ -226,6 +227,9 @@ def apply_winner_stick(
             if str(row.get("opportunity_id") or "") != lock.opportunity_id
         ]
         return [matching[0], *rest], None
+    mode = str(session_mode or "").strip().lower()
+    if mode == "rth" and locked_direction == "NEUTRAL":
+        return [], "rth_pin_winner_stick_center_locked"
     same_direction = [
         row
         for row in passed
@@ -238,7 +242,6 @@ def apply_winner_stick(
             if str(row.get("direction") or "").upper() != locked_direction
         ]
         return [*same_direction, *others], None
-    mode = str(session_mode or "").strip().lower()
     reason = (
         "gth_winner_stick_direction_locked"
         if mode == "gth"
@@ -341,12 +344,11 @@ def rank_candidates(
 
 
 def _look_window_pin_priority(candidate: Mapping[str, Any], *, look_window: bool) -> tuple[int, float]:
-    """11–13 TRADE prefers any pin fly over a vertical, then the tightest tent."""
+    """11–13 TRADE prefers a confirmed pin fly without overriding its score."""
 
     if not look_window or candidate.get("setup_kind") != "STABLE_PIN":
         return (0, 0.0)
-    width = _number(candidate.get("width")) or 0.0
-    return (1, -width)
+    return (1, 0.0)
 
 
 def _apply_surface_shape_prior(

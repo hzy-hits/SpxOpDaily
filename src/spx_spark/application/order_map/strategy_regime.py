@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
@@ -35,13 +36,21 @@ __all__ = (
     "pin_stable_center",
     "pin_stable_next_step_text",
     "pin_stable_watch_phase",
+    "pin_trade_center",
     "pin_watch_center",
 )
 
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v42"
+    policy_version: str = "strategy_policy.bootstrap.v43"
+    # v43: a STABLE_PIN body is observation-only until the same selected
+    # center survives at least three decision snapshots and ten minutes. A
+    # small challenger cannot replace the previous center unless its score
+    # leads by 0.05; only the confirmed top center reaches candidate
+    # enumeration. The 11:00–13:00 ladder starts at 10-wide and rank no
+    # longer hard-prefers the tightest tent. An accepted RTH pin card keeps
+    # its exact center/width/right for the existing 15-minute winner window.
     # v42: blind GTH width/delta scans remain in the rejection funnel but no
     # longer authorize Trade Ready. Recent live cards showed rapid direction
     # flips without forward edge evidence. GTH manual debit now requires
@@ -106,7 +115,7 @@ class StrategyPolicy:
     # (failed-break, trend-pullback, breakout). Event-settlement and GTH
     # scans stay. PIN_MIGRATING / UNCERTAIN do not block spreads.
     # v29: 11:00–13:00 TRADE does not bind fly width. The look ladder is
-    # 5/10/15/20/50; a width is enumerated when local mass is already piled
+    # 10/15/20/50; a width is enumerated when local mass is already piled
     # inside [K−W, K+W]. Rank prefers any pin fly over a vertical, then the
     # tightest passing tent. Late RTH still uses 5/10/15/20 on 12 min/point.
     # v28: 11:00–13:00 TRADE evaluates 10-wide flies by default. 5-wide in
@@ -212,9 +221,13 @@ class StrategyPolicy:
     pin_stable_enter_min_excursions: int = 2
     pin_stable_hold_min_excursions: int = 1
     pin_look_min_excursions: int = 1
-    butterfly_look_clock_widths: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0, 50.0)
+    butterfly_look_clock_widths: tuple[float, ...] = (10.0, 15.0, 20.0, 50.0)
     pin_look_min_mass_fraction: float = 0.50
     pin_q_mode_hold_max_distance_points: float = 5.0
+    pin_center_hold_max_distance_points: float = 10.0
+    pin_center_switch_min_score_margin: float = 0.05
+    pin_center_min_confirmation_snapshots: int = 3
+    pin_center_min_dwell_seconds: float = 600.0
     pin_body_max_center_distance_points: float = 5.0
     pin_body_max_spot_distance_points: float = 15.0
     hmm_trend_min_probability: float = 0.55
@@ -286,7 +299,7 @@ def butterfly_entry_clock_open(
 ) -> bool:
     """True when the pin-fly clock allows this width to be ranked.
 
-    Look-ladder widths (5/10/15/20/50): 11:00–13:00 ET, or their late clocks.
+    Look-ladder widths (10/15/20/50): 11:00–13:00 ET, or their late clocks.
     A leftover of 90 minutes (about 14:30 ET) stays closed for 5-wide.
     """
 
@@ -322,7 +335,7 @@ def pin_look_trade_widths(
 ) -> tuple[float, ...]:
     """Widths enumerated for a STABLE_PIN body.
 
-    Look window follows the mass box on the 5/10/15/20/50 ladder. Late RTH
+    Look window follows the mass box on the 10/15/20/50 ladder. Late RTH
     keeps the 5/10/15/20 scan; 50 is look-window only.
     """
 
@@ -382,6 +395,19 @@ def pin_stable_center(regime: Mapping[str, Any] | None) -> float | None:
     return _pin_top_center(payload)
 
 
+def pin_trade_center(regime: Mapping[str, Any] | None) -> float | None:
+    """Confirmed PIN_STABLE body that may enter candidate enumeration."""
+
+    payload = _map(regime)
+    pin = _map(payload.get("pin"))
+    if (
+        payload.get("terminal_state") != "PIN_STABLE"
+        or pin.get("center_confirmation_ready") is not True
+    ):
+        return None
+    return _pin_top_center(payload)
+
+
 def pin_blocks_directional_spreads(regime: Mapping[str, Any] | None) -> bool:
     """True when a forming or stable pin forbids RTH directional debit cards."""
 
@@ -432,7 +458,7 @@ def pin_stable_next_step_text(
 ) -> str:
     phase = pin_stable_watch_phase(minutes_to_close, policy)
     if phase == "look":
-        return "11–13 可看今日蝶；5 点限价已开窗，提交前刷新三腿报价"
+        return "11–13 仅评已确认中轴的 10–50 点蝶；提交前刷新三腿报价"
     if phase == "clock_open":
         return "5 点蝶尾盘时钟已开，等待精确三腿报价与赔率"
     late = butterfly_max_entry_minutes(5.0, policy)
@@ -724,6 +750,30 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
                        - 0.25 * min(max(abs(drift30) / 5, abs(drift60) / 8), 1) - 0.20 * depin, 4),
         "excursion_returns": returns[center],
     } for center in centers), key=lambda row: row["score"], reverse=True)
+    latch = _map(facts.get("pin_latch"))
+    raw_leader = _number(_map(ranked[0]).get("center")) if ranked else None
+    center_source = "current_score"
+    previous_center = _number(latch.get("center"))
+    if ranked and previous_center is not None:
+        previous_row = next(
+            (
+                row
+                for row in ranked
+                if abs(float(row["center"]) - previous_center) <= 0.01
+            ),
+            None,
+        )
+        leader = ranked[0]
+        if (
+            previous_row is not None
+            and previous_row is not leader
+            and abs(float(leader["center"]) - previous_center)
+            <= policy.pin_center_hold_max_distance_points
+            and float(leader["score"]) - float(previous_row["score"])
+            < policy.pin_center_switch_min_score_margin
+        ):
+            ranked = [previous_row, *(row for row in ranked if row is not previous_row)]
+            center_source = "previous_center_score_margin_hold"
     er_max, drift30_max, drift60_max, migrate30, migrate60, stable_risk, block_risk = policy.pin_thresholds
     migrating = abs(drift30) > migrate30 or abs(drift60) > migrate60 or float(er) > 0.40 or extreme
     aligned = gamma is not None and max(float(q_mode), float(vc30), gamma) - min(float(q_mode), float(vc30), gamma) <= 5
@@ -762,6 +812,43 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
         terminal, grade = "NONE", "look"
     else:
         terminal, grade = "NONE", "none"
+    selected_center = _number(_map(ranked[0]).get("center")) if ranked else None
+    decision_at = _time(facts.get("decision_at"))
+    same_center = (
+        selected_center is not None
+        and previous_center is not None
+        and abs(selected_center - previous_center) <= 0.01
+    )
+    if same_center:
+        previous_count = int(_number(latch.get("center_confirmation_count")) or 1)
+        confirmation_count = previous_count + 1
+        first_seen_at = (
+            _time(latch.get("center_first_seen_at"))
+            or _time(latch.get("decision_at"))
+            or decision_at
+        )
+    else:
+        confirmation_count = 1 if selected_center is not None else 0
+        first_seen_at = decision_at
+    confirmation_age = (
+        max((decision_at - first_seen_at).total_seconds(), 0.0)
+        if decision_at is not None and first_seen_at is not None
+        else 0.0
+    )
+    confirmation_ready = (
+        terminal == "PIN_STABLE"
+        and confirmation_count >= policy.pin_center_min_confirmation_snapshots
+        and confirmation_age >= policy.pin_center_min_dwell_seconds
+    )
+    confirmation_reason = (
+        "pin_not_stable"
+        if terminal != "PIN_STABLE"
+        else "center_snapshot_confirmation_pending"
+        if confirmation_count < policy.pin_center_min_confirmation_snapshots
+        else "center_dwell_confirmation_pending"
+        if confirmation_age < policy.pin_center_min_dwell_seconds
+        else "confirmed"
+    )
     return {
         "terminal_state": terminal,
         "depin_risk": round(depin, 4),
@@ -771,6 +858,16 @@ def _pin_assessment(facts: Mapping[str, Any], policy: StrategyPolicy) -> dict[st
         "q_mode": q_mode,
         "q_mode_source": q_mode_source,
         "grade": grade,
+        "center": selected_center,
+        "raw_leader_center": raw_leader,
+        "center_source": center_source,
+        "center_confirmation_count": confirmation_count,
+        "center_confirmation_required": policy.pin_center_min_confirmation_snapshots,
+        "center_first_seen_at": first_seen_at.isoformat() if first_seen_at else None,
+        "center_confirmation_age_seconds": round(confirmation_age, 3),
+        "center_confirmation_min_seconds": policy.pin_center_min_dwell_seconds,
+        "center_confirmation_ready": confirmation_ready,
+        "center_confirmation_reason": confirmation_reason,
         "excursion_held": bool(held and stable and excursions < policy.pin_stable_enter_min_excursions),
         "top_centers": ranked[:3],
     }
@@ -852,6 +949,19 @@ def _map(value: object) -> Mapping[str, Any]:
 
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
+
+
+def _time(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
 
 
 def _first_number(*values: object) -> float | None:

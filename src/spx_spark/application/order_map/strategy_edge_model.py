@@ -146,7 +146,7 @@ def apply_strategy_edge_authority(
             )
             if setup == _PREAVERAGE_SETUP
             else (
-                "strategy_policy.bootstrap.v42",
+                "strategy_policy.bootstrap.v43",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             )

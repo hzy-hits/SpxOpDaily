@@ -999,9 +999,19 @@ def _pin_latch_fact(payload: Mapping[str, Any], *, session_date: str | None) -> 
         "center": center,
         "session_date": session_date,
     }
-    q_mode = _number(_map(regime.get("pin")).get("q_mode"))
+    previous_decision_at = previous.get("decision_at")
+    if isinstance(previous_decision_at, str) and _time(previous_decision_at) is not None:
+        latch["decision_at"] = previous_decision_at
+    pin = _map(regime.get("pin"))
+    q_mode = _number(pin.get("q_mode"))
     if q_mode is not None:
         latch["q_mode"] = q_mode
+    confirmation_count = _number(pin.get("center_confirmation_count"))
+    if confirmation_count is not None:
+        latch["center_confirmation_count"] = int(confirmation_count)
+    first_seen_at = pin.get("center_first_seen_at")
+    if isinstance(first_seen_at, str) and _time(first_seen_at) is not None:
+        latch["center_first_seen_at"] = first_seen_at
     return latch
 
 

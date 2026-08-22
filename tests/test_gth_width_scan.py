@@ -255,7 +255,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v42"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v43"
     assert ranked.passed == []
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
@@ -664,6 +664,76 @@ def test_rth_winner_stick_blocks_opposite_direction() -> None:
 
     assert stuck == []
     assert reason == "rth_winner_stick_direction_locked"
+
+
+def test_rth_pin_winner_stick_keeps_exact_butterfly_opportunity() -> None:
+    lock = GthDirectionLock(
+        direction="NEUTRAL",
+        opportunity_id="strategy-opportunity:pin-7675-20-call",
+        started_at=NOW,
+    )
+    passed = [
+        {
+            "opportunity_id": "strategy-opportunity:pin-7675-10-call",
+            "setup_kind": "STABLE_PIN",
+            "direction": "NEUTRAL",
+            "selection_score": 3.0,
+        },
+        {
+            "opportunity_id": "strategy-opportunity:pin-7675-20-call",
+            "setup_kind": "STABLE_PIN",
+            "direction": "NEUTRAL",
+            "selection_score": 1.0,
+        },
+    ]
+
+    stuck, reason = apply_winner_stick(passed, lock, session_mode="rth")
+
+    assert reason is None
+    assert stuck[0]["opportunity_id"] == lock.opportunity_id
+
+
+def test_rth_pin_winner_stick_blocks_a_different_butterfly_opportunity() -> None:
+    lock = GthDirectionLock(
+        direction="NEUTRAL",
+        opportunity_id="strategy-opportunity:pin-7675-20-call",
+        started_at=NOW,
+    )
+    passed = [
+        {
+            "opportunity_id": "strategy-opportunity:pin-7690-10-put",
+            "setup_kind": "STABLE_PIN",
+            "direction": "NEUTRAL",
+            "selection_score": 3.0,
+        }
+    ]
+
+    stuck, reason = apply_winner_stick(passed, lock, session_mode="rth")
+
+    assert stuck == []
+    assert reason == "rth_pin_winner_stick_center_locked"
+
+
+def test_rth_session_lock_includes_neutral_pin_cards() -> None:
+    cards = (
+        {
+            "session_mode": "rth",
+            "direction": "NEUTRAL",
+            "opportunity_id": "strategy-opportunity:pin-7675-20-call",
+            "decision_at": NOW,
+        },
+    )
+
+    lock = session_direction_lock(
+        cards,
+        now=NOW + timedelta(seconds=30),
+        stick_seconds=900.0,
+        session_mode="rth",
+    )
+
+    assert lock is not None
+    assert lock.direction == "NEUTRAL"
+    assert lock.opportunity_id == cards[0]["opportunity_id"]
 
 
 def test_rth_session_lock_expires_but_committed_direction_remains() -> None:

@@ -12,8 +12,9 @@ pub struct RenderedMessage {
 pub fn render_desk_message(message: &DeskMessageV1) -> RenderedMessage {
     let title = normalize(message.title.as_str());
     let body = format!(
-        "Desk View\n{}\n\nExecution\n{}\n\nRisk\n{}\n\nTargets\n{}\n\nData Quality\n{}",
+        "Desk View\n{}\n\n{}\n\nExecution\n{}\n\nRisk\n{}\n\nTargets\n{}\n\nData Quality\n{}",
         normalize(message.desk_view.as_str()),
+        chart_links(),
         normalize(message.execution.as_str()),
         normalize(message.risk.as_str()),
         normalize(message.targets.as_str()),
@@ -94,7 +95,8 @@ fn compact_setup_body(body: &str) -> String {
     let targets = select_lines(sections[3], &[], 1, true);
     let data_quality = select_lines(sections[4], &[], 1, true);
     format!(
-        "Desk View\n🟠 WATCH · 尚未到人工入场\n{desk_view}\n\nExecution\n{execution}\n\nRisk\n{risk}\n\nTargets\n{targets}\n\nData Quality\n{data_quality}",
+        "Desk View\n🟠 WATCH · 尚未到人工入场\n{desk_view}\n\n{}\n\nExecution\n{execution}\n\nRisk\n{risk}\n\nTargets\n{targets}\n\nData Quality\n{data_quality}",
+        chart_links(),
     )
 }
 
@@ -128,8 +130,13 @@ fn try_compact_trade_ready_body(body: &str) -> Option<String> {
     let targets = select_lines(sections[3], &[], 3, true);
     let data_quality = select_lines(sections[4], &[], 1, true);
     Some(format!(
-        "Desk View\n{desk_view}\n\nExecution\n{execution}\n\nRisk\n{risk}\n\nTargets\n{targets}\n\nData Quality\n{data_quality}",
+        "Desk View\n{desk_view}\n\n{}\n\nExecution\n{execution}\n\nRisk\n{risk}\n\nTargets\n{targets}\n\nData Quality\n{data_quality}",
+        chart_links(),
     ))
+}
+
+fn chart_links() -> String {
+    format!("图表\n策略风险 {STRATEGY_RISK_IMAGE_URL}\nOI墙位 {OPEN_INTEREST_IMAGE_URL}")
 }
 
 fn trade_ready_sections_are_complete(sections: &[&str; 5]) -> bool {
@@ -273,7 +280,7 @@ mod tests {
         assert_eq!(rendered.title, "SPX 0DTE | MANUAL CANDIDATE");
         assert_eq!(
             rendered.body,
-            "Desk View\nRange regime\n\nExecution\nWait for exact-leg confirmation\n\nRisk\nNo automatic order\n\nTargets\nCall wall 6000\n\nData Quality\nSchwab live; exact NBBO fresh"
+            "Desk View\nRange regime\n\n图表\n策略风险 https://spx.zh3nyu.com/strategy-risk/latest.png\nOI墙位 https://spx.zh3nyu.com/oi/latest.png\n\nExecution\nWait for exact-leg confirmation\n\nRisk\nNo automatic order\n\nTargets\nCall wall 6000\n\nData Quality\nSchwab live; exact NBBO fresh"
         );
     }
 
@@ -372,6 +379,8 @@ mod tests {
         assert!(rendered.body.contains("🟠 WATCH · 尚未到人工入场"));
         assert!(rendered.body.contains("LONG条件  7760上方接受"));
         assert!(rendered.body.contains("动作  等待 READY"));
+        assert!(rendered.body.contains(STRATEGY_RISK_IMAGE_URL));
+        assert!(rendered.body.contains(OPEN_INTEREST_IMAGE_URL));
         assert!(!rendered.body.contains("SPXW 7760C"));
         assert!(!rendered.body.contains("Spring Gamma"));
         assert!(!rendered.body.contains("HMM 未校准"));
@@ -407,6 +416,8 @@ mod tests {
         assert!(rendered.body.contains("限价  ≤ 21.60"));
         assert!(rendered.body.contains("止损  SPX 跌回 7757"));
         assert!(rendered.body.contains("目标  SPX 7780"));
+        assert!(rendered.body.contains(STRATEGY_RISK_IMAGE_URL));
+        assert!(rendered.body.contains(OPEN_INTEREST_IMAGE_URL));
         assert!(!rendered.body.contains("解释  省略"));
         assert!(!rendered.body.contains("Spring Gamma"));
         assert!(!rendered.body.contains("历史  23 笔"));
@@ -457,7 +468,8 @@ mod tests {
         let rendered = render_operator_notification(&notification);
 
         assert_eq!(rendered.title, "SPX GTH TRADE READY · 人工限价");
-        assert!(rendered.body.len() < source.len());
+        assert!(rendered.body.contains(STRATEGY_RISK_IMAGE_URL));
+        assert!(rendered.body.contains(OPEN_INTEREST_IMAGE_URL));
         for critical in [
             "买入  SPXW 08-05 7760C",
             "卖出  SPXW 08-05 7770C",

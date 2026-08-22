@@ -135,6 +135,18 @@ def render_open_interest_mirror_svg(
     call_walls = _wall_rows(walls, "call_walls")
     put_ranks = {_number(row.get("strike")): rank for rank, row in enumerate(put_walls, 1)}
     call_ranks = {_number(row.get("strike")): rank for rank, row in enumerate(call_walls, 1)}
+    max_put_row = max(
+        visible,
+        key=lambda item: _number(item.get("put_open_interest")) or 0.0,
+    )
+    max_call_row = max(
+        visible,
+        key=lambda item: _number(item.get("call_open_interest")) or 0.0,
+    )
+    max_put_strike = _number(max_put_row.get("strike"))
+    max_call_strike = _number(max_call_row.get("strike"))
+    max_put_oi = max(0.0, _number(max_put_row.get("put_open_interest")) or 0.0)
+    max_call_oi = max(0.0, _number(max_call_row.get("call_open_interest")) or 0.0)
 
     width = 1200
     center = width / 2
@@ -144,7 +156,7 @@ def render_open_interest_mirror_svg(
     call_axis = center + center_gap / 2
     max_bar_width = put_axis - plot_left - 78.0
     row_height = 31.0
-    plot_top = 398.0
+    plot_top = 442.0
     plot_bottom = plot_top + len(visible) * row_height
     height = int(plot_bottom + 164)
     max_oi = max(
@@ -172,20 +184,22 @@ def render_open_interest_mirror_svg(
         ".rank { font-size: 18px; font-weight: 700; fill: #FFFFFF; }",
         "</style>",
         f'<rect width="{width}" height="{height}" fill="#F8FAFC"/>',
-        '<rect x="34" y="28" width="1132" height="318" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
+        '<rect x="34" y="28" width="1132" height="362" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
         '<text x="60" y="78" font-size="34" font-weight="700">SPXW 0DTE Open Interest · ATM Mirror</text>',
         f'<text x="60" y="116" class="body muted">Expiry {expiry_label} · SPX {underlier:,.2f} · ATM {atm:,.0f} · {escape(as_of)}</text>',
-        '<text x="60" y="150" class="small muted">Bars = open interest (same scale) · P1/C1 = OI-GEX wall rank</text>',
-        f'<text x="60" y="196" font-size="23" font-weight="700" fill="{_PUT_COLOR}">PUT WALLS</text>',
-        f'<text x="650" y="196" font-size="23" font-weight="700" fill="{_CALL_COLOR}">CALL WALLS</text>',
+        '<text x="60" y="150" class="small muted">Bars = open interest (same scale) · P1/C1 = OI-GEX wall rank · MAX = longest visible OI bar</text>',
+        f'<text x="60" y="196" font-size="21" font-weight="700" fill="{_PUT_COLOR}">{escape(_primary_wall_label(put_walls, underlier=underlier, side="PUT"))}</text>',
+        f'<text x="650" y="196" font-size="21" font-weight="700" fill="{_CALL_COLOR}">{escape(_primary_wall_label(call_walls, underlier=underlier, side="CALL"))}</text>',
     ]
     parts.extend(_wall_summary(put_walls, x=60, y=232, prefix="P", color=_WALL_PUT_COLOR))
     parts.extend(_wall_summary(call_walls, x=650, y=232, prefix="C", color=_WALL_CALL_COLOR))
     parts.extend(
         [
-            f'<text x="72" y="382" font-size="22" font-weight="700" fill="{_PUT_COLOR}">PUT OI</text>',
-            f'<text x="1128" y="382" font-size="22" font-weight="700" text-anchor="end" fill="{_CALL_COLOR}">CALL OI</text>',
-            '<text x="600" y="382" font-size="20" font-weight="700" text-anchor="middle">STRIKE</text>',
+            f'<text x="60" y="344" class="small" font-weight="700" fill="{_PUT_COLOR}">VISIBLE MAX PUT OI · SPX {max_put_strike:,.0f} · OI {max_put_oi:,.0f}</text>',
+            f'<text x="650" y="344" class="small" font-weight="700" fill="{_CALL_COLOR}">VISIBLE MAX CALL OI · SPX {max_call_strike:,.0f} · OI {max_call_oi:,.0f}</text>',
+            f'<text x="72" y="426" font-size="22" font-weight="700" fill="{_PUT_COLOR}">PUT OI</text>',
+            f'<text x="1128" y="426" font-size="22" font-weight="700" text-anchor="end" fill="{_CALL_COLOR}">CALL OI</text>',
+            '<text x="600" y="426" font-size="20" font-weight="700" text-anchor="middle">SPX STRIKE</text>',
         ]
     )
 
@@ -198,6 +212,8 @@ def render_open_interest_mirror_svg(
         call_width = max_bar_width * call_oi / max_oi
         put_rank = put_ranks.get(strike)
         call_rank = call_ranks.get(strike)
+        put_is_max = max_put_oi > 0.0 and strike == max_put_strike
+        call_is_max = max_call_oi > 0.0 and strike == max_call_strike
         if strike == atm:
             parts.append(
                 f'<rect x="42" y="{y - 3:.1f}" width="1116" height="{row_height:.1f}" '
@@ -210,12 +226,14 @@ def render_open_interest_mirror_svg(
         parts.append(
             f'<rect x="{put_axis - put_width:.1f}" y="{y + 2:.1f}" width="{put_width:.1f}" '
             f'height="20" rx="4" fill="{_WALL_PUT_COLOR if put_rank else _PUT_COLOR}" '
-            f'opacity="{1.0 if put_rank else 0.72}"/>'
+            f'opacity="{1.0 if put_rank else 0.72}"'
+            f'{" stroke=\"#172033\" stroke-width=\"2\"" if put_is_max else ""}/>'
         )
         parts.append(
             f'<rect x="{call_axis:.1f}" y="{y + 2:.1f}" width="{call_width:.1f}" '
             f'height="20" rx="4" fill="{_WALL_CALL_COLOR if call_rank else _CALL_COLOR}" '
-            f'opacity="{1.0 if call_rank else 0.72}"/>'
+            f'opacity="{1.0 if call_rank else 0.72}"'
+            f'{" stroke=\"#172033\" stroke-width=\"2\"" if call_is_max else ""}/>'
         )
         parts.append(
             f'<text x="{put_axis - put_width - 8:.1f}" y="{y + 19:.1f}" class="small" '
@@ -232,6 +250,10 @@ def render_open_interest_mirror_svg(
             parts.append(_rank_badge(put_axis - 42, y + 2, f"P{put_rank}", _WALL_PUT_COLOR))
         if call_rank:
             parts.append(_rank_badge(call_axis + 10, y + 2, f"C{call_rank}", _WALL_CALL_COLOR))
+        if put_is_max:
+            parts.append(_rank_badge(put_axis - 96, y + 2, "MAX", "#172033", width=48))
+        if call_is_max:
+            parts.append(_rank_badge(call_axis + 50, y + 2, "MAX", "#172033", width=48))
 
     footer_y = plot_bottom + 50
     parts.extend(
@@ -943,7 +965,7 @@ def _wall_summary(
             strike = _number(rows[index].get("strike"))
             oi = _number(rows[index].get("open_interest"))
             label = (
-                f"{strike:,.0f}    OI {oi:,.0f}"
+                f"SPX {strike:,.0f}    OI {oi:,.0f}"
                 if strike is not None and oi is not None
                 else "unavailable"
             )
@@ -959,10 +981,35 @@ def _wall_summary(
     return output
 
 
-def _rank_badge(x: float, y: float, label: str, color: str) -> str:
+def _primary_wall_label(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    underlier: float,
+    side: str,
+) -> str:
+    if not rows:
+        return f"MAIN {side} WALL · unavailable"
+    strike = _number(rows[0].get("strike"))
+    oi = _number(rows[0].get("open_interest"))
+    if strike is None or oi is None:
+        return f"MAIN {side} WALL · unavailable"
     return (
-        f'<rect x="{x:.1f}" y="{y:.1f}" width="34" height="20" rx="5" fill="{color}"/>'
-        f'<text x="{x + 17:.1f}" y="{y + 16:.1f}" class="rank" text-anchor="middle">{label}</text>'
+        f"MAIN {side} WALL · SPX {strike:,.0f} · OI {oi:,.0f} · "
+        f"ΔSPX {strike - underlier:+.1f}pt"
+    )
+
+
+def _rank_badge(
+    x: float,
+    y: float,
+    label: str,
+    color: str,
+    *,
+    width: float = 34,
+) -> str:
+    return (
+        f'<rect x="{x:.1f}" y="{y:.1f}" width="{width:.0f}" height="20" rx="5" fill="{color}"/>'
+        f'<text x="{x + width / 2:.1f}" y="{y + 16:.1f}" class="rank" text-anchor="middle">{label}</text>'
     )
 
 

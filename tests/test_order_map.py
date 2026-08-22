@@ -5136,7 +5136,7 @@ def test_pin_stable_watch_text_is_observation_not_a_trade() -> None:
         phase="look",
     )
     assert "【SPX 观察 · 稳定钉住 7785】" in text
-    assert "11–13 可看今日蝶" in text
+    assert "11–13 仅评已确认中轴的 10–50 点蝶" in text
     assert "还早" not in text
     assert "14:50 ET" not in text
     assert "人工候选" not in text
@@ -5168,7 +5168,7 @@ def test_desk_view_renders_pin_stable_observation() -> None:
     decision = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
     decision["why_not"] = {
         "reasons": ["butterfly_entry_too_early"],
-        "reauthorize_on": "11–13 可看今日蝶；5 点限价已开窗，提交前刷新三腿报价",
+        "reauthorize_on": "11–13 仅评已确认中轴的 10–50 点蝶；提交前刷新三腿报价",
         "nearest_candidate": {
             "setup_kind": "STABLE_PIN",
             "strategy_type": "PUT_BUTTERFLY",
@@ -5180,7 +5180,7 @@ def test_desk_view_renders_pin_stable_observation() -> None:
     text = strategy_decision_desk_view({"strategy_decision": decision})
     assert text is not None
     assert "观察 · 稳定钉住 7785" in text
-    assert "11–13 可看今日蝶" in text
+    assert "11–13 仅评已确认中轴的 10–50 点蝶" in text
     assert "距收盘过早，窄翼蝶式尚未授权" not in text
 
 
@@ -5199,6 +5199,11 @@ def _pin_stable_decision(
             "path_state": "BALANCED",
             "pin": {
                 "depin_risk": 0.17,
+                "center_confirmation_count": 3,
+                "center_confirmation_required": 3,
+                "center_confirmation_age_seconds": 660.0,
+                "center_confirmation_min_seconds": 600.0,
+                "center_confirmation_ready": True,
                 "top_centers": [{"center": center, "score": 0.8}],
             },
         },

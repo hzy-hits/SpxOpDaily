@@ -132,18 +132,28 @@ def build_strategy_decision(
                     row.get("setup_kind") == "PREAVERAGE15_PULLBACK"
                     for row in rank.passed
                 )
+                winner_lock = (
+                    None
+                    if independent_preaverage
+                    else _session_direction_lock(
+                        facts,
+                        now=_utc(now),
+                        policy=DEFAULT_STRATEGY_POLICY,
+                        payload=payload,
+                    )
+                )
+                if (
+                    winner_lock is not None
+                    and winner_lock.direction.upper() == "NEUTRAL"
+                    and not any(
+                        row.get("setup_kind") == "STABLE_PIN"
+                        for row in rank.passed
+                    )
+                ):
+                    winner_lock = None
                 stuck, stick_reason = apply_winner_stick(
                     rank.passed,
-                    (
-                        None
-                        if independent_preaverage
-                        else _session_direction_lock(
-                            facts,
-                            now=_utc(now),
-                            policy=DEFAULT_STRATEGY_POLICY,
-                            payload=payload,
-                        )
-                    ),
+                    winner_lock,
                     session_mode=session_mode,
                 )
                 rank = RankResult(
@@ -808,7 +818,7 @@ def _injected_direction_lock(raw: object) -> GthDirectionLock | None:
     direction = str(item.get("direction") or "").upper()
     opportunity_id = str(item.get("opportunity_id") or "").strip()
     started_at = item.get("started_at")
-    if direction not in {"UP", "DOWN"} or not opportunity_id:
+    if direction not in {"UP", "DOWN", "NEUTRAL"} or not opportunity_id:
         return None
     if isinstance(started_at, datetime):
         started = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)

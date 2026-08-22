@@ -36,6 +36,7 @@ from spx_spark.application.order_map.strategy_regime import (
     pin_look_trade_widths,
     pin_stable_center,
     pin_stable_watch_phase,
+    pin_trade_center,
     pin_watch_center,
 )
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
@@ -258,6 +259,101 @@ def test_frozen_pin_cases_migrate_on_aug5_and_rank_7710_on_aug6() -> None:
     assert aug5["terminal_state"] == "PIN_MIGRATING"
     assert aug6["terminal_state"] == "PIN_STABLE"
     assert [row["center"] for row in aug6["pin"]["top_centers"]][:1] == [7710.0]
+
+
+def test_pin_center_requires_three_snapshots_and_ten_minutes() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    base = _frozen_pin_facts("2026-08-06")
+    unconfirmed = assess_regime({**base, "decision_at": now})
+    confirmed = assess_regime(
+        {
+            **base,
+            "decision_at": now,
+            "session_date": "2026-08-06",
+            "pin_latch": {
+                "terminal_state": "PIN_STABLE",
+                "center": 7710.0,
+                "q_mode": 7710.0,
+                "session_date": "2026-08-06",
+                "center_confirmation_count": 2,
+                "center_first_seen_at": (now - timedelta(minutes=11)).isoformat(),
+            },
+        }
+    )
+
+    assert unconfirmed["terminal_state"] == "PIN_STABLE"
+    assert unconfirmed["pin"]["center_confirmation_ready"] is False
+    assert pin_trade_center(unconfirmed) is None
+    assert confirmed["pin"]["center_confirmation_count"] == 3
+    assert confirmed["pin"]["center_confirmation_age_seconds"] == 660.0
+    assert confirmed["pin"]["center_confirmation_ready"] is True
+    assert pin_trade_center(confirmed) == 7710.0
+
+
+def test_pin_center_holds_a_nearby_challenger_without_score_margin() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    base = _frozen_pin_facts("2026-08-06")
+    regime = assess_regime(
+        {
+            **base,
+            "decision_at": now,
+            "session_date": "2026-08-06",
+            "structure": {
+                **base["structure"],
+                "q_local_mass_5pt": {
+                    **base["structure"]["q_local_mass_5pt"],
+                    "7710": 0.28,
+                    "7715": 0.33,
+                },
+            },
+            "pin_latch": {
+                "terminal_state": "PIN_STABLE",
+                "center": 7710.0,
+                "q_mode": 7710.0,
+                "session_date": "2026-08-06",
+                "center_confirmation_count": 2,
+                "center_first_seen_at": (now - timedelta(minutes=11)).isoformat(),
+            },
+        }
+    )
+
+    assert regime["pin"]["raw_leader_center"] == 7715.0
+    assert regime["pin"]["center"] == 7710.0
+    assert regime["pin"]["center_source"] == "previous_center_score_margin_hold"
+    assert regime["pin"]["center_confirmation_ready"] is True
+
+
+def test_pin_center_switch_resets_confirmation_when_score_margin_is_material() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    base = _frozen_pin_facts("2026-08-06")
+    regime = assess_regime(
+        {
+            **base,
+            "decision_at": now,
+            "session_date": "2026-08-06",
+            "structure": {
+                **base["structure"],
+                "q_local_mass_5pt": {
+                    **base["structure"]["q_local_mass_5pt"],
+                    "7710": 0.20,
+                    "7715": 0.40,
+                },
+            },
+            "pin_latch": {
+                "terminal_state": "PIN_STABLE",
+                "center": 7710.0,
+                "q_mode": 7710.0,
+                "session_date": "2026-08-06",
+                "center_confirmation_count": 3,
+                "center_first_seen_at": (now - timedelta(minutes=11)).isoformat(),
+            },
+        }
+    )
+
+    assert regime["pin"]["raw_leader_center"] == 7715.0
+    assert regime["pin"]["center"] == 7715.0
+    assert regime["pin"]["center_confirmation_count"] == 1
+    assert regime["pin"]["center_confirmation_ready"] is False
 
 
 def test_pin_stable_holds_when_excursion_flickers_to_one() -> None:
@@ -495,7 +591,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v42"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v43"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -706,12 +802,40 @@ def test_fact_pack_reads_index_hmm_from_research_signals() -> None:
 
 def test_stable_pin_produces_manual_7710_call_butterfly() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
-    decision = build_strategy_decision(_pin_payload(now), _pin_state(now), now)
+    payload = _pin_payload(now)
+    facts = build_market_fact_pack(payload, _pin_state(now), now)
+    regime = assess_regime(facts)
+    rows = enumerate_candidates(
+        payload,
+        facts,
+        regime,
+        _pin_state(now),
+        now=now,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    decision = build_strategy_decision(payload, _pin_state(now), now)
+
+    assert {row["center"] for row in rows if row["setup_kind"] == "STABLE_PIN"} == {
+        7710.0
+    }
     assert decision["decision_type"] == "CALL_BUTTERFLY", decision["why_not"]
     assert decision["candidate"]["center"] == 7710.0
     assert decision["candidate"]["width"] == 10.0
     assert decision["execution"]["limit"] == pytest.approx(3.3)
     assert decision["automatic_ordering"] is False
+
+
+def test_unconfirmed_pin_stays_no_trade_without_butterfly_candidates() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    payload.pop("previous_strategy_decision")
+
+    decision = build_strategy_decision(payload, _pin_state(now), now)
+
+    assert decision["regime"]["terminal_state"] == "PIN_STABLE"
+    assert decision["regime"]["pin"]["center_confirmation_ready"] is False
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["reasons"][0] == "butterfly_center_confirming"
 
 
 def test_low_snr_strike_surface_is_explained_without_strategy_authority() -> None:
@@ -878,7 +1002,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v42"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v43"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -897,6 +1021,22 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert rejected["shadow_candidates"] == []
     assert rejected["shadow_candidates_skipped"] == []
     assert "es_volume_momentum_too_late" in rejected["why_not"]["reasons"]
+
+
+def test_expired_pin_state_does_not_block_independent_rth_direction() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["session_direction_lock"] = {
+        "direction": "NEUTRAL",
+        "opportunity_id": "strategy-opportunity:prior-pin",
+        "started_at": (now - timedelta(seconds=10)).isoformat(),
+    }
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["terminal_state"] != "PIN_STABLE"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
 def test_rth_preaverage_signal_reaches_manual_decision_with_frozen_contract(
@@ -2024,15 +2164,15 @@ def test_butterfly_entry_too_early_blocks_midday_five_wide() -> None:
     assert "butterfly_entry_too_early" in gates
 
 
-def test_butterfly_clock_slack_is_five_wide_only() -> None:
+def test_butterfly_clock_keeps_five_wide_out_of_the_look_window() -> None:
     policy = DEFAULT_STRATEGY_POLICY
     assert butterfly_max_entry_minutes(5.0, policy) == 70.0
     assert butterfly_max_entry_minutes(10.0, policy) == 120.0
     assert butterfly_max_entry_minutes(15.0, policy) == 180.0
-    assert butterfly_entry_clock_open(5.0, 201.0, policy) is True
+    assert butterfly_entry_clock_open(5.0, 201.0, policy) is False
     assert butterfly_entry_clock_open(10.0, 201.0, policy) is True
-    assert butterfly_entry_clock_open(5.0, 180.0, policy) is True
-    assert butterfly_entry_clock_open(5.0, 300.0, policy) is True
+    assert butterfly_entry_clock_open(5.0, 180.0, policy) is False
+    assert butterfly_entry_clock_open(5.0, 300.0, policy) is False
     assert butterfly_entry_clock_open(5.0, 90.0, policy) is False
     assert butterfly_entry_clock_open(5.0, 150.0, policy) is False
     assert butterfly_entry_clock_open(10.0, 150.0, policy) is False
@@ -2063,7 +2203,7 @@ def test_pin_look_trade_widths_follow_mass_box() -> None:
     assert five_wide_look_mass_ready(piled, 7785.0) is True
     assert pin_look_trade_widths(201.0, 7785.0, {}) == ()
     assert pin_look_trade_widths(201.0, 7785.0, spread) == (15.0, 20.0, 50.0)
-    assert pin_look_trade_widths(201.0, 7785.0, piled) == (5.0, 10.0, 15.0, 20.0, 50.0)
+    assert pin_look_trade_widths(201.0, 7785.0, piled) == (10.0, 15.0, 20.0, 50.0)
     assert pin_look_trade_widths(201.0, 7785.0, ten_box) == (10.0, 15.0, 20.0, 50.0)
     assert pin_look_trade_widths(201.0, 7785.0, fifty_box) == (50.0,)
     assert pin_look_trade_widths(90.0, 7785.0, piled) == (5.0, 10.0, 15.0, 20.0)
@@ -2149,7 +2289,7 @@ def test_pin_stable_fifty_wide_look_window_allows_wide_mass() -> None:
     assert rank.passed[0]["width"] == 50.0
 
 
-def test_pin_stable_five_wide_look_window_needs_local_mass() -> None:
+def test_pin_stable_five_wide_is_not_authorized_in_look_window() -> None:
     rank = _rank_stable_pin_butterfly(
         {
             "spot": {"spx": 7786.0},
@@ -2162,10 +2302,10 @@ def test_pin_stable_five_wide_look_window_needs_local_mass() -> None:
     )
     assert rank.passed == []
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
-    assert "butterfly_look_mass_not_concentrated" in gates
+    assert "butterfly_entry_too_early" in gates
 
 
-def test_pin_stable_five_wide_look_window_passes_when_mass_is_local() -> None:
+def test_pin_stable_five_wide_stays_closed_even_when_mass_is_local() -> None:
     rank = _rank_stable_pin_butterfly(
         {
             "spot": {"spx": 7786.0},
@@ -2187,8 +2327,9 @@ def test_pin_stable_five_wide_look_window_passes_when_mass_is_local() -> None:
         },
         _stable_pin_butterfly(center=7785.0, width=5.0, right="P", debit=1.3),
     )
-    assert [row["center"] for row in rank.passed] == [7785.0]
-    assert rank.passed[0]["width"] == 5.0
+    assert rank.passed == []
+    gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
+    assert "butterfly_entry_too_early" in gates
 
 
 def test_look_window_ten_wide_pin_outranks_failed_break_vertical() -> None:
@@ -2621,7 +2762,7 @@ def test_es_volume_momentum_post_event_allows_first_minutes_after_open() -> None
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
 
 
-def test_look_window_tighter_pin_outranks_wider_pin() -> None:
+def test_look_window_pin_width_uses_selection_score() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     tight = _stable_pin_butterfly(center=7785.0, width=10.0, right="P", debit=3.2)
     tight["selection_score"] = 0.4
@@ -2661,7 +2802,7 @@ def test_look_window_tighter_pin_outranks_wider_pin() -> None:
         probability_settings=None,
         now=now,
     )
-    assert [row["width"] for row in rank.passed][:2] == [10.0, 20.0]
+    assert [row["width"] for row in rank.passed][:2] == [20.0, 10.0]
 
 
 def test_pin_stable_five_wide_allows_ten_minute_clock_slack() -> None:
@@ -4133,6 +4274,19 @@ def _pin_payload(now: datetime) -> dict[str, object]:
         },
         "macro_event": {"mode": "normal", "entry_allowed": True},
         "strategy_distribution_forecast": _probability_forecast(now, "terminal_between"),
+        "previous_strategy_decision": {
+            "decision_at": (now - timedelta(seconds=30)).isoformat(),
+            "session_date": "2026-08-06",
+            "regime": {
+                "terminal_state": "PIN_STABLE",
+                "pin": {
+                    "top_centers": [{"center": 7710.0}],
+                    "q_mode": 7710.0,
+                    "center_confirmation_count": 2,
+                    "center_first_seen_at": (now - timedelta(minutes=11)).isoformat(),
+                },
+            },
+        },
         "candidates": [],
     }
 

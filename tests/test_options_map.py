@@ -114,11 +114,16 @@ def test_open_interest_mirror_keeps_wall_rank_distinct_from_bar_value() -> None:
 
     svg = render_open_interest_mirror_svg(exposure, window_points=100.0)
 
-    assert "Bars = open interest (same scale) · P1/C1 = OI-GEX wall rank" in svg
+    assert "P1/C1 = OI-GEX wall rank · MAX = longest visible OI bar" in svg
     assert ">P1</text>" in svg
     assert ">C1</text>" in svg
-    assert ">7,655    OI 500</text>" in svg
-    assert ">7,700    OI 2,000</text>" in svg
+    assert svg.count(">MAX</text>") == 2
+    assert "MAIN PUT WALL · SPX 7,655 · OI 500 · ΔSPX +0.0pt" in svg
+    assert "MAIN CALL WALL · SPX 7,700 · OI 2,000 · ΔSPX +45.0pt" in svg
+    assert "VISIBLE MAX PUT OI · SPX 7,650 · OI 9,000" in svg
+    assert "VISIBLE MAX CALL OI · SPX 7,700 · OI 2,000" in svg
+    assert ">SPX 7,655    OI 500</text>" in svg
+    assert ">SPX 7,700    OI 2,000</text>" in svg
     assert "OI quality: ibkr_ok · max source age 1.5m" in svg
     assert "Not a direction or trade signal." in svg
 

@@ -26,6 +26,7 @@ from spx_spark.application.order_map.strategy_regime import (
     hmm_owns_trend_direction,
     pin_blocks_directional_spreads,
     pin_look_trade_widths,
+    pin_trade_center,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import InstrumentId, Provider
@@ -89,6 +90,8 @@ def candidate_generation_reasons(
             butterfly_reasons = _capability_reasons(facts, "butterfly")
             if butterfly_reasons:
                 return butterfly_reasons
+            if pin_trade_center(regime) is None:
+                return ["butterfly_center_confirming"]
             if not _map(payload.get("option_structure_frame")).get("front_expiry"):
                 return ["butterfly_expiry_unavailable"]
             return ["butterfly_three_leg_bbo_unavailable"]
@@ -814,12 +817,20 @@ def _butterfly_candidates(
     if not expiry:
         return []
     rows: list[dict[str, Any]] = []
-    if regime.get("terminal_state") == "PIN_STABLE":
+    trade_center = pin_trade_center(regime)
+    if trade_center is not None:
         pin = _map(regime.get("pin"))
-        for ranked in pin.get("top_centers") or ():
-            center = _number(_map(ranked).get("center"))
-            if center is None:
-                continue
+        ranked = next(
+            (
+                _map(row)
+                for row in pin.get("top_centers") or ()
+                if (candidate_center := _number(_map(row).get("center"))) is not None
+                and abs(candidate_center - trade_center) <= 0.01
+            ),
+            {},
+        )
+        if ranked:
+            center = trade_center
             mass = _map(_map(facts.get("structure")).get("q_local_mass_5pt"))
             for width in pin_look_trade_widths(
                 facts.get("minutes_to_close"), center, mass, policy
