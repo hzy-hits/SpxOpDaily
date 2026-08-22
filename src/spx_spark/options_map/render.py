@@ -268,7 +268,7 @@ def render_open_interest_mirror_svg(
 
 
 def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
-    """Render one decision-owned strategy risk sheet without trading authority."""
+    """Render a mobile-readable location and risk sheet without trading authority."""
     facts = _mapping(strategy_decision.get("market_facts"))
     spot = _number(_mapping(facts.get("spot")).get("spx"))
     structure, source = _strategy_risk_structure(strategy_decision)
@@ -279,6 +279,15 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
     q_rows = _q_mass_rows(structure_facts.get("q_local_mass_5pt"))
     domain = _strategy_price_domain(
         structure, structure_facts=structure_facts, q_rows=q_rows, spot=spot
+    )
+    payoff_series = _strategy_payoff_series(structure, domain=domain)
+    histogram = [_mapping(row) for row in _sequence(path_distribution.get("pnl_histogram"))]
+    objective_available = any(
+        _number(objective.get(key)) is not None
+        for key in (
+            "expected_pnl_points", "cvar10_loss_points", "quote_width_points",
+            "model_uncertainty_points", "objective_points",
+        )
     )
     authority = _strategy_risk_authority(strategy_decision, source=source)
     as_of = _format_as_of(
@@ -291,37 +300,71 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
         "CALL_BUTTERFLY": "Call 蝶式", "PUT_BUTTERFLY": "Put 蝶式",
         "IRON_CONDOR": "铁鹰"}.get(strategy_type, "暂无可展示结构")
     choice_label = {"STRUCTURE": "结构可研究", "NO_TRADE": "暂不交易"}.get(shadow_choice, "结论暂缺")
-    width, height = 1200, 1450
+    header_height = 282.0 if objective_available else 220.0
+    location_y = 28.0 + header_height + 20.0
+    q_y = location_y + 290.0
+    cursor = q_y + 270.0
+    payoff_y = cursor if payoff_series else None
+    if payoff_y is not None:
+        cursor += 390.0
+    pnl_y = cursor if histogram else None
+    if pnl_y is not None:
+        cursor += 320.0
+    footer_y = cursor + 14.0
+    width, height = 1200, int(footer_y + 122.0)
+    has_structure = bool(payoff_series)
+    conclusion = (
+        f"{choice_label} · 路径亏损概率 {_percent(_number(objective.get('loss_probability')))} "
+        f"· 目标值 {_points_as_dollars(objective_points)}"
+        if objective_available
+        else "暂无可执行结构 · 先看 SPX 相对关键位置"
+    )
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}">',
         "<style>",
         "text { font-family: 'WenQuanYi Zen Hei', sans-serif; fill: #172033; }",
-        ".muted { fill: #667085; } .small { font-size: 17px; } .body { font-size: 20px; }",
-        ".label { font-size: 18px; font-weight: 700; } .metric { font-size: 24px; font-weight: 700; }",
+        ".muted { fill: #667085; } .small { font-size: 20px; } .body { font-size: 23px; }",
+        ".label { font-size: 21px; font-weight: 700; } .metric { font-size: 27px; font-weight: 700; }",
         "</style>",
         f'<rect width="{width}" height="{height}" fill="#F8FAFC"/>',
-        '<rect x="34" y="28" width="1132" height="282" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
-        '<text x="60" y="76" font-size="34" font-weight="700">SPXW 交易策略风险</text>',
+        f'<rect x="34" y="28" width="1132" height="{header_height:.0f}" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
+        '<text x="60" y="76" font-size="34" font-weight="700">SPX 位置与策略风险</text>',
         f'<text x="60" y="112" class="body muted">{escape(strategy_label)} · '
         f'SPX {spot:,.2f} · {escape(as_of)}</text>' if spot is not None else
         f'<text x="60" y="112" class="body muted">{escape(strategy_label)} · '
         f'SPX 暂缺 · {escape(as_of)}</text>',
         f'<rect x="820" y="54" width="314" height="42" rx="12" fill="{_authority_background(source)}"/>',
         f'<text x="977" y="82" class="label" text-anchor="middle" fill="{_authority_color(source)}">{escape(authority)}</text>',
-        f'<text x="60" y="158" font-size="27" font-weight="700" fill="{_PROFIT_COLOR if shadow_choice == "STRUCTURE" else _LOSS_COLOR}">{escape(choice_label)} · 路径亏损概率 {_percent(_number(objective.get("loss_probability")))} · 目标值 {_points_as_dollars(objective_points)}</text>',
-        f'<text x="60" y="192" class="small muted">{escape(_payoff_summary(structure))}</text>',
+        f'<text x="60" y="158" font-size="27" font-weight="700" fill="{_PROFIT_COLOR if shadow_choice == "STRUCTURE" and objective_available else "#172033"}">{escape(conclusion)}</text>',
+        f'<text x="60" y="196" class="small muted">{escape(_payoff_summary(structure) if has_structure else "未通过结构与执行门，本图不补造执行价、盈亏或历史胜率。")}</text>',
     ]
-    parts.extend(_strategy_objective_cards(objective, y=214, objective_points=objective_points))
-    parts.extend(_strategy_q_panel(q_rows, structure=structure, structure_facts=structure_facts, spot=spot, domain=domain, y=330))
-    parts.extend(_strategy_payoff_panel(structure, structure_facts=structure_facts, spot=spot, domain=domain, y=600))
-    parts.extend(_strategy_pnl_panel(path_distribution, objective=objective, y=990))
+    if objective_available:
+        parts.extend(_strategy_objective_cards(objective, y=214, objective_points=objective_points))
+    parts.extend(
+        _strategy_location_panel(structure_facts, spot=spot, domain=domain, y=location_y)
+    )
+    parts.extend(
+        _strategy_q_panel(
+            q_rows, structure=structure, structure_facts=structure_facts,
+            spot=spot, domain=domain, y=q_y,
+        )
+    )
+    if payoff_y is not None:
+        parts.extend(
+            _strategy_payoff_panel(
+                structure, structure_facts=structure_facts, spot=spot,
+                domain=domain, y=payoff_y, series=payoff_series,
+            )
+        )
+    if pnl_y is not None:
+        parts.extend(_strategy_pnl_panel(path_distribution, objective=objective, y=pnl_y))
     parts.extend(
         [
-            '<text x="60" y="1330" class="small muted">Q 是期权隐含的风险中性结算分布，不是真实涨跌概率；路径图来自因果历史回放。</text>',
-            f'<text x="60" y="1362" class="small muted">目标函数：{escape(str(objective.get("formula") or RISK_OBJECTIVE_FORMULA))}</text>',
-            '<text x="60" y="1394" class="small muted">只作研究解释，不改策略排序、不授权下单；到期图不含退出费用，自动下单关闭。</text>',
-            f'<text x="60" y="1426" class="small muted">决策 {escape(str(strategy_decision.get("decision_id") or "unknown"))} · 来源 {escape(source)}</text>',
+            f'<text x="60" y="{footer_y:.0f}" class="small muted">Q 是期权隐含的风险中性结算分布，不是真实涨跌概率；暂缺数据的面板已省略。</text>',
+            f'<text x="60" y="{footer_y + 32:.0f}" class="small muted">目标函数：{escape(str(objective.get("formula") or RISK_OBJECTIVE_FORMULA))}</text>',
+            f'<text x="60" y="{footer_y + 64:.0f}" class="small muted">只作研究解释，不改策略排序、不授权下单；自动下单关闭。</text>',
+            f'<text x="60" y="{footer_y + 96:.0f}" class="small muted">决策 {escape(str(strategy_decision.get("decision_id") or "unknown"))} · 来源 {escape(source)}</text>',
             "</svg>",
         ]
     )
@@ -474,6 +517,64 @@ def _strategy_objective_cards(
     return parts
 
 
+def _strategy_location_panel(
+    structure_facts: Mapping[str, object],
+    *,
+    spot: float | None,
+    domain: tuple[float, float],
+    y: float,
+) -> list[str]:
+    """Draw an uncluttered, directly labelled SPX price ruler."""
+    left, right = 82.0, 1130.0
+    axis_y = y + 154.0
+    levels = [
+        ("Put Wall", _number(structure_facts.get("put_wall")), _WALL_PUT_COLOR),
+        ("Zero Gamma", _number(structure_facts.get("zero_gamma")), "#64748B"),
+        ("Q50", _number(structure_facts.get("q_median")), _Q_COLOR),
+        ("Call Wall", _number(structure_facts.get("call_wall")), _WALL_CALL_COLOR),
+    ]
+    visible = sorted(
+        (
+            (label, value, color)
+            for label, value, color in levels
+            if value is not None and domain[0] <= value <= domain[1]
+        ),
+        key=lambda item: item[1],
+    )
+    parts = [
+        f'<rect x="34" y="{y}" width="1132" height="270" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
+        f'<text x="60" y="{y + 42}" font-size="27" font-weight="700">SPX 关键位置尺</text>',
+        f'<text x="1140" y="{y + 42}" class="small muted" text-anchor="end">标注值为 SPX 点位 · 括号为距当前</text>',
+        f'<line x1="{left}" y1="{axis_y}" x2="{right}" y2="{axis_y}" stroke="#94A3B8" stroke-width="3"/>',
+    ]
+    for index, (label, value, color) in enumerate(visible):
+        marker_x = _scale(value, domain[0], domain[1], left, right)
+        label_x = left + (right - left) * (index + 0.5) / max(len(visible), 1)
+        delta = "" if spot is None else f"  ({value - spot:+.1f}pt)"
+        parts.extend(
+            [
+                f'<line x1="{label_x:.1f}" y1="{y + 111:.1f}" x2="{marker_x:.1f}" y2="{axis_y - 10:.1f}" stroke="{color}" stroke-width="1.5" stroke-dasharray="5 5"/>',
+                f'<line x1="{marker_x:.1f}" y1="{axis_y - 13:.1f}" x2="{marker_x:.1f}" y2="{axis_y + 13:.1f}" stroke="{color}" stroke-width="4"/>',
+                f'<text x="{label_x:.1f}" y="{y + 78:.1f}" class="label" text-anchor="middle" fill="{color}">{escape(label)}</text>',
+                f'<text x="{label_x:.1f}" y="{y + 106:.1f}" class="small" text-anchor="middle">{value:,.1f}{escape(delta)}</text>',
+            ]
+        )
+    if spot is not None and domain[0] <= spot <= domain[1]:
+        spot_x = _scale(spot, domain[0], domain[1], left, right)
+        badge_x = min(max(spot_x - 126.0, left), right - 252.0)
+        parts.extend(
+            [
+                f'<line x1="{spot_x:.1f}" y1="{y + 126:.1f}" x2="{spot_x:.1f}" y2="{y + 211:.1f}" stroke="{_SPOT_COLOR}" stroke-width="5"/>',
+                f'<polygon points="{spot_x - 8:.1f},{axis_y - 1:.1f} {spot_x + 8:.1f},{axis_y - 1:.1f} {spot_x:.1f},{axis_y + 11:.1f}" fill="{_SPOT_COLOR}"/>',
+                f'<line x1="{spot_x:.1f}" y1="{y + 211:.1f}" x2="{badge_x + 126:.1f}" y2="{y + 211:.1f}" stroke="{_SPOT_COLOR}" stroke-width="2"/>',
+                f'<rect x="{badge_x:.1f}" y="{y + 190:.1f}" width="252" height="48" rx="12" fill="{_SPOT_COLOR}"/>',
+                f'<text x="{badge_x + 126:.1f}" y="{y + 222:.1f}" font-size="24" font-weight="700" text-anchor="middle" fill="#FFFFFF">当前 SPX {spot:,.2f}</text>',
+            ]
+        )
+    parts.extend(_price_axis(domain, left=left, right=right, y=y + 180.0))
+    return parts
+
+
 def _strategy_q_panel(
     q_rows: Sequence[tuple[float, float]],
     *,
@@ -520,6 +621,7 @@ def _strategy_q_panel(
             right=right,
             top=top,
             bottom=bottom,
+            labels=False,
         )
     )
     parts.extend(_price_axis(domain, left=left, right=right, y=bottom + 24.0))
@@ -533,14 +635,15 @@ def _strategy_payoff_panel(
     spot: float | None,
     domain: tuple[float, float],
     y: float,
+    series: Sequence[tuple[float, float]],
 ) -> list[str]:
     left, right = 82.0, 1130.0
-    top, bottom = y + 82.0, y + 312.0
-    series = _strategy_payoff_series(structure, domain=domain)
+    top, bottom = y + 104.0, y + 312.0
     parts = [
         f'<rect x="34" y="{y}" width="1132" height="370" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
         f'<text x="60" y="{y + 42}" font-size="25" font-weight="700">到期损益（按保守入场价）</text>',
         f'<text x="1140" y="{y + 42}" class="small muted" text-anchor="end">到期形状不等于盘中路径胜率</text>',
+        f'<text x="60" y="{y + 76}" class="small muted">{escape(_structure_strike_summary(structure, spot=spot))}</text>',
     ]
     if not series:
         parts.append(
@@ -683,6 +786,7 @@ def _strategy_price_domain(
             _number(structure_facts.get("q_p10")),
             _number(structure_facts.get("q_p90")),
             _number(structure_facts.get("put_wall")),
+            _number(structure_facts.get("zero_gamma")),
             _number(structure_facts.get("call_wall")),
         )
         if value is not None
@@ -805,6 +909,7 @@ def _price_markers(
     markers: list[tuple[str, float | None, str]] = [
         ("SPX", spot, _SPOT_COLOR),
         ("PW", _number(structure_facts.get("put_wall")), _WALL_PUT_COLOR),
+        ("ZG", _number(structure_facts.get("zero_gamma")), "#64748B"),
         ("CW", _number(structure_facts.get("call_wall")), _WALL_CALL_COLOR),
         ("Q50", _number(structure_facts.get("q_median")), _Q_COLOR),
     ]
@@ -827,8 +932,8 @@ def _price_markers(
         if match is None:
             combined.append((label, value, color))
         else:
-            labels, observed, observed_color = combined[match]
-            combined[match] = (f"{labels}/{label}", observed, observed_color)
+            combined_labels, observed, observed_color = combined[match]
+            combined[match] = (f"{combined_labels}/{label}", observed, observed_color)
     parts: list[str] = []
     for index, (label, value, color) in enumerate(combined):
         if not domain[0] <= value <= domain[1]:
@@ -878,6 +983,19 @@ def _payoff_summary(structure: Mapping[str, object]) -> str:
     ]
     be = "/".join(f"{value:,.1f}" for value in breakevens) or "—"
     return f"执行价 {strikes} · 净{'贷记' if credit else '借记'} {_points_as_dollars(premium)} · 最大亏损 {_points_as_dollars(loss)} · 盈亏平衡 {be}"
+
+
+def _structure_strike_summary(
+    structure: Mapping[str, object], *, spot: float | None
+) -> str:
+    legs = _structure_legs(structure)
+    strikes = " · ".join(
+        f"K{index + 1} {value:,.0f}{str(leg.get('right') or '')}"
+        for index, leg in enumerate(legs)
+        if (value := _number(leg.get("strike"))) is not None
+    )
+    spot_label = "SPX 暂缺" if spot is None else f"当前 SPX {spot:,.2f}"
+    return f"{strikes or '执行价暂缺'} · {spot_label}"
 
 
 def _pnl_quantiles(distribution: Mapping[str, object]) -> str:
