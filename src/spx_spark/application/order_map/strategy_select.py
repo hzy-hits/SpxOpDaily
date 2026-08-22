@@ -6,12 +6,16 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.density import summarize_strike_surface_shape
+from spx_spark.application.market_features.physical_close_convergence import (
+    estimate_physical_close_convergence,
+)
 from spx_spark.application.order_map.candidate_factory import (
+    CLOSE_CONVERGENCE_60M,
     candidate_generation_reasons,
     enumerate_candidates,
 )
@@ -59,6 +63,17 @@ def build_strategy_decision(
     probability_settings: StrategyDistributionSettings | None = None,
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
+    if data_root is not None:
+        try:
+            trading_date = date.fromisoformat(str(facts.get("session_date") or ""))
+        except ValueError:
+            trading_date = None
+        if trading_date is not None:
+            facts["close_convergence"] = estimate_physical_close_convergence(
+                data_root,
+                now=_utc(now),
+                trading_date=trading_date,
+            ).to_dict()
     regime = assess_regime(facts)
     committed = _rth_committed_direction(
         facts,
@@ -129,7 +144,8 @@ def build_strategy_decision(
             if rank.passed:
                 session_mode = str(_map(facts.get("session")).get("mode") or "")
                 independent_preaverage = any(
-                    row.get("setup_kind") == "PREAVERAGE15_PULLBACK"
+                    row.get("setup_kind")
+                    in {"PREAVERAGE15_PULLBACK", CLOSE_CONVERGENCE_60M}
                     for row in rank.passed
                 )
                 winner_lock = (
@@ -146,7 +162,8 @@ def build_strategy_decision(
                     winner_lock is not None
                     and winner_lock.direction.upper() == "NEUTRAL"
                     and not any(
-                        row.get("setup_kind") == "STABLE_PIN"
+                        row.get("setup_kind")
+                        in {"STABLE_PIN", CLOSE_CONVERGENCE_60M}
                         for row in rank.passed
                     )
                 ):

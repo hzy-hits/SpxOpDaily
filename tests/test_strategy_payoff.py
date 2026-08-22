@@ -8,6 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from spx_spark.analytics.options.strategy_payoff import (
+    CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
     DEFAULT_MANAGEMENT_POLICY,
     PIN_BUTTERFLY_MANAGEMENT_POLICY,
     PolicyMark,
@@ -23,6 +24,9 @@ from spx_spark.analytics.options.strategy_payoff import (
     vertical_economics,
     vertical_payoff,
     vertical_width_path_reasons,
+)
+from spx_spark.application.market_features.physical_close_convergence import (
+    PhysicalCloseConvergenceEstimate,
 )
 from spx_spark.application.order_map.candidate_factory import enumerate_candidates
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
@@ -591,7 +595,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v43"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v44"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -838,6 +842,54 @@ def test_unconfirmed_pin_stays_no_trade_without_butterfly_candidates() -> None:
     assert decision["why_not"]["reasons"][0] == "butterfly_center_confirming"
 
 
+def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 6, 19, 0, 30, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    payload.pop("previous_strategy_decision")
+    estimate = PhysicalCloseConvergenceEstimate(
+        status="ready",
+        as_of=datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc),
+        target_at=datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc),
+        horizon_minutes=60,
+        center=7710.0,
+        center_probability=0.31,
+        q10=7702.0,
+        q50=7710.0,
+        q90=7718.0,
+        settlement_quantiles=tuple(
+            7700.0 + position * 20.0 / 50.0 for position in range(51)
+        ),
+        training_sessions=28,
+        trained_through_date=datetime(2026, 8, 5).date(),
+        online_weights=(("functional_ridge", 1.0 / 3.0),),
+        reason_codes=(),
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.estimate_physical_close_convergence",
+        lambda *_args, **_kwargs: estimate,
+    )
+
+    decision = build_strategy_decision(
+        payload,
+        _pin_state(now),
+        now,
+        data_root=tmp_path,
+    )
+
+    assert decision["decision_type"] == "CALL_BUTTERFLY", decision["why_not"]
+    candidate = decision["candidate"]
+    assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
+    assert candidate["center"] == 7710.0
+    assert candidate["width"] == 10.0
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v44"
+    assert candidate["convergence_risk"]["n_paths"] == 51
+    assert decision["action_authority"] == "manual"
+    assert decision["execution"]["automatic_ordering"] is False
+
+
 def test_low_snr_strike_surface_is_explained_without_strategy_authority() -> None:
     cases: list[tuple[str, datetime, dict[str, object], LatestState]] = []
     for day in ("2026-08-05", "2026-08-06"):
@@ -1002,7 +1054,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v43"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v44"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -4414,6 +4466,30 @@ def test_pin_butterfly_policy_holds_past_default_time_and_premium_stop() -> None
     assert pin.exit_at > default.exit_at
     assert pin.policy_version == "management_policy.pin_butterfly.hold_1545.v1"
     assert default.policy_version == "management_policy.v2"
+
+
+def test_close_convergence_policy_holds_without_intrahour_stop_until_1555() -> None:
+    start = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    marks = [
+        PolicyMark(at=start + timedelta(minutes=5), combo_bid=0.20),
+        PolicyMark(at=start + timedelta(minutes=45), combo_bid=1.80),
+        PolicyMark(at=start + timedelta(minutes=55), combo_bid=1.20),
+    ]
+
+    label = simulate_management_policy(
+        marks,
+        entry_ask=1.0,
+        leg_count=4,
+        entry_at=start,
+        policy=CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
+    )
+
+    assert label.exit_reason == "hard_close"
+    assert label.exit_at == start + timedelta(minutes=55)
+    assert label.policy_version == "management_policy.close_convergence.hold_1555.v1"
+    assert management_policy_for_candidate(
+        {"setup_kind": "CLOSE_CONVERGENCE_60M"}
+    ) == CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY
 
 
 def test_management_policy_for_candidate_keeps_verticals_on_v2() -> None:

@@ -374,6 +374,21 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "## 目标",
             f"SPX {target}{payoff}",
         ]
+        if setup == "CLOSE_CONVERGENCE_60M":
+            convergence = (
+                candidate.get("close_convergence")
+                if isinstance(candidate.get("close_convergence"), dict)
+                else {}
+            )
+            lines.extend(
+                (
+                    f"60分钟收敛 P10/P50/P90 "
+                    f"{_fmt_strike(convergence.get('q10'))}/"
+                    f"{_fmt_strike(convergence.get('q50'))}/"
+                    f"{_fmt_strike(convergence.get('q90'))}",
+                    "按模型合同持有至 15:55 ET，再以新鲜组合报价退出",
+                )
+            )
     elif setup == "EVENT_SETTLEMENT_THRESHOLD":
         view = candidate.get("view") if isinstance(candidate.get("view"), dict) else {}
         direction = str(candidate.get("direction") or "")
@@ -498,6 +513,7 @@ def _setup_cn(setup: object) -> str:
         "TREND_PULLBACK": "趋势回踩",
         "ES_VOLUME_MOMENTUM": "ES量比动量",
         "STABLE_PIN": "稳定钉住",
+        "CLOSE_CONVERGENCE_60M": "尾盘收敛蝶",
         "CONFIRMATION_TARGET_PIN": "目标钉住",
     }.get(str(setup or ""), "结构扫描")
 

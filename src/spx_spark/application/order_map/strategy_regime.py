@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 
 from spx_spark.analytics.options.strategy_payoff import (
+    CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
     DEFAULT_MANAGEMENT_POLICY,
     PIN_BUTTERFLY_MANAGEMENT_POLICY,
     ManagementPolicy,
@@ -18,6 +19,7 @@ from spx_spark.analytics.options.strategy_payoff import (
 MARK_HORIZONS_MINUTES: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20)
 
 __all__ = (
+    "CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY",
     "DEFAULT_MANAGEMENT_POLICY",
     "DEFAULT_STRATEGY_POLICY",
     "MARK_HORIZONS_MINUTES",
@@ -43,7 +45,12 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v43"
+    policy_version: str = "strategy_policy.bootstrap.v44"
+    # v44: the user-authorized 15:00 ET physical close-convergence lane may
+    # enumerate one manual-only Butterfly from the causal online-pool modal
+    # center. It compares 10/15/20-point C/P tents on 51 settlement quantiles,
+    # exact BBO and the frozen risk objective, then holds to 15:55 ET. It does
+    # not inherit STABLE_PIN, dealer, GEX, wall, q-mode, or direction rules.
     # v43: a STABLE_PIN body is observation-only until the same selected
     # center survives at least three decision snapshots and ten minutes. A
     # small challenger cannot replace the previous center unless its score
@@ -236,6 +243,9 @@ class StrategyPolicy:
     gth_trend_min_abs_return_points: float = 1.0
     butterfly_max_debit_fraction: float = 0.35
     butterfly_max_risk_usd: float = 1000.0
+    close_convergence_widths: tuple[float, ...] = (10.0, 15.0, 20.0)
+    close_convergence_max_debit_fraction: float = 0.45
+    close_convergence_min_training_sessions: int = 15
     butterfly_minutes_per_width_point: float = 12.0
     butterfly_five_wide_early_slack_minutes: float = 10.0
     # 11:00–13:00 ET look window, expressed as minutes remaining to 16:00.

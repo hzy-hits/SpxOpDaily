@@ -995,6 +995,22 @@ NetBid = Bid_lower − 2·Ask_body + Bid_upper
 
 利润管理：15:30 前达到最大价值的 60% 以上可兑现；中轴稳定且风险可控可持有至接近结算；不使用无限宽松的期权价格 trailing stop；主要按 SPX 中轴和 De-pin 条件管理。
 
+### 11.10 v44：60 分钟收盘收敛蝶
+
+`CLOSE_CONVERGENCE_60M` 是用户明确授权、但仍标记
+`forward_unvalidated_user_override` 的独立 RTH 候选。它只在 15:00:00–15:02:59 ET
+运行，并使用当日 15:00 前的原始 Schwab SPX/ES 路径及严格早于当日的完整 session。
+三个前向路径专家（季节 Student-t、整段 analog、functional ridge）按先前 session 的
+CRPS 在线加权；生产只携带 51 个收盘分位数，不携带完整 Monte Carlo 矩阵。
+
+- 中轴为 online-pool 收盘分布的 5 点 modal bucket，不是现价取整，也不是 dealer/GEX/OI/wall 推断；
+- 仅枚举 `W ∈ {10, 15, 20}` 的 Call/Put Butterfly；
+- 选择分数是相同 51 个终值路径上的冻结 `risk_adjusted_cvar.v1` 目标；负目标不单独否决，记录为 advisory；
+- 只接受 Schwab exact 三腿 BBO，age ≤ 15 秒、source skew ≤ 2 秒、借记/翼宽 ≤ 0.45、最大风险 ≤ $1,000；
+- 不继承 `STABLE_PIN`、Q mode、Value Center、GEX、墙位、HMM 或方向门；shock 仍 fail closed；
+- 入场保持人工净借记限价，`automatic_ordering=false`；固定以 15:55 ET 新鲜 conservative combo bid 管理退出，不使用盘中 premium stop/trail；
+- 生产依据为 14 个 session 的 60 分钟冻结 OOS：13 笔 exact entry/exit BBO，11 胜，总计 +$1,412.72，每个 decision +$100.91，session bootstrap 95% 下界 +$10.54。样本仍小，必须继续前向结算。
+
 ---
 
 ## 12. 正式 NoTrade

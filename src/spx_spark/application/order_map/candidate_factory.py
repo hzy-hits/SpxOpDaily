@@ -11,14 +11,21 @@ from typing import Any
 
 from spx_spark.analytics.options.pricing import usable_delta
 from spx_spark.analytics.options.strategy_payoff import (
+    CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
+    butterfly_payoff,
     butterfly_economics,
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
     debit_vertical_reach_reasons,
+    risk_adjusted_cvar_objective,
     vertical_economics,
     vertical_width_path_reasons,
 )
 from spx_spark.application.market_features.market import quote_source_at
+from spx_spark.application.market_features.physical_close_convergence import (
+    CLOSE_CONVERGENCE_FEATURE_VERSION,
+    CLOSE_CONVERGENCE_MODEL_VERSION,
+)
 from spx_spark.application.market_features.session_quote_selection import provider_quote
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
@@ -38,6 +45,10 @@ GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 GTH_ATM_PIN = "GTH_ATM_PIN"
 PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
+CLOSE_CONVERGENCE_60M = "CLOSE_CONVERGENCE_60M"
+CLOSE_CONVERGENCE_CONTRACT_HASH = (
+    "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
+)
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
     "strategy_event_expired",
@@ -86,6 +97,11 @@ def candidate_generation_reasons(
     """Return legacy-compatible reasons when enumeration yields no rows."""
 
     if DEFAULT_MARKET_CALENDAR.is_rth_open(_utc(now)):
+        convergence = _map(facts.get("close_convergence"))
+        if convergence.get("status") == "ready":
+            if not _map(payload.get("option_structure_frame")).get("front_expiry"):
+                return ["close_convergence_expiry_unavailable"]
+            return ["close_convergence_three_leg_bbo_unavailable"]
         if str(regime.get("terminal_state") or "") == "PIN_STABLE":
             butterfly_reasons = _capability_reasons(facts, "butterfly")
             if butterfly_reasons:
@@ -98,9 +114,7 @@ def candidate_generation_reasons(
         capability_reasons = _capability_reasons(facts, "vertical")
         if capability_reasons:
             return capability_reasons
-        _, reasons = _rth_evidences(
-            payload, facts, regime, latest, now=now, policy=policy
-        )
+        _, reasons = _rth_evidences(payload, facts, regime, latest, now=now, policy=policy)
         if reasons:
             return reasons
         frame = _map(payload.get("option_structure_frame"))
@@ -152,9 +166,7 @@ def _vertical_candidates(
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
     if DEFAULT_MARKET_CALENDAR.is_rth_open(now):
-        evidences, _ = _rth_evidences(
-            payload, facts, regime, latest, now=now, policy=policy
-        )
+        evidences, _ = _rth_evidences(payload, facts, regime, latest, now=now, policy=policy)
         if not evidences:
             return []
         if _capability_reasons(facts, "vertical") and not any(
@@ -172,14 +184,10 @@ def _vertical_candidates(
                 continue
             if _map(evidence.get("long")) and _map(evidence.get("short")):
                 rows.append(
-                    _vertical_candidate_from_evidence(
-                        evidence, facts, now=now, policy=policy
-                    )
+                    _vertical_candidate_from_evidence(evidence, facts, now=now, policy=policy)
                 )
             rows.extend(
-                _rth_width_verticals(
-                    evidence, payload, facts, latest, now=now, policy=policy
-                )
+                _rth_width_verticals(evidence, payload, facts, latest, now=now, policy=policy)
             )
         return [row for row in rows if row]
     if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
@@ -191,9 +199,7 @@ def _vertical_candidates(
             )
             if row:
                 rows.append(row)
-        rows.extend(
-            _gth_width_verticals(payload, facts, latest, now=now, policy=policy)
-        )
+        rows.extend(_gth_width_verticals(payload, facts, latest, now=now, policy=policy))
         return [row for row in rows if row]
     return []
 
@@ -382,9 +388,7 @@ def _gth_width_verticals(
                 if not legs:
                     continue
                 long, short = legs
-                if setup_kind == GTH_DELTA_SCAN and _long_delta_above_scan_cap(
-                    long, policy
-                ):
+                if setup_kind == GTH_DELTA_SCAN and _long_delta_above_scan_cap(long, policy):
                     continue
                 row = _vertical_candidate_from_evidence(
                     {
@@ -471,7 +475,9 @@ def _vertical_candidate_from_evidence(
             )
         except ValueError:
             economics = {}
-    expiry = _expiry_from_contract(long.get("contract_id")) or _expiry_from_contract(short.get("contract_id"))
+    expiry = _expiry_from_contract(long.get("contract_id")) or _expiry_from_contract(
+        short.get("contract_id")
+    )
     candidate_id = _candidate_id(
         facts.get("session_date"),
         strategy_type,
@@ -578,14 +584,10 @@ def _rth_evidences(
         row for row in setup_facts if str(row.get("setup_kind") or "") == "ES_VOLUME_MOMENTUM"
     ]
     preaverage_setups = [
-        row
-        for row in setup_facts
-        if str(row.get("setup_kind") or "") == PREAVERAGE15_PULLBACK
+        row for row in setup_facts if str(row.get("setup_kind") or "") == PREAVERAGE15_PULLBACK
     ]
     wall_hazard_setups = [
-        row
-        for row in setup_facts
-        if str(row.get("setup_kind") or "") == WALL_BREAKOUT_HAZARD
+        row for row in setup_facts if str(row.get("setup_kind") or "") == WALL_BREAKOUT_HAZARD
     ]
     pin_blocks = pin_blocks_directional_spreads(regime)
     if pin_blocks:
@@ -646,25 +648,23 @@ def _rth_evidences(
             reasons.append("es_volume_momentum_unavailable")
         else:
             blocked = [
-                str(row.get("blocked_by") or row.get("reason") or "")
-                for row in momentum_setups
+                str(row.get("blocked_by") or row.get("reason") or "") for row in momentum_setups
             ]
             states = {str(row.get("state") or "") for row in momentum_setups}
             if "es_volume_momentum_too_late" in blocked or "ENTRY_TOO_LATE" in states:
                 reasons.append("es_volume_momentum_too_late")
-            elif any(code in blocked for code in (
-                "es_volume_not_elevated",
-                "es_volume_momentum_direction_flat",
-                "es_volume_momentum_not_aligned",
-                "es_volume_momentum_too_weak",
-                "es_volume_momentum_unevaluable",
-                "es_volume_unavailable",
-            )):
-                reasons.append(next(
-                    code
-                    for code in blocked
-                    if code
-                ))
+            elif any(
+                code in blocked
+                for code in (
+                    "es_volume_not_elevated",
+                    "es_volume_momentum_direction_flat",
+                    "es_volume_momentum_not_aligned",
+                    "es_volume_momentum_too_weak",
+                    "es_volume_momentum_unevaluable",
+                    "es_volume_unavailable",
+                )
+            ):
+                reasons.append(next(code for code in blocked if code))
             else:
                 reasons.append("es_volume_momentum_unavailable")
     evidences: list[dict[str, Any]] = []
@@ -690,9 +690,7 @@ def _rth_evidences(
         if evidence.get("setup_kind") == WALL_BREAKOUT_HAZARD:
             evidences.append(evidence)
             continue
-        spread_source = (
-            "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
-        )
+        spread_source = "call_skew_spread_shadow" if direction == "UP" else "put_skew_spread_shadow"
         shadow = _map(payload.get(spread_source))
         spread = _map(shadow.get("candidate"))
         if shadow.get("status") != "candidate" or not spread:
@@ -701,8 +699,7 @@ def _rth_evidences(
         if spread:
             expected_right = "C" if direction == "UP" else "P"
             if any(
-                str(_map(spread.get(key)).get("right") or "").upper()
-                != expected_right
+                str(_map(spread.get(key)).get("right") or "").upper() != expected_right
                 for key in ("long", "short")
             ):
                 spread = {}
@@ -745,9 +742,7 @@ def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
         )
         if evidence.get("status") not in {"manual_ready", "selector_candidate"} or not eligible:
             live_reasons = [
-                reason
-                for reason in evidence_reasons
-                if reason not in _EXPIRED_GTH_REASONS
+                reason for reason in evidence_reasons if reason not in _EXPIRED_GTH_REASONS
             ]
             if live_reasons:
                 reasons.extend(live_reasons)
@@ -769,9 +764,7 @@ def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
         target = _number(evidence.get("target_spx"))
         stop = _number(evidence.get("invalidation_spx"))
         if target is None or stop is None:
-            reasons.extend(
-                ["gth_spx_target_or_invalidation_unavailable", *evidence_reasons]
-            )
+            reasons.extend(["gth_spx_target_or_invalidation_unavailable", *evidence_reasons])
             continue
         snapshot = _map(evidence.get("exact_spread_snapshot"))
         setup = (
@@ -810,13 +803,19 @@ def _butterfly_candidates(
         return []
     if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
         return []
-    if _capability_reasons(facts, "butterfly"):
-        return []
     frame = _map(payload.get("option_structure_frame"))
     expiry = str(frame.get("front_expiry") or "")
     if not expiry:
         return []
-    rows: list[dict[str, Any]] = []
+    rows = _close_convergence_butterflies(
+        facts,
+        latest,
+        expiry,
+        now=now,
+        policy=policy,
+    )
+    if _capability_reasons(facts, "butterfly"):
+        return rows
     trade_center = pin_trade_center(regime)
     if trade_center is not None:
         pin = _map(regime.get("pin"))
@@ -832,9 +831,7 @@ def _butterfly_candidates(
         if ranked:
             center = trade_center
             mass = _map(_map(facts.get("structure")).get("q_local_mass_5pt"))
-            for width in pin_look_trade_widths(
-                facts.get("minutes_to_close"), center, mass, policy
-            ):
+            for width in pin_look_trade_widths(facts.get("minutes_to_close"), center, mass, policy):
                 for right in ("C", "P"):
                     row = _butterfly_candidate(
                         facts,
@@ -860,7 +857,9 @@ def _butterfly_candidates(
     trigger = _map(facts.get("trigger"))
     direction = _direction(trigger.get("direction"))
     if trigger.get("phase") == "confirmed" and direction:
-        target, stop, geometry_source = resolve_geometry(payload, facts, direction, _number(trigger.get("level")))
+        target, stop, geometry_source = resolve_geometry(
+            payload, facts, direction, _number(trigger.get("level"))
+        )
         center = _round_to_strike(target)
         if center is not None and stop is not None:
             for width in WIDTHS:
@@ -894,6 +893,103 @@ def _butterfly_candidates(
     return rows
 
 
+def _close_convergence_butterflies(
+    facts: Mapping[str, Any],
+    latest: LatestState,
+    expiry: str,
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    evidence = _map(facts.get("close_convergence"))
+    center = _number(evidence.get("center"))
+    quantiles = tuple(
+        value
+        for value in (_number(item) for item in evidence.get("settlement_quantiles") or ())
+        if value is not None
+    )
+    if (
+        evidence.get("status") != "ready"
+        or center is None
+        or len(quantiles) != 51
+        or evidence.get("model_version") != CLOSE_CONVERGENCE_MODEL_VERSION
+        or evidence.get("feature_version") != CLOSE_CONVERGENCE_FEATURE_VERSION
+    ):
+        return []
+    training_sessions = int(_number(evidence.get("training_sessions")) or 0)
+    rows: list[dict[str, Any]] = []
+    for width in policy.close_convergence_widths:
+        for right in ("C", "P"):
+            row = _butterfly_candidate(
+                facts,
+                latest,
+                expiry,
+                center=center,
+                width=width,
+                right=right,
+                now=now,
+                policy=policy,
+                source="physical_close_online_pool_60m",
+                setup_kind=CLOSE_CONVERGENCE_60M,
+                direction="NEUTRAL",
+                thesis_direction="NEUTRAL",
+                payoff_shape="CLOSE_CONVERGENCE",
+                manual_authority_eligible=True,
+                selection_prior=0.0,
+                pin={},
+                geometry_source="physical_close_distribution",
+                providers=(Provider.SCHWAB,),
+                metadata={
+                    "authorization_policy": policy.policy_version,
+                    "evidence_contract_hash": CLOSE_CONVERGENCE_CONTRACT_HASH,
+                    "evidence_status": "forward_unvalidated_user_override",
+                    "close_convergence": dict(evidence),
+                    "management_policy_version": (
+                        CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY.policy_version
+                    ),
+                },
+            )
+            economics = _map(row.get("economics"))
+            quote = _map(row.get("quote"))
+            debit = _number(economics.get("max_loss_points"))
+            if not row or debit is None or quote.get("status") != "ready":
+                continue
+            fees = (
+                CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY.fees_per_leg_per_side * 4 * 2 / 100.0
+            )
+            pnl_paths = [
+                butterfly_payoff(
+                    settlement,
+                    center=center,
+                    width=width,
+                    net_debit=debit,
+                )
+                - fees
+                for settlement in quantiles
+            ]
+            risk = risk_adjusted_cvar_objective(
+                pnl_paths,
+                max_loss_points=debit + fees,
+                quote_width_points=max(
+                    float(quote.get("ask") or 0.0) - float(quote.get("bid") or 0.0),
+                    0.0,
+                ),
+                session_count=training_sessions,
+            )
+            row["convergence_risk"] = {
+                **risk,
+                "fees_points": round(fees, 6),
+                "profit_probability": round(
+                    sum(value > 0.0 for value in pnl_paths) / len(pnl_paths), 6
+                ),
+                "selection_rule": "max_risk_objective_across_10_15_20_C_P",
+                "policy_choice": "best_available_structure",
+            }
+            row["selection_score"] = float(risk["objective_points"])
+            rows.append(row)
+    return rows
+
+
 def _butterfly_candidate(
     facts: Mapping[str, Any],
     latest: LatestState,
@@ -916,6 +1012,7 @@ def _butterfly_candidate(
     target_spx: float | None = None,
     invalidation_spx: float | list[float] | None = None,
     providers: Sequence[Provider] = (Provider.SCHWAB, Provider.IBKR),
+    metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     legs = _session_option_legs(
         latest,
@@ -936,7 +1033,9 @@ def _butterfly_candidate(
     economics: dict[str, Any] = {}
     if quote.get("status") == "ready":
         try:
-            economics = butterfly_economics(center=center, width=width, net_debit=float(quote["ask"]))
+            economics = butterfly_economics(
+                center=center, width=width, net_debit=float(quote["ask"])
+            )
         except ValueError:
             economics = {}
     strategy_type = f"{'CALL' if right == 'C' else 'PUT'}_BUTTERFLY"
@@ -955,7 +1054,9 @@ def _butterfly_candidate(
         "manual_authority_eligible": manual_authority_eligible,
         "opportunity_id": f"strategy-opportunity:{_hash(identity)[:24]}",
         "target_spx": target_spx if target_spx is not None else center,
-        "invalidation_spx": invalidation_spx if invalidation_spx is not None else [center - width, center + width],
+        "invalidation_spx": invalidation_spx
+        if invalidation_spx is not None
+        else [center - width, center + width],
         "center": center,
         "width": width,
         "right": right,
@@ -965,9 +1066,12 @@ def _butterfly_candidate(
         "selection_score": round(score, 4),
         "pin": dict(pin),
         "quote_valid_until": quote_valid.isoformat() if quote_valid else now.isoformat(),
-        "opportunity_valid_until": (now + timedelta(seconds=policy.opportunity_ttl_seconds)).isoformat(),
+        "opportunity_valid_until": (
+            now + timedelta(seconds=policy.opportunity_ttl_seconds)
+        ).isoformat(),
         "source": source,
         "geometry_source": geometry_source,
+        **dict(metadata or {}),
         "automatic_ordering": False,
         "manual_action_only": True,
     }
@@ -1014,13 +1118,13 @@ def _facts_wall_ladder_geometry(
     spot, structure = _number(_map(facts.get("spot")).get("spx")), _map(facts.get("structure"))
     if spot is None or direction not in {"UP", "DOWN"}:
         return None, None
-    raw_target = _number(
-        structure.get("call_wall" if direction == "UP" else "put_wall")
-    )
+    raw_target = _number(structure.get("call_wall" if direction == "UP" else "put_wall"))
     target = (
         raw_target
         if raw_target is not None
-        and ((direction == "UP" and raw_target > spot) or (direction == "DOWN" and raw_target < spot))
+        and (
+            (direction == "UP" and raw_target > spot) or (direction == "DOWN" and raw_target < spot)
+        )
         else None
     )
     levels = [
@@ -1169,8 +1273,7 @@ def nearest_abs_delta_strike(
             if (
                 quote.provider is not provider
                 or instrument.expiry != expiry
-                or str(getattr(instrument.right, "value", instrument.right) or "").upper()
-                != wanted
+                or str(getattr(instrument.right, "value", instrument.right) or "").upper() != wanted
             ):
                 continue
             source_at = quote_source_at(quote)
@@ -1272,13 +1375,17 @@ def _candidate_id(
     strikes: list[float],
     right: str,
 ) -> str:
-    return _hash((session_date, strategy_type, expiry, [round(float(value), 4) for value in strikes], right))[:16]
+    return _hash(
+        (session_date, strategy_type, expiry, [round(float(value), 4) for value in strikes], right)
+    )[:16]
 
 
 def _expiry_from_legs(evidence: Mapping[str, Any]) -> str | None:
     long = _map(evidence.get("long"))
     short = _map(evidence.get("short"))
-    return _expiry_from_contract(long.get("contract_id")) or _expiry_from_contract(short.get("contract_id"))
+    return _expiry_from_contract(long.get("contract_id")) or _expiry_from_contract(
+        short.get("contract_id")
+    )
 
 
 def _expiry_from_contract(value: object) -> str | None:
@@ -1326,7 +1433,11 @@ def _time(value: object) -> datetime | None:
     if not isinstance(value, (str, datetime)):
         return None
     try:
-        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(value.replace("Z", "+00:00"))
+        )
     except ValueError:
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else None

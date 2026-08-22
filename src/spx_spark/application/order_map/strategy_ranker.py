@@ -39,6 +39,7 @@ _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _GTH_HUMAN_DEBIT_SETUPS: frozenset[str] = frozenset()
 _PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 _WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
+_CLOSE_CONVERGENCE_60M = "CLOSE_CONVERGENCE_60M"
 _RTH_HUMAN_DEBIT_SETUPS = frozenset(
     {"ES_VOLUME_MOMENTUM", _PREAVERAGE15_PULLBACK, _WALL_BREAKOUT_HAZARD}
 )
@@ -216,30 +217,22 @@ def apply_winner_stick(
         return passed, None
     locked_direction = lock.direction.upper()
     matching = [
-        row
-        for row in passed
-        if str(row.get("opportunity_id") or "") == lock.opportunity_id
+        row for row in passed if str(row.get("opportunity_id") or "") == lock.opportunity_id
     ]
     if matching:
         rest = [
-            row
-            for row in passed
-            if str(row.get("opportunity_id") or "") != lock.opportunity_id
+            row for row in passed if str(row.get("opportunity_id") or "") != lock.opportunity_id
         ]
         return [matching[0], *rest], None
     mode = str(session_mode or "").strip().lower()
     if mode == "rth" and locked_direction == "NEUTRAL":
         return [], "rth_pin_winner_stick_center_locked"
     same_direction = [
-        row
-        for row in passed
-        if str(row.get("direction") or "").upper() == locked_direction
+        row for row in passed if str(row.get("direction") or "").upper() == locked_direction
     ]
     if same_direction:
         others = [
-            row
-            for row in passed
-            if str(row.get("direction") or "").upper() != locked_direction
+            row for row in passed if str(row.get("direction") or "").upper() != locked_direction
         ]
         return [*same_direction, *others], None
     reason = (
@@ -278,9 +271,7 @@ def rank_candidates(
     audit: list[dict[str, Any]] = []
     for row in rows:
         candidate = dict(row)
-        deterministic = _hard_gate_candidate(
-            candidate, facts, regime, now=now, policy=policy
-        )
+        deterministic = _hard_gate_candidate(candidate, facts, regime, now=now, policy=policy)
         if deterministic:
             rejected = _rejected(candidate, deterministic)
             misses.append(rejected)
@@ -306,8 +297,7 @@ def rank_candidates(
                             [
                                 *(
                                     str(item)
-                                    for item in _map(scored.get("edge")).get("advisories")
-                                    or ()
+                                    for item in _map(scored.get("edge")).get("advisories") or ()
                                 ),
                                 *(
                                     str(gate.get("gate"))
@@ -333,6 +323,7 @@ def rank_candidates(
     look_window = pin_look_window(facts.get("minutes_to_close"), policy)
     passed.sort(
         key=lambda item: (
+            _close_convergence_priority(item),
             _look_window_pin_priority(item, look_window=look_window),
             float(item.get("selection_score") or 0.0),
             float(_map(item.get("utility")).get("utility") or 0.0),
@@ -343,7 +334,13 @@ def rank_candidates(
     return RankResult(passed=passed, near_misses=misses[:3], gate_audit=audit)
 
 
-def _look_window_pin_priority(candidate: Mapping[str, Any], *, look_window: bool) -> tuple[int, float]:
+def _close_convergence_priority(candidate: Mapping[str, Any]) -> int:
+    return int(candidate.get("setup_kind") == _CLOSE_CONVERGENCE_60M)
+
+
+def _look_window_pin_priority(
+    candidate: Mapping[str, Any], *, look_window: bool
+) -> tuple[int, float]:
     """11–13 TRADE prefers a confirmed pin fly without overriding its score."""
 
     if not look_window or candidate.get("setup_kind") != "STABLE_PIN":
@@ -355,6 +352,13 @@ def _apply_surface_shape_prior(
     candidate: Mapping[str, Any], summary: Mapping[str, object]
 ) -> dict[str, Any]:
     base = float(candidate.get("selection_score") or 0.0)
+    if candidate.get("setup_kind") == _CLOSE_CONVERGENCE_60M:
+        return {
+            **dict(candidate),
+            "selection_score_base": round(base, 4),
+            "surface_shape_prior": 0.0,
+            "selection_score": round(base, 4),
+        }
     strategy_type = str(candidate.get("strategy_type") or "")
     prior = 0.0
     if summary.get("snr_quality") == "high":
@@ -393,7 +397,13 @@ def _hard_gate_candidate(
         if valid_until is None:
             gates.append({"gate": f"{key}_missing", "actual": None, "threshold": "present"})
         elif valid_until <= now:
-            gates.append({"gate": f"{key}_expired", "actual": valid_until.isoformat(), "threshold": now.isoformat()})
+            gates.append(
+                {
+                    "gate": f"{key}_expired",
+                    "actual": valid_until.isoformat(),
+                    "threshold": now.isoformat(),
+                }
+            )
     gates.extend(_macro_hard_gates(candidate, facts))
     strategy_type = str(candidate.get("strategy_type") or "")
     if strategy_type.endswith("_DEBIT_VERTICAL"):
@@ -410,15 +420,32 @@ def _hard_gate_candidate(
             }
         )
     else:
-        gates.append({"gate": "unsupported_strategy_type", "actual": strategy_type, "threshold": "approved_strategy"})
-    if candidate.get("automatic_ordering") is not False or candidate.get("manual_action_only") is not True:
-        gates.append({"gate": "manual_action_contract", "actual": candidate.get("automatic_ordering"), "threshold": False})
+        gates.append(
+            {
+                "gate": "unsupported_strategy_type",
+                "actual": strategy_type,
+                "threshold": "approved_strategy",
+            }
+        )
+    if (
+        candidate.get("automatic_ordering") is not False
+        or candidate.get("manual_action_only") is not True
+    ):
+        gates.append(
+            {
+                "gate": "manual_action_contract",
+                "actual": candidate.get("automatic_ordering"),
+                "threshold": False,
+            }
+        )
     if candidate.get("manual_authority_eligible") is False:
-        gates.append({
-            "gate": "research_alternative_only",
-            "actual": candidate.get("source"),
-            "threshold": "manual_authority_eligible",
-        })
+        gates.append(
+            {
+                "gate": "research_alternative_only",
+                "actual": candidate.get("source"),
+                "threshold": "manual_authority_eligible",
+            }
+        )
     return gates
 
 
@@ -483,9 +510,8 @@ def _vertical_hard_gates(
             candidate,
             _gth_scan_vertical_hard_gates(candidate, facts, regime, policy=policy),
         )
-    if (
-        candidate.get("setup_kind") in _RTH_DIRECTIONAL_SPREADS
-        and pin_blocks_directional_spreads(regime)
+    if candidate.get("setup_kind") in _RTH_DIRECTIONAL_SPREADS and pin_blocks_directional_spreads(
+        regime
     ):
         return _block_unevidenced_debit(
             candidate,
@@ -516,7 +542,13 @@ def _vertical_hard_gates(
     if None in (spot, atr, target, stop, debit_fraction):
         return _block_unevidenced_debit(
             candidate,
-            [{"gate": "entry_quality_atr_or_geometry_unavailable", "actual": None, "threshold": "present"}],
+            [
+                {
+                    "gate": "entry_quality_atr_or_geometry_unavailable",
+                    "actual": None,
+                    "threshold": "present",
+                }
+            ],
         )
     long_strike = _number(long.get("strike"))
     short_strike = _number(short.get("strike"))
@@ -712,13 +744,21 @@ def _preaverage_vertical_hard_gates(
         and scale >= 2.5
         and abs(abs(target - trigger) - scale) <= 1e-6
         and abs(abs(trigger - stop) - scale) <= 1e-6
-        and ((direction == "UP" and target > trigger > stop) or (direction == "DOWN" and target < trigger < stop))
+        and (
+            (direction == "UP" and target > trigger > stop)
+            or (direction == "DOWN" and target < trigger < stop)
+        )
     )
     if not geometry_ok:
         gates.append(
             {
                 "gate": "preaverage_first_passage_geometry_invalid",
-                "actual": {"direction": direction, "target": target, "trigger": trigger, "stop": stop},
+                "actual": {
+                    "direction": direction,
+                    "target": target,
+                    "trigger": trigger,
+                    "stop": stop,
+                },
                 "threshold": "symmetric_directional_geometry",
             }
         )
@@ -734,7 +774,9 @@ def _gth_scan_vertical_hard_gates(
 ) -> list[dict[str, Any]]:
     long, short = _map(candidate.get("long")), _map(candidate.get("short"))
     if not long or not short:
-        return [{"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}]
+        return [
+            {"gate": "vertical_legs_unavailable", "actual": None, "threshold": "long_and_short"}
+        ]
     economics = _map(candidate.get("economics"))
     target = _number(candidate.get("target_spx"))
     stop = _number(candidate.get("invalidation_spx"))
@@ -742,7 +784,13 @@ def _gth_scan_vertical_hard_gates(
     long_strike = _number(long.get("strike"))
     short_strike = _number(short.get("strike"))
     if None in (target, stop, debit_fraction, long_strike, short_strike):
-        return [{"gate": "gth_scan_geometry_or_payoff_unavailable", "actual": None, "threshold": "present"}]
+        return [
+            {
+                "gate": "gth_scan_geometry_or_payoff_unavailable",
+                "actual": None,
+                "threshold": "present",
+            }
+        ]
     gates: list[dict[str, Any]] = []
     path_state = str(regime.get("path_state") or "")
     path_direction = str(regime.get("path_direction") or "").upper()
@@ -863,7 +911,9 @@ def _event_settlement_vertical_hard_gates(
     event = _map(candidate.get("probability_event"))
     direction = str(candidate.get("direction") or "")
     threshold = _number(view.get("threshold_level"))
-    expected_kind = "terminal_above" if direction == "UP" else "terminal_below" if direction == "DOWN" else None
+    expected_kind = (
+        "terminal_above" if direction == "UP" else "terminal_below" if direction == "DOWN" else None
+    )
     event_threshold = _number(
         event.get("lower_level") if direction == "UP" else event.get("upper_level")
     )
@@ -900,20 +950,49 @@ def _butterfly_hard_gates(
     *,
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
+    if candidate.get("setup_kind") == _CLOSE_CONVERGENCE_60M:
+        return _close_convergence_butterfly_hard_gates(
+            candidate,
+            facts,
+            policy=policy,
+        )
     if candidate.get("setup_kind") == _GTH_ATM_PIN:
         return _gth_scan_butterfly_hard_gates(candidate, facts, policy=policy)
     gates: list[dict[str, Any]] = []
     legs = candidate.get("legs")
     economics = _map(candidate.get("economics"))
     if not isinstance(legs, list) or len(legs) != 3 or any(not _map(leg) for leg in legs):
-        gates.append({"gate": "butterfly_three_leg_bbo_unavailable", "actual": None, "threshold": "three_legs"})
-    if _number(economics.get("max_loss_points")) is None or _number(economics.get("max_gain_points")) is None:
-        gates.append({"gate": "butterfly_economics_unavailable", "actual": None, "threshold": "valid_debit"})
+        gates.append(
+            {
+                "gate": "butterfly_three_leg_bbo_unavailable",
+                "actual": None,
+                "threshold": "three_legs",
+            }
+        )
+    if (
+        _number(economics.get("max_loss_points")) is None
+        or _number(economics.get("max_gain_points")) is None
+    ):
+        gates.append(
+            {"gate": "butterfly_economics_unavailable", "actual": None, "threshold": "valid_debit"}
+        )
     if regime.get("terminal_state") != "PIN_STABLE":
-        gates.append({"gate": "butterfly_requires_pin_stable", "actual": regime.get("terminal_state"), "threshold": "PIN_STABLE"})
+        gates.append(
+            {
+                "gate": "butterfly_requires_pin_stable",
+                "actual": regime.get("terminal_state"),
+                "threshold": "PIN_STABLE",
+            }
+        )
     shock_state = str(_map(facts.get("shock")).get("state") or "NONE")
     if shock_state not in {"NONE", "RECLAIMED"}:
-        gates.append({"gate": "butterfly_shock_veto", "actual": shock_state, "threshold": ["NONE", "RECLAIMED"]})
+        gates.append(
+            {
+                "gate": "butterfly_shock_veto",
+                "actual": shock_state,
+                "threshold": ["NONE", "RECLAIMED"],
+            }
+        )
     path, vc, structure = (
         _map(facts.get("path")),
         _map(facts.get("value_center")),
@@ -925,7 +1004,11 @@ def _butterfly_hard_gates(
     pin = _map(regime.get("pin")) or _map(candidate.get("pin"))
     q_mode = _number(pin.get("q_mode")) or _number(structure.get("q_mode"))
     for gate, reference, threshold in (
-        ("butterfly_body_value_center_distance", value_center, policy.pin_body_max_center_distance_points),
+        (
+            "butterfly_body_value_center_distance",
+            value_center,
+            policy.pin_body_max_center_distance_points,
+        ),
         ("butterfly_body_q_mode_distance", q_mode, policy.pin_body_max_center_distance_points),
         ("butterfly_body_spot_distance", spot, policy.pin_body_max_spot_distance_points),
     ):
@@ -935,24 +1018,202 @@ def _butterfly_hard_gates(
     depin = _number(pin.get("depin_risk"))
     max_depin = policy.pin_thresholds[5]
     if depin is None or depin >= max_depin:
-        gates.append({"gate": "butterfly_depin_risk", "actual": depin, "threshold": f"<{max_depin}"})
+        gates.append(
+            {"gate": "butterfly_depin_risk", "actual": depin, "threshold": f"<{max_depin}"}
+        )
     if pin.get("recent_extreme_acceptance") is not False:
-        gates.append({"gate": "butterfly_recent_extreme_acceptance", "actual": pin.get("recent_extreme_acceptance"), "threshold": False})
-    if _number(path.get("breadth_above_vwap")) is None or _number(_map(facts.get("volatility")).get("vix_return_15m_pct")) is None:
-        gates.append({"gate": "butterfly_vix_or_breadth_unavailable", "actual": None, "threshold": "both_present"})
+        gates.append(
+            {
+                "gate": "butterfly_recent_extreme_acceptance",
+                "actual": pin.get("recent_extreme_acceptance"),
+                "threshold": False,
+            }
+        )
+    if (
+        _number(path.get("breadth_above_vwap")) is None
+        or _number(_map(facts.get("volatility")).get("vix_return_15m_pct")) is None
+    ):
+        gates.append(
+            {
+                "gate": "butterfly_vix_or_breadth_unavailable",
+                "actual": None,
+                "threshold": "both_present",
+            }
+        )
     width = _number(economics.get("width_points")) or _number(candidate.get("width"))
     debit = _number(economics.get("max_loss_points"))
-    debit_fraction = debit / width if debit is not None and width is not None and width > 0 else None
+    debit_fraction = (
+        debit / width if debit is not None and width is not None and width > 0 else None
+    )
     if debit_fraction is None or debit_fraction > policy.butterfly_max_debit_fraction:
-        gates.append({"gate": "butterfly_debit_fraction", "actual": debit_fraction, "threshold": policy.butterfly_max_debit_fraction})
+        gates.append(
+            {
+                "gate": "butterfly_debit_fraction",
+                "actual": debit_fraction,
+                "threshold": policy.butterfly_max_debit_fraction,
+            }
+        )
     risk_usd = debit * 100.0 if debit is not None else None
     if risk_usd is None or risk_usd > policy.butterfly_max_risk_usd:
-        gates.append({"gate": "butterfly_risk_budget", "actual": risk_usd, "threshold": policy.butterfly_max_risk_usd})
+        gates.append(
+            {
+                "gate": "butterfly_risk_budget",
+                "actual": risk_usd,
+                "threshold": policy.butterfly_max_risk_usd,
+            }
+        )
     gates.extend(
         _rth_butterfly_pin_location_gates(
             facts, policy=policy, center=center, spot=spot, width=width
         )
     )
+    return gates
+
+
+def _close_convergence_butterfly_hard_gates(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+) -> list[dict[str, Any]]:
+    """Protect the frozen close-distribution lane without importing pin rules."""
+
+    gates: list[dict[str, Any]] = []
+    legs = candidate.get("legs")
+    economics = _map(candidate.get("economics"))
+    evidence = _map(candidate.get("close_convergence"))
+    fact_evidence = _map(facts.get("close_convergence"))
+    risk = _map(candidate.get("convergence_risk"))
+    if not isinstance(legs, list) or len(legs) != 3 or any(not _map(leg) for leg in legs):
+        gates.append(
+            {
+                "gate": "close_convergence_three_leg_bbo_unavailable",
+                "actual": None,
+                "threshold": "three_schwab_legs",
+            }
+        )
+    elif any(_map(leg).get("provider") != "schwab" for leg in legs):
+        gates.append(
+            {
+                "gate": "close_convergence_provider_mismatch",
+                "actual": [_map(leg).get("provider") for leg in legs],
+                "threshold": "schwab",
+            }
+        )
+    debit = _number(economics.get("max_loss_points"))
+    width = _number(economics.get("width_points")) or _number(candidate.get("width"))
+    if debit is None or width is None or width <= 0.0:
+        gates.append(
+            {
+                "gate": "close_convergence_economics_unavailable",
+                "actual": None,
+                "threshold": "valid_debit",
+            }
+        )
+    elif width not in policy.close_convergence_widths:
+        gates.append(
+            {
+                "gate": "close_convergence_width_not_frozen",
+                "actual": width,
+                "threshold": policy.close_convergence_widths,
+            }
+        )
+    else:
+        debit_fraction = debit / width
+        if debit_fraction > policy.close_convergence_max_debit_fraction:
+            gates.append(
+                {
+                    "gate": "close_convergence_debit_fraction",
+                    "actual": debit_fraction,
+                    "threshold": policy.close_convergence_max_debit_fraction,
+                }
+            )
+        if debit * 100.0 > policy.butterfly_max_risk_usd:
+            gates.append(
+                {
+                    "gate": "close_convergence_risk_budget",
+                    "actual": debit * 100.0,
+                    "threshold": policy.butterfly_max_risk_usd,
+                }
+            )
+    center = _number(candidate.get("center"))
+    evidence_center = _number(evidence.get("center"))
+    fact_center = _number(fact_evidence.get("center"))
+    quantiles = evidence.get("settlement_quantiles")
+    evidence_ready = (
+        evidence.get("status") == "ready"
+        and fact_evidence.get("status") == "ready"
+        and _number(evidence.get("horizon_minutes")) == 60.0
+        and isinstance(quantiles, list)
+        and len(quantiles) == 51
+        and center is not None
+        and evidence_center == center == fact_center
+    )
+    if not evidence_ready:
+        gates.append(
+            {
+                "gate": "close_convergence_evidence_invalid",
+                "actual": {
+                    "status": evidence.get("status"),
+                    "horizon_minutes": evidence.get("horizon_minutes"),
+                    "quantiles": len(quantiles) if isinstance(quantiles, list) else 0,
+                    "center": evidence_center,
+                    "fact_center": fact_center,
+                },
+                "threshold": "ready_60m_51q_same_center",
+            }
+        )
+    training_sessions = int(_number(evidence.get("training_sessions")) or 0)
+    if training_sessions < policy.close_convergence_min_training_sessions:
+        gates.append(
+            {
+                "gate": "close_convergence_training_sessions_insufficient",
+                "actual": training_sessions,
+                "threshold": policy.close_convergence_min_training_sessions,
+            }
+        )
+    if _number(risk.get("objective_points")) is None or risk.get("n_paths") != 51:
+        gates.append(
+            {
+                "gate": "close_convergence_risk_objective_unavailable",
+                "actual": risk.get("objective_points"),
+                "threshold": "51_path_objective",
+            }
+        )
+    spot = _number(_map(facts.get("spot")).get("spx"))
+    if (
+        center is None
+        or spot is None
+        or width is None
+        or not (center - width <= spot <= center + width)
+    ):
+        gates.append(
+            {
+                "gate": "close_convergence_spot_outside_wings",
+                "actual": None if center is None or spot is None else spot - center,
+                "threshold": width,
+            }
+        )
+    shock_state = str(_map(facts.get("shock")).get("state") or "NONE")
+    if shock_state not in {"NONE", "RECLAIMED"}:
+        gates.append(
+            {
+                "gate": "close_convergence_shock_veto",
+                "actual": shock_state,
+                "threshold": ["NONE", "RECLAIMED"],
+            }
+        )
+    if (
+        candidate.get("manual_authority_eligible") is not True
+        or candidate.get("automatic_ordering") is not False
+    ):
+        gates.append(
+            {
+                "gate": "close_convergence_manual_only_contract_invalid",
+                "actual": candidate.get("automatic_ordering"),
+                "threshold": "manual_true_automatic_false",
+            }
+        )
     return gates
 
 
@@ -971,13 +1232,17 @@ def _rth_butterfly_pin_location_gates(
 
     gates: list[dict[str, Any]] = []
     if center is None or spot is None or width is None or width <= 0:
-        gates.append({"gate": "butterfly_spot_outside_wings", "actual": None, "threshold": "inside_wings"})
+        gates.append(
+            {"gate": "butterfly_spot_outside_wings", "actual": None, "threshold": "inside_wings"}
+        )
     elif not (center - width <= spot <= center + width):
-        gates.append({
-            "gate": "butterfly_spot_outside_wings",
-            "actual": round(spot - center, 4),
-            "threshold": width,
-        })
+        gates.append(
+            {
+                "gate": "butterfly_spot_outside_wings",
+                "actual": round(spot - center, 4),
+                "threshold": width,
+            }
+        )
     minutes = _number(facts.get("minutes_to_close"))
     max_minutes = butterfly_max_entry_minutes(width, policy)
     if not butterfly_entry_clock_open(width, minutes, policy):
@@ -990,11 +1255,13 @@ def _rth_butterfly_pin_location_gates(
             }
         else:
             threshold = max_minutes
-        gates.append({
-            "gate": "butterfly_entry_too_early",
-            "actual": minutes,
-            "threshold": threshold,
-        })
+        gates.append(
+            {
+                "gate": "butterfly_entry_too_early",
+                "actual": minutes,
+                "threshold": threshold,
+            }
+        )
     elif (
         width in policy.butterfly_look_clock_widths
         and pin_look_window(minutes, policy)
@@ -1005,22 +1272,33 @@ def _rth_butterfly_pin_location_gates(
             policy,
         )
     ):
-        gates.append({
-            "gate": "butterfly_look_mass_not_concentrated",
-            "actual": center,
-            "threshold": {
-                "width": width,
-                "min_mass_fraction": policy.pin_look_min_mass_fraction,
-            },
-        })
+        gates.append(
+            {
+                "gate": "butterfly_look_mass_not_concentrated",
+                "actual": center,
+                "threshold": {
+                    "width": width,
+                    "min_mass_fraction": policy.pin_look_min_mass_fraction,
+                },
+            }
+        )
     remaining = _number(_map(facts.get("volatility")).get("expected_move_points"))
     structure = _map(facts.get("structure"))
-    if remaining is None or remaining <= 0 or center is None or width is None or width <= 0 or spot is None:
-        gates.append({
-            "gate": "butterfly_unresolved_nearby_wall",
-            "actual": None,
-            "threshold": "remaining_em_and_wings",
-        })
+    if (
+        remaining is None
+        or remaining <= 0
+        or center is None
+        or width is None
+        or width <= 0
+        or spot is None
+    ):
+        gates.append(
+            {
+                "gate": "butterfly_unresolved_nearby_wall",
+                "actual": None,
+                "threshold": "remaining_em_and_wings",
+            }
+        )
         return gates
     reach = remaining * policy.butterfly_unresolved_wall_em_multiple
     unresolved = [
@@ -1029,11 +1307,13 @@ def _rth_butterfly_pin_location_gates(
         if wall is not None and abs(spot - wall) <= reach and abs(center - wall) > width
     ]
     if unresolved:
-        gates.append({
-            "gate": "butterfly_unresolved_nearby_wall",
-            "actual": unresolved,
-            "threshold": round(reach, 4),
-        })
+        gates.append(
+            {
+                "gate": "butterfly_unresolved_nearby_wall",
+                "actual": unresolved,
+                "threshold": round(reach, 4),
+            }
+        )
     return gates
 
 
@@ -1141,6 +1421,8 @@ def _score_candidate(
     probability_settings: StrategyDistributionSettings | None,
     now: datetime,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if candidate.get("setup_kind") == _CLOSE_CONVERGENCE_60M:
+        return _score_close_convergence_candidate(candidate), []
     expected_kind = {
         "UP": "terminal_above",
         "DOWN": "terminal_below",
@@ -1209,6 +1491,44 @@ def _score_candidate(
     return scored, []
 
 
+def _score_close_convergence_candidate(
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = _map(candidate.get("close_convergence"))
+    risk = _map(candidate.get("convergence_risk"))
+    objective = _number(risk.get("objective_points")) or 0.0
+    expected = _number(risk.get("expected_pnl_points")) or 0.0
+    probability = _number(risk.get("profit_probability"))
+    advisories = [] if objective > 0.0 else ["close_convergence_risk_objective_not_positive"]
+    return {
+        **dict(candidate),
+        "probability_evidence": {
+            "q10_close": evidence.get("q10"),
+            "q50_close": evidence.get("q50"),
+            "q90_close": evidence.get("q90"),
+            "center": evidence.get("center"),
+            "center_probability": evidence.get("center_probability"),
+            "n_raw": evidence.get("training_sessions"),
+            "trained_through_date": evidence.get("trained_through_date"),
+            "method": evidence.get("model_version"),
+        },
+        "utility": {
+            "expected_net_pnl": round(expected * 100.0, 2),
+            "expected_shortfall_10": round(
+                (_number(risk.get("cvar10_loss_points")) or 0.0) * 100.0, 2
+            ),
+            "utility": round(objective, 6),
+            "method": risk.get("version"),
+        },
+        "edge": {
+            "edge_status": "forward_unvalidated_user_override",
+            "utility": round(objective, 6),
+            "model_p": probability,
+            "advisories": advisories,
+        },
+    }
+
+
 def _candidate_probability_evidence(
     candidate: Mapping[str, Any],
     facts: Mapping[str, Any],
@@ -1236,7 +1556,9 @@ def _candidate_probability_evidence(
     lower = _number(economics.get("breakeven_low"))
     upper = _number(economics.get("breakeven_high"))
     spot = _number(_map(facts.get("spot")).get("spx"))
-    q_mass = _terminal_range_q_mass(_map(_map(facts.get("structure")).get("q_local_mass_5pt")), lower, upper)
+    q_mass = _terminal_range_q_mass(
+        _map(_map(facts.get("structure")).get("q_local_mass_5pt")), lower, upper
+    )
     session_date = _session_date(facts.get("session_date"))
     if None in (lower, upper, spot, q_mass) or session_date is None:
         return {}, {}, ["pin_probability_inputs_unavailable"]
@@ -1267,16 +1589,20 @@ def _candidate_probability_evidence(
         "upper_level": round(float(upper), 4),
     }
     effective = max(estimate.effective_sample_count, 0.0)
-    return {
-        "q": round(float(q_mass), 6),
-        "p_empirical": estimate.probability,
-        "p_interval_low": estimate.interval_low,
-        "n_raw": estimate.sample_count,
-        "n_effective": round(effective, 6),
-        "shrinkage_weight": round(effective / (effective + 20.0), 6),
-        "historical_sessions": list(estimate.historical_sessions),
-        "method": estimate.model_version,
-    }, event, []
+    return (
+        {
+            "q": round(float(q_mass), 6),
+            "p_empirical": estimate.probability,
+            "p_interval_low": estimate.interval_low,
+            "n_raw": estimate.sample_count,
+            "n_effective": round(effective, 6),
+            "shrinkage_weight": round(effective / (effective + 20.0), 6),
+            "historical_sessions": list(estimate.historical_sessions),
+            "method": estimate.model_version,
+        },
+        event,
+        [],
+    )
 
 
 def _attach_policy_ev(
@@ -1313,9 +1639,7 @@ def _policy_ev_annotation(
             "policy_ev_version": None,
             "policy_ev_reason": "table_unavailable",
         }
-    bucket = _map(_map(table).get("buckets")).get(
-        _policy_ev_bucket_key(candidate, regime)
-    )
+    bucket = _map(_map(table).get("buckets")).get(_policy_ev_bucket_key(candidate, regime))
     if not isinstance(bucket, Mapping):
         return {
             "policy_ev": None,
@@ -1327,10 +1651,7 @@ def _policy_ev_annotation(
         "policy_ev": _number(bucket.get("ev_points")),
         "policy_ev_n": int(n) if (n := _number(bucket.get("n"))) is not None else None,
         "policy_ev_version": str(table.get("management_policy_version") or ""),
-        "policy_ev_reason": (
-            str(bucket.get("reason") or "")
-            or None
-        ),
+        "policy_ev_reason": (str(bucket.get("reason") or "") or None),
     }
 
 
@@ -1383,7 +1704,9 @@ def _load_policy_ev_table_cached(
     return payload
 
 
-def _terminal_range_q_mass(values: Mapping[str, Any], lower: float | None, upper: float | None) -> float | None:
+def _terminal_range_q_mass(
+    values: Mapping[str, Any], lower: float | None, upper: float | None
+) -> float | None:
     if lower is None or upper is None or lower >= upper:
         return None
     cells = []
@@ -1391,7 +1714,11 @@ def _terminal_range_q_mass(values: Mapping[str, Any], lower: float | None, upper
         center, mass = _strike_number(key), _number(value)
         if center is not None and mass is not None and mass >= 0.0:
             cells.append((center - 2.5, center + 2.5, mass))
-    if not cells or lower < min(cell[0] for cell in cells) or upper > max(cell[1] for cell in cells):
+    if (
+        not cells
+        or lower < min(cell[0] for cell in cells)
+        or upper > max(cell[1] for cell in cells)
+    ):
         return None
     probability = sum(
         mass * max(0.0, min(upper, high) - max(lower, low)) / (high - low)
@@ -1585,7 +1912,11 @@ def _time(value: object) -> datetime | None:
     if not isinstance(value, (str, datetime)):
         return None
     try:
-        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(value.replace("Z", "+00:00"))
+        )
     except ValueError:
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else None

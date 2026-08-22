@@ -36,12 +36,41 @@ def test_v40_preaverage_manual_authority_is_explicitly_unvalidated(
     )
 
     assert result.rejected == []
-    assert result.passed[0]["edge"]["edge_status"] == (
-        "explicit_manual_policy_unvalidated"
-    )
+    assert result.passed[0]["edge"]["edge_status"] == ("explicit_manual_policy_unvalidated")
     assert result.passed[0]["edge"]["strategy_edge"]["evidence_status"] == (
         "forward_unvalidated_user_override"
     )
+
+
+def test_v44_close_convergence_manual_authority_is_explicitly_unvalidated(
+    tmp_path: Path,
+) -> None:
+    candidate = {
+        "setup_kind": "CLOSE_CONVERGENCE_60M",
+        "authorization_policy": "strategy_policy.bootstrap.v44",
+        "evidence_contract_hash": (
+            "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
+        ),
+        "evidence_status": "forward_unvalidated_user_override",
+        "close_convergence": {"status": "ready", "training_sessions": 28},
+        "convergence_risk": {"objective_points": -0.1, "n_paths": 51},
+        "selection_score": -0.1,
+    }
+
+    result = apply_strategy_edge_authority(
+        [candidate],
+        {"session": {"mode": "rth"}},
+        {},
+        data_root=tmp_path,
+        now=NOW,
+    )
+
+    assert result.rejected == []
+    assert result.passed[0]["edge"]["edge_status"] == ("explicit_manual_policy_unvalidated")
+    assert result.passed[0]["edge"]["strategy_edge"]["convergence_risk"] == {
+        "objective_points": -0.1,
+        "n_paths": 51,
+    }
 
 
 def test_model_rejection_prevents_manual_authority(monkeypatch) -> None:
@@ -159,6 +188,4 @@ def test_model_rejection_prevents_manual_authority(monkeypatch) -> None:
 
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
-    assert decision["why_not"]["primary_blocker"] == (
-        "strategy_edge_lower_bound_below_threshold"
-    )
+    assert decision["why_not"]["primary_blocker"] == ("strategy_edge_lower_bound_below_threshold")

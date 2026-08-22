@@ -107,6 +107,8 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
   `market_regime_signal.py` 统一负责
 - `application/market_features/` — 实时特征编排、GTH 手工候选，以及独立的
   current-session trend transition source 校验与候选生命周期分类；其中
+  `physical_close_convergence.py` 负责 15:00 ET 因果 SPX/ES 收盘分布，只输出
+  观察事实且不持有交易授权；
   `gth_level_candidate_runtime.py` 负责候选持久化、投递回执对账、人工计划监控、
   gate/replay 日志，候选评估模块仅保留决策与兼容门面；不持有 provider 原始字段
 - `service_loop.py`、`maintenance.py`、`post_close_review.py`、`latest_state.py`

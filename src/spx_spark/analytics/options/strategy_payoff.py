@@ -58,6 +58,16 @@ PIN_BUTTERFLY_MANAGEMENT_POLICY = ManagementPolicy(
     time_stop_minutes=None,
     hard_exit_et="15:45",
 )
+# The 60-minute physical-close lane was validated against exact 15:55 ET
+# conservative combo bids. Earlier exits materially changed the result, so it
+# has its own frozen hold policy and no intrahour premium/trail stop.
+CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY = ManagementPolicy(
+    policy_version="management_policy.close_convergence.hold_1555.v1",
+    profit_arm_return_on_debit=10.0,
+    premium_stop_fraction=None,
+    time_stop_minutes=None,
+    hard_exit_et="15:55",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +607,8 @@ def management_policy_for_candidate(candidate: Mapping[str, Any] | None) -> Mana
     """Select the frozen exit policy for one structure. Verticals use v2."""
 
     row = candidate or {}
+    if str(row.get("setup_kind") or "") == "CLOSE_CONVERGENCE_60M":
+        return CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY
     if str(row.get("setup_kind") or "") == "STABLE_PIN":
         return PIN_BUTTERFLY_MANAGEMENT_POLICY
     if str(row.get("strategy_type") or "").upper() == "IRON_CONDOR":

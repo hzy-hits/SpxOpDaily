@@ -30,6 +30,10 @@ _WALL_HAZARD_SETUP = "WALL_BREAKOUT_HAZARD"
 _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
+_CLOSE_CONVERGENCE_SETUP = "CLOSE_CONVERGENCE_60M"
+_CLOSE_CONVERGENCE_CONTRACT_HASH = (
+    "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
+)
 
 # Stable feature order shared by offline training and runtime inference.
 FEATURE_NAMES: tuple[str, ...] = (
@@ -117,9 +121,9 @@ def apply_strategy_edge_authority(
     ``data_root is None`` is reserved for pure unit/replay fixtures that do not
     model deployment state. Production model-backed lanes fail closed when the
     artifact is absent, unpromoted, stale, malformed, or out of domain. The
-    Pre-average v40 and wall hazard (introduced in v41, carried by the current
-    strategy policy) are explicit manual-policy exceptions and are always
-    labeled forward-unvalidated.
+    Pre-average, wall hazard, and the user-authorized v44 close convergence
+    Butterfly are explicit manual-policy exceptions and are always labeled
+    forward-unvalidated.
     """
 
     if not candidates:
@@ -135,22 +139,31 @@ def apply_strategy_edge_authority(
     model_candidates: list[Mapping[str, Any]] = []
     for candidate in candidates:
         setup = candidate.get("setup_kind")
-        if setup not in {_PREAVERAGE_SETUP, _WALL_HAZARD_SETUP}:
+        if setup not in {
+            _PREAVERAGE_SETUP,
+            _WALL_HAZARD_SETUP,
+            _CLOSE_CONVERGENCE_SETUP,
+        }:
             model_candidates.append(candidate)
             continue
-        expected_policy, expected_hash, failure = (
-            (
+        authority_contracts = {
+            _PREAVERAGE_SETUP: (
                 "strategy_policy.bootstrap.v40",
                 _PREAVERAGE_CONTRACT_HASH,
                 "preaverage_policy_authority_invalid",
-            )
-            if setup == _PREAVERAGE_SETUP
-            else (
-                "strategy_policy.bootstrap.v43",
+            ),
+            _WALL_HAZARD_SETUP: (
+                "strategy_policy.bootstrap.v44",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
-            )
-        )
+            ),
+            _CLOSE_CONVERGENCE_SETUP: (
+                "strategy_policy.bootstrap.v44",
+                _CLOSE_CONVERGENCE_CONTRACT_HASH,
+                "close_convergence_policy_authority_invalid",
+            ),
+        }
+        expected_policy, expected_hash, failure = authority_contracts[str(setup)]
         if (
             candidate.get("authorization_policy") != expected_policy
             or candidate.get("evidence_contract_hash") != expected_hash
@@ -168,6 +181,8 @@ def apply_strategy_edge_authority(
                     "evidence_status": "forward_unvalidated_user_override",
                     "hazard_probability": candidate.get("hazard_probability"),
                     "hazard_oos": dict(_map(candidate.get("hazard_oos"))),
+                    "close_convergence": dict(_map(candidate.get("close_convergence"))),
+                    "convergence_risk": dict(_map(candidate.get("convergence_risk"))),
                 },
             )
         )
@@ -439,14 +454,10 @@ def candidate_edge_features(
         / scale,
         "efficiency_ratio_30m": _number(path.get("efficiency_ratio_30m")) or 0.0,
         "vwap_crosses_30m": _number(path.get("vwap_crosses_30m")) or 0.0,
-        "vwap_slope_atr_directional": sign
-        * (_number(path.get("vwap_slope")) or 0.0)
-        / scale,
+        "vwap_slope_atr_directional": sign * (_number(path.get("vwap_slope")) or 0.0) / scale,
         "breadth_directional": _breadth_directional(breadth, sign),
-        "direction_score_directional": sign
-        * (_number(path.get("direction_score")) or 0.0),
-        "expected_move_atr": (_number(volatility.get("expected_move_points")) or 0.0)
-        / scale,
+        "direction_score_directional": sign * (_number(path.get("direction_score")) or 0.0),
+        "expected_move_atr": (_number(volatility.get("expected_move_points")) or 0.0) / scale,
         "atm_iv_0dte": _number(volatility.get("atm_iv_0dte")) or 0.0,
         "atm_iv_change_5m": _number(volatility.get("atm_iv_change_5m")) or 0.0,
         "atm_iv_change_15m": _number(volatility.get("atm_iv_change_15m")) or 0.0,
@@ -465,8 +476,7 @@ def candidate_edge_features(
         )
         / scale,
         "flip_distance_atr_directional": _directional_distance(spot, flip, sign) / scale,
-        "minutes_to_close_scaled": (_number(facts.get("minutes_to_close")) or 0.0)
-        / 390.0,
+        "minutes_to_close_scaled": (_number(facts.get("minutes_to_close")) or 0.0) / 390.0,
         "session_rth": float(session_mode == "rth"),
         "session_gth": float(session_mode == "gth"),
         "path_trend": float(path_state == "TREND"),
@@ -495,8 +505,10 @@ def feature_vector(features: Mapping[str, float]) -> list[float]:
 def edge_model_key(candidate: Mapping[str, Any], facts: Mapping[str, Any]) -> str:
     session = str(_map(facts.get("session")).get("mode") or "unknown").lower()
     strategy = str(candidate.get("strategy_type") or "").upper()
-    family = "vertical" if strategy.endswith("_DEBIT_VERTICAL") else (
-        "butterfly" if strategy.endswith("_BUTTERFLY") else "other"
+    family = (
+        "vertical"
+        if strategy.endswith("_DEBIT_VERTICAL")
+        else ("butterfly" if strategy.endswith("_BUTTERFLY") else "other")
     )
     return f"{session}|{family}"
 
@@ -528,8 +540,7 @@ def _linear(model: Mapping[str, Any], name: str, values: Sequence[float]) -> flo
     if intercept is None:
         raise ValueError("linear intercept missing")
     result = intercept + sum(
-        float(weight) * value
-        for weight, value in zip(coefficients, values, strict=True)
+        float(weight) * value for weight, value in zip(coefficients, values, strict=True)
     )
     if not math.isfinite(result):
         raise ValueError("linear result is non-finite")
