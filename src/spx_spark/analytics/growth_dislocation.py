@@ -10,7 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v8"
+POLICY_VERSION = "growth_dislocation_leaps.v10"
 IV_SCORE_CHEAP_CUTOFF = 0.10
 
 
@@ -53,29 +53,55 @@ def price_features(closes: Sequence[float]) -> dict[str, float] | None:
 def select_target_leaps(
     contracts: Sequence[Any],
     policy: GrowthDislocationSettings,
+    *,
+    spot: float | None = None,
+    realized_vol_20d: float | None = None,
 ) -> Any | None:
-    eligible = [
-        contract
-        for contract in contracts
-        if policy.min_leaps_dte <= int(contract.dte) <= policy.max_leaps_dte
-        and contract.delta is not None
-        and policy.target_delta_min <= float(contract.delta) <= policy.target_delta_max
-        and contract.bid is not None
-        and contract.ask is not None
-        and float(contract.ask) > float(contract.bid) >= 0.0
-    ]
+    eligible: list[Any] = []
+    for contract in contracts:
+        if not policy.min_leaps_dte <= int(contract.dte) <= policy.max_leaps_dte:
+            continue
+        if contract.delta is None or not (
+            policy.target_delta_min <= float(contract.delta) <= policy.target_delta_max
+        ):
+            continue
+        spread = spread_mid_ratio(contract.bid, contract.ask)
+        if spread is None or spread > policy.max_leaps_spread_mid:
+            continue
+        if contract.volatility is None or not (
+            0.0 < float(contract.volatility) <= policy.max_current_leaps_iv
+        ):
+            continue
+        if int(contract.open_interest) < policy.min_target_leaps_open_interest:
+            continue
+        if realized_vol_20d is not None and realized_vol_20d > 0.0:
+            if float(contract.volatility) / realized_vol_20d > policy.max_iv_rv_ratio:
+                continue
+        if spot is not None:
+            value_ratio = extrinsic_value_ratio(
+                spot=spot,
+                strike=float(contract.strike),
+                bid=float(contract.bid),
+                ask=float(contract.ask),
+            )
+            if value_ratio is None or value_ratio > policy.max_extrinsic_value_ratio:
+                continue
+        eligible.append(contract)
     if not eligible:
         return None
 
-    def selection_key(contract: Any) -> tuple[float, int, float, int, str]:
+    target_delta = (policy.target_delta_min + policy.target_delta_max) / 2.0
+
+    def selection_key(contract: Any) -> tuple[int, float, float, int, int, str]:
         spread = spread_mid_ratio(float(contract.bid), float(contract.ask))
         assert spread is not None
         preferred = int(int(contract.dte) < policy.preferred_leaps_dte)
         return (
-            spread,
             preferred,
-            abs(float(contract.delta) - 0.70),
+            abs(float(contract.delta) - target_delta),
+            spread,
             -int(contract.open_interest),
+            -int(contract.dte),
             str(contract.symbol),
         )
 
@@ -87,6 +113,24 @@ def spread_mid_ratio(bid: float | None, ask: float | None) -> float | None:
         return None
     mid = (bid + ask) / 2.0
     return (ask - bid) / mid if mid > 0.0 else None
+
+
+def extrinsic_value_ratio(
+    *,
+    spot: float,
+    strike: float,
+    bid: float,
+    ask: float,
+) -> float | None:
+    """Return a call's mid-price time value as a fraction of spot."""
+
+    if spot <= 0.0 or strike <= 0.0 or bid < 0.0 or ask <= bid:
+        return None
+    mid = (bid + ask) / 2.0
+    intrinsic = max(spot - strike, 0.0)
+    if mid < intrinsic:
+        return None
+    return (mid - intrinsic) / spot
 
 
 def score_candidate(
@@ -103,18 +147,51 @@ def score_candidate(
         "ma10",
         "last",
         "spread_mid",
-        "max_option_dte",
+        "leaps_dte",
+        "leaps_delta",
+        "leaps_bid",
+        "leaps_ask",
+        "leaps_strike",
+        "target_leaps_oi",
+        "current_iv",
+        "realized_vol_20d",
         "ivp_13w",
         "ivp_26w",
+        "ivp_52w",
     )
     if any(data.get(key) is None for key in required):
         return None
-    if float(data["ivp_13w"]) > policy.max_ivp_13w or float(data["ivp_26w"]) > policy.max_ivp_26w:
+    if (
+        float(data["ivp_13w"]) > policy.max_ivp_13w
+        or float(data["ivp_26w"]) > policy.max_ivp_26w
+        or float(data["ivp_52w"]) > policy.max_ivp_52w
+    ):
         return None
     spread = float(data["spread_mid"])
     if spread > policy.max_leaps_spread_mid:
         return None
-    if int(data["max_option_dte"]) < policy.min_leaps_dte:
+    if not policy.min_leaps_dte <= int(data["leaps_dte"]) <= policy.max_leaps_dte:
+        return None
+    if not policy.target_delta_min <= float(data["leaps_delta"]) <= policy.target_delta_max:
+        return None
+    current_iv = float(data["current_iv"])
+    realized_vol_20d = float(data["realized_vol_20d"])
+    if (
+        current_iv <= 0.0
+        or current_iv > policy.max_current_leaps_iv
+        or realized_vol_20d <= 0.0
+        or current_iv / realized_vol_20d > policy.max_iv_rv_ratio
+    ):
+        return None
+    if int(data["target_leaps_oi"]) < policy.min_target_leaps_open_interest:
+        return None
+    time_value_ratio = extrinsic_value_ratio(
+        spot=float(data["last"]),
+        strike=float(data["leaps_strike"]),
+        bid=float(data["leaps_bid"]),
+        ask=float(data["leaps_ask"]),
+    )
+    if time_value_ratio is None or time_value_ratio > policy.max_extrinsic_value_ratio:
         return None
 
     iv_score = iv_cheapness_score(
@@ -143,21 +220,16 @@ def score_candidate(
             1.0,
         )
         ivp_52w_score = 100.0 * clamp(
-            1.0
-            - float(data["ivp_52w"])
-            / max(policy.max_ivp_13w, policy.max_ivp_26w),
+            1.0 - float(data["ivp_52w"]) / policy.max_ivp_52w,
             0.0,
             1.0,
         )
         priority_score = 0.50 * price_dislocation_score + 0.50 * ivp_52w_score
     rs5_sector = float(data["return_5d"]) - float(data["sector_return_5d"])
     state = candidate_state(
-        rsi_now=float(data["rsi14"]),
-        rsi_min_20d=float(data["rsi14_min_20d"]),
         close=float(data["last"]),
         ma10=float(data["ma10"]),
         rs5_sector=rs5_sector,
-        policy=policy,
     )
     return {
         "iv_score": iv_score,
@@ -167,6 +239,7 @@ def score_candidate(
         "price_dislocation_score": price_dislocation_score,
         "ivp_52w_score": ivp_52w_score,
         "priority_score": priority_score,
+        "extrinsic_value_ratio": time_value_ratio,
         "state": state,
         "rs_5d_sector": rs5_sector,
         "rs_10d_sector": float(data["return_10d"]) - float(data["sector_return_10d"]),
@@ -276,17 +349,13 @@ def relative_strength_score(
 
 def candidate_state(
     *,
-    rsi_now: float,
-    rsi_min_20d: float,
     close: float,
     ma10: float,
     rs5_sector: float,
-    policy: GrowthDislocationSettings,
 ) -> str:
-    was_oversold = rsi_min_20d < policy.rsi_oversold_threshold
-    if was_oversold and rsi_now >= policy.rsi_recovery_min and rs5_sector > 0.0 and close > ma10:
+    if rs5_sector > 0.0 and close > ma10:
         return "TRIGGER"
-    if was_oversold and rsi_now > policy.rsi_oversold_threshold:
+    if rs5_sector > 0.0 or close > ma10:
         return "ARMED"
     return "WATCH"
 

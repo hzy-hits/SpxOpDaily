@@ -187,7 +187,7 @@ loopback Schwab gateway plus the unified Feishu/Bark outbox. It does not feed
 
 The tracked default remains disabled. Enable `growth_dislocation.enabled` in
 the gitignored runtime-local overlay only after one read-only IBKR/Schwab shadow
-run has completed without missing IV history or provider errors.
+run has completed without provider-wide errors or request exhaustion.
 
 - RTH: 09:30, 10:30, ..., 15:30 ET on exchange trading days. These scans refresh
   WATCH / ARMED / TRIGGER and data quality only; they never change Core Pool
@@ -208,32 +208,40 @@ run has completed without missing IV history or provider errors.
   first request supplies the complete lookback, so the scanner does not need to
   accumulate 52 weeks locally.
 - The universe is the tracked point-in-time union of official SPY, Nasdaq-100,
-  IWB (Russell 1000), and IWM holdings. The `market_cap >= $3B` hard gate turns
-  this into a large/mid-cap fallen-angel search rather than a small-cap screen.
-- Hard gates are `52W price location <= 0.20`, `ivp_13w <= 0.20`,
-  `ivp_26w <= 0.20`, `market_cap >= $3B`, `dividend_yield < 1.50%`, at least
-  365 DTE, valid target-LEAPS bid/ask, and spread/mid `<= 0.12`. The current
+  IWB (Russell 1000), and IWM holdings. The `market_cap >= $10B` hard gate keeps
+  the lane focused on large, comparatively smooth fallen angels.
+- Underlying hard gates are `52W price location <= 0.20`, all three IBKR
+  `ivp_13w / ivp_26w / ivp_52w <= 0.20`, `market_cap >= $10B`, and
+  `dividend_yield < 1.50%`. Target-call hard gates are 450–730 DTE, delta
+  0.68–0.80, valid bid/ask, spread/mid `<= 0.08`, current IV `<= 0.60`,
+  current IV / RV20 `<= 1.00`, OI `>= 100`, and time value / spot `<= 0.20`.
+  The selector first prefers 540–730 DTE, then delta nearest 0.74, then spread
+  and OI; a very tight but poorly matched contract no longer wins by itself. The current
   Schwab endpoints do not provide trustworthy underlying average option volume,
   so V1 reports that field as unavailable and does not fabricate or gate on it.
-  Missing history, timeouts, connectivity loss, and
-  error 10197 fail closed into data-quality rows. Requests use the existing IBKR
-  snapshot client id and never read accounts, subscribe to continuous ticker
-  lines, or place orders.
-- A symbol with incomplete IV or price history stays out of the strict table and
-  is hidden from raw scanner notification rows. The Core Pool is bootstrapped
+  A symbol without sufficient IV history or a usable symbol-level response fails
+  closed into the rejection counts; provider-wide connectivity loss and fatal
+  error 10197 still fail the scan. Requests use the existing IBKR snapshot client
+  id and never read accounts, subscribe to continuous ticker lines, or place orders.
+- A symbol with incomplete IV is skipped before price-history and LEAPS detail
+  requests, stays out of the strict table, and does not make the otherwise
+  complete scan partial. Other incomplete rows remain hidden from raw scanner
+  notification rows. The Core Pool is bootstrapped
   only by the first `Data Quality=complete` daily scan. After bootstrap, a new
   symbol needs two consecutive complete daily passes. Any partial scan freezes
   membership, entry/exit counters, and the stored Top Opportunities list; fresh
   rows may update Today State while unrefreshed members display `STALE`.
-- IV above the entry limit, a spread above 12%, an unrefreshed contract, missing
-  provider data, or a non-triggering Today State pauses a member rather than
-  removing it. Exit hysteresis requires three complete daily observations of
-  one condition: 52-week price location above 30%, market cap below $2.50B,
-  dividend yield at least 2.00%, or no 365-DTE option depth. A confirmed
-  untradeable symbol or a symbol placed in the persisted manual research-reject
-  set exits immediately.
+- Failure of an entry IV or exact-contract gate, an unrefreshed contract, or
+  missing symbol-level data pauses a member rather than removing it. Today State
+  remains timing context and does not control Core Pool membership. Provider-wide
+  errors and request exhaustion still freeze the entire membership update. Exit
+  hysteresis requires three complete daily observations of one condition:
+  52-week price location above 30%, market cap below $2.50B, dividend yield at
+  least 2.00%, or no 450-DTE option depth. A
+  confirmed untradeable symbol or a symbol placed in the persisted manual
+  research-reject set exits immediately.
 - `52W price location` is `(last - 52W low) / (52W high - 52W low)`. The selected
-  call remains 365–730 DTE with 0.60–0.80 delta, while the intended research
+  call is 450–730 DTE with 0.68–0.80 delta, while the intended research
   holding window is roughly two to three months; that holding horizon is not an
   extra scanner score or an automatic exit rule.
 - `FinalScore` is only 50% IV cheapness, 30% RSI recovery, and 20%
@@ -253,8 +261,9 @@ run has completed without missing IV history or provider errors.
   52-week dislocation priority; RTH and partial scans preserve membership and
   ordering. These lifecycle states remain research workflow controls, not an
   order signal.
-- `WATCH / ARMED / TRIGGER` is determined from oversold recovery, positive 5-day
-  sector relative strength, and close above MA10. Growth quality, convexity,
+- RSI recovery affects `FinalScore` only. `WATCH / ARMED / TRIGGER` is determined
+  from positive 5-day sector relative strength and close above MA10: either one
+  makes a symbol `ARMED`, while both make it `TRIGGER`. Growth quality, convexity,
   market cap, OI, and fundamentals do not enter the score. Human-visible numeric
   values render with two decimals.
 - Manual diagnostic: `uv run spx job growth-dislocation --force`. This consumes

@@ -16,6 +16,7 @@ class GrowthDislocationSettings:
     min_market_cap: float
     max_ivp_13w: float
     max_ivp_26w: float
+    max_ivp_52w: float
     ibkr_history_timeout_seconds: float
     ibkr_history_concurrency: int
     min_leaps_dte: int
@@ -24,6 +25,10 @@ class GrowthDislocationSettings:
     target_delta_min: float
     target_delta_max: float
     max_leaps_spread_mid: float
+    max_current_leaps_iv: float
+    max_iv_rv_ratio: float
+    min_target_leaps_open_interest: int
+    max_extrinsic_value_ratio: float
     rsi_oversold_threshold: float
     rsi_recovery_min: float
     rsi_recovery_optimal_low: float
@@ -44,9 +49,13 @@ class GrowthDislocationSettings:
             ("max_dividend_yield", self.max_dividend_yield),
             ("max_ivp_13w", self.max_ivp_13w),
             ("max_ivp_26w", self.max_ivp_26w),
+            ("max_ivp_52w", self.max_ivp_52w),
             ("target_delta_min", self.target_delta_min),
             ("target_delta_max", self.target_delta_max),
             ("max_leaps_spread_mid", self.max_leaps_spread_mid),
+            ("max_current_leaps_iv", self.max_current_leaps_iv),
+            ("max_iv_rv_ratio", self.max_iv_rv_ratio),
+            ("max_extrinsic_value_ratio", self.max_extrinsic_value_ratio),
         ):
             if not 0.0 < value <= 1.0:
                 raise ValueError(f"growth-dislocation {label} must be in (0, 1]")
@@ -58,6 +67,8 @@ class GrowthDislocationSettings:
             raise ValueError("growth-dislocation IBKR history timeout must be positive")
         if self.ibkr_history_concurrency <= 0:
             raise ValueError("growth-dislocation IBKR history concurrency must be positive")
+        if self.min_target_leaps_open_interest <= 0:
+            raise ValueError("growth-dislocation target LEAPS open interest must be positive")
         if not 0 < self.min_leaps_dte <= self.preferred_leaps_dte <= self.max_leaps_dte:
             raise ValueError("growth-dislocation LEAPS DTE thresholds are not ordered")
         if not (
@@ -102,6 +113,7 @@ def load_growth_dislocation_settings(
         min_market_cap=float(value("min_market_cap")),
         max_ivp_13w=float(value("max_ivp_13w")),
         max_ivp_26w=float(value("max_ivp_26w")),
+        max_ivp_52w=float(value("max_ivp_52w")),
         ibkr_history_timeout_seconds=float(value("ibkr_history_timeout_seconds")),
         ibkr_history_concurrency=int(value("ibkr_history_concurrency")),
         min_leaps_dte=int(value("min_leaps_dte")),
@@ -110,6 +122,10 @@ def load_growth_dislocation_settings(
         target_delta_min=float(value("target_delta_min")),
         target_delta_max=float(value("target_delta_max")),
         max_leaps_spread_mid=float(value("max_leaps_spread_mid")),
+        max_current_leaps_iv=float(value("max_current_leaps_iv")),
+        max_iv_rv_ratio=float(value("max_iv_rv_ratio")),
+        min_target_leaps_open_interest=int(value("min_target_leaps_open_interest")),
+        max_extrinsic_value_ratio=float(value("max_extrinsic_value_ratio")),
         rsi_oversold_threshold=float(value("rsi_oversold_threshold")),
         rsi_recovery_min=float(value("rsi_recovery_min")),
         rsi_recovery_optimal_low=float(value("rsi_recovery_optimal_low")),

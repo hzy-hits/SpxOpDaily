@@ -297,7 +297,11 @@ def _build_document(
                 fetched = iv_percentile_fetcher(refresh_symbols)
                 for raw_symbol, snapshot in fetched.items():
                     symbol = _ibkr_provider_symbol(raw_symbol)
-                    if snapshot.ivp_13w is None or snapshot.ivp_26w is None:
+                    if (
+                        snapshot.ivp_13w is None
+                        or snapshot.ivp_26w is None
+                        or snapshot.ivp_52w is None
+                    ):
                         continue
                     iv_snapshots[symbol] = snapshot
                     iv_cache[symbol] = iv_percentile_snapshot_to_payload(snapshot)
@@ -306,7 +310,6 @@ def _build_document(
                 errors.append(f"ibkr_ivp:{type(exc).__name__}")
 
     hard_survivors: list[tuple[UniverseMember, EquityQuote, float]] = []
-    iv_warming_survivors: list[tuple[UniverseMember, EquityQuote, float]] = []
     for item in price_hard_survivors:
         member = item[0]
         snapshot = iv_snapshots.get(_ibkr_provider_symbol(member.symbol))
@@ -318,9 +321,14 @@ def _build_document(
                 "ivp_52w": snapshot.ivp_52w if snapshot else None,
             }
         )
-        if snapshot is None or snapshot.ivp_13w is None or snapshot.ivp_26w is None:
+        if (
+            snapshot is None
+            or snapshot.ivp_13w is None
+            or snapshot.ivp_26w is None
+            or snapshot.ivp_52w is None
+        ):
             observation["screen_reason"] = "ibkr_iv_percentile_missing"
-            iv_warming_survivors.append(item)
+            rejection_counts["ibkr_iv_percentile_missing"] += 1
             continue
         if snapshot.ivp_13w > policy.max_ivp_13w:
             observation["screen_reason"] = "ivp_13w_above_limit"
@@ -329,6 +337,10 @@ def _build_document(
         if snapshot.ivp_26w > policy.max_ivp_26w:
             observation["screen_reason"] = "ivp_26w_above_limit"
             rejection_counts["ivp_26w_above_limit"] += 1
+            continue
+        if snapshot.ivp_52w > policy.max_ivp_52w:
+            observation["screen_reason"] = "ivp_52w_above_limit"
+            rejection_counts["ivp_52w_above_limit"] += 1
             continue
         observation["screen_reason"] = None
         hard_survivors.append(item)
@@ -394,10 +406,21 @@ def _build_document(
                 "max_option_dte": chain.max_dte,
             }
         )
-        target = select_target_leaps(chain.contracts, policy)
+        features = price_features([entry.close for entry in history])
+        target = select_target_leaps(
+            chain.contracts,
+            policy,
+            spot=quote.last,
+            realized_vol_20d=(
+                float(features["realized_vol_20d"])
+                if features and float(features.get("realized_vol_20d") or 0.0) > 0.0
+                else None
+            ),
+        )
         if target is None:
-            membership_observations[member.symbol]["screen_reason"] = "target_leaps_missing"
-            rejection_counts["target_leaps_missing"] += 1
+            reason = "target_leaps_hard_filter" if chain.contracts else "target_leaps_missing"
+            membership_observations[member.symbol]["screen_reason"] = reason
+            rejection_counts[reason] += 1
             detail_cache.pop(member.symbol, None)
             target_leaps_rejected.add(member.symbol)
             continue
@@ -456,35 +479,6 @@ def _build_document(
         )
         strict_candidates.append(row)
 
-    for member, quote, location in iv_warming_survivors:
-        row, reasons = _candidate_row(
-            member=member,
-            quote=quote,
-            price_location=location,
-            history=_close_history(histories.get(member.symbol)),
-            detail={},
-            benchmark_histories=histories,
-            policy=policy,
-            now=now,
-            ny=ny,
-            mode=mode,
-            detail_current=False,
-            iv_snapshot=iv_snapshots.get(_ibkr_provider_symbol(member.symbol)),
-        )
-        warming.append(row)
-        membership_observations[member.symbol].update(
-            {
-                "data_quality_reasons": row["data_quality_reasons"],
-                "screen_reason": (
-                    row["data_quality_reasons"][0]
-                    if row["data_quality_reasons"]
-                    else "data_quality_incomplete"
-                ),
-            }
-        )
-        for reason in reasons:
-            rejection_counts[reason] += 1
-
     top, reserve = apply_crowding(strict_candidates, policy)
     notification_top, _notification_reserve = apply_crowding(
         strict_candidates,
@@ -499,7 +493,6 @@ def _build_document(
         )
     )
     request_limited = bool(hard_survivors) and len(detail_evaluated_now) < len(hard_survivors)
-    ivp_incomplete = bool(iv_warming_survivors)
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "policy_version": POLICY_VERSION,
@@ -536,11 +529,11 @@ def _build_document(
         ],
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "data_quality": {
-            "status": "partial" if request_limited or ivp_incomplete or errors else "complete",
+            "status": "partial" if request_limited or errors else "complete",
             "request_limited": request_limited,
-            "ivp_incomplete": ivp_incomplete,
+            "ivp_incomplete": False,
             "errors": sorted(set(errors)),
-            "volatility_contract": "13-week and 26-week percentile calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; 52-week percentile drives notification priority but is not a hard gate",
+            "volatility_contract": "13-week, 26-week, and 52-week percentiles calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; selected LEAPS current IV and IV/RV20 also pass configured hard limits",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
             "classification": "official sector fallback; subindustry unavailable",
         },
@@ -953,6 +946,8 @@ def _candidate_row(
             reasons.append("ibkr_ivp_13w_missing")
         if iv_snapshot.ivp_26w is None:
             reasons.append("ibkr_ivp_26w_missing")
+        if iv_snapshot.ivp_52w is None:
+            reasons.append("ibkr_ivp_52w_missing")
     if not detail:
         reasons.append("target_leaps_warming")
     elif not detail_current:
@@ -1018,6 +1013,7 @@ def _candidate_row(
         "dividend_yield": quote.dividend_yield,
         "leaps_symbol": detail.get("symbol"),
         "leaps_expiry": detail.get("expiry"),
+        "leaps_dte": detail.get("dte"),
         "leaps_strike": detail.get("strike"),
         "leaps_delta": detail.get("delta"),
         "leaps_bid": bid,
@@ -1088,8 +1084,8 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         "",
         "## Top Opportunities（52W低位 + IVP 52W）",
         "",
-        "| Symbol | Today State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | Spread |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|",
+        "| Symbol | Today State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | IV | IV/RV20 | OI | 时间价值/股价 | Spread |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
     top = document.get("core_top_opportunities", [])
     if isinstance(top, list) and top:
@@ -1097,7 +1093,7 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             if not isinstance(row, Mapping):
                 continue
             lines.append(
-                "| {symbol} | {state} | {priority} | {market_cap} | {score} | {location} | {ivp_52w} | {ivp} | {rsi} | {sector_rs} | {contract} | {spread} |".format(
+                "| {symbol} | {state} | {priority} | {market_cap} | {score} | {location} | {ivp_52w} | {ivp} | {rsi} | {sector_rs} | {contract} | {current_iv} | {iv_rv} | {oi} | {extrinsic} | {spread} |".format(
                     symbol=row.get("symbol", "-"),
                     state=row.get("today_state", row.get("state", "-")),
                     priority=_fmt(row.get("priority_score")),
@@ -1109,12 +1105,16 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
                     rsi=_fmt(row.get("rsi14")),
                     sector_rs=_pct(row.get("rs_5d_sector")),
                     contract=row.get("leaps_symbol") or "-",
+                    current_iv=_pct(row.get("current_iv")),
+                    iv_rv=_fmt(row.get("iv_rv_ratio")),
+                    oi=_fmt(row.get("target_leaps_oi")),
+                    extrinsic=_pct(row.get("extrinsic_value_ratio")),
                     spread=_pct(row.get("leaps_spread_mid")),
                 )
             )
     else:
         lines.append(
-            "| — | WATCH | — | — | — | — | — | Core Pool 尚无可展示候选 | — | — | — | — |"
+            "| — | WATCH | — | — | — | — | — | Core Pool 尚无可展示候选 | — | — | — | — | — | — | — | — |"
         )
     return title, "\n".join(lines)
 
@@ -1166,13 +1166,16 @@ def _detail_payload(
 def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
     if raw.get("schema_version") not in {None, 2, STATE_SCHEMA_VERSION}:
         return {}
-    # V6 smoothed the score curve, V7 changed notification priority, and V8
-    # adds the Core Pool while preserving all market-data caches.
+    # V6 smoothed the score curve, V7 changed notification priority, V8 added
+    # the Core Pool, V9 made RSI score-only, and V10 tightened all three entry
+    # gates while preserving price, IV-history, and contract caches.
     if raw.get("policy_version") not in {
         None,
         "growth_dislocation_leaps.v5",
         "growth_dislocation_leaps.v6",
         "growth_dislocation_leaps.v7",
+        "growth_dislocation_leaps.v8",
+        "growth_dislocation_leaps.v9",
         POLICY_VERSION,
     }:
         return {}
@@ -1197,7 +1200,12 @@ def _fresh_iv_snapshots(
             raw_payload,
             fallback_symbol=str(raw_symbol),
         )
-        if snapshot is None or snapshot.ivp_13w is None or snapshot.ivp_26w is None:
+        if (
+            snapshot is None
+            or snapshot.ivp_13w is None
+            or snapshot.ivp_26w is None
+            or snapshot.ivp_52w is None
+        ):
             continue
         basis_day = snapshot.as_of_date or snapshot.observed_at.astimezone(ET).date()
         age = DEFAULT_MARKET_CALENDAR.trading_days_elapsed(basis_day, trading_day)
@@ -1288,9 +1296,13 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
         "iv_filter_source",
         "rsi14",
         "leaps_symbol",
+        "leaps_dte",
+        "leaps_delta",
         "leaps_bid",
         "leaps_ask",
         "leaps_spread_mid",
+        "target_leaps_oi",
+        "extrinsic_value_ratio",
         "data_quality",
         "data_quality_reasons",
     )

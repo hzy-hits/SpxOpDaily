@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from spx_spark.analytics.growth_dislocation import (
     apply_crowding,
     candidate_state,
+    extrinsic_value_ratio,
     priority_sort_key,
     rsi_recovery_score,
     score_candidate,
@@ -151,6 +152,32 @@ def _policy():
     return load_app_settings().growth_dislocation
 
 
+def _eligible_score_row() -> dict[str, float | int]:
+    return {
+        "rsi14": 42.0,
+        "rsi14_min_20d": 25.0,
+        "return_5d": 0.04,
+        "return_10d": 0.03,
+        "sector_return_5d": 0.01,
+        "sector_return_10d": 0.01,
+        "ma10": 100.0,
+        "last": 101.0,
+        "spread_mid": 0.08,
+        "leaps_dte": 600,
+        "leaps_delta": 0.72,
+        "leaps_bid": 20.0,
+        "leaps_ask": 21.0,
+        "leaps_strike": 90.0,
+        "target_leaps_oi": 1000,
+        "current_iv": 0.20,
+        "realized_vol_20d": 0.30,
+        "ivp_13w": 0.05,
+        "ivp_26w": 0.10,
+        "ivp_52w": 0.08,
+        "price_location_52w": 0.05,
+    }
+
+
 def _universe() -> Universe:
     return Universe(
         members=(
@@ -179,39 +206,46 @@ def _universe() -> Universe:
     )
 
 
-def test_candidate_state_follows_watch_armed_trigger_contract() -> None:
+def test_v10_defaults_encode_the_three_hard_gates() -> None:
     policy = _policy()
 
+    assert policy.min_market_cap == 10_000_000_000.0
+    assert (policy.max_ivp_13w, policy.max_ivp_26w, policy.max_ivp_52w) == (
+        0.20,
+        0.20,
+        0.20,
+    )
+    assert (policy.min_leaps_dte, policy.max_leaps_dte) == (450, 730)
+    assert (policy.target_delta_min, policy.target_delta_max) == (0.68, 0.80)
+    assert policy.max_leaps_spread_mid == 0.08
+    assert policy.max_current_leaps_iv == 0.60
+    assert policy.max_iv_rv_ratio == 1.00
+    assert policy.min_target_leaps_open_interest == 100
+    assert policy.max_extrinsic_value_ratio == 0.20
+
+
+def test_candidate_state_follows_watch_armed_trigger_contract() -> None:
     assert (
         candidate_state(
-            rsi_now=32.0,
-            rsi_min_20d=25.0,
             close=99.0,
             ma10=100.0,
-            rs5_sector=-0.01,
-            policy=policy,
+            rs5_sector=0.01,
         )
         == "ARMED"
     )
     assert (
         candidate_state(
-            rsi_now=42.0,
-            rsi_min_20d=25.0,
             close=101.0,
             ma10=100.0,
             rs5_sector=0.01,
-            policy=policy,
         )
         == "TRIGGER"
     )
     assert (
         candidate_state(
-            rsi_now=28.0,
-            rsi_min_20d=25.0,
             close=99.0,
             ma10=100.0,
             rs5_sector=-0.01,
-            policy=policy,
         )
         == "WATCH"
     )
@@ -232,22 +266,7 @@ def test_rsi_recovery_score_is_continuous_at_state_thresholds() -> None:
 
 
 def test_v1_score_uses_only_iv_rsi_recovery_and_sector_strength() -> None:
-    row = {
-        "rsi14": 42.0,
-        "rsi14_min_20d": 25.0,
-        "return_5d": 0.04,
-        "return_10d": 0.03,
-        "sector_return_5d": 0.01,
-        "sector_return_10d": 0.01,
-        "ma10": 100.0,
-        "last": 101.0,
-        "spread_mid": 0.08,
-        "max_option_dte": 600,
-        "ivp_13w": 0.05,
-        "ivp_26w": 0.10,
-        "ivp_52w": 0.08,
-        "price_location_52w": 0.05,
-    }
+    row = _eligible_score_row()
 
     scored = score_candidate(row, _policy())
 
@@ -259,35 +278,26 @@ def test_v1_score_uses_only_iv_rsi_recovery_and_sector_strength() -> None:
     assert round(scored["price_dislocation_score"], 2) == 75.00
     assert round(scored["ivp_52w_score"], 2) == 60.00
     assert round(scored["priority_score"], 2) == 67.50
+    assert round(scored["extrinsic_value_ratio"], 4) == 0.0941
     assert scored["state"] == "TRIGGER"
 
 
-def test_v1_hard_option_spread_gate_is_twelve_percent() -> None:
-    row = {
-        "rsi14": 42.0,
-        "rsi14_min_20d": 25.0,
-        "return_5d": 0.04,
-        "return_10d": 0.03,
-        "sector_return_5d": 0.01,
-        "sector_return_10d": 0.01,
-        "ma10": 100.0,
-        "last": 101.0,
-        "spread_mid": 0.13,
-        "max_option_dte": 600,
-        "ivp_13w": 0.05,
-        "ivp_26w": 0.10,
-    }
+def test_v1_hard_option_spread_gate_is_eight_percent() -> None:
+    row = _eligible_score_row()
+    row["spread_mid"] = 0.09
 
     assert score_candidate(row, _policy()) is None
 
 
-def test_target_leaps_prefers_the_tightest_executable_contract() -> None:
+def test_target_leaps_rejects_wide_contract_before_selection() -> None:
     wide = SimpleNamespace(
         symbol="WIDE",
         dte=700,
         delta=0.70,
         bid=20.0,
         ask=23.0,
+        strike=90.0,
+        volatility=0.20,
         open_interest=2000,
     )
     tight = SimpleNamespace(
@@ -296,10 +306,63 @@ def test_target_leaps_prefers_the_tightest_executable_contract() -> None:
         delta=0.76,
         bid=20.0,
         ask=21.0,
+        strike=90.0,
+        volatility=0.20,
         open_interest=100,
     )
 
     assert select_target_leaps([wide, tight], _policy()) is tight
+
+
+def test_target_leaps_prefers_target_delta_before_tighter_spread() -> None:
+    tight_edge = SimpleNamespace(
+        symbol="TIGHT_EDGE",
+        dte=600,
+        delta=0.68,
+        bid=20.0,
+        ask=20.4,
+        strike=90.0,
+        volatility=0.20,
+        open_interest=1000,
+    )
+    target_delta = SimpleNamespace(
+        symbol="TARGET_DELTA",
+        dte=600,
+        delta=0.74,
+        bid=20.0,
+        ask=21.0,
+        strike=90.0,
+        volatility=0.20,
+        open_interest=1000,
+    )
+
+    assert select_target_leaps([tight_edge, target_delta], _policy()) is target_delta
+
+
+def test_extrinsic_value_rejects_mid_below_call_intrinsic_value() -> None:
+    assert (
+        extrinsic_value_ratio(
+            spot=101.0,
+            strike=90.0,
+            bid=10.50,
+            ask=11.00,
+        )
+        is None
+    )
+
+
+def test_three_gate_contract_rejects_high_ivp_iv_rv_and_time_value() -> None:
+    row = _eligible_score_row()
+    for field, value in (
+        ("ivp_52w", 0.21),
+        ("current_iv", 0.61),
+        ("realized_vol_20d", 0.19),
+        ("target_leaps_oi", 99),
+        ("leaps_ask", 50.0),
+    ):
+        rejected = dict(row)
+        rejected[field] = value
+        assert score_candidate(rejected, _policy()) is None
 
 
 def test_eligible_candidates_rank_by_market_cap_then_score() -> None:
@@ -468,6 +531,21 @@ def test_direct_ibkr_ivp_hard_gate_rejects_expensive_regime(tmp_path: Path) -> N
     assert outcome.document["rejection_counts"]["ivp_13w_above_limit"] == 1
 
 
+def test_direct_ibkr_52w_ivp_is_also_a_hard_gate(tmp_path: Path) -> None:
+    outcome = scan_once(
+        now=NOW,
+        mode="rth",
+        client=FakeSchwabClient(NOW),  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, ivp_52w=0.21),
+    )
+
+    assert outcome.document["counts"]["strict_candidates"] == 0
+    assert outcome.document["rejection_counts"]["ivp_52w_above_limit"] == 1
+
+
 def test_missing_target_leaps_is_hard_rejection_not_warming(tmp_path: Path) -> None:
     outcome = scan_once(
         now=NOW,
@@ -486,7 +564,22 @@ def test_missing_target_leaps_is_hard_rejection_not_warming(tmp_path: Path) -> N
     assert outcome.document["rejection_counts"]["target_leaps_missing"] == 1
 
 
-def test_missing_ibkr_ivp_fails_closed_to_watchlist(tmp_path: Path) -> None:
+def test_target_leaps_contract_gate_rejects_high_absolute_iv(tmp_path: Path) -> None:
+    outcome = scan_once(
+        now=NOW,
+        mode="rth",
+        client=FakeSchwabClient(NOW, chain_iv_percent=61.0),  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=_universe(),
+        data_root=tmp_path,
+        iv_percentile_fetcher=_ivp_fetcher,
+    )
+
+    assert outcome.document["counts"]["strict_candidates"] == 0
+    assert outcome.document["rejection_counts"]["target_leaps_hard_filter"] == 1
+
+
+def test_missing_ibkr_ivp_fails_closed_to_symbol_rejection(tmp_path: Path) -> None:
     outcome = scan_once(
         now=NOW,
         mode="rth",
@@ -498,14 +591,38 @@ def test_missing_ibkr_ivp_fails_closed_to_watchlist(tmp_path: Path) -> None:
     )
 
     assert outcome.document["counts"]["strict_candidates"] == 0
-    assert outcome.document["counts"]["warming_rows"] == 1
+    assert outcome.document["counts"]["warming_rows"] == 0
     assert outcome.document["scan_complete"] is True
-    assert outcome.document["data_quality"]["status"] == "partial"
-    assert "ibkr_iv_percentile_missing" in outcome.document["watchlist"][0]["data_quality_reasons"]
+    assert outcome.document["data_quality"]["status"] == "complete"
+    assert outcome.document["rejection_counts"]["ibkr_iv_percentile_missing"] == 1
+    assert outcome.document["watchlist"] == []
     _title, text = render_notification(outcome.document)
-    assert "未完成数据行（正文隐藏） **1**" in text
+    assert "未完成数据行（正文隐藏） **0**" in text
     assert "## Warming" not in text
     assert "**TEST**" not in text
+
+
+def test_missing_symbol_ivp_does_not_freeze_complete_core_pool_update(tmp_path: Path) -> None:
+    base = _universe().members[0]
+    missing = replace(base, symbol="MISS", provider_symbol="MISS", company="Missing IV")
+    universe = Universe(members=(base, missing), metadata=("test universe",))
+
+    outcome = scan_once(
+        now=NOW.replace(hour=20, minute=0),
+        mode="daily",
+        client=FakeSchwabClient(NOW),  # type: ignore[arg-type]
+        policy=_policy(),
+        universe=universe,
+        data_root=tmp_path,
+        iv_percentile_fetcher=lambda symbols: _ivp_fetcher(
+            [symbol for symbol in symbols if symbol != "MISS"]
+        ),
+    )
+
+    assert outcome.document["data_quality"]["status"] == "complete"
+    assert outcome.document["rejection_counts"]["ibkr_iv_percentile_missing"] == 1
+    assert outcome.document["added_symbols"] == ["TEST"]
+    assert outcome.document["counts"]["core_pool"] == 1
 
 
 def test_incomplete_ibkr_ivp_is_not_cached_and_retries_next_scan(tmp_path: Path) -> None:
@@ -514,7 +631,12 @@ def test_incomplete_ibkr_ivp_is_not_cached_and_retries_next_scan(tmp_path: Path)
     def fetch(symbols: list[str]):
         calls.append(symbols)
         if len(calls) == 1:
-            return _ivp_fetcher(symbols, ivp_13w=None, ivp_26w=None)  # type: ignore[arg-type]
+            return _ivp_fetcher(  # type: ignore[arg-type]
+                symbols,
+                ivp_13w=None,
+                ivp_26w=None,
+                ivp_52w=None,
+            )
         return _ivp_fetcher(symbols)
 
     first = scan_once(
@@ -629,6 +751,10 @@ def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Pa
     assert "4.76% / 6.00%" in text
     assert "8.00%" in text
     assert f"{candidate['rsi14']:.2f}" in text
+    assert f"{candidate['current_iv'] * 100.0:.2f}%" in text
+    assert f"{candidate['iv_rv_ratio']:.2f}" in text
+    assert f"{candidate['target_leaps_oi']:.2f}" in text
+    assert f"{candidate['extrinsic_value_ratio'] * 100.0:.2f}%" in text
     assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 
 
