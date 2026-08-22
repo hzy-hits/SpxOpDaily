@@ -59,6 +59,7 @@ from spx_spark.state_io import (
 SCHEMA_VERSION = "growth_dislocation_leaps.v7"
 STATE_SCHEMA_VERSION = 3
 SCHEDULE_MINUTE = 30
+SCHEDULE_GRACE_MINUTES = 5
 DAILY_SUMMARY_HOUR_ET = 20
 MAX_CLOSE_HISTORY = 270
 CORE_ENTRY_CONFIRMATIONS = 2
@@ -107,11 +108,14 @@ def scheduled_mode(now: datetime) -> str | None:
     ny = _aware(now).astimezone(ET)
     if (
         ny.hour == DAILY_SUMMARY_HOUR_ET
-        and ny.minute == 0
+        and 0 <= ny.minute < SCHEDULE_GRACE_MINUTES
         and DEFAULT_MARKET_CALENDAR.is_trading_day(ny.date())
     ):
         return "daily"
-    if ny.minute == SCHEDULE_MINUTE and DEFAULT_MARKET_CALENDAR.is_rth_open(ny):
+    if (
+        SCHEDULE_MINUTE <= ny.minute < SCHEDULE_MINUTE + SCHEDULE_GRACE_MINUTES
+        and DEFAULT_MARKET_CALENDAR.is_rth_open(ny)
+    ):
         return "rth"
     return None
 

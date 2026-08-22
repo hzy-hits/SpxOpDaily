@@ -756,9 +756,15 @@ def test_core_pool_exits_only_after_three_complete_price_recovery_scans(
 
 def test_schedule_is_exchange_local_and_daily_lane_bypasses_quiet_window() -> None:
     assert scheduled_mode(datetime(2026, 8, 20, 9, 30, tzinfo=ET)) == "rth"
+    assert scheduled_mode(datetime(2026, 8, 20, 9, 31, tzinfo=ET)) == "rth"
+    assert scheduled_mode(datetime(2026, 8, 20, 9, 34, tzinfo=ET)) == "rth"
+    assert scheduled_mode(datetime(2026, 8, 20, 9, 35, tzinfo=ET)) is None
     assert scheduled_mode(datetime(2026, 8, 20, 10, 0, tzinfo=ET)) is None
     daily_at = datetime(2026, 8, 20, 20, 0, tzinfo=ET)
     assert scheduled_mode(daily_at) == "daily"
+    assert scheduled_mode(daily_at.replace(minute=1)) == "daily"
+    assert scheduled_mode(daily_at.replace(minute=4)) == "daily"
+    assert scheduled_mode(daily_at.replace(minute=5)) is None
     envelope = NotificationEnvelope(
         event_id="growth-dislocation:test",
         source="growth_dislocation",
