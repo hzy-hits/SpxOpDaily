@@ -309,6 +309,11 @@ def build_market_fact_pack(
         "volatility": {
             "vix": _number(volatility.get("vix")), "vix1d": _number(volatility.get("vix1d")),
             "atm_iv_0dte": _number(volatility.get("atm_iv_0dte")),
+            "put_skew_25d_0dte": _number(volatility.get("put_skew_25d_0dte")),
+            "call_skew_25d_0dte": _number(volatility.get("call_skew_25d_0dte")),
+            "atm_iv_minus_es_realized_vol": _number(
+                market_volatility.get("atm_iv_minus_es_realized_vol")
+            ),
             "atm_iv_change_5m": _number(volatility.get("atm_iv_change_5m")),
             "atm_iv_change_15m": _number(volatility.get("atm_iv_change_15m")),
             "expected_move_points": _first(volatility.get("expected_move_points_0dte"),

@@ -595,7 +595,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v44"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v45"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -884,7 +884,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v44"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v45"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1002,7 +1002,7 @@ def test_low_snr_strike_surface_is_explained_without_strategy_authority() -> Non
                 assert shaped["candidate"]["candidate_id"] == baseline_decision["candidate"][
                     "candidate_id"
                 ]
-                assert shaped["candidate"]["surface_shape_prior"] == 0.0
+                assert shaped["candidate"]["surface_decision_modifier"] <= 0.0
             else:
                 assert "surface_shape_low_snr" in shaped["why_not"]["reasons"]
                 assert shaped["desk_view"]["reason"] == baseline_decision["desk_view"]["reason"]
@@ -1054,7 +1054,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v44"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v45"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -3178,38 +3178,19 @@ def test_directional_confirmation_butterfly_is_research_alternative_only() -> No
     )
 
 
-def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None:
+def test_surface_risk_modifier_changes_only_post_gate_structure_rank() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
-
-    def context(d3_snr: float) -> dict[str, object]:
-        return {
-            "feature_version": "strike_differential_context.v1",
-            "status": "ready",
-            "references": [
-                {
-                    "center": 100.0,
-                    "labels": ["atm"],
-                    "observations": [
-                        {
-                            "scale_points": 5.0,
-                            "quality": "ready" if d3_snr >= 1.0 else "degraded_low_snr",
-                            "strike_d2": 0.02,
-                            "strike_d3": 0.001,
-                            "strike_d4": 0.0,
-                            "d2_snr": d3_snr,
-                            "d3_snr": d3_snr,
-                            "d4_snr": 0.0,
-                        }
-                    ],
-                }
-            ],
-        }
 
     facts = {
         "session_date": "2026-08-07",
         "spot": {"spx": 100.0},
         "path": {"atr_5m": 10.0, "distance_to_vwap_points": 0.0, "impulse_15m_points": 0.0},
-        "volatility": {"expected_move_points": 40.0},
+        "volatility": {
+            "atm_iv_0dte": 0.20,
+            "put_skew_25d_0dte": 0.04,
+            "call_skew_25d_0dte": 0.01,
+            "expected_move_points": 40.0,
+        },
         "probability": {
             "event": {"kind": "terminal_above", "target_at": (now + timedelta(minutes=5)).isoformat()},
             "q": 0.6,
@@ -3219,7 +3200,7 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
             "n_effective": 40.0,
             "historical_sessions": ["2026-08-06"],
         },
-        "structure": {"strike_differential_context": context(2.0)},
+        "structure": {},
     }
 
     def vertical(
@@ -3229,16 +3210,20 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
         direction: str,
         score: float,
         quote_status: str = "ready",
+        max_loss: float = 3.0,
     ) -> dict[str, object]:
         up = direction == "UP"
+        right = "C" if up else "P"
+        short_strike = 110.0 if up else 90.0
         return {
             "candidate_id": candidate_id,
             "strategy_type": strategy_type,
             "setup_kind": "EVENT_SETTLEMENT_THRESHOLD",
             "direction": direction,
             "selection_score": score,
-            "long": {"strike": 100.0},
-            "short": {"strike": 110.0 if up else 90.0},
+            "expiry": "20260810",
+            "long": {"strike": 100.0, "right": right, "implied_vol": 0.20},
+            "short": {"strike": short_strike, "right": right, "implied_vol": 0.22},
             "quote": {
                 "status": quote_status,
                 "reasons": [] if quote_status == "ready" else ["spread_leg_quote_stale"],
@@ -3247,9 +3232,9 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
             },
             "economics": {
                 "width_points": 10.0,
-                "max_gain_points": 7.0,
-                "max_loss_points": 3.0,
-                "debit_fraction_of_width": 0.3,
+                "max_gain_points": 10.0 - max_loss,
+                "max_loss_points": max_loss,
+                "debit_fraction_of_width": max_loss / 10.0,
                 "breakeven_spx": 103.0 if up else 97.0,
             },
             "view": {"threshold_level": 100.0},
@@ -3273,13 +3258,14 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
         "aligned-call",
         strategy_type="CALL_DEBIT_VERTICAL",
         direction="UP",
-        score=1.0,
+        score=1.01,
+        max_loss=1.0,
     )
     put = vertical(
         "unaligned-put",
         strategy_type="PUT_DEBIT_VERTICAL",
         direction="DOWN",
-        score=1.01,
+        score=1.0,
     )
     hard_failed = vertical(
         "hard-failed-call",
@@ -3289,7 +3275,7 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
         quote_status="unavailable",
     )
 
-    high_snr = rank_candidates(
+    ranked = rank_candidates(
         [call, put, hard_failed],
         facts,
         {"pin": {"depin_risk": 0.0}},
@@ -3298,35 +3284,41 @@ def test_surface_shape_soft_prior_changes_only_post_gate_vertical_rank() -> None
         probability_settings=None,
         now=now,
     )
-    assert [candidate["candidate_id"] for candidate in high_snr.passed[:2]] == [
-        "aligned-call",
+    assert [candidate["candidate_id"] for candidate in ranked.passed[:2]] == [
         "unaligned-put",
+        "aligned-call",
     ]
-    assert high_snr.passed[0]["selection_score_base"] == 1.0
-    assert high_snr.passed[0]["surface_shape_prior"] == 0.05
-    assert high_snr.passed[0]["selection_score"] == 1.05
-    assert high_snr.passed[0]["automatic_ordering"] is False
-    assert [candidate["candidate_id"] for candidate in high_snr.near_misses] == [
+    assert ranked.passed[0]["selection_score_base"] == 1.0
+    assert ranked.passed[0]["surface_decision_modifier"] < 0.0
+    assert ranked.passed[0]["selection_score"] < 1.0
+    assert ranked.passed[0]["surface_attribution"]["authority"] == "structure_risk_only"
+    assert ranked.passed[0]["automatic_ordering"] is False
+    assert [candidate["candidate_id"] for candidate in ranked.near_misses] == [
         "hard-failed-call"
     ]
-    assert "surface_shape_prior" not in high_snr.near_misses[0]
+    assert "surface_decision_modifier" not in ranked.near_misses[0]
 
-    low_snr_facts = deepcopy(facts)
-    low_snr_facts["structure"]["strike_differential_context"] = context(0.2)
-    low_snr = rank_candidates(
-        [call, put],
-        low_snr_facts,
+    no_iv_call, no_iv_put = deepcopy(call), deepcopy(put)
+    no_iv_call["long"]["implied_vol"] = None
+    no_iv_put["long"]["implied_vol"] = None
+    unavailable = rank_candidates(
+        [no_iv_call, no_iv_put],
+        facts,
         {"pin": {"depin_risk": 0.0}},
         policy=DEFAULT_STRATEGY_POLICY,
         data_root=None,
         probability_settings=None,
         now=now,
     )
-    assert [candidate["candidate_id"] for candidate in low_snr.passed[:2]] == [
-        "unaligned-put",
+    assert [candidate["candidate_id"] for candidate in unavailable.passed[:2]] == [
         "aligned-call",
+        "unaligned-put",
     ]
-    assert all(candidate["surface_shape_prior"] == 0.0 for candidate in low_snr.passed)
+    assert all(
+        candidate["surface_decision_modifier"] == 0.0
+        and candidate["surface_attribution"]["status"] == "unavailable"
+        for candidate in unavailable.passed
+    )
 
 
 def test_ranker_winner_is_structure_score_not_research_utility() -> None:

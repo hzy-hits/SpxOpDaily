@@ -45,7 +45,11 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v44"
+    policy_version: str = "strategy_policy.bootstrap.v45"
+    # v45: candidate-specific entry-frozen ATM / put-call skew / put-call
+    # curvature bumps replace the global d3/d4 direction prior. Surface may
+    # subtract at most 0.05 from structure rank; it cannot add direction,
+    # bypass a hard gate, authorize an iron condor, or enable ordering.
     # v44: the user-authorized 15:00 ET physical close-convergence lane may
     # enumerate one manual-only Butterfly from the causal online-pool modal
     # center. It compares 10/15/20-point C/P tents on 51 settlement quantiles,
@@ -206,6 +210,8 @@ class StrategyPolicy:
     gth_delta_targets: tuple[float, ...] = (0.20, 0.15, 0.10, 0.05)
     iron_condor_short_deltas: tuple[float, ...] = (0.20, 0.15, 0.10, 0.05)
     iron_condor_wing_width: float = 10.0
+    surface_bump_vol_points: float = 1.0
+    surface_risk_modifier_cap: float = 0.05
     opportunity_ttl_seconds: float = 300.0
     min_target_room_ratio: float = 1.5
     failed_break_min_target_room_ratio: float = 1.8

@@ -10,6 +10,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     conservative_iron_condor_bbo,
     iron_condor_economics,
 )
+from spx_spark.analytics.options.surface_attribution import attribute_candidate_surface
 from spx_spark.application.order_map.candidate_factory import (
     _candidate_id,
     _gth_quote_policy,
@@ -84,15 +85,46 @@ def build_iron_condor_map(
             expiry=expiry,
             spot=spot,
         )
-    primary = dict(variants[0])
+    ranked_variants: list[dict[str, Any]] = []
+    for variant in variants:
+        row = dict(variant)
+        base = _structure_selection_score(row)
+        attribution = attribute_candidate_surface(
+            row,
+            facts,
+            now=now,
+            bump_vol_points=policy.surface_bump_vol_points,
+            modifier_cap=policy.surface_risk_modifier_cap,
+        )
+        modifier = min(float(attribution.get("decision_modifier") or 0.0), 0.0)
+        row.update(
+            {
+                "selection_score_base": round(base, 4),
+                "surface_decision_modifier": round(modifier, 4),
+                "surface_attribution": attribution,
+                "selection_score": round(base + modifier, 4),
+            }
+        )
+        ranked_variants.append(row)
+    ranked_variants.sort(
+        key=lambda row: (
+            float(row.get("selection_score") or 0.0),
+            float(row.get("short_abs_delta") or 0.0),
+        ),
+        reverse=True,
+    )
+    primary = dict(ranked_variants[0])
     primary["variants"] = [
         {
             "short_abs_delta": row.get("short_abs_delta"),
             "strikes": row.get("strikes"),
             "quote": row.get("quote"),
             "economics": row.get("economics"),
+            "selection_score_base": row.get("selection_score_base"),
+            "surface_decision_modifier": row.get("surface_decision_modifier"),
+            "selection_score": row.get("selection_score"),
         }
-        for row in variants
+        for row in ranked_variants
     ]
     return primary
 
@@ -138,13 +170,7 @@ def enumerate_iron_condor_candidates(
         *(leg.get("contract_id") for leg in legs),
     )
     quote_valid = _quote_valid_until(legs, now=now, policy=session_policy)
-    credit = _number(quote.get("credit"))
-    loss = _number(economics.get("max_loss_points"))
-    gain = _number(economics.get("max_gain_points"))
-    score = 0.0
-    if credit is not None and loss is not None and loss > 0 and gain is not None:
-        spread = abs(float(quote.get("ask") or 0.0) - float(quote.get("bid") or 0.0))
-        score = round(gain / loss - 0.05 * spread / loss, 4)
+    score = float(structure.get("selection_score") or 0.0)
     return [
         {
             "candidate_id": candidate_id,
@@ -167,6 +193,9 @@ def enumerate_iron_condor_candidates(
             "quote": dict(quote),
             "economics": dict(economics),
             "selection_score": score,
+            "selection_score_base": structure.get("selection_score_base"),
+            "surface_decision_modifier": structure.get("surface_decision_modifier"),
+            "surface_attribution": dict(_map(structure.get("surface_attribution"))),
             "spot_inside_shorts": structure.get("spot_inside_shorts"),
             "short_abs_delta": structure.get("short_abs_delta"),
             "wing_width": WING_WIDTH,
@@ -182,6 +211,18 @@ def enumerate_iron_condor_candidates(
             "manual_action_only": True,
         }
     ]
+
+
+def _structure_selection_score(structure: Mapping[str, Any]) -> float:
+    quote = _map(structure.get("quote"))
+    economics = _map(structure.get("economics"))
+    loss = _number(economics.get("max_loss_points"))
+    gain = _number(economics.get("max_gain_points"))
+    bid = _number(quote.get("bid"))
+    ask = _number(quote.get("ask"))
+    if loss is None or loss <= 0 or gain is None or bid is None or ask is None:
+        return 0.0
+    return gain / loss - 0.05 * abs(ask - bid) / loss
 
 
 def _short_deltas(policy: StrategyPolicy) -> tuple[float, ...]:

@@ -153,12 +153,12 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v44",
+                "strategy_policy.bootstrap.v45",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v44",
+                "strategy_policy.bootstrap.v45",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),

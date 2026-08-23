@@ -210,4 +210,5 @@ A change that increases process count, active languages, mutable stores or owner
 6. 所有判断在 SPX 坐标完成；conservative synthetic BBO 不得用 mid 代替；回放必须满足 `available_at <= decision_at`，冻结验收案例为 2026-08-05 与 2026-08-06。
 7. LLM 只做 bounded idea/critic（结构化假设 + 反证），不计算价格/概率/payoff、不覆盖 hard gate、不直接创建 Trade Ready；不引入 LangChain/LangGraph。
 8. `automatic_ordering=false` 不变；回放通过 v2 §19.5 门后直接进入人工候选卡，不得以“继续 Shadow N 天”代替工程接入。
-9. **v4 触发条件（运维）**：`config/macro_events.toml` 中存在尚未发布、`impact∈{high,critical}`、且 `release_at` 不晚于当日 front expiry 收盘的事件；同时 `day_move.prior_close`、front expiry、两腿 exact BBO 就绪。事件发布后停止生成。入口：`enumerate_event_settlement_candidates` → `rank_candidates` → `strategy_decision`；Codex/Agent 以本文件与 v4 文档为准，勿把 Draft PR 状态当作现行事实。
+9. v45 起曲面只拥有结构排序风险降权：对已过 hard gate 的候选按入场冻结 strike 计算 ATM、左右 skew、左右 curvature 的 1 vol bump-and-revalue，`surface_decision_modifier∈[-0.05,0]`。它不得产生或翻转方向、增加正向分数、绕过 hard gate、解除 `iron_condor_not_human_authorized` 或改变 `automatic_ordering=false`；IV 缺失时记录 unavailable 且对旧决策零影响。
+10. **v4 触发条件（运维）**：`config/macro_events.toml` 中存在尚未发布、`impact∈{high,critical}`、且 `release_at` 不晚于当日 front expiry 收盘的事件；同时 `day_move.prior_close`、front expiry、两腿 exact BBO 就绪。事件发布后停止生成。入口：`enumerate_event_settlement_candidates` → `rank_candidates` → `strategy_decision`；Codex/Agent 以本文件与 v4 文档为准，勿把 Draft PR 状态当作现行事实。

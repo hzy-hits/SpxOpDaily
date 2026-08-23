@@ -192,13 +192,16 @@ def test_gth_always_computes_ten_wide_5_20_delta_iron_condor_from_one_minute_quo
     )
 
     assert structure["status"] == "ready"
-    assert structure["short_abs_delta"] == 0.20
+    assert structure["short_abs_delta"] == 0.10
     assert structure["spot_inside_shorts"] is True
     assert structure["wing_width"] == 10.0
     assert structure["economics"]["put_width_points"] == 10.0
     assert structure["economics"]["call_width_points"] == 10.0
     assert structure["economics"]["max_loss_points"] <= 10.0
-    assert structure["strikes"] == [7680.0, 7690.0, 7810.0, 7820.0]
+    assert structure["strikes"] == [7660.0, 7670.0, 7830.0, 7840.0]
+    assert structure["surface_decision_modifier"] <= 0.0
+    assert structure["surface_attribution"]["authority"] == "structure_risk_only"
+    assert [row["short_abs_delta"] for row in structure["variants"]] == [0.10, 0.15, 0.20]
     assert abs(structure["put_short"]["delta"]) <= 0.20
     assert abs(structure["call_short"]["delta"]) <= 0.20
     assert rows
@@ -226,12 +229,13 @@ def _state_with_richer_20d(now: datetime) -> LatestState:
 
 
 def test_iron_condor_20d_picks_at_or_below_not_richer_nearest() -> None:
+    policy = replace(StrategyPolicy(), iron_condor_short_deltas=(0.20,))
     structure = build_iron_condor_map(
         _payload(),
         _facts(),
         _state_with_richer_20d(NOW),
         now=NOW,
-        policy=StrategyPolicy(),
+        policy=policy,
     )
 
     assert max(StrategyPolicy().gth_delta_targets) == 0.20
@@ -288,8 +292,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v44"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v44"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v45"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v45"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None

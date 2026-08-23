@@ -592,7 +592,7 @@ def _candidate_summary(candidate: Mapping[str, Any]) -> dict[str, Any]:
         "score": _candidate_score(candidate),
         "gate_failures": list(candidate.get("failed_gates") or ()),
     }
-    for key in ("selection_score_base", "surface_shape_prior"):
+    for key in ("selection_score_base", "surface_decision_modifier"):
         if key in candidate:
             summary[key] = candidate.get(key)
     return summary

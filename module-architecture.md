@@ -78,7 +78,8 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 
 ### L3 analytics
 - `analytics/options/` — models（含 `DensityQuality`）、chain、quality、pricing、
-  probability、density、exposure、levels、service
+  probability、density、exposure、levels、service；`surface_attribution` 负责候选
+  入场时冻结行权价坐标的 ATM/左右 skew/左右 curvature 载荷与纯风险降权
 - `analytics/greeks/` — black_scholes / higher_order 等纯核
 - `options_map/` — LatestState orchestration + CLI；`__init__.py` 为兼容门面（≤150 行）
 - `features/`、`greek_reference.py`、`iv_surface.py`、`market_context.py`、

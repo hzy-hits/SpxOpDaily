@@ -861,8 +861,8 @@ def test_surface_shape_summary_prefers_atm_5pt_and_respects_snr() -> None:
     assert summary["d3_sign"] == "up"
     assert summary["d4_shape"] == "trough"
     assert summary["snr_quality"] == "high"
-    assert summary["rank_prior"] == 0.05
-    assert summary["authority"] == "desk_explain_and_rank_soft"
+    assert summary["rank_prior"] == 0.0
+    assert summary["authority"] == "desk_explain_only"
     assert "D3斜率+" in summary["desk_line"]
     assert "D4槽形" in summary["desk_line"]
 

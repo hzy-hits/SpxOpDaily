@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from spx_spark.analytics.options.density import summarize_strike_surface_shape
+from spx_spark.analytics.options.surface_attribution import attribute_candidate_surface
 from spx_spark.analytics.options.strategy_payoff import (
     debit_vertical_reach_reasons,
     vertical_entry_quality,
@@ -263,9 +263,6 @@ def rank_candidates(
     now: datetime,
 ) -> RankResult:
     now = _utc(now)
-    surface_shape = summarize_strike_surface_shape(
-        _map(_map(facts.get("structure")).get("strike_differential_context"))
-    )
     passed: list[dict[str, Any]] = []
     misses: list[dict[str, Any]] = []
     audit: list[dict[str, Any]] = []
@@ -277,7 +274,12 @@ def rank_candidates(
             misses.append(rejected)
             audit.append(_audit_row(rejected))
             continue
-        candidate = _apply_surface_shape_prior(candidate, surface_shape)
+        candidate = _apply_surface_risk_modifier(
+            candidate,
+            facts,
+            policy=policy,
+            now=now,
+        )
         scored, utility_gates = _score_candidate(
             candidate,
             facts,
@@ -348,34 +350,28 @@ def _look_window_pin_priority(
     return (1, 0.0)
 
 
-def _apply_surface_shape_prior(
-    candidate: Mapping[str, Any], summary: Mapping[str, object]
+def _apply_surface_risk_modifier(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+    now: datetime,
 ) -> dict[str, Any]:
     base = float(candidate.get("selection_score") or 0.0)
-    if candidate.get("setup_kind") == _CLOSE_CONVERGENCE_60M:
-        return {
-            **dict(candidate),
-            "selection_score_base": round(base, 4),
-            "surface_shape_prior": 0.0,
-            "selection_score": round(base, 4),
-        }
-    strategy_type = str(candidate.get("strategy_type") or "")
-    prior = 0.0
-    if summary.get("snr_quality") == "high":
-        if strategy_type.endswith("_BUTTERFLY"):
-            prior = 0.025 if summary.get("d4_shape") == "peaked" else 0.0
-        elif strategy_type == _IRON_CONDOR_TYPE:
-            prior = 0.05 if summary.get("d4_shape") == "peaked" else 0.0
-        elif strategy_type.startswith("CALL_") and summary.get("d3_sign") == "up":
-            prior = 0.05
-        elif strategy_type.startswith("PUT_") and summary.get("d3_sign") == "down":
-            prior = 0.05
-    prior = min(max(prior, -0.05), 0.05)
+    attribution = attribute_candidate_surface(
+        candidate,
+        facts,
+        now=now,
+        bump_vol_points=policy.surface_bump_vol_points,
+        modifier_cap=policy.surface_risk_modifier_cap,
+    )
+    modifier = min(float(attribution.get("decision_modifier") or 0.0), 0.0)
     return {
         **dict(candidate),
         "selection_score_base": round(base, 4),
-        "surface_shape_prior": round(prior, 4),
-        "selection_score": round(base + prior, 4),
+        "surface_decision_modifier": round(modifier, 4),
+        "surface_attribution": attribution,
+        "selection_score": round(base + modifier, 4),
     }
 
 

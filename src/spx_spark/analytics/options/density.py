@@ -235,7 +235,7 @@ def build_strike_differential_context(
 def summarize_strike_surface_shape(
     context: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    """Select one operator-facing D3/D4 observation and label its soft authority."""
+    """Select one operator-facing D3/D4 observation without strategy authority."""
 
     base: dict[str, object] = {
         "summary_version": STRIKE_SURFACE_OPERATOR_SUMMARY_VERSION,
@@ -259,7 +259,7 @@ def summarize_strike_surface_shape(
             "surface_shape_missing" if not context else "surface_shape_unavailable"
         ],
         "rank_prior": 0.0,
-        "authority": "desk_explain_and_rank_soft",
+        "authority": "desk_explain_only",
     }
     if not context:
         return base
@@ -316,13 +316,6 @@ def summarize_strike_surface_shape(
         reasons.append("surface_shape_low_snr")
     elif snr_quality == "unknown":
         reasons.append("surface_shape_snr_unknown")
-    rank_prior = (
-        0.05
-        if snr_quality == "high" and d3_sign == "up"
-        else -0.05
-        if snr_quality == "high" and d3_sign == "down"
-        else 0.0
-    )
     base.update(
         status=("ready" if selected_observation.get("quality") == "ready" else "partial"),
         center=center,
@@ -347,7 +340,7 @@ def summarize_strike_surface_shape(
             d4_snr=d4_snr,
         ),
         why_reasons=reasons,
-        rank_prior=rank_prior,
+        rank_prior=0.0,
     )
     return base
 

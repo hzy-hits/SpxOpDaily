@@ -1011,6 +1011,22 @@ CRPS 在线加权；生产只携带 51 个收盘分位数，不携带完整 Mont
 - 入场保持人工净借记限价，`automatic_ordering=false`；固定以 15:55 ET 新鲜 conservative combo bid 管理退出，不使用盘中 premium stop/trail；
 - 生产依据为 14 个 session 的 60 分钟冻结 OOS：13 笔 exact entry/exit BBO，11 胜，总计 +$1,412.72，每个 decision +$100.91，session bootstrap 95% 下界 +$10.54。样本仍小，必须继续前向结算。
 
+### 11.11 v45：0DTE 曲面载荷参与结构排序
+
+v45 删除旧的全局 D3/D4 方向加分，改为对每个已通过 hard gate 的具体
+Vertical/Butterfly 以及 Iron Condor Map 变体做 entry-frozen bump-and-revalue：
+
+- 保存当时腿的 strike/log-moneyness，计算组合 Delta、Gamma、Vega、Vanna 和有限差分 Volga；
+- 分别把 ATM、put skew、call skew、put curvature、call curvature 抬高 1 vol point 并重估组合；
+- 取五个载荷的最大绝对值除以结构最大亏损，形成 `surface_decision_modifier`；
+- modifier 只允许在 `[-0.05, 0]`，因此只能降低曲面冲击更敏感的结构排名，不能增加方向置信度；
+- 同方向候选可因此更换 strike/width/right；Iron Condor Map 可因此更换 5–20Δ 变体，但 `iron_condor_not_human_authorized` 不变；
+- IV 缺失时明确输出 `surface_leg_iv_unavailable` 且 modifier 为 0，不用不完整曲面阻断原有候选；
+- `automatic_ordering=false`、所有既有 hard gate、方向 owner 与 manual authority 均不变。
+
+这是当前入场曲面的结构风险决策层，不是 Ravagli premium 已验证为 alpha 的声明。
+历史 joint spot-surface replay 在独立 walk-forward 通过前仍不得提供新的授权或正向加分。
+
 ---
 
 ## 12. 正式 NoTrade
