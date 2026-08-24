@@ -11,6 +11,8 @@ data/raw/
 data/processed/
 data/latest/
 data/features/
+data/reports/
+data/runtime/
 vendor/
 __pycache__/
 *.py[cod]
