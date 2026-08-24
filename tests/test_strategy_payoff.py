@@ -11,6 +11,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
     DEFAULT_MANAGEMENT_POLICY,
     PIN_BUTTERFLY_MANAGEMENT_POLICY,
+    RTH_IRON_CONDOR_MANAGEMENT_POLICY,
     PolicyMark,
     butterfly_economics,
     butterfly_payoff,
@@ -595,7 +596,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v45"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v46"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -884,7 +885,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v45"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v46"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1054,7 +1055,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v45"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v46"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -4428,6 +4429,32 @@ def test_management_policy_premium_stop_before_arm() -> None:
     assert label.tp_armed is False
     assert label.exit_reason == "premium_stop"
     assert label.mae_points == pytest.approx(-0.6)
+
+
+def test_rth_iron_condor_policy_takes_half_credit_and_stops_at_true_200pct_loss() -> None:
+    start = datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc)
+    take_profit = simulate_management_policy(
+        [PolicyMark(at=start + timedelta(minutes=5), combo_bid=3.0)],
+        entry_ask=2.0,
+        leg_count=4,
+        entry_at=start,
+        policy=RTH_IRON_CONDOR_MANAGEMENT_POLICY,
+    )
+    stop = simulate_management_policy(
+        [PolicyMark(at=start + timedelta(minutes=5), combo_bid=-2.0)],
+        entry_ask=2.0,
+        leg_count=4,
+        entry_at=start,
+        policy=RTH_IRON_CONDOR_MANAGEMENT_POLICY,
+    )
+
+    assert take_profit.exit_reason == "profit_take"
+    assert take_profit.tp_before_stop is True
+    assert take_profit.policy_pnl_points == pytest.approx(1.0 - 0.1056)
+    assert stop.exit_reason == "stop_loss"
+    assert stop.tp_before_stop is False
+    assert stop.policy_pnl_points == pytest.approx(-4.0 - 0.1056)
+    assert stop.policy_version == "management_policy.iron_condor.tp50_sl200_hold1545.v2"
 
 
 def test_pin_butterfly_policy_holds_past_default_time_and_premium_stop() -> None:

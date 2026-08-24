@@ -78,19 +78,24 @@ def _observe(
     horizon_minutes = int(observation.get("horizon_minutes") or 0)
     if horizon_minutes <= 0:
         raise ValueError("strategy outcome horizon must be positive")
-    entry_debit = _entry_debit(legs)
-    exit_legs, exit_reasons = _exit_legs(legs, latest=latest, now=sampled_at)
-    exit_credit = _exit_credit(exit_legs) if not exit_reasons else None
-    entry_spx = _number(_map(_map(decision.get("market_facts")).get("spot")).get("spx"))
-    current_spx, spx_reason = _current_spx(latest, sampled_at)
-    reasons = [*exit_reasons]
-    if entry_debit is None:
-        reasons.append("entry_debit_unavailable")
-    if current_spx is None:
-        reasons.append(spx_reason or "exit_spx_unavailable")
     candidate = _map(decision.get("candidate")) or _map(
         _map(decision.get("why_not")).get("nearest_candidate")
     )
+    credit_entry = str(candidate.get("strategy_type") or "") == "IRON_CONDOR"
+    entry_value = _entry_credit(legs) if credit_entry else _entry_debit(legs)
+    exit_legs, exit_reasons = _exit_legs(legs, latest=latest, now=sampled_at)
+    exit_value = (
+        _exit_liability(exit_legs) if credit_entry else _exit_credit(exit_legs)
+    ) if not exit_reasons else None
+    entry_spx = _number(_map(_map(decision.get("market_facts")).get("spot")).get("spx"))
+    current_spx, spx_reason = _current_spx(latest, sampled_at)
+    reasons = [*exit_reasons]
+    if entry_value is None:
+        reasons.append(
+            "entry_credit_unavailable" if credit_entry else "entry_debit_unavailable"
+        )
+    if current_spx is None:
+        reasons.append(spx_reason or "exit_spx_unavailable")
     regime = _map(decision.get("regime"))
     breach = _invalidation_breach(
         decision,
@@ -104,20 +109,33 @@ def _observe(
         decision=decision,
         target_at=target_at,
         breach=breach,
-        exit_credit=exit_credit,
-        entry_debit=entry_debit,
+        exit_credit=exit_value,
+        entry_debit=entry_value,
     )
     status = "observed" if censor_kind is None else "censored"
     if status == "censored" and censor_kind is not None:
         reasons.append(f"censor:{censor_kind}")
     option_return = (
-        (exit_credit - entry_debit) / entry_debit * 10_000.0
-        if status == "observed" and entry_debit and exit_credit is not None
+        (
+            (entry_value - exit_value) / entry_value
+            if credit_entry
+            else (exit_value - entry_value) / entry_value
+        )
+        * 10_000.0
+        if status == "observed" and entry_value and exit_value is not None
         else None
     )
     gross_pnl = (
-        round((exit_credit - entry_debit) * 100.0, 2)
-        if status == "observed" and exit_credit is not None and entry_debit is not None
+        round(
+            (
+                entry_value - exit_value
+                if credit_entry
+                else exit_value - entry_value
+            )
+            * 100.0,
+            2,
+        )
+        if status == "observed" and exit_value is not None and entry_value is not None
         else None
     )
     spx_return = (
@@ -137,10 +155,16 @@ def _observe(
         "attributes": {
             "schema_version": "strategy_outcome_mark.v2",
             "label_basis": "decision_quote_shadow_not_fill",
-            "entry_combo_ask": entry_debit,
-            "exit_combo_bid": exit_credit,
-            "combo_bid": exit_credit,
-            "combo_ask": _exit_ask(exit_legs) if not exit_reasons else None,
+            "entry_combo_ask": None if credit_entry else entry_value,
+            "entry_combo_credit": entry_value if credit_entry else None,
+            "exit_combo_bid": None if credit_entry else exit_value,
+            "exit_combo_liability": exit_value if credit_entry else None,
+            "combo_bid": None if credit_entry else exit_value,
+            "combo_ask": (
+                exit_value
+                if credit_entry
+                else (_exit_ask(exit_legs) if not exit_reasons else None)
+            ),
             "gross_option_pnl": gross_pnl,
             "net_option_pnl": None,
             "commission": None,
@@ -174,7 +198,7 @@ def _invalidation_breach(
 ) -> dict[str, Any]:
     session_date = str(decision.get("session_date") or "").strip()
     invalidation = candidate.get("invalidation_spx")
-    if not session_date or invalidation in {None, ""}:
+    if not session_date or invalidation is None or invalidation == "":
         return {
             "invalidation_breached": None,
             "breach_at": None,
@@ -348,6 +372,17 @@ def _entry_debit(legs: list[dict[str, Any]]) -> float | None:
     return round(debit, 4) if debit > 0.0 else None
 
 
+def _entry_credit(legs: list[dict[str, Any]]) -> float | None:
+    values = []
+    for leg in legs:
+        quantity, bid, ask = (_number(leg.get(key)) for key in ("quantity", "bid", "ask"))
+        if quantity is None or bid is None or ask is None:
+            return None
+        values.append(quantity * (ask if quantity > 0 else bid))
+    credit = -sum(values)
+    return round(credit, 4) if credit > 0.0 else None
+
+
 def _exit_credit(legs: list[dict[str, Any]]) -> float | None:
     values = []
     for leg in legs:
@@ -356,6 +391,16 @@ def _exit_credit(legs: list[dict[str, Any]]) -> float | None:
             return None
         values.append(quantity * (bid if quantity > 0 else ask))
     return round(max(sum(values), 0.0), 4)
+
+
+def _exit_liability(legs: list[dict[str, Any]]) -> float | None:
+    values = []
+    for leg in legs:
+        quantity, bid, ask = (_number(leg.get(key)) for key in ("quantity", "bid", "ask"))
+        if quantity is None or bid is None or ask is None:
+            return None
+        values.append(quantity * (bid if quantity > 0 else ask))
+    return round(max(-sum(values), 0.0), 4)
 
 
 def _exit_ask(legs: list[dict[str, Any]]) -> float | None:

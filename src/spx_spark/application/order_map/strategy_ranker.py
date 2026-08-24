@@ -326,6 +326,7 @@ def rank_candidates(
     passed.sort(
         key=lambda item: (
             _close_convergence_priority(item),
+            _iron_condor_priority(item),
             _look_window_pin_priority(item, look_window=look_window),
             float(item.get("selection_score") or 0.0),
             float(_map(item.get("utility")).get("utility") or 0.0),
@@ -338,6 +339,12 @@ def rank_candidates(
 
 def _close_convergence_priority(candidate: Mapping[str, Any]) -> int:
     return int(candidate.get("setup_kind") == _CLOSE_CONVERGENCE_60M)
+
+
+def _iron_condor_priority(candidate: Mapping[str, Any]) -> int:
+    """The once-per-RTH contract must not be starved by incomparable scores."""
+
+    return int(str(candidate.get("strategy_type") or "") == _IRON_CONDOR_TYPE)
 
 
 def _look_window_pin_priority(
@@ -408,13 +415,6 @@ def _hard_gate_candidate(
         gates.extend(_butterfly_hard_gates(candidate, facts, regime, policy=policy))
     elif strategy_type == _IRON_CONDOR_TYPE:
         gates.extend(_iron_condor_hard_gates(candidate, facts))
-        gates.append(
-            {
-                "gate": _IRON_CONDOR_HUMAN_GATE,
-                "actual": candidate.get("setup_kind"),
-                "threshold": "iron_condor_map_only",
-            }
-        )
     else:
         gates.append(
             {
@@ -1338,10 +1338,70 @@ def _iron_condor_hard_gates(
         MIN_CREDIT_FRACTION,
         SHORT_DELTA_MAX,
         SHORT_DELTA_MIN,
+        HUMAN_ENTRY_END_ET,
+        HUMAN_ENTRY_START_ET,
+        HUMAN_EVIDENCE_CONTRACT_HASH,
+        HUMAN_MAX_RISK_DOLLARS,
+        HUMAN_SHORT_DELTA,
         WING_WIDTH,
     )
 
     gates: list[dict[str, Any]] = []
+    session_mode = str(_map(facts.get("session")).get("mode") or "").lower()
+    if session_mode != "rth":
+        gates.append(
+            {
+                "gate": _IRON_CONDOR_HUMAN_GATE,
+                "actual": session_mode or None,
+                "threshold": "rth_only",
+            }
+        )
+    authority = _map(facts.get("iron_condor_authority"))
+    if session_mode == "rth" and authority.get("status") != "ready":
+        gates.append(
+            {
+                "gate": "iron_condor_session_authority_unavailable",
+                "actual": authority.get("status"),
+                "threshold": "ready",
+            }
+        )
+    accepted_count = _number(authority.get("accepted_count"))
+    if session_mode == "rth" and accepted_count is not None and accepted_count >= 1:
+        gates.append(
+            {
+                "gate": "iron_condor_session_cap",
+                "actual": int(accepted_count),
+                "threshold": 1,
+            }
+        )
+    if candidate.get("manual_authority_eligible") is not True:
+        gates.append(
+            {
+                "gate": "iron_condor_entry_window_closed",
+                "actual": candidate.get("decision_at"),
+                "threshold": (
+                    f"{HUMAN_ENTRY_START_ET.strftime('%H:%M')}-"
+                    f"{HUMAN_ENTRY_END_ET.strftime('%H:%M')} ET"
+                ),
+            }
+        )
+    short_delta = _number(candidate.get("short_abs_delta"))
+    if short_delta is None or abs(short_delta - HUMAN_SHORT_DELTA) > 1e-9:
+        gates.append(
+            {
+                "gate": "iron_condor_human_short_delta",
+                "actual": short_delta,
+                "threshold": HUMAN_SHORT_DELTA,
+            }
+        )
+    if candidate.get("evidence_contract_hash") != HUMAN_EVIDENCE_CONTRACT_HASH:
+        gates.append(
+            {
+                "gate": "iron_condor_evidence_contract_invalid",
+                "actual": candidate.get("evidence_contract_hash"),
+                "threshold": HUMAN_EVIDENCE_CONTRACT_HASH,
+            }
+        )
     legs = candidate.get("legs")
     if not isinstance(legs, list) or len(legs) != 4 or any(not _map(leg) for leg in legs):
         gates.append(
@@ -1369,6 +1429,14 @@ def _iron_condor_hard_gates(
                 "gate": "iron_condor_credit_fraction",
                 "actual": credit_fraction,
                 "threshold": f"{MIN_CREDIT_FRACTION}-{MAX_CREDIT_FRACTION}",
+            }
+        )
+    if loss is not None and loss * 100.0 > HUMAN_MAX_RISK_DOLLARS:
+        gates.append(
+            {
+                "gate": "iron_condor_max_risk",
+                "actual": round(loss * 100.0, 2),
+                "threshold": HUMAN_MAX_RISK_DOLLARS,
             }
         )
     if candidate.get("spot_inside_shorts") is not True:

@@ -346,12 +346,23 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         credit = quote.get("credit")
         strikes = _iron_condor_strike_text(candidate)
         invalidation = _strike_pair(candidate.get("invalidation_spx")) or "-"
-        target = _fmt_strike(candidate.get("target_spx"))
+        take_profit = (
+            float(credit) * 0.50 if isinstance(credit, int | float) else None
+        )
+        stop_buyback = (
+            float(credit) * 3.00 if isinstance(credit, int | float) else None
+        )
+        short_delta = candidate.get("short_abs_delta")
+        delta_text = (
+            f"{float(short_delta) * 100:.0f}Δ"
+            if isinstance(short_delta, int | float)
+            else "20Δ"
+        )
         lines = [
             f"【{title}】",
             "",
             "## 结论",
-            f"铁鹰 卖5–20Δ 10点翼宽 {strikes} · 只许限价",
+            f"铁鹰 卖{delta_text} 10点翼宽 {strikes} · 只许限价",
             "",
             "## 执行",
             f"四腿 {strikes}",
@@ -359,10 +370,12 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             f"有效至 {until}（北京）",
             "",
             "## 风险",
-            f"最大亏损 {loss} · 短腿 {invalidation} 被打穿即失效",
+            f"最大亏损 {loss} · 短腿 {invalidation} 被触及时刷新四腿回购价",
+            f"止损：回购价 ≥ {_fmt_premium(stop_buyback)}（入场贷记 3倍，净亏200%）",
             "",
             "## 目标",
-            f"短腿中点 {target} · 收到权利金即最大收益",
+            f"止盈：回购价 ≤ {_fmt_premium(take_profit)}（入场贷记 50%）",
+            "15:45 ET 前未触发则用新鲜四腿报价平仓",
         ]
     elif str(candidate.get("strategy_type") or "").endswith("_BUTTERFLY"):
         ask = quote.get("ask")
@@ -697,7 +710,14 @@ def _flood_control_block(
     )
     session_direction = 0
     cooldown_hits = 0
+    iron_condor_hits = 0
     for row in accepted:
+        if (
+            setup_kind == "IRON_CONDOR_DELTA"
+            and str(row.get("session_mode") or session_mode) == "rth"
+            and str(row.get("setup_kind") or "") == "IRON_CONDOR_DELTA"
+        ):
+            iron_condor_hits += 1
         if str(row.get("direction") or "").upper() != direction.upper():
             continue
         if str(row.get("session_mode") or session_mode) != session_mode:
@@ -709,6 +729,14 @@ def _flood_control_block(
             continue
         cooldown_hits += 1
     counts = {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
+    if setup_kind == "IRON_CONDOR_DELTA":
+        counts["iron_condor_hits"] = iron_condor_hits
+    if setup_kind == "IRON_CONDOR_DELTA" and iron_condor_hits >= 1:
+        return {
+            "accepted": False,
+            "outcome": "flood_control_iron_condor_session_cap",
+            "counts": counts,
+        }
     if session_mode in {"gth", "rth"}:
         stick_seconds = (
             DEFAULT_STRATEGY_POLICY.gth_winner_stick_seconds

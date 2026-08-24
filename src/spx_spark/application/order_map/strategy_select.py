@@ -63,6 +63,7 @@ def build_strategy_decision(
     probability_settings: StrategyDistributionSettings | None = None,
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
+    facts["iron_condor_authority"] = _iron_condor_session_authority(facts)
     if data_root is not None:
         try:
             trading_date = date.fromisoformat(str(facts.get("session_date") or ""))
@@ -318,6 +319,18 @@ def _candidate_decision(
     geometry_source = _decision_geometry_source(candidate)
     quote = _map(candidate.get("quote"))
     credit_entry = str(candidate.get("strategy_type") or "") == "IRON_CONDOR"
+    management_plan = dict(_map(candidate.get("management_plan")))
+    targets = (
+        [
+            {
+                "instrument": "SPXW_COMBO_BUYBACK",
+                "price": round(float(quote.get("credit")) * 0.50, 4),
+                "kind": "take_profit",
+            }
+        ]
+        if credit_entry and _number(quote.get("credit")) is not None
+        else [{"instrument": "SPX", "price": candidate["target_spx"]}]
+    )
     result.update({
         "available_at": available,
         "geometry_source": geometry_source,
@@ -341,10 +354,12 @@ def _candidate_decision(
             "quote_valid_until": candidate["quote_valid_until"],
             "opportunity_valid_until": candidate["opportunity_valid_until"],
             "automatic_ordering": False, "manual_action_only": True,
+            "management_plan": management_plan,
         },
         "risk": {"max_loss": round(float(economics["max_loss_points"]) * 100, 2),
-                 "invalidation": {"instrument": "SPX", "price": candidate["invalidation_spx"]}},
-        "targets": [{"instrument": "SPX", "price": candidate["target_spx"]}],
+                 "invalidation": {"instrument": "SPX", "price": candidate["invalidation_spx"]},
+                 "management_plan": management_plan},
+        "targets": targets,
         "data_quality": {**dict(_map(facts.get("quality"))), "quote": "ready"},
         "action_authority": "manual",
     })
@@ -632,7 +647,10 @@ def _candidate_score(candidate: Mapping[str, Any]) -> float:
 
 def _decision_geometry_source(candidate: Mapping[str, Any]) -> str:
     source = candidate.get("geometry_source")
-    if source == "preaverage_local_scale_first_passage":
+    if source in {
+        "preaverage_local_scale_first_passage",
+        "rth_20delta_fixed10_iron_condor",
+    }:
         return source
     return "confirmation_geometry" if source == "confirmation_geometry" else "facts_wall_ladder_fallback"
 
@@ -879,6 +897,29 @@ def _accepted_session_cards(session_date: str):
         return None
     except Exception:  # noqa: BLE001 - unmigrated sqlite must not block ranking
         return None
+
+
+def _iron_condor_session_authority(
+    facts: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed unless the accepted-card ledger proves the RTH quota is free."""
+
+    session_mode = str(_map(facts.get("session")).get("mode") or "").lower()
+    if session_mode != "rth":
+        return {"status": "map_only", "accepted_count": None}
+    session_date = str(facts.get("session_date") or "")
+    if not session_date:
+        return {"status": "unavailable", "accepted_count": None}
+    rows = _accepted_session_cards(session_date)
+    if rows is None:
+        return {"status": "unavailable", "accepted_count": None}
+    accepted = sum(
+        1
+        for row in rows
+        if str(row.get("session_mode") or "").lower() == "rth"
+        and str(row.get("setup_kind") or "") == "IRON_CONDOR_DELTA"
+    )
+    return {"status": "ready", "accepted_count": accepted}
 
 
 def _with_iron_condor_map(

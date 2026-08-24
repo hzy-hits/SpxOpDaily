@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from spx_spark.analytics.options.strategy_payoff import (
     conservative_iron_condor_bbo,
@@ -36,6 +37,17 @@ SHORT_DELTA_TOLERANCE = 0.05
 WING_WIDTH = 10.0
 MIN_CREDIT_FRACTION = 0.15
 MAX_CREDIT_FRACTION = 0.55
+HUMAN_SHORT_DELTA = 0.20
+HUMAN_ENTRY_START_ET = time(10, 0)
+HUMAN_ENTRY_END_ET = time(11, 30)
+HUMAN_MAX_RISK_DOLLARS = 1_000.0
+HUMAN_TAKE_PROFIT_BUYBACK_FRACTION = 0.50
+HUMAN_STOP_BUYBACK_MULTIPLE = 3.0
+HUMAN_HARD_EXIT_ET = "15:45"
+HUMAN_EVIDENCE_CONTRACT_HASH = (
+    "sha256:43c77438122ba2deb51b4fa84d339a2773414c73a7dc80a774db0d551bf89d1b"
+)
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 def build_iron_condor_map(
@@ -87,23 +99,11 @@ def build_iron_condor_map(
         )
     ranked_variants: list[dict[str, Any]] = []
     for variant in variants:
-        row = dict(variant)
-        base = _structure_selection_score(row)
-        attribution = attribute_candidate_surface(
-            row,
+        row = _with_surface_score(
+            variant,
             facts,
             now=now,
-            bump_vol_points=policy.surface_bump_vol_points,
-            modifier_cap=policy.surface_risk_modifier_cap,
-        )
-        modifier = min(float(attribution.get("decision_modifier") or 0.0), 0.0)
-        row.update(
-            {
-                "selection_score_base": round(base, 4),
-                "surface_decision_modifier": round(modifier, 4),
-                "surface_attribution": attribution,
-                "selection_score": round(base + modifier, 4),
-            }
+            policy=policy,
         )
         ranked_variants.append(row)
     ranked_variants.sort(
@@ -143,9 +143,34 @@ def enumerate_iron_condor_candidates(
     if structure.get("status") != "ready":
         return []
     now = _utc(now)
-    session_policy, _, _ = _session_quote_policy(now, policy)
+    session_policy, providers, _ = _session_quote_policy(now, policy)
     if session_policy is None:
         return []
+    session_mode = "gth" if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now) else "rth"
+    human_window_open = session_mode == "rth" and _human_entry_window_open(now)
+    if human_window_open:
+        expiry = str(structure.get("expiry") or "")
+        spot = _number(structure.get("spot"))
+        human_structure = (
+            _structure_for_short_delta(
+                latest,
+                expiry,
+                spot=spot,
+                short_abs_delta=HUMAN_SHORT_DELTA,
+                now=now,
+                session_policy=session_policy,
+                providers=providers,
+            )
+            if expiry and spot is not None
+            else None
+        )
+        if human_structure is not None and human_structure.get("status") == "ready":
+            structure = _with_surface_score(
+                human_structure,
+                facts,
+                now=now,
+                policy=policy,
+            )
     legs = list(structure.get("legs") or ())
     quote = _map(structure.get("quote"))
     economics = _map(structure.get("economics"))
@@ -180,11 +205,12 @@ def enumerate_iron_condor_candidates(
             "direction": "NEUTRAL",
             "thesis_direction": "NEUTRAL",
             "payoff_shape": "RANGE",
-            "manual_authority_eligible": True,
+            "manual_authority_eligible": human_window_open,
             "opportunity_id": f"strategy-opportunity:{_hash(identity)[:24]}",
             "target_spx": (strikes[1] + strikes[2]) / 2.0 if len(strikes) == 4 else None,
             "invalidation_spx": strikes[1:3] if len(strikes) == 4 else None,
             "right": "IC",
+            "strikes": strikes,
             "put_long": dict(put_long),
             "put_short": dict(put_short),
             "call_short": dict(call_short),
@@ -204,9 +230,41 @@ def enumerate_iron_condor_candidates(
                 now + timedelta(seconds=session_policy.opportunity_ttl_seconds)
             ).isoformat(),
             "source": f"gth_{quote.get('provider')}_iron_condor"
-            if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now)
+            if session_mode == "gth"
             else f"rth_{quote.get('provider')}_iron_condor",
-            "geometry_source": "delta_5_20_ten_wide_iron_condor",
+            "session_mode": session_mode,
+            "geometry_source": (
+                "rth_20delta_fixed10_iron_condor"
+                if human_window_open
+                else "delta_5_20_ten_wide_iron_condor_map"
+            ),
+            "authorization_policy": policy.policy_version,
+            "evidence_status": "forward_unvalidated_user_override",
+            "evidence_contract_hash": HUMAN_EVIDENCE_CONTRACT_HASH,
+            "management_policy_version": (
+                "management_policy.iron_condor.tp50_sl200_hold1545.v2"
+            ),
+            "management_plan": {
+                "entry": "net_credit_limit",
+                "take_profit_buyback_fraction": HUMAN_TAKE_PROFIT_BUYBACK_FRACTION,
+                "stop_buyback_multiple": HUMAN_STOP_BUYBACK_MULTIPLE,
+                "stop_loss_return_on_credit": 2.0,
+                "hard_exit_et": HUMAN_HARD_EXIT_ET,
+                "management_quote_max_age_seconds": 30.0,
+                "management_quote_max_skew_seconds": 30.0,
+            },
+            "production_evidence": {
+                "contract": "rth_20delta_fixed10_daily_first.v1",
+                "sessions": 10,
+                "resolved_trades": 10,
+                "wins": 9,
+                "mean_net_pnl_dollars": 85.44,
+                "limitations": [
+                    "small_session_sample",
+                    "one_minute_stop_sampling",
+                    "not_fill_probability",
+                ],
+            },
             "automatic_ordering": False,
             "manual_action_only": True,
         }
@@ -223,6 +281,39 @@ def _structure_selection_score(structure: Mapping[str, Any]) -> float:
     if loss is None or loss <= 0 or gain is None or bid is None or ask is None:
         return 0.0
     return gain / loss - 0.05 * abs(ask - bid) / loss
+
+
+def _with_surface_score(
+    structure: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    *,
+    now: datetime,
+    policy: StrategyPolicy,
+) -> dict[str, Any]:
+    row = dict(structure)
+    base = _structure_selection_score(row)
+    attribution = attribute_candidate_surface(
+        row,
+        facts,
+        now=now,
+        bump_vol_points=policy.surface_bump_vol_points,
+        modifier_cap=policy.surface_risk_modifier_cap,
+    )
+    modifier = min(float(attribution.get("decision_modifier") or 0.0), 0.0)
+    row.update(
+        {
+            "selection_score_base": round(base, 4),
+            "surface_decision_modifier": round(modifier, 4),
+            "surface_attribution": attribution,
+            "selection_score": round(base + modifier, 4),
+        }
+    )
+    return row
+
+
+def _human_entry_window_open(now: datetime) -> bool:
+    local = _utc(now).astimezone(NEW_YORK).time().replace(tzinfo=None)
+    return HUMAN_ENTRY_START_ET <= local <= HUMAN_ENTRY_END_ET
 
 
 def _short_deltas(policy: StrategyPolicy) -> tuple[float, ...]:

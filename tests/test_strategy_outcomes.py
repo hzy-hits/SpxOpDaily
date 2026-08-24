@@ -279,6 +279,90 @@ def test_shadow_candidate_records_fresh_exit_mark_without_claiming_fill(
     assert repeated["observed"] == 0
 
 
+def test_iron_condor_outcome_uses_entry_credit_minus_close_liability(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+
+    def leg(strike: float, right: str, bid: float, ask: float) -> dict[str, object]:
+        return {
+            "contract_id": f"option:SPX:SPXW:20260807:{strike:g}:{right}",
+            "strike": strike,
+            "right": right,
+            "provider": "schwab",
+            "bid": bid,
+            "ask": ask,
+            "source_at": (NOW - timedelta(seconds=1)).isoformat(),
+        }
+
+    entry_legs = [
+        leg(7680.0, "P", 0.4, 0.5),
+        leg(7690.0, "P", 1.6, 1.7),
+        leg(7790.0, "C", 1.6, 1.7),
+        leg(7800.0, "C", 0.4, 0.5),
+    ]
+    decision = {
+        "schema_version": "strategy_decision.v2",
+        "decision_id": "strategy:iron-condor-outcome",
+        "policy_version": "strategy_policy.bootstrap.v46",
+        "decision_at": NOW.isoformat(),
+        "available_at": NOW.isoformat(),
+        "session_date": "2026-08-07",
+        "decision_type": "IRON_CONDOR",
+        "candidate": {
+            "strategy_type": "IRON_CONDOR",
+            "setup_kind": "IRON_CONDOR_DELTA",
+            "direction": "NEUTRAL",
+            "opportunity_id": "strategy-opportunity:iron-condor-outcome",
+            "invalidation_spx": [7690.0, 7790.0],
+            "target_spx": 7740.0,
+            "legs": entry_legs,
+            "quote": {"credit": 2.2, "bid": 2.2, "ask": 2.6},
+        },
+        "market_facts": {"spot": {"spx": 7740.0}},
+        "regime": {"path_state": "BALANCED", "terminal_state": "NONE"},
+        "desk_view": {"reason": "IRON_CONDOR_DELTA"},
+        "why_not": {"reasons": []},
+        "execution": {"action": "MANUAL_LIMIT", "automatic_ordering": False},
+        "action_authority": "manual",
+    }
+    persist_strategy_decision(decision, database_path=database)
+    sampled_at = NOW + timedelta(minutes=5, seconds=1)
+    quotes = (
+        _quote(InstrumentId.index("SPX"), 7739.9, 7740.1, sampled_at),
+        _quote(InstrumentId.option("SPX", expiry="20260807", strike=7680, right="P", trading_class="SPXW"), 0.3, 0.4, sampled_at),
+        _quote(InstrumentId.option("SPX", expiry="20260807", strike=7690, right="P", trading_class="SPXW"), 0.9, 1.0, sampled_at),
+        _quote(InstrumentId.option("SPX", expiry="20260807", strike=7790, right="C", trading_class="SPXW"), 0.9, 1.0, sampled_at),
+        _quote(InstrumentId.option("SPX", expiry="20260807", strike=7800, right="C", trading_class="SPXW"), 0.3, 0.4, sampled_at),
+    )
+    latest = LatestState(
+        created_at=sampled_at,
+        as_of=sampled_at,
+        quotes=quotes,
+        best_quotes=quotes,
+    )
+
+    result = observe_due_strategy_outcomes(
+        latest,
+        now=sampled_at,
+        data_root=tmp_path,
+        horizon_minutes=5,
+        database_path=database,
+    )
+
+    assert result["statuses"] == {"observed": 1}
+    with sqlite3.connect(database) as connection:
+        option_return, attributes_json = connection.execute(
+            "SELECT option_return_bps, attributes_json FROM outcomes"
+        ).fetchone()
+    attributes = json.loads(attributes_json)
+    assert option_return > 0
+    assert attributes["entry_combo_ask"] is None
+    assert attributes["entry_combo_credit"] == 2.2
+    assert attributes["exit_combo_liability"] == 1.4
+    assert attributes["gross_option_pnl"] == 80.0
+
+
 def test_multi_horizon_marks_persist_independently(tmp_path: Path) -> None:
     database = _migrate(tmp_path)
     persist_strategy_decision(_decision(), database_path=database)

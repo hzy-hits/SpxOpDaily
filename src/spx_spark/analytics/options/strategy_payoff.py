@@ -40,15 +40,30 @@ class ManagementPolicy:
     time_stop_minutes: int | None = None
     hard_exit_et: str = "15:45"
     fees_per_leg_per_side: float = 1.32
+    entry_side: str = "debit"
+    credit_take_profit_fraction: float | None = None
+    credit_stop_loss_multiple: float | None = None
 
 
 DEFAULT_MANAGEMENT_POLICY = ManagementPolicy()
-# GTH iron condors are held into RTH and unwound in the 12:00–13:00 ET
-# clearing window. Do not flatten them on the 20-minute debit time stop.
+# Legacy GTH clearing overlay remains map-only and ends at 12:30 ET.
 IRON_CONDOR_MANAGEMENT_POLICY = ManagementPolicy(
     policy_version="management_policy.iron_condor.clear_1230.v1",
     time_stop_minutes=24 * 60,
     hard_exit_et="12:30",
+)
+# The user-authorized RTH contract buys the package back at half the entry
+# credit, stops when buyback liability reaches 3x entry credit (a 200% pre-fee
+# loss on collected credit), and otherwise exits at 15:45 ET. Credit marks are
+# signed position liquidation values: 2x entry credit minus buyback liability.
+RTH_IRON_CONDOR_MANAGEMENT_POLICY = ManagementPolicy(
+    policy_version="management_policy.iron_condor.tp50_sl200_hold1545.v2",
+    premium_stop_fraction=None,
+    time_stop_minutes=None,
+    hard_exit_et="15:45",
+    entry_side="credit",
+    credit_take_profit_fraction=0.50,
+    credit_stop_loss_multiple=2.00,
 )
 # RTH STABLE_PIN butterflies need the pin to complete. Keep +50% trail and
 # 15:45 ET hard close; do not flatten on the debit 20-minute / 50% stops.
@@ -525,7 +540,15 @@ def simulate_management_policy(
         raise ValueError("leg_count must be positive")
     start = _utc(entry_at)
     rows = [_coerce_mark(item) for item in marks]
-    rows = sorted((row for row in rows if row.at >= start and row.combo_bid >= 0), key=lambda row: row.at)
+    rows = sorted(
+        (
+            row
+            for row in rows
+            if row.at >= start
+            and (policy.entry_side == "credit" or row.combo_bid >= 0)
+        ),
+        key=lambda row: row.at,
+    )
     fees_dollars = policy.fees_per_leg_per_side * float(leg_count) * 2.0
     fees_points = fees_dollars / 100.0
     arm_level = entry_ask * (1.0 + policy.profit_arm_return_on_debit)
@@ -551,6 +574,59 @@ def simulate_management_policy(
     exit_at: datetime | None = None
     exit_bid: float | None = None
     exit_reason = "marks_exhausted"
+
+    if policy.entry_side == "credit":
+        take_profit = (
+            entry_ask * (1.0 + policy.credit_take_profit_fraction)
+            if policy.credit_take_profit_fraction is not None
+            and policy.credit_take_profit_fraction > 0
+            else None
+        )
+        stop_loss = (
+            entry_ask * (1.0 - policy.credit_stop_loss_multiple)
+            if policy.credit_stop_loss_multiple is not None
+            and policy.credit_stop_loss_multiple > 0
+            else None
+        )
+        for mark in rows:
+            gap_max = max(gap_max, (mark.at - previous_at).total_seconds())
+            previous_at = mark.at
+            pnl = mark.combo_bid - entry_ask
+            mfe = max(mfe, pnl)
+            mae = min(mae, pnl)
+            if mark.at >= hard_exit:
+                exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "hard_close"
+                break
+            if take_profit is not None and mark.combo_bid >= take_profit:
+                armed = True
+                time_to_arm = (mark.at - start).total_seconds()
+                exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "profit_take"
+                break
+            if stop_loss is not None and mark.combo_bid <= stop_loss:
+                exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "stop_loss"
+                break
+        else:
+            if rows:
+                exit_at, exit_bid = rows[-1].at, rows[-1].combo_bid
+        policy_pnl = (
+            exit_bid - entry_ask - fees_points
+            if exit_bid is not None
+            else -entry_ask - fees_points
+        )
+        return PolicyLabel(
+            tp_armed=armed,
+            tp_before_stop=exit_reason == "profit_take",
+            time_to_arm_seconds=time_to_arm,
+            mfe_points=round(mfe, 6),
+            mae_points=round(mae, 6),
+            policy_pnl_points=round(policy_pnl, 6),
+            exit_reason=exit_reason,
+            exit_at=exit_at,
+            exit_bid=round(exit_bid, 6) if exit_bid is not None else None,
+            quote_gap_seconds_max=round(gap_max, 3),
+            policy_version=policy.policy_version,
+            fees_points=round(fees_points, 6),
+        )
 
     for mark in rows:
         gap_max = max(gap_max, (mark.at - previous_at).total_seconds())
@@ -612,6 +688,8 @@ def management_policy_for_candidate(candidate: Mapping[str, Any] | None) -> Mana
     if str(row.get("setup_kind") or "") == "STABLE_PIN":
         return PIN_BUTTERFLY_MANAGEMENT_POLICY
     if str(row.get("strategy_type") or "").upper() == "IRON_CONDOR":
+        if str(row.get("session_mode") or "").lower() == "rth":
+            return RTH_IRON_CONDOR_MANAGEMENT_POLICY
         return IRON_CONDOR_MANAGEMENT_POLICY
     return DEFAULT_MANAGEMENT_POLICY
 

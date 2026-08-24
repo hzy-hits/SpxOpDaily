@@ -27,6 +27,7 @@ from spx_spark.marketdata import (
 from spx_spark.storage import LatestState
 
 NOW = datetime(2026, 8, 13, 4, 30, tzinfo=timezone.utc)
+RTH_NOW = datetime(2026, 8, 13, 14, 0, tzinfo=timezone.utc)
 EXPIRY = "20260813"
 SPOT = 7750.0
 
@@ -95,6 +96,28 @@ def _state(now: datetime, *, with_greeks: bool = True) -> LatestState:
     return LatestState(created_at=now, as_of=now, quotes=quotes, best_quotes=quotes)
 
 
+def _rth_state(now: datetime = RTH_NOW) -> LatestState:
+    rows = []
+    for quote in _quotes(now, with_greeks=True):
+        right = str(getattr(quote.instrument.right, "value", quote.instrument.right) or "")
+        rich_short = (
+            (right == "P" and quote.instrument.strike == 7690.0)
+            or (right == "C" and quote.instrument.strike == 7810.0)
+        )
+        rows.append(
+            replace(
+                quote,
+                provider=Provider.SCHWAB,
+                received_at=now,
+                quote_time=now,
+                bid=(quote.bid or 0.0) + (0.5 if rich_short else 0.0),
+                ask=(quote.ask or 0.0) + (0.5 if rich_short else 0.0),
+            )
+        )
+    quotes = tuple(rows)
+    return LatestState(created_at=now, as_of=now, quotes=quotes, best_quotes=quotes)
+
+
 def _facts() -> dict[str, object]:
     return {
         "schema_version": "market_fact_pack.v1",
@@ -139,6 +162,23 @@ def _facts() -> dict[str, object]:
         },
         "quality": {"status": "ready", "reasons": []},
     }
+
+
+def _rth_facts() -> dict[str, object]:
+    facts = _facts()
+    facts.update(
+        {
+            "decision_at": RTH_NOW.isoformat(),
+            "available_at": RTH_NOW.isoformat(),
+            "minutes_to_close": 360,
+            "session": {"mode": "rth", "legal": True},
+            "iron_condor_authority": {
+                "status": "ready",
+                "accepted_count": 0,
+            },
+        }
+    )
+    return facts
 
 
 def _payload() -> dict[str, object]:
@@ -292,8 +332,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v45"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v45"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v46"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v46"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -339,6 +379,45 @@ def test_ready_iron_condor_is_map_only_not_a_human_winner() -> None:
     miss = ranked.near_misses[0]
     assert miss["strategy_type"] == "IRON_CONDOR"
     assert "iron_condor_not_human_authorized" in miss["rejection_reasons"]
+
+
+def test_rth_iron_condor_reaches_single_strategy_decision_authority(
+    monkeypatch, tmp_path
+) -> None:
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    facts = _rth_facts()
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+        lambda payload, latest, at: facts,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select._accepted_session_cards",
+        lambda session_date: (),
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
+
+    decision = build_strategy_decision(
+        _payload(), _rth_state(), RTH_NOW, data_root=tmp_path
+    )
+
+    assert decision["decision_type"] == "IRON_CONDOR", decision["why_not"]
+    assert decision["action_authority"] == "manual"
+    assert decision["execution"]["order_type"] == "NET_CREDIT_LIMIT"
+    assert decision["execution"]["automatic_ordering"] is False
+    assert decision["candidate"]["short_abs_delta"] == 0.20
+    assert decision["candidate"]["wing_width"] == 10.0
+    assert "strategy_edge" in decision["candidate"]["edge"], decision["candidate"]["edge"]
+    assert decision["candidate"]["edge"]["strategy_edge"]["status"] == (
+        "explicit_policy_authority_unvalidated"
+    )
+    assert decision["targets"][0]["kind"] == "take_profit"
+    assert decision["risk"]["management_plan"]["stop_buyback_multiple"] == 3.0
 
 
 def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:

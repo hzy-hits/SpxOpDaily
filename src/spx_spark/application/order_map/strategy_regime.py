@@ -45,7 +45,13 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v45"
+    policy_version: str = "strategy_policy.bootstrap.v46"
+    # v46: the user-authorized RTH iron-condor lane is one 20-delta,
+    # fixed-10-wide manual candidate per session between 10:00 and 11:30 ET.
+    # It requires exact four-leg BBO age <=15s/skew <=2s, 15%-55% credit,
+    # spot inside shorts, and <=$1,000 defined risk. Management is buy back at
+    # 0.5x entry credit, stop at 3x liability (200% loss on credit), otherwise
+    # close at 15:45 ET. GTH remains map-only and ordering remains disabled.
     # v45: candidate-specific entry-frozen ATM / put-call skew / put-call
     # curvature bumps replace the global d3/d4 direction prior. Surface may
     # subtract at most 0.05 from structure rank; it cannot add direction,
