@@ -268,6 +268,34 @@ def test_strategy_risk_sheet_separates_q_payoff_and_physical_loss() -> None:
     assert "自动下单关闭" in svg
 
 
+def test_strategy_risk_sheet_labels_gth_sources_and_joint_surface_baseline() -> None:
+    decision = _strategy_risk_decision()
+    decision["market_facts"]["session"] = {"mode": "gth", "legal": True}
+    decision["market_facts"]["spot"]["pricing_source"] = "future:ES+basis:17.54"
+    structure = decision["iron_condor_map"]
+    structure["quote"]["provider"] = "ibkr"
+    distribution = structure["path_distribution"]
+    distribution.update(
+        {
+            "method": "joint_spot_surface_iron_condor_clear_1230.v1",
+            "surface_degraded_fraction": 0.75,
+            "sticky_iv_baseline": {
+                "p10_net_pnl": -300.0,
+                "p50_net_pnl": 20.0,
+                "p90_net_pnl": 170.0,
+            },
+        }
+    )
+
+    svg = render_strategy_risk_svg(decision)
+
+    assert "SPX GTH 决策快照与策略风险" in svg
+    assert "GTH 坐标 future:ES+basis:17.54 · SPXW 报价 IBKR" in svg
+    assert "SPX+ATM+左右Skew/Fly 联合回放 · 5分钟 · 降级曲面 75%" in svg
+    assert "同一 SPX 路径 sticky-IV 基线" in svg
+    assert "GTH 墙位是最近可用 OI 结构锚" in svg
+
+
 def test_strategy_risk_sheet_omits_empty_risk_panels() -> None:
     decision = _strategy_risk_decision()
     decision["iron_condor_map"] = {}

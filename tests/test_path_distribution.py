@@ -12,6 +12,7 @@ from spx_spark.application.market_features.physical_followthrough import (
 from spx_spark.application.order_map.path_distribution import (
     estimate_iron_condor_clearing_distribution,
     estimate_path_distribution,
+    load_joint_surface_paths,
     path_distribution_desk_text,
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
@@ -39,6 +40,62 @@ def _write_session(root: Path, day: str, *, start_et: time, prices: list[float])
             )
         )
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _write_surface_session(
+    root: Path,
+    day: str,
+    *,
+    start_et: time,
+    count: int,
+    atm_step: float = 0.0002,
+    created_at: datetime | None = None,
+) -> None:
+    session_day = date.fromisoformat(day)
+    start = datetime.combine(session_day, start_et, tzinfo=NEW_YORK)
+    by_path: dict[Path, list[str]] = {}
+    for index in range(count):
+        as_of = start + timedelta(minutes=5 * index)
+        expiry = day.replace("-", "")
+        row = {
+            "created_at": (created_at or as_of).astimezone(timezone.utc).isoformat(),
+            "as_of": as_of.astimezone(timezone.utc).isoformat(),
+            "underlier_price": 7750.0 + 0.1 * index,
+            "underlier_source": "index:SPX",
+            "front_expiry": expiry,
+            "next_expiry": None,
+            "front_vs_next_atm_iv_gap": None,
+            "warnings": [],
+            "expiries": [
+                {
+                    "expiry": expiry,
+                    "atm_iv": 0.16 + atm_step * index,
+                    "put_skew_ratio": 1.15 + 0.001 * index,
+                    "call_skew_ratio": 1.05 - 0.0005 * index,
+                    "put_skew_25d": 0.02 + 0.0001 * index,
+                    "call_skew_25d": -0.005 - 0.00005 * index,
+                    "surface_fit_quality": "raw_grid",
+                    "wide_quote_surface_degraded": False,
+                    "option_count": 80,
+                    "iv_coverage_ratio": 1.0,
+                    "gamma_coverage_ratio": 1.0,
+                    "warnings": [],
+                }
+            ],
+        }
+        utc = as_of.astimezone(timezone.utc)
+        path = (
+            root
+            / "features"
+            / "iv_surface"
+            / f"date={day}"
+            / f"hour={utc:%H}"
+            / "snapshots.jsonl"
+        )
+        by_path.setdefault(path, []).append(json.dumps(row))
+    for path, lines in by_path.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _facts(*, now: datetime, spot: float = 7750.0, session_date: str = "2026-08-06") -> dict[str, object]:
@@ -165,6 +222,50 @@ def test_winner_path_distribution_is_ordered_and_does_not_change_score(tmp_path:
     text = path_distribution_desk_text(distribution)
     assert text is not None
     assert text.startswith("持有至15:45ET 路径 P10/P50/P90 $")
+
+
+def test_joint_surface_replay_is_primary_and_keeps_sticky_baseline(tmp_path: Path) -> None:
+    _write_surface_session(tmp_path, "2026-08-04", start_et=time(10, 30), count=64)
+    _write_surface_session(
+        tmp_path, "2026-08-05", start_et=time(10, 30), count=64, atm_step=-0.00015
+    )
+
+    distribution = estimate_path_distribution(
+        _call_vertical(),
+        _facts(now=RTH_NOW),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=RTH_NOW,
+    )
+
+    assert distribution["method"] == "joint_spot_surface_management_policy.v1"
+    assert distribution["surface_coordinate"].startswith("historical_dynamic_25d")
+    assert distribution["surface_cadence_seconds"] == 300
+    assert distribution["n_sessions"] == 2
+    assert distribution["sticky_iv_baseline"]["method"] == "sticky_iv_same_spot_paths.v1"
+    assert "joint_spot_atm_skew_curvature_replay" in distribution["reason_codes"]
+
+
+def test_joint_surface_loader_rejects_snapshots_available_after_decision(tmp_path: Path) -> None:
+    _write_surface_session(tmp_path, "2026-08-04", start_et=time(10, 30), count=6)
+    _write_surface_session(
+        tmp_path,
+        "2026-08-05",
+        start_et=time(10, 30),
+        count=6,
+        created_at=RTH_NOW + timedelta(minutes=1),
+    )
+
+    rows, mode = load_joint_surface_paths(
+        _facts(now=RTH_NOW),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=RTH_NOW,
+        horizon_minutes=20,
+    )
+
+    assert mode == "same_session_clock_5m"
+    assert [row.session_date for row in rows] == [date(2026, 8, 4)]
 
 
 def test_trigger_level_is_not_counted_as_a_protective_stop(tmp_path: Path) -> None:
@@ -327,3 +428,26 @@ def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) ->
     text = path_distribution_desk_text(distribution)
     assert text is not None
     assert text.startswith("持有至12:30ET 路径 P10/P50/P90 $")
+
+
+def test_gth_iron_condor_uses_joint_surface_path_and_sticky_comparison(
+    tmp_path: Path,
+) -> None:
+    _write_surface_session(tmp_path, "2026-08-04", start_et=time(0, 30), count=145)
+    _write_surface_session(
+        tmp_path, "2026-08-05", start_et=time(0, 30), count=145, atm_step=-0.0001
+    )
+
+    distribution = estimate_iron_condor_clearing_distribution(
+        _iron_condor(),
+        _facts(now=GTH_NOW, spot=7750.0),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=GTH_NOW,
+    )
+
+    assert distribution["method"] == "joint_spot_surface_iron_condor_clear_1230.v1"
+    assert distribution["n_sessions"] == 2
+    assert distribution["surface_cadence_seconds"] == 300
+    assert distribution["sticky_iv_baseline"]["method"] == "sticky_iv_same_spot_paths.v1"
+    assert distribution["hard_exit_et"] == "12:30"

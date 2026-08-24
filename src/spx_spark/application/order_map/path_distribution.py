@@ -1,8 +1,10 @@
 """Advisory path-forward PnL for ranked winners and the iron-condor map.
 
-Replays completed prior-session 1-minute SPX windows through sticky-IV
-Black-Scholes marks and the frozen management policy. The distribution is
-display-only: it does not veto, re-rank, or authorize orders.
+The primary replay uses completed prior-session SPX and five-coordinate IV
+surface paths when they are causally available.  A like-for-like sticky-IV
+result remains attached as a baseline; sparse surface history fails back to
+the older one-minute physical SPX replay.  Every result is display-only: it
+does not veto, re-rank, or authorize orders.
 """
 
 from __future__ import annotations
@@ -38,6 +40,14 @@ from spx_spark.application.market_features.physical_followthrough import (
     load_physical_spot_paths,
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.application.order_map.surface_path_distribution import (
+    JOINT_SURFACE_CLEARING_METHOD,
+    JOINT_SURFACE_METHOD,
+    estimate_joint_debit_distribution,
+    estimate_joint_iron_condor_distribution,
+    load_joint_surface_paths,
+    path_distribution_desk_text,
+)
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 METHOD = "physical_path_management_policy.v3"
@@ -189,6 +199,38 @@ def estimate_path_distribution(
     if priced_legs is None:
         return _unavailable("path_iv_unavailable")
 
+    management_policy = management_policy_for_candidate(candidate)
+    session_date = _session_date(facts.get("session_date"))
+    if session_date is None:
+        return _unavailable("session_date_unavailable")
+    horizon_end = policy_mark_horizon_end(
+        now_utc,
+        management_policy,
+        session_date=session_date,
+    )
+    requested_horizon = int((horizon_end - now_utc).total_seconds() // 60)
+    close_seed = _number(quote.get("bid"))
+    if close_seed is None:
+        return _unavailable("path_mark_seed_unavailable")
+    joint = estimate_joint_debit_distribution(
+        candidate,
+        facts,
+        data_root=data_root,
+        probability_settings=probability_settings,
+        now=now_utc,
+        horizon_minutes=requested_horizon,
+        spot=spot,
+        expiry=expiry,
+        priced_legs=priced_legs,
+        quote=quote,
+        entry=entry,
+        close_seed=close_seed,
+        policy=management_policy,
+        started=started,
+    )
+    if joint is not None:
+        return joint
+
     loaded_mode = clock_mode
     if paths is None:
         paths, loaded_mode = load_decision_spot_paths(
@@ -199,7 +241,6 @@ def estimate_path_distribution(
         )
     if not paths:
         return _unavailable("physical_spot_paths_unavailable")
-
     remaining_em = _number(_map(facts.get("volatility")).get("expected_move_points"))
     minutes_to_close = _number(facts.get("minutes_to_close"))
     horizon = len(paths[0].prices) - 1
@@ -209,10 +250,6 @@ def estimate_path_distribution(
         minutes_to_close=minutes_to_close,
         horizon_minutes=horizon,
     )
-    credit = False
-    close_seed = _number(quote.get("ask")) if credit else _number(quote.get("bid"))
-    if close_seed is None:
-        return _unavailable("path_mark_seed_unavailable")
     model0 = _model_mid(priced_legs, spot=spot, tau_years=tau0)
     combo_bids = _combo_bid_matrix(
         paths,
@@ -223,10 +260,10 @@ def estimate_path_distribution(
         scale=scale,
         model0=model0,
         close_seed=close_seed,
-        entry_credit=entry if credit else None,
+        entry_credit=None,
     )
     invalidation, invalidation_reason = _invalidation_touch(
-        candidate, credit=credit, spot=spot
+        candidate, credit=False, spot=spot
     )
 
     pnls: list[float] = []
@@ -234,7 +271,6 @@ def estimate_path_distribution(
     hit_invalidation = 0
     tp_before_stop = 0
     premium_stops = 0
-    management_policy = management_policy_for_candidate(candidate)
     for index in range(len(paths)):
         projected = tuple(float(value) for value in combo_bids["spots"][index])
         if invalidation is not None and invalidation(projected):
@@ -271,6 +307,7 @@ def estimate_path_distribution(
         "research_unvalidated",
         "not_fill_probability",
         "sticky_iv_conservative_mark",
+        "joint_surface_paths_unavailable",
         METHOD,
     ]
     if loaded_mode == "session_shape_fallback":
@@ -363,6 +400,24 @@ def estimate_iron_condor_clearing_distribution(
     close_seed = _number(quote.get("ask"))
     if close_seed is None:
         return _unavailable("path_mark_seed_unavailable")
+
+    joint_result = estimate_joint_iron_condor_distribution(
+        candidate,
+        facts,
+        data_root=data_root,
+        probability_settings=probability_settings,
+        now=now_utc,
+        session_date=session_date,
+        spot=spot,
+        expiry=expiry,
+        priced_legs=priced_legs,
+        quote=quote,
+        entry=entry,
+        close_seed=close_seed,
+        started=started,
+    )
+    if joint_result is not None:
+        return joint_result
 
     settings = probability_settings or StrategyDistributionSettings()
     try:
@@ -561,28 +616,6 @@ def _clearing_clocks(
     if include_gth_now and now_utc < morning[0]:
         return [now_utc, *morning]
     return morning
-
-
-def path_distribution_desk_text(distribution: Mapping[str, Any] | None) -> str | None:
-    """Compact P10/P50/P90 line for Desk Map and trade cards."""
-
-    if not isinstance(distribution, Mapping):
-        return None
-    if distribution.get("status") not in {"estimated_uncalibrated", "insufficient_sample"}:
-        return None
-    p10, p50, p90 = (distribution.get(key) for key in ("p10_net_pnl", "p50_net_pnl", "p90_net_pnl"))
-    if not all(isinstance(value, int | float) and not isinstance(value, bool) for value in (p10, p50, p90)):
-        return None
-    n_paths = distribution.get("n_paths")
-    sample = f" n={int(n_paths)}" if isinstance(n_paths, int | float) else ""
-    prefix = (
-        "持有至12:30ET "
-        if distribution.get("method") == IRON_CONDOR_CLEARING_METHOD
-        else "持有至15:45ET "
-        if distribution.get("method") == METHOD
-        else ""
-    )
-    return f"{prefix}路径 P10/P50/P90 ${float(p10):.0f}/${float(p50):.0f}/${float(p90):.0f}{sample}"
 
 
 def _structure_legs(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -948,11 +981,14 @@ def _utc(value: datetime) -> datetime:
 
 __all__ = [
     "IRON_CONDOR_CLEARING_METHOD",
+    "JOINT_SURFACE_CLEARING_METHOD",
+    "JOINT_SURFACE_METHOD",
     "METHOD",
     "attach_iron_condor_path_distribution",
     "attach_path_distribution",
     "estimate_iron_condor_clearing_distribution",
     "estimate_path_distribution",
+    "load_joint_surface_paths",
     "load_decision_spot_paths",
     "path_distribution_desk_text",
 ]

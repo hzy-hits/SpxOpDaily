@@ -2364,6 +2364,38 @@ def test_strategy_risk_image_publishes_for_trade_ready_delivery(
     ).read_bytes() == b"risk-png"
 
 
+def test_strategy_risk_image_publishes_stable_gth_url(monkeypatch, tmp_path) -> None:
+    import spx_spark.application.order_map.delivery as delivery_module
+
+    now = datetime(2026, 8, 24, 2, 45, tzinfo=timezone.utc)
+    decision = {
+        "decision_id": "strategy:gth-risk-image",
+        "decision_type": "NO_TRADE",
+        "available_at": now.isoformat(),
+        "market_facts": {"session": {"mode": "gth"}},
+    }
+
+    def write_png(_payload, output) -> None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"gth-risk-png")
+
+    monkeypatch.setattr(delivery_module, "write_strategy_risk_png", write_png)
+    result = delivery_module.publish_strategy_risk_image(
+        SimpleNamespace(data_root=str(tmp_path)),
+        decision=decision,
+        now=now,
+    )
+
+    assert result["public_path"] == "/strategy-risk/gth-latest.png"
+    assert result["public_url"] == "https://spx.zh3nyu.com/strategy-risk/gth-latest.png"
+    assert (
+        tmp_path / "published/spxw-surface/strategy-risk/gth-latest.png"
+    ).read_bytes() == b"gth-risk-png"
+    assert (
+        tmp_path / "published/spxw-surface/strategy-risk/latest.png"
+    ).read_bytes() == b"gth-risk-png"
+
+
 def test_strategy_risk_image_rejects_misaligned_market_facts(
     monkeypatch, tmp_path
 ) -> None:

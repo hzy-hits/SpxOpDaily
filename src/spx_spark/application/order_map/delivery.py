@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
 from pathlib import Path
@@ -48,6 +49,8 @@ from spx_spark.options_map import write_strategy_risk_png
 
 STRATEGY_RISK_IMAGE_PUBLIC_PATH = "/strategy-risk/latest.png"
 STRATEGY_RISK_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/strategy-risk/latest.png"
+STRATEGY_RISK_GTH_IMAGE_PUBLIC_PATH = "/strategy-risk/gth-latest.png"
+STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/strategy-risk/gth-latest.png"
 
 
 def enqueue_pin_stable_watch(
@@ -201,6 +204,19 @@ def publish_strategy_risk_image(
 ) -> dict[str, object]:
     """Publish the latest pushed manual candidate without affecting delivery authority."""
 
+    facts = (
+        decision.get("market_facts")
+        if isinstance(decision.get("market_facts"), dict)
+        else {}
+    )
+    session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
+    gth = str(session.get("mode") or "").lower() == "gth"
+    public_path = (
+        STRATEGY_RISK_GTH_IMAGE_PUBLIC_PATH if gth else STRATEGY_RISK_IMAGE_PUBLIC_PATH
+    )
+    public_url = (
+        STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL if gth else STRATEGY_RISK_IMAGE_PUBLIC_URL
+    )
     try:
         output = (
             Path(storage_settings.data_root)
@@ -211,11 +227,6 @@ def publish_strategy_risk_image(
         )
         if not decision:
             raise ValueError("strategy decision unavailable")
-        facts = (
-            decision.get("market_facts")
-            if isinstance(decision.get("market_facts"), dict)
-            else {}
-        )
         decision_at = _timestamp(decision.get("decision_at"))
         facts_at = _timestamp(facts.get("decision_at"))
         if (
@@ -225,20 +236,29 @@ def publish_strategy_risk_image(
         ):
             raise ValueError("strategy risk decision and market facts are not time-aligned")
         write_strategy_risk_png(decision, output)
+        if gth:
+            session_output = output.with_name("gth-latest.png")
+            temporary = output.with_name(f".gth-latest.{os.getpid()}.tmp")
+            try:
+                temporary.unlink(missing_ok=True)
+                os.link(output, temporary)
+                os.replace(temporary, session_output)
+            finally:
+                temporary.unlink(missing_ok=True)
     except Exception as exc:  # noqa: BLE001 - image failure must not block trade-ready delivery
         return {
             "status": "failed",
             "error": f"{type(exc).__name__}:{exc}",
-            "public_path": STRATEGY_RISK_IMAGE_PUBLIC_PATH,
-            "public_url": STRATEGY_RISK_IMAGE_PUBLIC_URL,
+            "public_path": public_path,
+            "public_url": public_url,
         }
     return {
         "status": "published",
         "as_of": str(decision.get("available_at") or now.isoformat()),
         "decision_id": decision.get("decision_id"),
         "strategy_type": decision.get("decision_type"),
-        "public_path": STRATEGY_RISK_IMAGE_PUBLIC_PATH,
-        "public_url": STRATEGY_RISK_IMAGE_PUBLIC_URL,
+        "public_path": public_path,
+        "public_url": public_url,
         "bytes": output.stat().st_size,
     }
 

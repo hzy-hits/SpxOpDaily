@@ -276,6 +276,7 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
     spot_source = str(
         spot_facts.get("pricing_source") or spot_facts.get("kind") or "source unknown"
     ).replace("_", " ")
+    session_mode = str(_mapping(facts.get("session")).get("mode") or "").lower()
     structure, source = _strategy_risk_structure(strategy_decision)
     strategy_type = str(structure.get("strategy_type") or "NO_SUPPORTED_STRUCTURE")
     path_distribution = _strategy_path_distribution(structure)
@@ -314,7 +315,17 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
         "CALL_BUTTERFLY": "Call 蝶式", "PUT_BUTTERFLY": "Put 蝶式",
         "IRON_CONDOR": "铁鹰"}.get(strategy_type, "暂无可展示结构")
     choice_label = {"STRUCTURE": "结构可研究", "NO_TRADE": "暂不交易"}.get(shadow_choice, "结论暂缺")
-    header_height = 282.0 if objective_available else 220.0
+    data_context = _strategy_data_context(
+        structure,
+        session_mode=session_mode,
+        spot_source=spot_source,
+        path_distribution=path_distribution,
+    )
+    header_height = (
+        326.0 if objective_available and data_context else
+        282.0 if objective_available else
+        258.0 if data_context else 220.0
+    )
     location_y = 28.0 + header_height + 20.0
     q_y = location_y + 290.0
     cursor = q_y + 270.0
@@ -323,9 +334,9 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
         cursor += 390.0
     pnl_y = cursor if histogram else None
     if pnl_y is not None:
-        cursor += 320.0
+        cursor += 360.0
     footer_y = cursor + 14.0
-    width, height = 1200, int(footer_y + 122.0)
+    width, height = 1200, int(footer_y + (154.0 if session_mode == "gth" else 122.0))
     has_structure = bool(payoff_series)
     conclusion = (
         f"{choice_label} · 路径亏损概率 {_percent(_number(objective.get('loss_probability')))} "
@@ -343,7 +354,7 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
         "</style>",
         f'<rect width="{width}" height="{height}" fill="#F8FAFC"/>',
         f'<rect x="34" y="28" width="1132" height="{header_height:.0f}" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
-        '<text x="60" y="76" font-size="34" font-weight="700">SPX 决策快照与策略风险</text>',
+        f'<text x="60" y="76" font-size="34" font-weight="700">{escape(_strategy_sheet_title(session_mode))}</text>',
         f'<text x="60" y="112" class="body muted">{escape(strategy_label)} · '
         f'决策时 SPX {spot:,.2f} · {escape(spot_source)} · {escape(as_of)}</text>' if spot is not None else
         f'<text x="60" y="112" class="body muted">{escape(strategy_label)} · '
@@ -353,8 +364,18 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
         f'<text x="60" y="158" font-size="27" font-weight="700" fill="{_PROFIT_COLOR if shadow_choice == "STRUCTURE" and objective_available else "#172033"}">{escape(conclusion)}</text>',
         f'<text x="60" y="196" class="small muted">{escape(_payoff_summary(structure) if has_structure else "未通过结构与执行门，本图不补造执行价、盈亏或历史胜率。")}</text>',
     ]
+    if data_context:
+        parts.append(
+            f'<text x="60" y="232" class="small" fill="#334155">{escape(data_context)}</text>'
+        )
     if objective_available:
-        parts.extend(_strategy_objective_cards(objective, y=214, objective_points=objective_points))
+        parts.extend(
+            _strategy_objective_cards(
+                objective,
+                y=252 if data_context else 214,
+                objective_points=objective_points,
+            )
+        )
     parts.extend(
         _strategy_location_panel(
             structure_facts, spot=spot, domain=domain, y=location_y,
@@ -380,9 +401,14 @@ def render_strategy_risk_svg(strategy_decision: Mapping[str, object]) -> str:
     parts.extend(
         [
             f'<text x="60" y="{footer_y:.0f}" class="small muted">Q 是期权隐含的风险中性结算分布，不是真实涨跌概率；暂缺数据的面板已省略。</text>',
-            f'<text x="60" y="{footer_y + 32:.0f}" class="small muted">目标函数：{escape(str(objective.get("formula") or RISK_OBJECTIVE_FORMULA))}</text>',
-            f'<text x="60" y="{footer_y + 64:.0f}" class="small muted">只作研究解释，不改策略排序、不授权下单；自动下单关闭。</text>',
-            f'<text x="60" y="{footer_y + 96:.0f}" class="small muted">决策 {escape(str(strategy_decision.get("decision_id") or "unknown"))} · 来源 {escape(source)}</text>',
+            *(
+                [f'<text x="60" y="{footer_y + 32:.0f}" class="small muted">GTH 墙位是最近可用 OI 结构锚，不代表夜盘新增持仓或做市商方向。</text>']
+                if session_mode == "gth"
+                else []
+            ),
+            f'<text x="60" y="{footer_y + (64 if session_mode == "gth" else 32):.0f}" class="small muted">目标函数：{escape(str(objective.get("formula") or RISK_OBJECTIVE_FORMULA))}</text>',
+            f'<text x="60" y="{footer_y + (96 if session_mode == "gth" else 64):.0f}" class="small muted">只作研究解释，不改策略排序、不授权下单；自动下单关闭。</text>',
+            f'<text x="60" y="{footer_y + (128 if session_mode == "gth" else 96):.0f}" class="small muted">决策 {escape(str(strategy_decision.get("decision_id") or "unknown"))} · 来源 {escape(source)}</text>',
             "</svg>",
         ]
     )
@@ -465,6 +491,13 @@ def _strategy_risk_structure(decision: Mapping[str, object]) -> tuple[Mapping[st
         return candidate, "strategy_decision.candidate"
     nearest = _mapping(_mapping(decision.get("why_not")).get("nearest_candidate"))
     iron_condor = _mapping(decision.get("iron_condor_map"))
+    iron_path = _strategy_path_distribution(iron_condor)
+    if (
+        iron_condor.get("status") == "ready"
+        and iron_path.get("status") in {"estimated_uncalibrated", "insufficient_sample"}
+        and iron_path.get("pnl_histogram")
+    ):
+        return iron_condor, "strategy_decision.iron_condor_map"
     if (
         nearest.get("strategy_type") == "IRON_CONDOR"
         and iron_condor.get("status") == "ready"
@@ -500,6 +533,51 @@ def _authority_color(source: str) -> str:
 
 def _authority_background(source: str) -> str:
     return "#DCFCE7" if source.endswith("candidate") else "#FEE2E2"
+
+
+def _strategy_sheet_title(session_mode: str) -> str:
+    if session_mode == "gth":
+        return "SPX GTH 决策快照与策略风险"
+    if session_mode == "rth":
+        return "SPX RTH 决策快照与策略风险"
+    return "SPX 决策快照与策略风险"
+
+
+def _strategy_data_context(
+    structure: Mapping[str, object],
+    *,
+    session_mode: str,
+    spot_source: str,
+    path_distribution: Mapping[str, object],
+) -> str:
+    if session_mode not in {"gth", "rth"}:
+        return ""
+    quote = _mapping(structure.get("quote"))
+    provider = str(
+        quote.get("provider")
+        or structure.get("provider")
+        or next(
+            (
+                leg.get("provider")
+                for leg in _structure_legs(structure)
+                if leg.get("provider")
+            ),
+            "unknown",
+        )
+    ).upper()
+    method = _path_method_label(str(path_distribution.get("method") or ""))
+    return (
+        f"{session_mode.upper()} 坐标 {spot_source} · SPXW 报价 {provider} · "
+        f"历史路径 {method}"
+    )
+
+
+def _path_method_label(method: str) -> str:
+    if method.startswith("joint_spot_surface"):
+        return "SPX+ATM+左右Skew/Fly 联合回放"
+    if method.startswith("physical_path"):
+        return "SPX路径 / sticky-IV"
+    return "暂缺"
 
 
 def _strategy_objective_cards(
@@ -739,7 +817,7 @@ def _strategy_pnl_panel(
     y: float,
 ) -> list[str]:
     left, right = 82.0, 1130.0
-    top, bottom = y + 82.0, y + 218.0
+    top, bottom = y + 104.0, y + 228.0
     histogram = [
         _mapping(row) for row in _sequence(distribution.get("pnl_histogram"))
     ]
@@ -748,10 +826,18 @@ def _strategy_pnl_panel(
     status = {"insufficient_sample": "样本不足", "estimated_uncalibrated": "尚未校准"}.get(
         str(distribution.get("status") or ""), "暂缺"
     )
+    method = str(distribution.get("method") or "")
+    degraded = _number(distribution.get("surface_degraded_fraction"))
+    method_note = _path_method_label(method)
+    if method.startswith("joint_spot_surface"):
+        method_note += " · 5分钟"
+        if degraded is not None:
+            method_note += f" · 降级曲面 {degraded * 100:.0f}%"
     parts = [
-        f'<rect x="34" y="{y}" width="1132" height="300" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
+        f'<rect x="34" y="{y}" width="1132" height="340" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
         f'<text x="60" y="{y + 42}" font-size="25" font-weight="700">历史路径净损益（执行管理规则后）</text>',
         f'<text x="1140" y="{y + 42}" class="small muted" text-anchor="end">{escape(status)} · {n_paths}条路径 / {n_sessions}个交易日</text>',
+        f'<text x="60" y="{y + 74}" class="small muted">主模型：{escape(method_note)}</text>',
     ]
     if histogram:
         lows = [_number(row.get("lower_net_pnl")) for row in histogram]
@@ -790,7 +876,7 @@ def _strategy_pnl_panel(
         parts.append(
             f'<text x="600" y="{y + 160}" class="body muted" text-anchor="middle">路径损益暂缺 · {escape(reasons[:80] or "没有因果路径样本")}</text>'
         )
-    metric_y = y + 268.0
+    metric_y = y + 278.0
     parts.extend(
         [
             f'<text x="60" y="{metric_y}" class="small">亏损概率 {_percent(_number(objective.get("loss_probability")))}</text>',
@@ -799,6 +885,11 @@ def _strategy_pnl_panel(
             f'<text x="700" y="{metric_y}" class="small">P10 / 中位 / P90 {_pnl_quantiles(distribution)}</text>',
         ]
     )
+    baseline = _mapping(distribution.get("sticky_iv_baseline"))
+    if baseline:
+        parts.append(
+            f'<text x="60" y="{y + 316}" class="small muted">同一 SPX 路径 sticky-IV 基线 P10 / 中位 / P90 {_pnl_quantiles(baseline)}</text>'
+        )
     return parts
 
 

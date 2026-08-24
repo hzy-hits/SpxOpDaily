@@ -1025,7 +1025,16 @@ Vertical/Butterfly 以及 Iron Condor Map 变体做 entry-frozen bump-and-revalu
 - `automatic_ordering=false`、所有既有 hard gate、方向 owner 与 manual authority 均不变。
 
 这是当前入场曲面的结构风险决策层，不是 Ravagli premium 已验证为 alpha 的声明。
-历史 joint spot-surface replay 在独立 walk-forward 通过前仍不得提供新的授权或正向加分。
+`joint_spot_surface_management_policy.v1` 另把已完成的同 session-clock 历史路径按
+5 分钟重放到冻结入场腿：SPX 路径与 ATM、put/call 25Δ skew、put/call residual
+curvature 同步变化，并附带同一 SPX 路径的 sticky-IV 基线。GTH 只使用先前 GTH
+同钟点路径，RTH 只使用先前 RTH 同钟点路径；历史点同时要求 `as_of` 和
+`created_at` 早于当前决策时刻，路径内部只允许最多 30 分钟的因果向前保持，不做
+未来插值。联合历史不足时回退 `physical_path_management_policy.v3`，不得补造曲面。
+
+该联合回放只影响候选/铁鹰 Map 的解释性 PnL、CVaR 和固定通知图。它的
+`research_unvalidated`、独立 session 数、曲面降级占比和 sticky-IV 对照必须同时展示；
+在独立 walk-forward 通过前仍不得提供新的授权、正向加分、方向或解除 IC gate。
 
 ---
 
