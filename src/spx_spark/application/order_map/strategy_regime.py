@@ -45,7 +45,12 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v46"
+    policy_version: str = "strategy_policy.bootstrap.v47"
+    # v47: the RTH iron-condor minimum conservative credit/wing fraction is
+    # raised from 15% to 20%. The held-out 2026-08-03--21 replay retained 9
+    # trades across 12 opportunities, with 8 wins and +$664.96 after the
+    # existing fee/slippage stress. All other v46 geometry, management,
+    # manual-only authority, and GTH map-only boundaries remain unchanged.
     # v46: the user-authorized RTH iron-condor lane is one 20-delta,
     # fixed-10-wide manual candidate per session between 10:00 and 11:30 ET.
     # It requires exact four-leg BBO age <=15s/skew <=2s, 15%-55% credit,

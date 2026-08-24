@@ -35,7 +35,7 @@ SHORT_DELTA_MIN = 0.05
 SHORT_DELTA_MAX = 0.20
 SHORT_DELTA_TOLERANCE = 0.05
 WING_WIDTH = 10.0
-MIN_CREDIT_FRACTION = 0.15
+MIN_CREDIT_FRACTION = 0.20
 MAX_CREDIT_FRACTION = 0.55
 HUMAN_SHORT_DELTA = 0.20
 HUMAN_ENTRY_START_ET = time(10, 0)
@@ -45,7 +45,7 @@ HUMAN_TAKE_PROFIT_BUYBACK_FRACTION = 0.50
 HUMAN_STOP_BUYBACK_MULTIPLE = 3.0
 HUMAN_HARD_EXIT_ET = "15:45"
 HUMAN_EVIDENCE_CONTRACT_HASH = (
-    "sha256:43c77438122ba2deb51b4fa84d339a2773414c73a7dc80a774db0d551bf89d1b"
+    "sha256:18fc09f37e797a435c62584e224853378651d58ffbfbc9d595d940e0b95997f3"
 )
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -254,11 +254,14 @@ def enumerate_iron_condor_candidates(
                 "management_quote_max_skew_seconds": 30.0,
             },
             "production_evidence": {
-                "contract": "rth_20delta_fixed10_daily_first.v1",
-                "sessions": 10,
-                "resolved_trades": 10,
-                "wins": 9,
-                "mean_net_pnl_dollars": 85.44,
+                "contract": "rth_20delta_fixed10_daily_first_credit20.v2",
+                "opportunity_sessions": 12,
+                "sessions": 9,
+                "resolved_trades": 9,
+                "wins": 8,
+                "mean_net_pnl_dollars": 73.88,
+                "mean_net_pnl_per_opportunity_dollars": 55.41,
+                "opportunity_mean_bootstrap_95pct_ci_dollars": [18.88, 85.74],
                 "limitations": [
                     "small_session_sample",
                     "one_minute_stop_sampling",

@@ -36,7 +36,7 @@ _CLOSE_CONVERGENCE_CONTRACT_HASH = (
 )
 _IRON_CONDOR_SETUP = "IRON_CONDOR_DELTA"
 _IRON_CONDOR_CONTRACT_HASH = (
-    "sha256:43c77438122ba2deb51b4fa84d339a2773414c73a7dc80a774db0d551bf89d1b"
+    "sha256:18fc09f37e797a435c62584e224853378651d58ffbfbc9d595d940e0b95997f3"
 )
 
 # Stable feature order shared by offline training and runtime inference.
@@ -125,7 +125,7 @@ def apply_strategy_edge_authority(
     ``data_root is None`` is reserved for pure unit/replay fixtures that do not
     model deployment state. Production model-backed lanes fail closed when the
     artifact is absent, unpromoted, stale, malformed, or out of domain. The
-    Pre-average, wall hazard, close convergence, and the user-authorized v46
+    Pre-average, wall hazard, close convergence, and the user-authorized v47
     RTH iron condor are explicit manual-policy exceptions and are always
     labeled forward-unvalidated.
     """
@@ -158,17 +158,17 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v46",
+                "strategy_policy.bootstrap.v47",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v46",
+                "strategy_policy.bootstrap.v47",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v46",
+                "strategy_policy.bootstrap.v47",
                 _IRON_CONDOR_CONTRACT_HASH,
                 "iron_condor_policy_authority_invalid",
             ),

@@ -96,7 +96,11 @@ def _state(now: datetime, *, with_greeks: bool = True) -> LatestState:
     return LatestState(created_at=now, as_of=now, quotes=quotes, best_quotes=quotes)
 
 
-def _rth_state(now: datetime = RTH_NOW) -> LatestState:
+def _rth_state(
+    now: datetime = RTH_NOW,
+    *,
+    short_quote_bonus: float = 0.5,
+) -> LatestState:
     rows = []
     for quote in _quotes(now, with_greeks=True):
         right = str(getattr(quote.instrument.right, "value", quote.instrument.right) or "")
@@ -110,8 +114,8 @@ def _rth_state(now: datetime = RTH_NOW) -> LatestState:
                 provider=Provider.SCHWAB,
                 received_at=now,
                 quote_time=now,
-                bid=(quote.bid or 0.0) + (0.5 if rich_short else 0.0),
-                ask=(quote.ask or 0.0) + (0.5 if rich_short else 0.0),
+                bid=(quote.bid or 0.0) + (short_quote_bonus if rich_short else 0.0),
+                ask=(quote.ask or 0.0) + (short_quote_bonus if rich_short else 0.0),
             )
         )
     quotes = tuple(rows)
@@ -332,8 +336,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v46"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v46"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v47"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v47"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -412,12 +416,22 @@ def test_rth_iron_condor_reaches_single_strategy_decision_authority(
     assert decision["execution"]["automatic_ordering"] is False
     assert decision["candidate"]["short_abs_delta"] == 0.20
     assert decision["candidate"]["wing_width"] == 10.0
+    assert decision["candidate"]["economics"]["credit_fraction_of_width"] == 0.20
     assert "strategy_edge" in decision["candidate"]["edge"], decision["candidate"]["edge"]
     assert decision["candidate"]["edge"]["strategy_edge"]["status"] == (
         "explicit_policy_authority_unvalidated"
     )
     assert decision["targets"][0]["kind"] == "take_profit"
     assert decision["risk"]["management_plan"]["stop_buyback_multiple"] == 3.0
+
+    low_credit = build_strategy_decision(
+        _payload(),
+        _rth_state(short_quote_bonus=0.45),
+        RTH_NOW,
+        data_root=tmp_path,
+    )
+    assert low_credit["decision_type"] == "NO_TRADE"
+    assert "iron_condor_credit_fraction" in low_credit["why_not"]["reasons"]
 
 
 def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
