@@ -1482,6 +1482,15 @@ def _iron_condor_hard_gates(
         surface_gate = _map(session_state.get("surface_gate"))
     elif session_state.get("status") == "eligible":
         surface_gate = {"reasons": []}
+        locked_candidate_id = str(session_state.get("candidate_id") or "")
+        if locked_candidate_id and candidate.get("candidate_id") != locked_candidate_id:
+            gates.append(
+                {
+                    "gate": "iron_condor_session_candidate_locked",
+                    "actual": candidate.get("candidate_id"),
+                    "threshold": locked_candidate_id,
+                }
+            )
     else:
         surface_gate = human_iron_condor_surface_gate(facts)
     for reason in surface_gate["reasons"]:

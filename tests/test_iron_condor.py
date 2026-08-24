@@ -347,8 +347,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v49"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v49"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v50"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v50"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -394,6 +394,82 @@ def test_ready_iron_condor_is_map_only_not_a_human_winner() -> None:
     miss = ranked.near_misses[0]
     assert miss["strategy_type"] == "IRON_CONDOR"
     assert "iron_condor_not_human_authorized" in miss["rejection_reasons"]
+
+
+def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
+
+    at_1100 = datetime(2026, 8, 13, 15, 0, tzinfo=timezone.utc)
+    rows = enumerate_iron_condor_candidates(
+        _payload(),
+        _rth_facts(),
+        _rth_state(at_1100),
+        now=at_1100,
+        policy=StrategyPolicy(),
+    )
+
+    assert rows[0]["manual_authority_eligible"] is True
+    assert rows[0]["put_short_abs_delta"] == 0.20
+    assert rows[0]["call_short_abs_delta"] == 0.20
+    assert rows[0]["put_short_distance_points"] == 60.0
+    assert rows[0]["call_short_distance_points"] == 60.0
+    assert {leg["provider"] for leg in rows[0]["legs"]} == {"schwab"}
+    card = _render_strategy_candidate(
+        {"market_facts": {"spot": {"spx": SPOT}}}, rows[0]
+    )
+    assert "逐边卖≤20Δ" in card
+    assert "实际选腿 Put 20.0Δ（距SPX 60.0点） · Call 20.0Δ（距SPX 60.0点）" in card
+
+    after_window = at_1100 + timedelta(minutes=1)
+    later = enumerate_iron_condor_candidates(
+        _payload(),
+        _rth_facts(),
+        _rth_state(after_window),
+        now=after_window,
+        policy=StrategyPolicy(),
+    )
+    assert later[0]["manual_authority_eligible"] is False
+
+
+def test_rth_iron_condor_locks_first_qualifying_candidate_id() -> None:
+    facts = _rth_facts()
+    facts["iron_condor_session_state"] = {
+        "status": "eligible",
+        "candidate_id": "strategy-candidate:locked-first-strikes",
+    }
+    rows = enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _rth_state(),
+        now=RTH_NOW,
+        policy=StrategyPolicy(),
+    )
+    ranked = rank_candidates(
+        rows,
+        facts,
+        {
+            "schema_version": "regime_assessment.v1",
+            "policy_version": StrategyPolicy().policy_version,
+            "path_state": "UNCERTAIN",
+            "path_direction": None,
+            "terminal_state": "NONE",
+            "event_state": "NORMAL",
+            "entry_state": "INSUFFICIENT_DATA",
+            "confidence": 0.0,
+            "reasons": [],
+            "contradictions": [],
+            "pin": {},
+        },
+        policy=StrategyPolicy(),
+        data_root=None,
+        probability_settings=None,
+        now=RTH_NOW,
+    )
+
+    assert ranked.passed == []
+    assert "iron_condor_session_candidate_locked" in ranked.near_misses[0][
+        "rejection_reasons"
+    ]
 
 
 def test_rth_iron_condor_reaches_single_strategy_decision_authority(

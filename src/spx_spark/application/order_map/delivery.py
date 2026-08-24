@@ -228,7 +228,12 @@ def publish_open_interest_image(
             / "oi"
             / "latest.png"
         )
-        state = LatestStateStore(storage_settings).load(now=now)
+        # The strategy image rendered immediately before this call can take
+        # several seconds.  Reloading the moving latest-state against the
+        # report's earlier decision timestamp makes newly arrived quotes look
+        # future-dated and can suppress the entire front expiry.  Let the
+        # store take a fresh evaluation clock for this fresh state read.
+        state = LatestStateStore(storage_settings).load()
         grouped = group_spxw_option_quotes(state, storage_settings=storage_settings)
         exposure = build_exposure_map(state, grouped_quotes=grouped)
         if not exposure.expiries:
@@ -410,20 +415,45 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         stop_buyback = (
             float(credit) * 3.00 if isinstance(credit, int | float) else None
         )
-        short_delta = candidate.get("short_abs_delta")
-        delta_text = (
-            f"{float(short_delta) * 100:.0f}Δ"
-            if isinstance(short_delta, int | float)
-            else "20Δ"
-        )
+        put_short = candidate.get("put_short") or {}
+        call_short = candidate.get("call_short") or {}
+        put_delta = _finite_number(candidate.get("put_short_abs_delta"))
+        call_delta = _finite_number(candidate.get("call_short_abs_delta"))
+        if put_delta is None:
+            raw = _finite_number(put_short.get("delta"))
+            put_delta = abs(raw) if raw is not None else None
+        if call_delta is None:
+            raw = _finite_number(call_short.get("delta"))
+            call_delta = abs(raw) if raw is not None else None
+        put_distance = _finite_number(candidate.get("put_short_distance_points"))
+        call_distance = _finite_number(candidate.get("call_short_distance_points"))
+        spot = _finite_number(candidate.get("spot"))
+        if spot is None:
+            spot = _finite_number(
+                ((decision.get("market_facts") or {}).get("spot") or {}).get("spx")
+            )
+        put_strike = _finite_number(put_short.get("strike"))
+        call_strike = _finite_number(call_short.get("strike"))
+        if put_distance is None and spot is not None and put_strike is not None:
+            put_distance = spot - put_strike
+        if call_distance is None and spot is not None and call_strike is not None:
+            call_distance = call_strike - spot
+        put_delta_text = f"{put_delta * 100:.1f}Δ" if put_delta is not None else "-"
+        call_delta_text = f"{call_delta * 100:.1f}Δ" if call_delta is not None else "-"
+        put_distance_text = f"{put_distance:.1f}点" if put_distance is not None else "-"
+        call_distance_text = f"{call_distance:.1f}点" if call_distance is not None else "-"
         lines = [
             f"【{title}】",
             "",
             "## 结论",
-            f"铁鹰 卖{delta_text} 10点翼宽 {strikes} · 只许限价",
+            f"铁鹰 逐边卖≤20Δ 10点翼宽 {strikes} · 只许限价",
             "",
             "## 执行",
             f"四腿 {strikes}",
+            (
+                f"实际选腿 Put {put_delta_text}（距SPX {put_distance_text}） · "
+                f"Call {call_delta_text}（距SPX {call_distance_text}）"
+            ),
             f"净贷记 ≥ {_fmt_premium(credit)} · 提交前刷新报价 · 禁止市价",
             f"有效至 {until}（北京）",
             "",

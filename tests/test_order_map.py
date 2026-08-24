@@ -2279,10 +2279,16 @@ def test_open_interest_image_publishes_for_card(monkeypatch, tmp_path) -> None:
         as_of=now,
         to_dict=lambda: {"expiries": []},
     )
+    load_calls: list[dict[str, object]] = []
+
+    def load_state(**kwargs):
+        load_calls.append(kwargs)
+        return state
+
     monkeypatch.setattr(
         delivery_module,
         "LatestStateStore",
-        lambda _settings: SimpleNamespace(load=lambda **_kwargs: state),
+        lambda _settings: SimpleNamespace(load=load_state),
     )
     monkeypatch.setattr(
         delivery_module,
@@ -2315,6 +2321,7 @@ def test_open_interest_image_publishes_for_card(monkeypatch, tmp_path) -> None:
         "public_url": "https://spx.zh3nyu.com/oi/latest.png",
         "bytes": 3,
     }
+    assert load_calls == [{}]
     assert (tmp_path / "published/spxw-surface/oi/latest.png").read_bytes() == b"png"
 
 

@@ -45,11 +45,14 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v49"
+    policy_version: str = "strategy_policy.bootstrap.v50"
+    # v50: RTH manual iron condors use Schwab-only per-side deltas at or below
+    # 20, require fresh Greek observations, stop new entries at 11:00 ET, and
+    # lock the first qualifying strike set for the session.
     # v49: RTH iron-condor credit is 25%-55%; the frozen ATM/smile verdict on
     # the first qualifying candidate is fail-closed, session-long, manual-only.
     # v46: the user-authorized RTH iron-condor lane is one 20-delta,
-    # fixed-10-wide manual candidate per session between 10:00 and 11:30 ET.
+    # fixed-10-wide manual candidate per session between 10:00 and 11:00 ET.
     # It requires exact four-leg BBO age <=15s/skew <=2s, 15%-55% credit,
     # spot inside shorts, and <=$1,000 defined risk. Management is buy back at
     # 0.5x entry credit, stop at 3x liability (200% loss on credit), otherwise

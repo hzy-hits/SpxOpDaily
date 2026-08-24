@@ -41,14 +41,14 @@ HUMAN_MAX_ATM_IV = 0.2374713681
 HUMAN_MAX_SMILE_RICHNESS = 0.0313827831
 HUMAN_SHORT_DELTA = 0.20
 HUMAN_ENTRY_START_ET = time(10, 0)
-HUMAN_ENTRY_END_ET = time(11, 30)
+HUMAN_ENTRY_END_ET = time(11, 0)
 HUMAN_MAX_RISK_DOLLARS = 1_000.0
 HUMAN_TAKE_PROFIT_BUYBACK_FRACTION = 0.50
 HUMAN_STOP_BUYBACK_MULTIPLE = 3.0
 HUMAN_HARD_EXIT_ET = "15:45"
 HUMAN_SESSION_STATE_KEY = "iron_condor_session_state"
 HUMAN_EVIDENCE_CONTRACT_HASH = (
-    "sha256:a5ca00a21bb1184d0f1fa8a2268e4d1967433a51231dfc749a11cb6eb5a683b3"
+    "sha256:ac8e09149686e929e939682b102c3da3fc54cf55a349ff2b28c7c1904f8b978a"
 )
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -162,7 +162,7 @@ def enumerate_iron_condor_candidates(
                 short_abs_delta=HUMAN_SHORT_DELTA,
                 now=now,
                 session_policy=session_policy,
-                providers=providers,
+                providers=(Provider.SCHWAB,),
             )
             if expiry and spot is not None
             else None
@@ -184,6 +184,7 @@ def enumerate_iron_condor_candidates(
         _map(structure.get("call_long")),
     )
     strikes = [float(value) for value in structure.get("strikes") or ()]
+    spot = _number(structure.get("spot"))
     expiry = str(structure.get("expiry") or "")
     candidate_id = _candidate_id(
         facts.get("session_date"),
@@ -200,6 +201,10 @@ def enumerate_iron_condor_candidates(
     quote_valid = _quote_valid_until(legs, now=now, policy=session_policy)
     score = float(structure.get("selection_score") or 0.0)
     human_surface_gate = human_iron_condor_surface_gate(facts)
+    put_short_delta = abs(_number(put_short.get("delta")) or 0.0)
+    call_short_delta = abs(_number(call_short.get("delta")) or 0.0)
+    put_short_distance = spot - strikes[1] if len(strikes) == 4 and spot is not None else None
+    call_short_distance = strikes[2] - spot if len(strikes) == 4 and spot is not None else None
     return [
         {
             "candidate_id": candidate_id,
@@ -228,7 +233,16 @@ def enumerate_iron_condor_candidates(
             "surface_attribution": dict(_map(structure.get("surface_attribution"))),
             "human_surface_gate": human_surface_gate,
             "spot_inside_shorts": structure.get("spot_inside_shorts"),
+            "spot": spot,
             "short_abs_delta": structure.get("short_abs_delta"),
+            "put_short_abs_delta": round(put_short_delta, 8),
+            "call_short_abs_delta": round(call_short_delta, 8),
+            "put_short_distance_points": (
+                round(put_short_distance, 4) if put_short_distance is not None else None
+            ),
+            "call_short_distance_points": (
+                round(call_short_distance, 4) if call_short_distance is not None else None
+            ),
             "wing_width": WING_WIDTH,
             "quote_valid_until": quote_valid.isoformat() if quote_valid else now.isoformat(),
             "opportunity_valid_until": (
@@ -259,20 +273,16 @@ def enumerate_iron_condor_candidates(
                 "management_quote_max_skew_seconds": 30.0,
             },
             "production_evidence": {
-                "contract": "rth_20delta_fixed10_daily_first_credit25_iv_smile.v3",
-                "opportunity_sessions": 22,
+                "contract": "rth_20delta_fixed10_daily_first_credit25_iv_smile_schwab_only_1000_1100_locked.v4",
+                "opportunity_sessions": 21,
                 "no_trade_sessions": 9,
-                "resolved_trades": 12,
+                "resolved_trades": 11,
                 "unresolved_trades": 1,
-                "wins": 12,
-                "mean_net_pnl_dollars": 112.36,
-                "observed_mean_net_pnl_per_opportunity_dollars": 61.29,
-                "pessimistic_mean_net_pnl_per_opportunity_dollars": 27.62,
-                "pessimistic_total_net_pnl_dollars": 607.72,
-                "pessimistic_opportunity_bootstrap_95pct_ci_dollars": [
-                    -58.92,
-                    81.64,
-                ],
+                "wins": 11,
+                "mean_net_pnl_dollars": 112.62,
+                "observed_mean_net_pnl_per_opportunity_dollars": 58.99,
+                "pessimistic_mean_net_pnl_per_opportunity_dollars": 23.73,
+                "pessimistic_total_net_pnl_dollars": 498.28,
                 "limitations": [
                     "same_sample_policy_search",
                     "iv_gate_removed_only_winners_in_august_holdout",
@@ -363,6 +373,7 @@ def iron_condor_session_state(
             "status": "eligible" if passed else "blocked",
             "attempted_at": _utc(now).isoformat(),
             "candidate_id": candidate.get("candidate_id"),
+            "strikes": list(candidate.get("strikes") or ()),
             "surface_gate": dict(surface_gate),
             "reasons": list(surface_gate.get("reasons") or ()),
         }
@@ -550,6 +561,7 @@ def _ten_wide_from_short_delta(
         max_distance=SHORT_DELTA_TOLERANCE,
         min_abs_delta=SHORT_DELTA_MIN,
         max_abs_delta=min(short_abs_delta, SHORT_DELTA_MAX),
+        max_greeks_age_seconds=policy.quote_max_age_seconds,
     )
     call_short = nearest_abs_delta_strike(
         latest,
@@ -562,6 +574,7 @@ def _ten_wide_from_short_delta(
         max_distance=SHORT_DELTA_TOLERANCE,
         min_abs_delta=SHORT_DELTA_MIN,
         max_abs_delta=min(short_abs_delta, SHORT_DELTA_MAX),
+        max_greeks_age_seconds=policy.quote_max_age_seconds,
     )
     if put_short is None or call_short is None:
         return None
