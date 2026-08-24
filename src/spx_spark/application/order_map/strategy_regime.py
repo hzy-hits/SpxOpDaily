@@ -45,7 +45,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v47"
+    policy_version: str = "strategy_policy.bootstrap.v48"
     # v47: the RTH iron-condor minimum conservative credit/wing fraction is
     # raised from 15% to 20%. The held-out 2026-08-03--21 replay retained 9
     # trades across 12 opportunities, with 8 wins and +$664.96 after the
@@ -228,6 +228,7 @@ class StrategyPolicy:
     failed_break_min_target_room_ratio: float = 1.8
     max_debit_fraction: float = 0.45
     gth_max_debit_fraction: float = 0.45
+    gth_max_risk_usd: float = 1000.0
     failed_break_max_debit_fraction: float = 0.40
     min_stop_atr: float = 0.25
     max_stop_atr: float = 1.0

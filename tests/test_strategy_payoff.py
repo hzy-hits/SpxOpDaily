@@ -596,7 +596,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v47"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v48"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -885,7 +885,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v47"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v48"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1055,7 +1055,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v47"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v48"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -3599,7 +3599,19 @@ def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cann
     assert advanced["candidate"]["setup_kind"] == "TREND_PULLBACK"
 
 
-def test_gth_selector_evidence_can_compete_while_operator_edge_authority_is_unavailable() -> None:
+def test_gth_selector_evidence_uses_v48_minute_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    monkeypatch.setattr(
+        strategy_select,
+        "apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
     now = datetime(2026, 8, 7, 3, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload["gth_level_manual_candidate"] = {
@@ -3616,8 +3628,11 @@ def test_gth_selector_evidence_can_compete_while_operator_edge_authority_is_unav
         "block_reasons": ["first_touch_time_stop_net_pnl_authority_unavailable"],
     }
     payload.pop("call_skew_spread_shadow")
+    # v48 deliberately does not inherit the old 15m/VWAP late-chase model.
+    payload["minute_market_frame"]["es"]["return_15m_points"] = 30.0
+    payload["minute_market_frame"]["es"]["vwap_distance_points"] = 30.0
 
-    decision = build_strategy_decision(payload, _state(now), now)
+    decision = build_strategy_decision(payload, _state(now), now, data_root=tmp_path)
 
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["source"] == "gth_level_manual_candidate"
@@ -3629,10 +3644,28 @@ def test_gth_selector_evidence_can_compete_while_operator_edge_authority_is_unav
     assert evidence["block_reasons"] == [
         "first_touch_time_stop_net_pnl_authority_unavailable"
     ]
+    assert decision["candidate"]["authorization_policy"] == (
+        "strategy_policy.bootstrap.v48"
+    )
+    assert decision["candidate"]["edge"]["strategy_edge"]["gate_kind"] == (
+        "gth_minute_confirmation"
+    )
     assert decision["automatic_ordering"] is False
 
 
-def test_fresh_dip_reclaim_evidence_overrides_trend_only_background() -> None:
+def test_fresh_dip_reclaim_evidence_overrides_trend_only_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    monkeypatch.setattr(
+        strategy_select,
+        "apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
     now = datetime(2026, 8, 7, 3, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload["gth_level_manual_candidate"] = {
@@ -3655,7 +3688,7 @@ def test_fresh_dip_reclaim_evidence_overrides_trend_only_background() -> None:
     }
     payload.pop("call_skew_spread_shadow")
 
-    decision = build_strategy_decision(payload, _state(now), now)
+    decision = build_strategy_decision(payload, _state(now), now, data_root=tmp_path)
 
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["source"] == "gth_dip_reclaim_evidence"

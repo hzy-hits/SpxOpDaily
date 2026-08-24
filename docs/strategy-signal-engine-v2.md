@@ -1671,3 +1671,19 @@ NoTrade 必须能赢。
 所有 Alpha 在 SPX 坐标中形成。
 所有价格与风险由确定性代码计算。
 ```
+
+---
+
+## 27. v48 GTH 分钟级人工门禁
+
+GTH 方向价差仅接受现有的已确认水平或 dip-reclaim 因果证据。它们不再因缺少
+first-touch/time-stop 推广模型而永久停在观察层；生产决策改由以下分钟门授权：
+
+- 当前 1 分钟路径收益必须与候选方向同向；
+- 5 分钟路径允许回收前的残余反向，但不得超过 `0.5 × ATR5m`；
+- 上游证据仍须在有效期内，双腿 conservative exact BBO 仍须通过；
+- 借记不超过翼宽 45%，单张定义风险不超过 $1,000；
+- 仅人工候选，自动下单保持关闭，原方向锁、冷却与 session 限额不变。
+
+`GTH_WIDTH_SCAN`、`GTH_DELTA_SCAN` 与纯 trend-transition 背景不进入该门。该门标记
+`forward_unvalidated_user_override`，不会伪装成已经验证的统计 edge。

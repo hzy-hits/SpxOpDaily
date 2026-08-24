@@ -38,6 +38,17 @@ _IRON_CONDOR_SETUP = "IRON_CONDOR_DELTA"
 _IRON_CONDOR_CONTRACT_HASH = (
     "sha256:18fc09f37e797a435c62584e224853378651d58ffbfbc9d595d940e0b95997f3"
 )
+_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v48"
+_GTH_MINUTE_GATE_CONTRACT_HASH = (
+    "sha256:72e0036694a079ed8e6a18b930662a12979d827db3ca27ab2b95a76bfd60884f"
+)
+_GTH_MINUTE_GATE_SOURCES = frozenset(
+    {"gth_level_manual_candidate", "gth_dip_reclaim_evidence"}
+)
+_GTH_MINUTE_GATE_SETUPS = frozenset({"FAILED_BREAK_RECLAIM", "TREND_PULLBACK"})
+_GTH_MINUTE_MAX_OPPOSING_5M_ATR = 0.50
+_GTH_MINUTE_MAX_DEBIT_FRACTION = 0.45
+_GTH_MINUTE_MAX_RISK_USD = 1000.0
 
 # Stable feature order shared by offline training and runtime inference.
 FEATURE_NAMES: tuple[str, ...] = (
@@ -125,9 +136,9 @@ def apply_strategy_edge_authority(
     ``data_root is None`` is reserved for pure unit/replay fixtures that do not
     model deployment state. Production model-backed lanes fail closed when the
     artifact is absent, unpromoted, stale, malformed, or out of domain. The
-    Pre-average, wall hazard, close convergence, and the user-authorized v47
-    RTH iron condor are explicit manual-policy exceptions and are always
-    labeled forward-unvalidated.
+    Pre-average, wall hazard, close convergence, the RTH iron condor, and the
+    user-authorized v48 GTH minute gate are explicit manual-policy exceptions
+    and are always labeled forward-unvalidated.
     """
 
     if not candidates:
@@ -143,6 +154,46 @@ def apply_strategy_edge_authority(
     model_candidates: list[Mapping[str, Any]] = []
     for candidate in candidates:
         setup = candidate.get("setup_kind")
+        if _is_gth_minute_gate_candidate(candidate):
+            minute_reasons = _gth_minute_gate_reasons(candidate, facts)
+            if minute_reasons:
+                rejected.append(
+                    _reject(
+                        candidate,
+                        *minute_reasons,
+                        model_payload={
+                            "status": "gth_minute_gate_rejected",
+                            "policy_version": _GTH_MINUTE_GATE_POLICY,
+                            "evidence_contract_hash": _GTH_MINUTE_GATE_CONTRACT_HASH,
+                        },
+                    )
+                )
+                continue
+            authorized = {
+                **dict(candidate),
+                "authorization_policy": _GTH_MINUTE_GATE_POLICY,
+                "evidence_contract_hash": _GTH_MINUTE_GATE_CONTRACT_HASH,
+                "evidence_status": "forward_unvalidated_user_override",
+            }
+            scored.append(
+                _attach_model_payload(
+                    authorized,
+                    {
+                        "status": "explicit_policy_authority_unvalidated",
+                        "policy_version": _GTH_MINUTE_GATE_POLICY,
+                        "evidence_contract_hash": _GTH_MINUTE_GATE_CONTRACT_HASH,
+                        "evidence_status": "forward_unvalidated_user_override",
+                        "gate_kind": "gth_minute_confirmation",
+                        "return_1m_points": _number(
+                            _map(facts.get("path")).get("return_1m_points")
+                        ),
+                        "return_5m_points": _number(
+                            _map(facts.get("path")).get("return_5m_points")
+                        ),
+                    },
+                )
+            )
+            continue
         if setup not in {
             _PREAVERAGE_SETUP,
             _WALL_HAZARD_SETUP,
@@ -158,17 +209,17 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v47",
+                "strategy_policy.bootstrap.v48",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v47",
+                "strategy_policy.bootstrap.v48",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v47",
+                "strategy_policy.bootstrap.v48",
                 _IRON_CONDOR_CONTRACT_HASH,
                 "iron_condor_policy_authority_invalid",
             ),
@@ -225,6 +276,51 @@ def apply_strategy_edge_authority(
     scored.sort(key=_edge_sort_key, reverse=True)
     rejected.sort(key=_edge_sort_key, reverse=True)
     return EdgeAuthorityResult(passed=scored, rejected=rejected)
+
+
+def _is_gth_minute_gate_candidate(candidate: Mapping[str, Any]) -> bool:
+    return (
+        str(candidate.get("source") or "") in _GTH_MINUTE_GATE_SOURCES
+        and str(candidate.get("setup_kind") or "") in _GTH_MINUTE_GATE_SETUPS
+        and str(candidate.get("strategy_type") or "").endswith("_DEBIT_VERTICAL")
+    )
+
+
+def _gth_minute_gate_reasons(
+    candidate: Mapping[str, Any], facts: Mapping[str, Any]
+) -> list[str]:
+    """Authorize fresh confirmed GTH evidence with only live minute direction.
+
+    The upstream selector owns source causality, expiry, exact BBO and payoff
+    geometry. This gate deliberately does not inherit a long-horizon trend
+    state or require a promoted historical model.
+    """
+
+    if str(_map(facts.get("session")).get("mode") or "").lower() != "gth":
+        return ["gth_minute_gate_session_mismatch"]
+    direction = str(candidate.get("direction") or "").upper()
+    sign = 1.0 if direction == "UP" else -1.0 if direction == "DOWN" else 0.0
+    if sign == 0.0:
+        return ["gth_minute_gate_direction_unavailable"]
+    path = _map(facts.get("path"))
+    ret1 = _number(path.get("return_1m_points"))
+    ret5 = _number(path.get("return_5m_points"))
+    atr = _number(path.get("atr_5m"))
+    if ret1 is None or ret5 is None or atr is None or atr <= 0.0:
+        return ["gth_minute_path_unavailable"]
+    reasons: list[str] = []
+    if sign * ret1 <= 0.0:
+        reasons.append("gth_1m_direction_not_confirmed")
+    if sign * ret5 < -_GTH_MINUTE_MAX_OPPOSING_5M_ATR * atr:
+        reasons.append("gth_5m_move_strongly_opposes_direction")
+    economics = _map(candidate.get("economics"))
+    debit_fraction = _number(economics.get("debit_fraction_of_width"))
+    max_loss = _number(economics.get("max_loss_points"))
+    if debit_fraction is None or debit_fraction > _GTH_MINUTE_MAX_DEBIT_FRACTION:
+        reasons.append("gth_minute_debit_fraction_above_max")
+    if max_loss is None or max_loss * 100.0 > _GTH_MINUTE_MAX_RISK_USD:
+        reasons.append("gth_minute_defined_risk_above_max")
+    return reasons
 
 
 def load_strategy_edge_artifact(

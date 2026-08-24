@@ -47,7 +47,7 @@ def test_v44_close_convergence_manual_authority_is_explicitly_unvalidated(
 ) -> None:
     candidate = {
         "setup_kind": "CLOSE_CONVERGENCE_60M",
-        "authorization_policy": "strategy_policy.bootstrap.v47",
+        "authorization_policy": "strategy_policy.bootstrap.v48",
         "evidence_contract_hash": (
             "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
         ),
@@ -71,6 +71,98 @@ def test_v44_close_convergence_manual_authority_is_explicitly_unvalidated(
         "objective_points": -0.1,
         "n_paths": 51,
     }
+
+
+def _gth_minute_candidate(**overrides: object) -> dict[str, object]:
+    return {
+        "candidate_id": "gth-call-7700-7710",
+        "strategy_type": "CALL_DEBIT_VERTICAL",
+        "setup_kind": "TREND_PULLBACK",
+        "source": "gth_level_manual_candidate",
+        "direction": "UP",
+        "economics": {
+            "width_points": 10.0,
+            "max_loss_points": 4.0,
+            "max_gain_points": 6.0,
+            "debit_fraction_of_width": 0.40,
+        },
+        "selection_score": 1.0,
+        **overrides,
+    }
+
+
+def test_v48_gth_confirmed_source_uses_minute_gate_without_model(tmp_path: Path) -> None:
+    result = apply_strategy_edge_authority(
+        [_gth_minute_candidate()],
+        {
+            "session": {"mode": "gth"},
+            "path": {
+                "return_1m_points": 0.25,
+                "return_5m_points": -1.5,
+                "atr_5m": 4.0,
+            },
+        },
+        {"path_state": "TRANSITION", "path_direction": "DOWN"},
+        data_root=tmp_path,
+        now=NOW,
+    )
+
+    assert result.rejected == []
+    candidate = result.passed[0]
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v48"
+    assert candidate["edge"]["edge_status"] == "explicit_manual_policy_unvalidated"
+    assert candidate["edge"]["strategy_edge"]["gate_kind"] == "gth_minute_confirmation"
+
+
+def test_v48_gth_minute_gate_rejects_opposing_1m_or_excess_risk(tmp_path: Path) -> None:
+    result = apply_strategy_edge_authority(
+        [_gth_minute_candidate(economics={
+            "width_points": 30.0,
+            "max_loss_points": 12.0,
+            "max_gain_points": 18.0,
+            "debit_fraction_of_width": 0.40,
+        })],
+        {
+            "session": {"mode": "gth"},
+            "path": {
+                "return_1m_points": -0.25,
+                "return_5m_points": 0.5,
+                "atr_5m": 4.0,
+            },
+        },
+        {},
+        data_root=tmp_path,
+        now=NOW,
+    )
+
+    assert result.passed == []
+    assert "gth_1m_direction_not_confirmed" in result.rejected[0]["rejection_reasons"]
+    assert "gth_minute_defined_risk_above_max" in result.rejected[0]["rejection_reasons"]
+
+
+def test_v48_does_not_authorize_gth_width_scan(tmp_path: Path) -> None:
+    result = apply_strategy_edge_authority(
+        [
+            _gth_minute_candidate(
+                setup_kind="GTH_WIDTH_SCAN",
+                source="gth_ibkr_width_enumeration",
+            )
+        ],
+        {
+            "session": {"mode": "gth"},
+            "path": {
+                "return_1m_points": 1.0,
+                "return_5m_points": 2.0,
+                "atr_5m": 4.0,
+            },
+        },
+        {},
+        data_root=tmp_path,
+        now=NOW,
+    )
+
+    assert result.passed == []
+    assert "strategy_edge_model_artifact_missing" in result.rejected[0]["rejection_reasons"]
 
 
 def test_model_rejection_prevents_manual_authority(monkeypatch) -> None:

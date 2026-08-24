@@ -576,6 +576,27 @@ def _vertical_hard_gates(
                 for reason in path_reasons
             ],
         )
+    if str(candidate.get("source") or "") in _GTH_HUMAN_DEBIT_SOURCES:
+        gates: list[dict[str, Any]] = []
+        if float(debit_fraction) > policy.gth_max_debit_fraction:
+            gates.append(
+                {
+                    "gate": "max_debit_fraction_exceeded",
+                    "actual": debit_fraction,
+                    "threshold": policy.gth_max_debit_fraction,
+                }
+            )
+        max_loss = _number(economics.get("max_loss_points"))
+        risk_usd = None if max_loss is None else max_loss * 100.0
+        if risk_usd is None or risk_usd > policy.gth_max_risk_usd:
+            gates.append(
+                {
+                    "gate": "gth_minute_defined_risk_above_max",
+                    "actual": risk_usd,
+                    "threshold": policy.gth_max_risk_usd,
+                }
+            )
+        return gates
     entry_quality, reasons = vertical_entry_quality(
         spot=float(spot),
         atr=float(atr),
