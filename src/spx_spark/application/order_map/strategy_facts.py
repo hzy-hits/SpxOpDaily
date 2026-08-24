@@ -39,6 +39,9 @@ def build_market_fact_pack(
     structure, density = _map(option.get("structure")), _map(option.get("density"))
     volatility = _map(option.get("volatility"))
     market_volatility, volume = _map(market.get("volatility")), _map(market.get("volume"))
+    cross_asset = _map(market.get("cross_asset"))
+    relative_strength = _map(cross_asset.get("relative_strength_15m"))
+    macro_proxies = _map(cross_asset.get("macro_proxies_15m"))
     macro = _map(payload.get("macro_event"))
     trigger = _map(payload.get("level_decision"))
     gth_level = _map(payload.get("gth_level_manual_candidate"))
@@ -319,7 +322,39 @@ def build_market_fact_pack(
             "expected_move_points": _first(volatility.get("expected_move_points_0dte"),
                                             payload.get("expected_move_points")),
             "vix_return_15m_pct": _number(market_volatility.get("vix_return_15m_pct")),
+            "vix1d_return_15m_pct": _number(
+                market_volatility.get("vix1d_return_15m_pct")
+            ),
             "atm_straddle_decay_15m": _number(volatility.get("atm_straddle_decay_15m")),
+        },
+        "internals": {
+            "qqq_minus_spy_15m_pct": _number(relative_strength.get("qqq_minus_spy_pct")),
+            "rsp_minus_spy_15m_pct": _number(relative_strength.get("rsp_minus_spy_pct")),
+            "iwm_minus_spy_15m_pct": _number(relative_strength.get("iwm_minus_spy_pct")),
+        },
+        "macro_context": {
+            "status": macro_proxies.get("status") or "unavailable",
+            "missing": list(macro_proxies.get("missing") or ()),
+            "short_rate_price_return_15m_pct": _number(
+                macro_proxies.get("short_rate_price_return_pct")
+            ),
+            "long_rate_price_return_15m_pct": _number(
+                macro_proxies.get("long_rate_price_return_pct")
+            ),
+            "duration_price_return_15m_pct": _number(
+                macro_proxies.get("duration_price_return_pct")
+            ),
+            "credit_hyg_minus_lqd_15m_pct": _number(
+                macro_proxies.get("credit_hyg_minus_lqd_pct")
+            ),
+            "dollar_uup_return_15m_pct": _number(
+                macro_proxies.get("dollar_uup_return_pct")
+            ),
+            "oil_uso_return_15m_pct": _number(
+                macro_proxies.get("oil_uso_return_pct")
+            ),
+            "semantics": macro_proxies.get("semantics"),
+            "action_authority": "filter_only",
         },
         "structure": {
             "zero_gamma": _first(structure.get("zero_gamma"), payload.get("zero_gamma")),
@@ -339,6 +374,8 @@ def build_market_fact_pack(
                 _map(density.get("strike_differential_context"))
             ),
             "gex_quality": structure.get("gex_quality"),
+            "gamma_state": structure.get("gamma_state"),
+            "net_gamma_ratio": _number(structure.get("net_gamma_ratio")),
             "zero_gamma_migration_points": _number(structure.get("zero_gamma_migration_points")),
         },
         "event": {"state": macro.get("mode") or "unavailable",

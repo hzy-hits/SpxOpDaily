@@ -361,11 +361,20 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
             spy=500.0 + minute / 10,
             qqq=600.0 + minute / 8,
             rsp=200.0 + minute / 25,
+            iwm=220.0 + minute / 30,
+            hyg=80.0 - minute / 1000,
+            lqd=110.0,
+            tlt=90.0 - minute / 500,
+            ief=95.0 - minute / 1000,
+            shy=100.0 - minute / 5000,
+            uup=27.0 + minute / 1000,
+            uso=75.0 + minute / 100,
             spx=7450.0 + minute,
             ndx=22_000.0 + minute * 2.0,
             dji=44_000.0 + minute * 0.5,
             rut=2_200.0 + minute * 0.2,
             vix=15.0 + minute / 100,
+            vix1d=10.0 + minute / 50,
             vvix=80.0 + minute / 10,
         )
         for minute in range(181)
@@ -418,7 +427,11 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
     assert cross_index["source"] == "globex_index"
     assert cross_index["status"] == "degraded"
     assert cross_index["anchor"] == "future:ES"
-    assert frame.volatility["vix1d_vix_ratio"] is None
+    assert frame.volatility["vix1d_vix_ratio"] is not None
+    assert frame.volatility["vix1d_return_15m_pct"] is not None
+    assert frame.cross_asset["macro_proxies_15m"]["status"] == "ready"
+    assert frame.cross_asset["macro_proxies_15m"]["credit_hyg_minus_lqd_pct"] < 0
+    assert frame.cross_asset["relative_strength_15m"]["iwm_minus_spy_pct"] is not None
     assert frame.volatility["es_realized_vol_60m_annualized"] is not None
     assert frame.volatility["atm_iv_minus_es_realized_vol"] is not None
 
@@ -1334,6 +1347,14 @@ def _market_sample(
     spy: float | None = None,
     qqq: float | None = None,
     rsp: float | None = None,
+    iwm: float | None = None,
+    hyg: float | None = None,
+    lqd: float | None = None,
+    tlt: float | None = None,
+    ief: float | None = None,
+    shy: float | None = None,
+    uup: float | None = None,
+    uso: float | None = None,
     spx: float | None = None,
     ndx: float | None = None,
     dji: float | None = None,
@@ -1342,6 +1363,7 @@ def _market_sample(
     ym: float | None = None,
     rty: float | None = None,
     vix: float | None = None,
+    vix1d: float | None = None,
     vvix: float | None = None,
 ) -> dict[str, object]:
     instruments: dict[str, dict[str, object]] = {
@@ -1354,11 +1376,20 @@ def _market_sample(
         ("equity:SPY", spy),
         ("equity:QQQ", qqq),
         ("equity:RSP", rsp),
+        ("equity:IWM", iwm),
+        ("equity:HYG", hyg),
+        ("equity:LQD", lqd),
+        ("equity:TLT", tlt),
+        ("equity:IEF", ief),
+        ("equity:SHY", shy),
+        ("equity:UUP", uup),
+        ("equity:USO", uso),
         ("index:SPX", spx),
         ("index:NDX", ndx),
         ("index:DJI", dji),
         ("index:RUT", rut),
         ("index:VIX", vix),
+        ("index:VIX1D", vix1d),
         ("index:VVIX", vvix),
     ):
         if value is not None:

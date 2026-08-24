@@ -34,6 +34,7 @@ from spx_spark.application.order_map.strategy_facts import build_market_fact_pac
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     assess_regime,
+    assess_rth_environment,
     butterfly_entry_clock_open,
     butterfly_max_entry_minutes,
     five_wide_look_mass_ready,
@@ -59,6 +60,80 @@ from spx_spark.marketdata import (
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 from spx_spark.storage import LatestState
+
+
+def test_rth_environment_separates_expansion_balance_and_missing_data() -> None:
+    facts = {
+        "session": {"mode": "rth"},
+        "event": {"state": "normal", "entry_allowed": True},
+        "path": {"breadth_above_vwap": 0.74},
+        "volatility": {
+            "vix1d_return_15m_pct": 0.03,
+            "atm_iv_change_5m": 0.012,
+            "atm_iv_change_15m": 0.018,
+            "atm_straddle_decay_15m": -0.03,
+        },
+        "structure": {"gamma_state": "negative_gamma_acceleration"},
+        "macro_context": {
+            "status": "ready",
+            "short_rate_price_return_15m_pct": -0.0003,
+            "long_rate_price_return_15m_pct": -0.001,
+            "credit_hyg_minus_lqd_15m_pct": -0.0012,
+            "dollar_uup_return_15m_pct": 0.0011,
+            "oil_uso_return_15m_pct": 0.0,
+        },
+    }
+    expansion = assess_rth_environment(
+        facts,
+        path_state="TREND",
+        terminal_state="NONE",
+    )
+    assert expansion["state"] == "RISK_EXPANSION"
+    assert expansion["directional_structures_allowed"] is True
+    assert expansion["range_structures_allowed"] is False
+    assert expansion["direction_authority"] == "none"
+
+    balanced = deepcopy(facts)
+    balanced["path"]["breadth_above_vwap"] = 0.50
+    balanced["volatility"] = {
+        "vix1d_return_15m_pct": -0.01,
+        "atm_iv_change_5m": -0.001,
+        "atm_iv_change_15m": -0.002,
+        "atm_straddle_decay_15m": 0.02,
+    }
+    balanced["structure"] = {"gamma_state": "positive_gamma_pin"}
+    contraction = assess_rth_environment(
+        balanced,
+        path_state="BALANCED",
+        terminal_state="NONE",
+    )
+    assert contraction["state"] == "VOL_CONTRACTION_BALANCE"
+    assert contraction["range_structures_allowed"] is True
+
+    del balanced["volatility"]["atm_iv_change_15m"]
+    missing = assess_rth_environment(
+        balanced,
+        path_state="BALANCED",
+        terminal_state="NONE",
+    )
+    assert missing["state"] == "INSUFFICIENT_DATA"
+    assert missing["range_structures_allowed"] is False
+
+
+def test_rth_environment_event_risk_blocks_both_structure_families() -> None:
+    result = assess_rth_environment(
+        {
+            "session": {"mode": "rth"},
+            "event": {"state": "pre_event", "entry_allowed": False},
+        },
+        path_state="TREND",
+        terminal_state="NONE",
+    )
+
+    assert result["state"] == "EVENT_RISK"
+    assert result["directional_structures_allowed"] is False
+    assert result["range_structures_allowed"] is False
+    assert result["direction_authority"] == "none"
 
 
 def test_risk_adjusted_cvar_objective_reconciles_and_keeps_no_trade_solution() -> None:
@@ -596,7 +671,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v50"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v51"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -885,7 +960,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v50"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v51"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1055,7 +1130,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v50"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v51"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1150,7 +1225,11 @@ def test_rth_preaverage_signal_reaches_manual_decision_with_frozen_contract(
     pathless["minute_market_frame"]["diagnostics"] = {}
     decoupled = build_strategy_decision(pathless, latest, now, data_root=tmp_path)
     assert decoupled["market_facts"]["capabilities"]["path"]["ready"] is False
-    assert decoupled["candidate"]["setup_kind"] == "PREAVERAGE15_PULLBACK"
+    assert decoupled["decision_type"] == "NO_TRADE"
+    assert decoupled["candidate"] is None
+    assert decoupled["why_not"]["primary_blocker"] == (
+        "rth_environment_inputs_unavailable"
+    )
 
     future_document = deepcopy(payload)
     future_document["experimental_research_signals"]["generated_at"] = (
@@ -4220,6 +4299,7 @@ def _decision_payload(now: datetime) -> dict[str, object]:
                     },
                 }
             },
+            "volatility": {"vix1d_return_15m_pct": 0.03},
         },
         "option_structure_frame": {
             "as_of": observed.isoformat(),
@@ -4230,6 +4310,12 @@ def _decision_payload(now: datetime) -> dict[str, object]:
                 "zero_gamma": 7695.0,
                 "flip_zone": [7700.0, 7705.0],
                 "call_wall": 7730.0,
+                "gamma_state": "negative_gamma_acceleration",
+            },
+            "volatility": {
+                "atm_iv_change_5m": 0.012,
+                "atm_iv_change_15m": 0.018,
+                "atm_straddle_decay_15m": -0.03,
             },
         },
         "macro_event": {"mode": "normal", "entry_allowed": True},
@@ -4337,7 +4423,10 @@ def _pin_payload(now: datetime) -> dict[str, object]:
                 "pin_path_1m": [value + 26.56 for value in facts["path"]["pin_path_spx"]],
             },
             "volume": {"value_centers_es": {"15m": 7739.12, "30m": 7739.25, "60m": 7740.74}},
-            "volatility": {"vix_return_15m_pct": -0.005},
+            "volatility": {
+                "vix_return_15m_pct": -0.005,
+                "vix1d_return_15m_pct": -0.01,
+            },
             "diagnostics": {"rth_market_state": {"D": 0.0, "input_lineage": {
                 "values": {"efficiency_ratio": 0.1429, "vwap_cross_count": 3,
                            "price_vs_vwap": "above", "breadth_above_vwap": 0.5},
@@ -4346,9 +4435,18 @@ def _pin_payload(now: datetime) -> dict[str, object]:
         },
         "option_structure_frame": {
             "as_of": observed, "quality": "ready", "front_expiry": "20260806",
-            "l1": {"quality": "ready"}, "structure": facts["structure"],
+            "l1": {"quality": "ready"},
+            "structure": {
+                **facts["structure"],
+                "gamma_state": "positive_gamma_pin",
+            },
             "density": {"mode": 7710.0, "local_mass_5pt": facts["structure"]["q_local_mass_5pt"]},
-            "volatility": {"atm_straddle_decay_15m": 0.0448, "expected_move_points_0dte": 25.0},
+            "volatility": {
+                "atm_straddle_decay_15m": 0.0448,
+                "atm_iv_change_5m": -0.001,
+                "atm_iv_change_15m": -0.002,
+                "expected_move_points_0dte": 25.0,
+            },
         },
         "macro_event": {"mode": "normal", "entry_allowed": True},
         "strategy_distribution_forecast": _probability_forecast(now, "terminal_between"),

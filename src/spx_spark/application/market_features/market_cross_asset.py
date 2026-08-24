@@ -38,6 +38,14 @@ RETURN_INSTRUMENTS = (
     "equity:SPY",
     "equity:QQQ",
     "equity:RSP",
+    "equity:IWM",
+    "equity:HYG",
+    "equity:LQD",
+    "equity:TLT",
+    "equity:IEF",
+    "equity:SHY",
+    "equity:UUP",
+    "equity:USO",
     *CASH_INDEX_INSTRUMENTS,
 )
 
@@ -117,6 +125,7 @@ def cross_asset_features(
     current_provider = es.get("provider") if es else None
     es_15 = returns["future:ES"]["return_15m_pct"]
     spy_15 = returns["equity:SPY"]["return_15m_pct"]
+    macro_proxies = _macro_proxy_features(returns)
     rolling_basis = statistics.median(basis_history) if basis_history else None
     return {
         "returns": returns,
@@ -131,13 +140,45 @@ def cross_asset_features(
         "relative_strength_15m": {
             "qqq_minus_spy_pct": _difference(returns["equity:QQQ"]["return_15m_pct"], spy_15),
             "rsp_minus_spy_pct": _difference(returns["equity:RSP"]["return_15m_pct"], spy_15),
+            "iwm_minus_spy_pct": _difference(returns["equity:IWM"]["return_15m_pct"], spy_15),
         },
+        "macro_proxies_15m": macro_proxies,
         "es_provider_divergence": divergence,
         "selected_es_provider": current_provider,
         "source_switch": (
             {"from": previous_provider, "to": current_provider}
             if previous_provider and current_provider and previous_provider != current_provider
             else None
+        ),
+    }
+
+
+def _macro_proxy_features(
+    returns: dict[str, dict[str, float | None]],
+) -> dict[str, Any]:
+    hyg = returns["equity:HYG"]["return_15m_pct"]
+    lqd = returns["equity:LQD"]["return_15m_pct"]
+    required = {
+        "hyg": hyg,
+        "lqd": lqd,
+        "tlt": returns["equity:TLT"]["return_15m_pct"],
+        "ief": returns["equity:IEF"]["return_15m_pct"],
+        "shy": returns["equity:SHY"]["return_15m_pct"],
+        "uup": returns["equity:UUP"]["return_15m_pct"],
+        "uso": returns["equity:USO"]["return_15m_pct"],
+    }
+    missing = [key for key, item in required.items() if item is None]
+    return {
+        "status": "ready" if not missing else "degraded",
+        "missing": missing,
+        "short_rate_price_return_pct": required["shy"],
+        "long_rate_price_return_pct": required["ief"],
+        "duration_price_return_pct": required["tlt"],
+        "credit_hyg_minus_lqd_pct": _difference(hyg, lqd),
+        "dollar_uup_return_pct": required["uup"],
+        "oil_uso_return_pct": required["uso"],
+        "semantics": (
+            "liquid_etf_price_proxies_not_yield_basis_points_credit_spreads_dxy_or_wti"
         ),
     }
 

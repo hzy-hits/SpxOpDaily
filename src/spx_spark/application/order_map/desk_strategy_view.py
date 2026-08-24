@@ -219,11 +219,23 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
     else:
         condor_text = "尚未形成可评估四腿报价"
 
-    return (
+    lines = [
         f"策略状态·方向价差  {vertical_text}",
         f"策略状态·蝶式  {butterfly_text}",
         f"策略状态·铁鹰  {condor_text}",
-    )
+    ]
+    environment = _mapping(_mapping(decision.get("regime")).get("rth_environment"))
+    environment_state = str(environment.get("state") or "")
+    if environment_state and environment_state != "NOT_APPLICABLE":
+        label = {
+            "EVENT_RISK": "事件风险，普通入场关闭",
+            "RISK_EXPANSION": "风险扩张，只考虑已有触发的方向结构",
+            "VOL_CONTRACTION_BALANCE": "波动收缩且平衡，可评估区间结构",
+            "MIXED_UNCONFIRMED": "混合未确认，暂不授权新结构",
+            "INSUFFICIENT_DATA": "核心输入不足，失效关闭",
+        }.get(environment_state, environment_state)
+        lines.insert(0, f"RTH环境  {label}；宏观只作过滤，不产生方向")
+    return tuple(lines)
 
 
 def _gth_scan_desk_view(
@@ -379,6 +391,9 @@ def humanize_strategy_reason(reason: str) -> str:
         "pricing_not_authorized": "定价未授权，不能当作可执行候选",
         "spx_price_unavailable": "触发坐标不可用（RTH 需现金 SPX；GTH 需期权隐含或 ES 折算）",
         "macro_entry_not_authorized": "宏观事件窗口禁止新建议",
+        "rth_environment_inputs_unavailable": "VIX1D、ATM、跨式衰减或广度输入不足",
+        "rth_range_structure_environment_not_balanced": "波动尚未收缩到平衡环境，不做铁鹰/位置蝶",
+        "rth_directional_environment_not_expanding": "剩余日内风险未确认扩张，不授权方向价差",
         "session_not_open_for_spxw_strategy": "当前不在可评估 SPXW 的时段",
         "no_supported_strategy_candidate": "没有通过门控的可交易候选",
         "gth_butterfly_rth_only": "夜盘不授权蝶式，只在 RTH 稳定钉住评估",

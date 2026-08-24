@@ -408,6 +408,7 @@ def _hard_gate_candidate(
                 }
             )
     gates.extend(_macro_hard_gates(candidate, facts))
+    gates.extend(_rth_environment_hard_gates(candidate, facts, regime))
     strategy_type = str(candidate.get("strategy_type") or "")
     if strategy_type.endswith("_DEBIT_VERTICAL"):
         gates.extend(_vertical_hard_gates(candidate, facts, regime, policy=policy))
@@ -462,6 +463,53 @@ def _macro_hard_gates(
             "gate": "macro_entry_not_authorized",
             "actual": event.get("state"),
             "threshold": "entry_allowed_or_explicit_event_settlement_view",
+        }
+    ]
+
+
+def _rth_environment_hard_gates(
+    candidate: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if str(_map(facts.get("session")).get("mode") or "").lower() != "rth":
+        return []
+    setup = str(candidate.get("setup_kind") or "")
+    if setup in {_EVENT_SETTLEMENT_SETUP, _CLOSE_CONVERGENCE_60M}:
+        return []
+    strategy_type = str(candidate.get("strategy_type") or "")
+    range_structure = strategy_type == _IRON_CONDOR_TYPE or (
+        strategy_type.endswith("_BUTTERFLY") and setup == "STABLE_PIN"
+    )
+    directional_structure = (
+        strategy_type.endswith("_DEBIT_VERTICAL") and setup in _RTH_DIRECTIONAL_SPREADS
+    )
+    if not range_structure and not directional_structure:
+        return []
+    environment = _map(regime.get("rth_environment"))
+    state = str(environment.get("state") or "INSUFFICIENT_DATA")
+    if state == "EVENT_RISK":
+        return []
+    if environment.get("status") != "ready":
+        return [
+            {
+                "gate": "rth_environment_inputs_unavailable",
+                "actual": list(environment.get("missing") or ()),
+                "threshold": "causal_vix1d_atm_straddle_breadth",
+            }
+        ]
+    expected = "VOL_CONTRACTION_BALANCE" if range_structure else "RISK_EXPANSION"
+    if state == expected:
+        return []
+    return [
+        {
+            "gate": (
+                "rth_range_structure_environment_not_balanced"
+                if range_structure
+                else "rth_directional_environment_not_expanding"
+            ),
+            "actual": state,
+            "threshold": expected,
         }
     ]
 

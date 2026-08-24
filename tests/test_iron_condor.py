@@ -181,11 +181,27 @@ def _rth_facts(
             "available_at": RTH_NOW.isoformat(),
             "minutes_to_close": 360,
             "session": {"mode": "rth", "legal": True},
+            "path": {
+                "direction_score": 0.0,
+                "efficiency_ratio_30m": 0.20,
+                "vwap_crosses_30m": 3.0,
+                "price_vs_vwap": "above",
+                "breadth_above_vwap": 0.50,
+                "vwap_slope": 0.0,
+            },
             "volatility": {
                 "expected_move_points": 40.0,
                 "atm_iv_0dte": atm_iv,
                 "put_skew_25d_0dte": put_skew,
                 "call_skew_25d_0dte": call_skew,
+                "vix1d_return_15m_pct": -0.01,
+                "atm_iv_change_5m": -0.001,
+                "atm_iv_change_15m": -0.002,
+                "atm_straddle_decay_15m": 0.02,
+            },
+            "structure": {
+                **facts["structure"],
+                "gamma_state": "positive_gamma_pin",
             },
             "iron_condor_authority": {
                 "status": "ready",
@@ -193,6 +209,7 @@ def _rth_facts(
             },
         }
     )
+    facts["capabilities"]["path"] = {"ready": True}
     return facts
 
 
@@ -347,8 +364,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v50"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v50"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v51"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v51"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None

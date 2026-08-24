@@ -1109,6 +1109,30 @@ v50 不采用 09:45 提前入场。34 个 RTH 的分钟因果回放中，09:45 �
 `greeks_observed_at` 列；运行时有独立时间戳时严格检查，否则只可使用报价行
 时间作为 Greeks 时间，因此继续标记 `forward_unvalidated_user_override`。
 
+### 11.16 v51：RTH 环境只负责过滤与结构选择
+
+v51 把事件、波动率、市场广度和跨资产确认压成一个
+`rth_environment`，但明确不给它方向权限：
+
+- `EVENT_RISK`：既有宏观日历在发布前继续禁止普通入场；显式
+  `EVENT_SETTLEMENT_THRESHOLD` 仍走自己的事件合同；
+- `RISK_EXPANSION`：VIX1D 15 分钟涨幅 ≥2%、ATM IV 5/15 分钟上升
+  ≥1/1.5 vol point、ATM 跨式 15 分钟重新扩张 ≥2% 或负 Gamma 中至少
+  两项成立；一项成立时还必须有 TREND、单边 breadth 或跨资产压力确认。
+  它只允许已有价格触发的 RTH Debit 继续过门，不能决定 Call/Put；
+- `VOL_CONTRACTION_BALANCE`：VIX1D、ATM IV 与跨式四项中至少三项确认
+  收缩，breadth 位于 35%–65%，同时路径为 BALANCED 或已形成
+  PIN_STABLE，且不得处于负 Gamma 加速。它允许评估 RTH 铁鹰和
+  STABLE_PIN 蝶式；
+- 核心 VIX1D/ATM/跨式/breadth 任一缺失时为 `INSUFFICIENT_DATA`，新结构
+  失效关闭；`MIXED_UNCONFIRMED` 也不授权新结构；
+- HYG−LQD、SHY/IEF/TLT、UUP、USO 只作 15 分钟压力确认。它们是流动 ETF
+  价格代理，不得表述为真实 credit spread、2Y/10Y 基点、DXY 或 WTI；
+- `CLOSE_CONVERGENCE_60M` 保留独立的物理收盘分布合同，不继承这个环境门。
+
+全部阈值是 `strategy_policy.bootstrap.v51` 的冻结代码常量。该层不增加服务、
+存储、通知通道或自动下单能力；`automatic_ordering=false` 不变。
+
 ---
 
 ## 12. 正式 NoTrade

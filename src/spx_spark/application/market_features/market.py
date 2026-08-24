@@ -44,6 +44,14 @@ TRACKED_INSTRUMENTS = (
     "equity:SPY",
     "equity:QQQ",
     "equity:RSP",
+    "equity:IWM",
+    "equity:HYG",
+    "equity:LQD",
+    "equity:TLT",
+    "equity:IEF",
+    "equity:SHY",
+    "equity:UUP",
+    "equity:USO",
     "index:VIX",
     "index:VIX1D",
     "index:VIX3M",
@@ -521,6 +529,7 @@ def volatility_features(
     }
     vix, vix1d, vix3m = values.get("vix"), values.get("vix1d"), values.get("vix3m")
     vix_return = _percent_return(_instrument_points(samples, "index:VIX"), now, 15)
+    vix1d_return = _percent_return(_instrument_points(samples, "index:VIX1D"), now, 15)
     vvix_return = _percent_return(_instrument_points(samples, "index:VVIX"), now, 15)
     es_realized = realized_volatility(_instrument_points(samples, "future:ES"), now=now, minutes=60)
     return {
@@ -529,6 +538,7 @@ def volatility_features(
         "vix_vix3m_ratio": vix / vix3m if vix and vix3m else None,
         "vix_vvix_direction_confirmation_15m": direction_confirmation(vix_return, vvix_return),
         "vix_return_15m_pct": vix_return,
+        "vix1d_return_15m_pct": vix1d_return,
         "vvix_return_15m_pct": vvix_return,
         "skew_change_60m": _return(_instrument_points(samples, "index:SKEW"), now, 60),
         "es_realized_vol_60m_annualized": es_realized,

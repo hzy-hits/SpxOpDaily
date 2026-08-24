@@ -26,6 +26,7 @@ __all__ = (
     "ManagementPolicy",
     "PIN_BUTTERFLY_MANAGEMENT_POLICY",
     "StrategyPolicy",
+    "assess_rth_environment",
     "assess_regime",
     "butterfly_entry_clock_open",
     "butterfly_max_entry_minutes",
@@ -45,166 +46,8 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v50"
-    # v50: RTH manual iron condors use Schwab-only per-side deltas at or below
-    # 20, require fresh Greek observations, stop new entries at 11:00 ET, and
-    # lock the first qualifying strike set for the session.
-    # v49: RTH iron-condor credit is 25%-55%; the frozen ATM/smile verdict on
-    # the first qualifying candidate is fail-closed, session-long, manual-only.
-    # v46: the user-authorized RTH iron-condor lane is one 20-delta,
-    # fixed-10-wide manual candidate per session between 10:00 and 11:00 ET.
-    # It requires exact four-leg BBO age <=15s/skew <=2s, 15%-55% credit,
-    # spot inside shorts, and <=$1,000 defined risk. Management is buy back at
-    # 0.5x entry credit, stop at 3x liability (200% loss on credit), otherwise
-    # close at 15:45 ET. GTH remains map-only and ordering remains disabled.
-    # v45: candidate-specific entry-frozen ATM / put-call skew / put-call
-    # curvature bumps replace the global d3/d4 direction prior. Surface may
-    # subtract at most 0.05 from structure rank; it cannot add direction,
-    # bypass a hard gate, authorize an iron condor, or enable ordering.
-    # v44: the user-authorized 15:00 ET physical close-convergence lane may
-    # enumerate one manual-only Butterfly from the causal online-pool modal
-    # center. It compares 10/15/20-point C/P tents on 51 settlement quantiles,
-    # exact BBO and the frozen risk objective, then holds to 15:55 ET. It does
-    # not inherit STABLE_PIN, dealer, GEX, wall, q-mode, or direction rules.
-    # v43: a STABLE_PIN body is observation-only until the same selected
-    # center survives at least three decision snapshots and ten minutes. A
-    # small challenger cannot replace the previous center unless its score
-    # leads by 0.05; only the confirmed top center reaches candidate
-    # enumeration. The 11:00–13:00 ladder starts at 10-wide and rank no
-    # longer hard-prefers the tightest tent. An accepted RTH pin card keeps
-    # its exact center/width/right for the existing 15-minute winner window.
-    # v42: blind GTH width/delta scans remain in the rejection funnel but no
-    # longer authorize Trade Ready. Recent live cards showed rapid direction
-    # flips without forward edge evidence. GTH manual debit now requires
-    # confirmed level/dip-reclaim evidence; existing RTH authorities remain.
-    # GTH directional hysteresis is 30 minutes, same-setup cards cool down for
-    # 15 minutes, and each direction is capped at two accepted cards/session.
-    # GTH debit above 45% of width fails closed.
-    # v41: user-authorized RTH wall competing-risk hazard may produce a
-    # forward-unvalidated manual debit candidate. The four-feature frozen
-    # model supplies direction only; exact BBO, structure quality, PIN,
-    # geometry, debit, and conservative target-payoff EV remain hard gates.
-    # v40: explicit user authorization promotes the RTH causal 15-second
-    # pre-average pullback detector to a manual-only 60-delta/15-point debit
-    # lane. It stays marked forward-unvalidated, uses Schwab exact BBO <=5s,
-    # and does not inherit HMM, GEX direction, or legacy entry-quality gates.
-    # v39: POST_EVENT_DISCOVERY no longer blocks ES_VOLUME_MOMENTUM after
-    # the RTH open. Debit management drops the v1 20-minute time stop;
-    # verticals keep the 50% premium stop, trail, and 15:45 ET hard close.
-    # Opposite cash HMM TREND, add-needs-new-impulse, and flip-needs-HMM
-    # TREND stay. User named the two gates to delete.
-    # v38: RTH ES_VOLUME_MOMENTUM is a human debit again. Failed-break,
-    # trend-pullback, and breakout stay funnel-only.
-    # v37: GTH width/delta debit prints on TREND or TRANSITION when the
-    # ES path direction matches. 2026-08-18 GTH dumped in TRANSITION DOWN
-    # (efficiency 0.33, below trend_efficiency 0.45); the 7730/7725 put
-    # outscored the iron condor but died on TREND-only plus 0.45 debit
-    # cap (0.52). GTH debit cap is 0.55. UNCERTAIN / opposite side stay
-    # closed.
-    # v36: iron condor stays on the desk map and does not print a human
-    # card. Geometry-ready 5–20Δ 10-wide condors were winning every GTH
-    # cycle after unevidenced debit was gated, and the winner overlay
-    # reused the 20-minute debit management policy. Human debit is still
-    # GTH direction-aligned width/delta plus confirmed level / dip-reclaim.
-    # v35: GTH can still print a human debit. TREND-aligned width/delta
-    # scans and confirmed GTH level / dip-reclaim verticals remain
-    # manual candidates. Desk Map copy stays 不做; winners still go
-    # through trade_ready. RTH ES_VOLUME_MOMENTUM and leftover RTH
-    # directionals stay blocked by unevidenced_debit_not_human_authorized.
-    # v34: unevidenced debit verticals no longer authorize a human card.
-    # GTH width/delta scans, RTH ES_VOLUME_MOMENTUM, failed-break, trend
-    # pullback, breakout, and GTH level-path verticals stay enumerated for
-    # the desk map and funnel. Human debit is EVENT_SETTLEMENT_THRESHOLD
-    # only. RTH pin TRADE butterflies stay. Replay on persisted cards found
-    # no edge in width-scan / volume-momentum debit under v1 management.
-    # v33: same-direction RTH adds need a new impulse (cash HMM TREND the
-    # same way and |5m|/ATR5m at least es_momentum_add_min_return_5m_atr).
-    # v33 also blocked ES_VOLUME_MOMENTUM in POST_EVENT_DISCOVERY after
-    # the RTH open grace; v39 removes that gate. entry_allowed stays
-    # true in post_event so event-settlement is not collateral damage.
-    # v32: ES_VOLUME_MOMENTUM stays the only RTH directional setup. The first
-    # card does not wait for TREND or a pullback. Cash HMM TREND opposite
-    # blocks a first print. A session that already printed the opposite RTH
-    # human card may flip only when cash HMM owns TREND the new way.
-    # Rank/delivery also stick the RTH winner for rth_winner_stick_seconds.
-    # v31: RTH human directional cards come from ES_VOLUME_MOMENTUM only
-    # (elevated ES pace + 1m/5m momentum). TREND_PULLBACK / FAILED_BREAK /
-    # BREAKOUT_ACCEPTANCE stay as audit facts and GTH labels; they no longer
-    # authorize an RTH card. Short-cycle Late Chase ignores VWAP+15m impulse
-    # and uses 5m ATR exhaustion plus 50% progress. Pin LOOK/TRADE still
-    # vetoes the new setup. Event-settlement and GTH scans stay.
-    # v30: LOOK or TRADE pin vetoes RTH directional debit verticals
-    # (failed-break, trend-pullback, breakout). Event-settlement and GTH
-    # scans stay. PIN_MIGRATING / UNCERTAIN do not block spreads.
-    # v29: 11:00–13:00 TRADE does not bind fly width. The look ladder is
-    # 10/15/20/50; a width is enumerated when local mass is already piled
-    # inside [K−W, K+W]. Rank prefers any pin fly over a vertical, then the
-    # tightest passing tent. Late RTH still uses 5/10/15/20 on 12 min/point.
-    # v28: 11:00–13:00 TRADE evaluates 10-wide flies by default. 5-wide in
-    # that window only when local 5pt mass is concentrated within ±5 of the
-    # body. The look clock opens 5 and 10; 15/20 stay on 12 min/point.
-    # v27: PIN splits LOOK vs TRADE. LOOK (11:00–13:00, 1 excursion, not
-    # migrating) is observation only and never authorizes a butterfly card.
-    # TRADE remains PIN_STABLE with the existing hard stack (2 excursions).
-    # v26: PIN alignment uses the local 5pt mass peak, not the global density
-    # argmax. The previous peak sticks when it is still a top-2 local mass
-    # center and within 5 points of the current local peak.
-    # v25: PIN_STABLE hold does not drop on a 2→1 excursion flicker, and a
-    # far-OTM Q-mode spike is replaced by the local 5pt mass peak.
-    # v24: PIN_STABLE may be assessed from 11:00 ET (300 minutes to close),
-    # matching the 5-wide look window. The old 12:30 / 210-minute floor is gone.
-    # v23: 5-wide PIN_STABLE has two clocks. 11:00–13:00 ET is the look
-    # window (12:38 must not be labeled too-early). 14:50 ET slack (≤70)
-    # remains the late pin window. 14:30 leftover of 90 minutes stays closed.
-    # 10-wide and wider keep 12 min/point. No dwell/hold gate: 2026-08-14
-    # PIN_STABLE flickered as single-cycle hits.
-    # v22: FAILED_BREAK_RECLAIM windows close at 50% trigger→target progress
-    # (session-episode and entry quality). TREND_PULLBACK Late Chase stays 60%.
-    # PIN_STABLE 5-wide flies get 10 minutes of clock slack so 14:50–15:00 ET
-    # is not a false early veto; 10-wide and wider keep 12 min/point.
-    # v21: Butterflies are RTH-only (STABLE_PIN). GTH ATM flies are not
-    # enumerated or human-authoritative; night path is too hard to pin.
-    # v20: GTH winner stick and delivery direction lock only count cards the
-    # outbox accepted. Selected-but-never-pushed cycles must not lock the desk.
-    # v19: GTH Call/Put debit verticals require TREND aligned with the
-    # candidate direction. Cheapness ranking stays, but TRANSITION/UNCERTAIN
-    # or the opposite side is a hard-gate zero. ATM butterflies may still pass.
-    # v18: GTH keeps one human direction at a time and sticks the winner for
-    # gth_winner_stick_seconds. Rank may not flip UP/DOWN/NEUTRAL, and delivery
-    # may not print the opposite side, until that hysteresis expires.
-    # v17: one perception contract, session-selected owners. Cash HMM may own
-    # RTH path_direction (SPX). Globex HMM never owns GTH path_direction; it
-    # only publishes cross_state (NQ/YM/RTY vs ES). GTH direction is ES path.
-    # HMM still cannot skip hard gates or order.
-    # v16: session-selected index HMM owns path_state when the cash (RTH) or
-    # globex-futures (GTH) basket is ready. ES path remains the fallback and
-    # a VWAP direction check. HMM still cannot skip hard gates or order.
-    # v15: RTH pin butterflies no longer require OI-GEX as a capability gate.
-    # STABLE_PIN management holds to 15:45 ET with trail; debit verticals
-    # used the v1 20-minute time stop until v39.
-    # v14: RTH pin butterflies must keep spot inside the tent, wait until
-    # minutes_to_close <= 12 per width point (5-wide from 15:00 ET), and not
-    # pin a body while a wall still sits inside 1.5x remaining EM outside the
-    # wings. Card text prints the three legs. PIN_STABLE itself is unchanged
-    # so iron-condor 12:30 timing does not move.
-    # v13: RTH confirmation stays open for two extra 5m bars so a human card
-    # can still print; session-episode reclaim expires at the same 60%
-    # progress cap as debit chase; flood caps are per session_mode so GTH
-    # scans cannot silence RTH.
-    # v12: "20Δ 以下" means at-or-below 20, never the richer nearest strike.
-    # GTH debit longs use the same 5–20Δ ladder, not 25Δ.
-    # v11: short-leg band is 5–20Δ (naked short delta, not 25). GTH iron
-    # condors are path-forwarded to the 12:00–13:00 ET clearing window.
-    # v10: sell 5–25Δ short legs with a 10-point defined-risk wing; do not pair
-    # 25Δ shorts with 5Δ longs. GTH debit longs must sit inside remaining EM.
-    # v9: GTH desk map is a live structure scan, not an empty health heartbeat.
-    # Always recompute the iron condor from 1-minute quotes. Widen the
-    # Call/Put/butterfly scan around spot±5 and 5–20Δ anchors. Winners still
-    # push only on trade_ready; unpassed debit spreads are not 可看.
-    # v8: GTH enumerates 5-50pt Call/Put debit verticals and butterflies from
-    # quotes no older than 60s, then pushes only rank winners on trade_ready.
-    # v7: GTH human cards authorize only NEUTRAL session-advance; dip-reclaim
-    # requires an aged bullish regime. Continuation m1 stays observe-only.
+    policy_version: str = "strategy_policy.bootstrap.v51"
+    # Policy history and frozen thresholds: docs/strategy-signal-engine-v2.md.
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
     trend_max_vwap_crosses: float = 2.0
@@ -223,6 +66,17 @@ class StrategyPolicy:
     iron_condor_wing_width: float = 10.0
     surface_bump_vol_points: float = 1.0
     surface_risk_modifier_cap: float = 0.05
+    rth_vix1d_expansion_15m_pct: float = 0.02
+    rth_atm_iv_expansion_5m: float = 0.01
+    rth_atm_iv_expansion_15m: float = 0.015
+    rth_straddle_reexpansion_15m: float = -0.02
+    rth_breadth_balance_min: float = 0.35
+    rth_breadth_balance_max: float = 0.65
+    rth_short_rate_proxy_fast_15m_pct: float = 0.0002
+    rth_long_rate_proxy_fast_15m_pct: float = 0.0008
+    rth_credit_stress_15m_pct: float = -0.001
+    rth_dollar_confirmation_15m_pct: float = 0.001
+    rth_oil_shock_15m_pct: float = 0.004
     opportunity_ttl_seconds: float = 300.0
     min_target_room_ratio: float = 1.5
     failed_break_min_target_room_ratio: float = 1.8
@@ -514,6 +368,145 @@ def hmm_owns_trend_direction(regime: Mapping[str, Any]) -> str | None:
     return direction if direction in {"UP", "DOWN"} else None
 
 
+def assess_rth_environment(
+    facts: Mapping[str, Any],
+    *,
+    path_state: str,
+    terminal_state: str,
+    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
+) -> dict[str, Any]:
+    """Classify RTH conditions for structure choice, never market direction."""
+
+    if str(_map(facts.get("session")).get("mode") or "").lower() != "rth":
+        return {"state": "NOT_APPLICABLE", "status": "not_applicable", "direction_authority": "none"}
+    event = _map(facts.get("event"))
+    if event.get("entry_allowed") is False or str(event.get("state") or "") in {
+        "pre_event",
+        "SCHEDULED_EVENT_RISK",
+    }:
+        return {
+            "state": "EVENT_RISK",
+            "status": "ready",
+            "direction_authority": "none",
+            "range_structures_allowed": False,
+            "directional_structures_allowed": False,
+            "reasons": ["scheduled_event_can_reprice_remaining_distribution"],
+        }
+
+    volatility = _map(facts.get("volatility"))
+    path = _map(facts.get("path"))
+    structure = _map(facts.get("structure"))
+    macro = _map(facts.get("macro_context"))
+    vix1d = _number(volatility.get("vix1d_return_15m_pct"))
+    atm_5m = _number(volatility.get("atm_iv_change_5m"))
+    atm_15m = _number(volatility.get("atm_iv_change_15m"))
+    straddle_decay = _number(volatility.get("atm_straddle_decay_15m"))
+    breadth = _number(path.get("breadth_above_vwap"))
+    core = {
+        "vix1d_return_15m_pct": vix1d,
+        "atm_iv_change_5m": atm_5m,
+        "atm_iv_change_15m": atm_15m,
+        "atm_straddle_decay_15m": straddle_decay,
+        "breadth_above_vwap": breadth,
+    }
+    missing = [key for key, value in core.items() if value is None]
+    if missing:
+        return {
+            "state": "INSUFFICIENT_DATA",
+            "status": "unavailable",
+            "direction_authority": "none",
+            "range_structures_allowed": False,
+            "directional_structures_allowed": False,
+            "missing": missing,
+            "reasons": ["rth_environment_core_inputs_unavailable"],
+        }
+
+    gamma_state = str(structure.get("gamma_state") or "unknown")
+    expansion_signals = {
+        "vix1d_expanding": float(vix1d) >= policy.rth_vix1d_expansion_15m_pct,
+        "atm_iv_5m_expanding": float(atm_5m) >= policy.rth_atm_iv_expansion_5m,
+        "atm_iv_15m_expanding": float(atm_15m) >= policy.rth_atm_iv_expansion_15m,
+        "straddle_reexpanding": (
+            float(straddle_decay) <= policy.rth_straddle_reexpansion_15m
+        ),
+        "negative_gamma": gamma_state == "negative_gamma_acceleration",
+    }
+    contraction_signals = {
+        "vix1d_not_expanding": float(vix1d) <= 0.0,
+        "atm_iv_5m_not_expanding": float(atm_5m) <= 0.0,
+        "atm_iv_15m_not_expanding": float(atm_15m) <= 0.0,
+        "straddle_decaying": float(straddle_decay) >= 0.0,
+    }
+    breadth_balanced = (
+        policy.rth_breadth_balance_min
+        <= float(breadth)
+        <= policy.rth_breadth_balance_max
+    )
+    breadth_directional = not breadth_balanced
+    rate_short = _number(macro.get("short_rate_price_return_15m_pct"))
+    rate_long = _number(macro.get("long_rate_price_return_15m_pct"))
+    rates_fast = bool(
+        rate_short is not None
+        and rate_long is not None
+        and rate_short * rate_long > 0
+        and (
+            abs(rate_short) >= policy.rth_short_rate_proxy_fast_15m_pct
+            or abs(rate_long) >= policy.rth_long_rate_proxy_fast_15m_pct
+        )
+    )
+    credit = _number(macro.get("credit_hyg_minus_lqd_15m_pct"))
+    dollar = _number(macro.get("dollar_uup_return_15m_pct"))
+    oil = _number(macro.get("oil_uso_return_15m_pct"))
+    confirmations = {
+        "rates_etf_price_shock": rates_fast,
+        "credit_stress": credit is not None and credit <= policy.rth_credit_stress_15m_pct,
+        "dollar_strength": (
+            dollar is not None and dollar >= policy.rth_dollar_confirmation_15m_pct
+        ),
+        "oil_shock": oil is not None and abs(oil) >= policy.rth_oil_shock_15m_pct,
+    }
+    expansion_count = sum(expansion_signals.values())
+    expansion_confirmed = expansion_count >= 2 or (
+        expansion_count >= 1
+        and (
+            path_state == "TREND"
+            or breadth_directional
+            or any(confirmations.values())
+        )
+    )
+    contraction_confirmed = (
+        sum(contraction_signals.values()) >= 3
+        and breadth_balanced
+        and (path_state == "BALANCED" or terminal_state == "PIN_STABLE")
+        and gamma_state != "negative_gamma_acceleration"
+    )
+    state = (
+        "RISK_EXPANSION"
+        if expansion_confirmed
+        else "VOL_CONTRACTION_BALANCE"
+        if contraction_confirmed
+        else "MIXED_UNCONFIRMED"
+    )
+    return {
+        "state": state,
+        "status": "ready",
+        "direction_authority": "none",
+        "directional_structures_allowed": state == "RISK_EXPANSION",
+        "range_structures_allowed": state == "VOL_CONTRACTION_BALANCE",
+        "expansion_signals": expansion_signals,
+        "contraction_signals": contraction_signals,
+        "macro_confirmations": confirmations,
+        "gamma_state": gamma_state,
+        "evidence": core,
+        "macro_proxy_status": macro.get("status") or "unavailable",
+        "macro_proxy_semantics": macro.get("semantics"),
+        "reasons": [
+            "macro_is_filter_not_direction",
+            "price_trigger_still_required",
+        ],
+    }
+
+
 def assess_regime(
     facts: Mapping[str, Any], policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY
 ) -> dict[str, Any]:
@@ -573,6 +566,12 @@ def assess_regime(
         "normal": "NORMAL",
     }.get(str(event.get("state") or "unavailable"), "UNCERTAIN")
     pin = _pin_assessment(facts, policy)
+    environment = assess_rth_environment(
+        facts,
+        path_state=state,
+        terminal_state=str(pin["terminal_state"]),
+        policy=policy,
+    )
     coordinate = {
         "cash_index": "index:SPX",
         "globex_index": "future:ES",
@@ -586,6 +585,7 @@ def assess_regime(
         "confidence": confidence,
         "reasons": reasons, "contradictions": contradictions, "pin": pin,
         "hmm": hmm_payload,
+        "rth_environment": environment,
     }
 
 
