@@ -431,11 +431,26 @@ def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
     assert rows[0]["put_short_distance_points"] == 60.0
     assert rows[0]["call_short_distance_points"] == 60.0
     assert {leg["provider"] for leg in rows[0]["legs"]} == {"schwab"}
+    assert rows[0]["gamma_risk"] == {
+        "status": "ready",
+        "version": "iron_condor_gamma_risk.v1",
+        "decision_effect": "explanation_only",
+        "state": "LOW",
+        "net_gamma_per_spx_point": 0.0,
+        "delta_shock_10_trader_delta": 0.0,
+        "gamma_loss_10_points": 0.0,
+        "gcr10": 0.0,
+        "gcr20": 0.0,
+        "nearest_short_abs_delta": 0.2,
+        "entry_gate_applied": False,
+    }
     card = _render_strategy_candidate(
         {"market_facts": {"spot": {"spx": SPOT}}}, rows[0]
     )
     assert "逐边卖≤20Δ" in card
     assert "实际选腿 Put 20.0Δ（距SPX 60.0点） · Call 20.0Δ（距SPX 60.0点）" in card
+    assert "Gamma风控（解释）：净Γ 0.0000 · 10点Delta冲击 0.0Δ" in card
+    assert "GCR10 0.0% · 最近短腿 20.0Δ · LOW" in card
 
     after_window = at_1100 + timedelta(minutes=1)
     later = enumerate_iron_condor_candidates(
@@ -446,6 +461,36 @@ def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
         policy=StrategyPolicy(),
     )
     assert later[0]["manual_authority_eligible"] is False
+
+
+def test_rth_iron_condor_gamma_risk_uses_signed_four_leg_gamma() -> None:
+    quotes = []
+    for quote in _rth_state().quotes:
+        gamma = 0.01
+        if quote.instrument.strike in {7680.0, 7820.0}:
+            gamma = 0.005
+        quotes.append(replace(quote, greeks=replace(quote.greeks, gamma=gamma)))
+    state = LatestState(
+        created_at=RTH_NOW,
+        as_of=RTH_NOW,
+        quotes=tuple(quotes),
+        best_quotes=tuple(quotes),
+    )
+
+    candidate = enumerate_iron_condor_candidates(
+        _payload(),
+        _rth_facts(),
+        state,
+        now=RTH_NOW,
+        policy=StrategyPolicy(),
+    )[0]
+
+    assert candidate["quote"]["credit"] == 2.5
+    assert candidate["gamma_risk"]["net_gamma_per_spx_point"] == -0.01
+    assert candidate["gamma_risk"]["delta_shock_10_trader_delta"] == 10.0
+    assert candidate["gamma_risk"]["gcr10"] == 0.20
+    assert candidate["gamma_risk"]["state"] == "NORMAL"
+    assert candidate["gamma_risk"]["entry_gate_applied"] is False
 
 
 def test_rth_human_iron_condor_does_not_fall_back_to_ibkr_delta_map() -> None:

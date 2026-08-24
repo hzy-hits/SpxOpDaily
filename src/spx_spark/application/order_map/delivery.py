@@ -442,6 +442,21 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         call_delta_text = f"{call_delta * 100:.1f}Δ" if call_delta is not None else "-"
         put_distance_text = f"{put_distance:.1f}点" if put_distance is not None else "-"
         call_distance_text = f"{call_distance:.1f}点" if call_distance is not None else "-"
+        gamma_risk = candidate.get("gamma_risk") or {}
+        if gamma_risk.get("status") == "ready":
+            net_gamma = _finite_number(gamma_risk.get("net_gamma_per_spx_point"))
+            delta_shock = _finite_number(gamma_risk.get("delta_shock_10_trader_delta"))
+            gcr10 = _finite_number(gamma_risk.get("gcr10"))
+            nearest_delta = _finite_number(gamma_risk.get("nearest_short_abs_delta"))
+            gamma_state = str(gamma_risk.get("state") or "-")
+            gamma_line = (
+                f"Gamma风控（解释）：净Γ {net_gamma:.4f} · 10点Delta冲击 {delta_shock:.1f}Δ · "
+                f"GCR10 {gcr10 * 100:.1f}% · 最近短腿 {nearest_delta * 100:.1f}Δ · {gamma_state}"
+                if None not in {net_gamma, delta_shock, gcr10, nearest_delta}
+                else "Gamma风控（解释）：数据不完整，不改变现有授权"
+            )
+        else:
+            gamma_line = "Gamma风控（解释）：数据不可用，不改变现有授权"
         lines = [
             f"【{title}】",
             "",
@@ -459,6 +474,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "",
             "## 风险",
             f"最大亏损 {loss} · 短腿 {invalidation} 被触及时刷新四腿回购价",
+            gamma_line,
             f"止损：回购价 ≥ {_fmt_premium(stop_buyback)}（入场贷记 3倍，净亏200%）",
             "",
             "## 目标",

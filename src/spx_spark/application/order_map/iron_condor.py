@@ -12,6 +12,8 @@ from spx_spark.analytics.options.strategy_payoff import (
     iron_condor_economics,
 )
 from spx_spark.analytics.options.surface_attribution import attribute_candidate_surface
+from spx_spark.analytics.options.quote_policy import option_field_observed_at
+from spx_spark.application.market_features.session_quote_selection import provider_quote
 from spx_spark.application.order_map.candidate_factory import (
     _candidate_id,
     _gth_quote_policy,
@@ -21,6 +23,7 @@ from spx_spark.application.order_map.candidate_factory import (
     _quote_valid_until,
     _round_to_strike,
     _session_option_legs,
+    _time,
     nearest_abs_delta_strike,
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
@@ -47,6 +50,10 @@ HUMAN_TAKE_PROFIT_BUYBACK_FRACTION = 0.50
 HUMAN_STOP_BUYBACK_MULTIPLE = 3.0
 HUMAN_HARD_EXIT_ET = "15:45"
 HUMAN_SESSION_STATE_KEY = "iron_condor_session_state"
+GAMMA_RISK_VERSION = "iron_condor_gamma_risk.v1"
+GAMMA_RISK_LOW_GCR10 = 0.10
+GAMMA_RISK_NORMAL_GCR10 = 0.20
+GAMMA_RISK_HOT_GCR10 = 0.30
 HUMAN_EVIDENCE_CONTRACT_HASH = (
     "sha256:ac8e09149686e929e939682b102c3da3fc54cf55a349ff2b28c7c1904f8b978a"
 )
@@ -206,6 +213,62 @@ def enumerate_iron_condor_candidates(
     call_short_delta = abs(_number(call_short.get("delta")) or 0.0)
     put_short_distance = spot - strikes[1] if len(strikes) == 4 and spot is not None else None
     call_short_distance = strikes[2] - spot if len(strikes) == 4 and spot is not None else None
+    gamma_values = [_number(leg.get("gamma")) for leg in legs]
+    gamma_times = [_time(leg.get("greeks_observed_at")) for leg in legs]
+    credit = _number(quote.get("credit"))
+    if (
+        len(gamma_values) == 4
+        and all(value is not None for value in gamma_values)
+        and all(observed_at is not None for observed_at in gamma_times)
+        and all(
+            0.0 <= (now - observed_at).total_seconds() <= policy.quote_max_age_seconds
+            for observed_at in gamma_times
+            if observed_at is not None
+        )
+        and (
+            max(observed_at for observed_at in gamma_times if observed_at is not None)
+            - min(observed_at for observed_at in gamma_times if observed_at is not None)
+        ).total_seconds()
+        <= policy.quote_max_skew_seconds
+        and credit is not None
+        and credit > 0
+    ):
+        put_long_gamma, put_short_gamma, call_short_gamma, call_long_gamma = (
+            float(value) for value in gamma_values if value is not None
+        )
+        net_gamma = put_long_gamma - put_short_gamma - call_short_gamma + call_long_gamma
+        gcr10 = 0.5 * abs(net_gamma) * 10.0**2 / credit
+        gamma_state = (
+            "LOW"
+            if gcr10 <= GAMMA_RISK_LOW_GCR10
+            else "NORMAL"
+            if gcr10 <= GAMMA_RISK_NORMAL_GCR10
+            else "HOT"
+            if gcr10 <= GAMMA_RISK_HOT_GCR10
+            else "HIGH"
+        )
+        gamma_risk = {
+            "status": "ready",
+            "version": GAMMA_RISK_VERSION,
+            "decision_effect": "explanation_only",
+            "state": gamma_state,
+            "net_gamma_per_spx_point": round(net_gamma, 8),
+            "delta_shock_10_trader_delta": round(abs(net_gamma) * 10.0 * 100.0, 4),
+            "gamma_loss_10_points": round(0.5 * abs(net_gamma) * 10.0**2, 6),
+            "gcr10": round(gcr10, 8),
+            "gcr20": round(0.5 * abs(net_gamma) * 20.0**2 / credit, 8),
+            "nearest_short_abs_delta": round(max(put_short_delta, call_short_delta), 8),
+            "entry_gate_applied": False,
+        }
+    else:
+        gamma_risk = {
+            "status": "unavailable",
+            "version": GAMMA_RISK_VERSION,
+            "decision_effect": "explanation_only",
+            "state": "UNAVAILABLE",
+            "entry_gate_applied": False,
+            "reason": "iron_condor_leg_gamma_unavailable",
+        }
     return [
         {
             "candidate_id": candidate_id,
@@ -244,6 +307,7 @@ def enumerate_iron_condor_candidates(
             "call_short_distance_points": (
                 round(call_short_distance, 4) if call_short_distance is not None else None
             ),
+            "gamma_risk": gamma_risk,
             "wing_width": WING_WIDTH,
             "quote_valid_until": quote_valid.isoformat() if quote_valid else now.isoformat(),
             "opportunity_valid_until": (
@@ -488,6 +552,25 @@ def _structure_for_short_delta(
     if len(legs) != 4:
         return None
     put_long, put_short, call_short, call_long = legs
+    provider = Provider(str(put_long.get("provider")))
+    enriched_legs: list[dict[str, Any]] = []
+    for leg in legs:
+        row = dict(leg)
+        live_quote = provider_quote(
+            latest,
+            str(leg.get("contract_id") or ""),
+            provider=provider,
+            now=now,
+        )
+        if live_quote is not None and live_quote.greeks is not None:
+            row["gamma"] = live_quote.greeks.gamma
+            row["greeks_observed_at"] = option_field_observed_at(
+                live_quote,
+                field="greeks",
+            ).isoformat()
+        enriched_legs.append(row)
+    put_long, put_short, call_short, call_long = enriched_legs
+    legs = enriched_legs
     put_delta = abs(_number(put_short.get("delta")) or 99.0)
     call_delta = abs(_number(call_short.get("delta")) or 99.0)
     if not (

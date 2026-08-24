@@ -1133,6 +1133,23 @@ v51 把事件、波动率、市场广度和跨资产确认压成一个
 全部阈值是 `strategy_policy.bootstrap.v51` 的冻结代码常量。该层不增加服务、
 存储、通知通道或自动下单能力；`automatic_ordering=false` 不变。
 
+### 11.17 RTH 铁鹰 Gamma 风险解释层
+
+RTH 铁鹰候选附加 `iron_condor_gamma_risk.v1`，直接使用同一张 Schwab 四腿
+快照中的逐腿 Gamma 与逐腿 short Delta，展示组合净 Gamma、10 点 SPX 冲击
+对应的 Delta 变化、`GCR10 = 0.5 × |Gamma| × 10² / 入场贷记`，以及两条
+short leg 中较大的绝对 Delta。`GCR10` 的 LOW/NORMAL/HOT/HIGH 分界为
+10%/20%/30%，只作解释，不改变入场、排序、TP50、3C 或 15:45 ET 退出。
+
+2026-07-07 至 2026-08-24 的 35 个 RTH 日分钟因果回放，严格使用
+10:00–11:00 ET 首个 25%–55% 贷记候选并冻结当天首个曲面判定，得到 13 个
+曲面通过候选。其入场 `GCR10` 为 4.3%–13.0%，所以 20% 门没有过滤任何交易；
+不能据此声明增量 edge。30Δ/35Δ 强平明显过早；40Δ 强平降低单次观察亏损，
+但把多笔后来达到 TP50 的路径提前以亏损退出，因此不替代现有 3C。入场冻结
+sticky-IV 的 ±10 点四腿完整重估门存在小样本筛选偏差，也不进入授权。
+回放仍受一分钟采样、两个 exact-leg 退出路径缺口和缺少独立历史
+`greeks_observed_at` 的限制；`automatic_ordering=false` 不变。
+
 ---
 
 ## 12. 正式 NoTrade
