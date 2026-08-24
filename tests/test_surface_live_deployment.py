@@ -36,6 +36,7 @@ def test_only_notification_images_remain_served() -> None:
     assert "network_mode: container:code-server" not in compose
     assert "location = /oi/latest.png" in entry
     assert "location = /strategy-risk/latest.png" in entry
+    assert "location = /strategy-risk/gth-latest.png" in entry
     assert entry.count("return 410;") == 7
 
 
