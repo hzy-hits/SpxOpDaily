@@ -99,7 +99,7 @@ def _state(now: datetime, *, with_greeks: bool = True) -> LatestState:
 def _rth_state(
     now: datetime = RTH_NOW,
     *,
-    short_quote_bonus: float = 0.5,
+    short_quote_bonus: float = 0.75,
 ) -> LatestState:
     rows = []
     for quote in _quotes(now, with_greeks=True):
@@ -168,7 +168,12 @@ def _facts() -> dict[str, object]:
     }
 
 
-def _rth_facts() -> dict[str, object]:
+def _rth_facts(
+    *,
+    atm_iv: float | None = 0.20,
+    put_skew: float | None = 0.03,
+    call_skew: float | None = 0.02,
+) -> dict[str, object]:
     facts = _facts()
     facts.update(
         {
@@ -176,6 +181,12 @@ def _rth_facts() -> dict[str, object]:
             "available_at": RTH_NOW.isoformat(),
             "minutes_to_close": 360,
             "session": {"mode": "rth", "legal": True},
+            "volatility": {
+                "expected_move_points": 40.0,
+                "atm_iv_0dte": atm_iv,
+                "put_skew_25d_0dte": put_skew,
+                "call_skew_25d_0dte": call_skew,
+            },
             "iron_condor_authority": {
                 "status": "ready",
                 "accepted_count": 0,
@@ -336,8 +347,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v48"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v48"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v49"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v49"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -416,7 +427,8 @@ def test_rth_iron_condor_reaches_single_strategy_decision_authority(
     assert decision["execution"]["automatic_ordering"] is False
     assert decision["candidate"]["short_abs_delta"] == 0.20
     assert decision["candidate"]["wing_width"] == 10.0
-    assert decision["candidate"]["economics"]["credit_fraction_of_width"] == 0.20
+    assert decision["candidate"]["economics"]["credit_fraction_of_width"] == 0.25
+    assert decision["candidate"]["human_surface_gate"]["passed"] is True
     assert "strategy_edge" in decision["candidate"]["edge"], decision["candidate"]["edge"]
     assert decision["candidate"]["edge"]["strategy_edge"]["status"] == (
         "explicit_policy_authority_unvalidated"
@@ -426,12 +438,92 @@ def test_rth_iron_condor_reaches_single_strategy_decision_authority(
 
     low_credit = build_strategy_decision(
         _payload(),
-        _rth_state(short_quote_bonus=0.45),
+        _rth_state(short_quote_bonus=0.70),
         RTH_NOW,
         data_root=tmp_path,
     )
     assert low_credit["decision_type"] == "NO_TRADE"
     assert "iron_condor_credit_fraction" in low_credit["why_not"]["reasons"]
+
+
+def test_rth_iron_condor_fails_closed_on_high_or_missing_surface(
+    monkeypatch, tmp_path
+) -> None:
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    facts_by_case = (
+        (_rth_facts(atm_iv=0.24), "iron_condor_atm_iv_high"),
+        (
+            _rth_facts(put_skew=0.05, call_skew=0.02),
+            "iron_condor_smile_richness_high",
+        ),
+        (_rth_facts(atm_iv=None), "iron_condor_surface_gate_unavailable"),
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select._accepted_session_cards",
+        lambda session_date: (),
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
+    for facts, expected_reason in facts_by_case:
+        monkeypatch.setattr(
+            "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+            lambda payload, latest, at, supplied=facts: supplied,
+        )
+        decision = build_strategy_decision(
+            _payload(), _rth_state(), RTH_NOW, data_root=tmp_path
+        )
+        assert decision["decision_type"] == "NO_TRADE"
+        assert expected_reason in decision["why_not"]["reasons"]
+
+
+def test_rth_iron_condor_surface_rejection_locks_the_session(
+    monkeypatch, tmp_path
+) -> None:
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    later = RTH_NOW + timedelta(minutes=1)
+    high_facts = _rth_facts(atm_iv=0.24)
+    normal_facts = _rth_facts(atm_iv=0.20)
+    normal_facts["decision_at"] = later.isoformat()
+    normal_facts["available_at"] = later.isoformat()
+    pending_facts = iter((high_facts, normal_facts))
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+        lambda payload, latest, at: next(pending_facts),
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select._accepted_session_cards",
+        lambda session_date: (),
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
+
+    first = build_strategy_decision(
+        _payload(), _rth_state(), RTH_NOW, data_root=tmp_path
+    )
+    next_payload = _payload()
+    next_payload["previous_strategy_decision"] = first
+    second = build_strategy_decision(
+        next_payload, _rth_state(later), later, data_root=tmp_path
+    )
+
+    first_state = first["market_facts"]["iron_condor_session_state"]
+    second_state = second["market_facts"]["iron_condor_session_state"]
+    assert first_state["status"] == "blocked"
+    assert first_state["surface_gate"]["atm_iv_0dte"] == 0.24
+    assert second["decision_type"] == "NO_TRADE"
+    assert second_state["status"] == "blocked"
+    assert second_state["carried_forward"] is True
+    assert "iron_condor_session_surface_blocked" in second["why_not"]["reasons"]
 
 
 def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:

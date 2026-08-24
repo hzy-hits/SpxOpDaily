@@ -25,8 +25,10 @@ from spx_spark.application.order_map.event_settlement_vertical import (
 )
 from spx_spark.application.order_map.iron_condor import (
     IRON_CONDOR_TYPE,
+    HUMAN_SESSION_STATE_KEY,
     build_iron_condor_map,
     enumerate_iron_condor_candidates,
+    iron_condor_session_state,
 )
 from spx_spark.application.order_map.path_distribution import (
     attach_iron_condor_path_distribution,
@@ -64,6 +66,9 @@ def build_strategy_decision(
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
     facts["iron_condor_authority"] = _iron_condor_session_authority(facts)
+    facts[HUMAN_SESSION_STATE_KEY] = iron_condor_session_state(
+        payload, facts, (), now=_utc(now)
+    )
     if data_root is not None:
         try:
             trading_date = date.fromisoformat(str(facts.get("session_date") or ""))
@@ -95,6 +100,16 @@ def build_strategy_decision(
         policy=DEFAULT_STRATEGY_POLICY,
     )
     if not reasons:
+        iron_condor_rows = enumerate_iron_condor_candidates(
+            payload,
+            facts,
+            latest,
+            now=_utc(now),
+            policy=DEFAULT_STRATEGY_POLICY,
+        )
+        facts[HUMAN_SESSION_STATE_KEY] = iron_condor_session_state(
+            payload, facts, iron_condor_rows, now=_utc(now)
+        )
         rows = [
             *enumerate_event_settlement_candidates(
                 payload,
@@ -111,13 +126,7 @@ def build_strategy_decision(
                 now=_utc(now),
                 policy=DEFAULT_STRATEGY_POLICY,
             ),
-            *enumerate_iron_condor_candidates(
-                payload,
-                facts,
-                latest,
-                now=_utc(now),
-                policy=DEFAULT_STRATEGY_POLICY,
-            ),
+            *iron_condor_rows,
         ]
         if rows:
             rank = rank_candidates(

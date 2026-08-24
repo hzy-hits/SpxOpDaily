@@ -35,8 +35,10 @@ SHORT_DELTA_MIN = 0.05
 SHORT_DELTA_MAX = 0.20
 SHORT_DELTA_TOLERANCE = 0.05
 WING_WIDTH = 10.0
-MIN_CREDIT_FRACTION = 0.20
+MIN_CREDIT_FRACTION = 0.25
 MAX_CREDIT_FRACTION = 0.55
+HUMAN_MAX_ATM_IV = 0.2374713681
+HUMAN_MAX_SMILE_RICHNESS = 0.0313827831
 HUMAN_SHORT_DELTA = 0.20
 HUMAN_ENTRY_START_ET = time(10, 0)
 HUMAN_ENTRY_END_ET = time(11, 30)
@@ -44,8 +46,9 @@ HUMAN_MAX_RISK_DOLLARS = 1_000.0
 HUMAN_TAKE_PROFIT_BUYBACK_FRACTION = 0.50
 HUMAN_STOP_BUYBACK_MULTIPLE = 3.0
 HUMAN_HARD_EXIT_ET = "15:45"
+HUMAN_SESSION_STATE_KEY = "iron_condor_session_state"
 HUMAN_EVIDENCE_CONTRACT_HASH = (
-    "sha256:18fc09f37e797a435c62584e224853378651d58ffbfbc9d595d940e0b95997f3"
+    "sha256:a5ca00a21bb1184d0f1fa8a2268e4d1967433a51231dfc749a11cb6eb5a683b3"
 )
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -196,6 +199,7 @@ def enumerate_iron_condor_candidates(
     )
     quote_valid = _quote_valid_until(legs, now=now, policy=session_policy)
     score = float(structure.get("selection_score") or 0.0)
+    human_surface_gate = human_iron_condor_surface_gate(facts)
     return [
         {
             "candidate_id": candidate_id,
@@ -222,6 +226,7 @@ def enumerate_iron_condor_candidates(
             "selection_score_base": structure.get("selection_score_base"),
             "surface_decision_modifier": structure.get("surface_decision_modifier"),
             "surface_attribution": dict(_map(structure.get("surface_attribution"))),
+            "human_surface_gate": human_surface_gate,
             "spot_inside_shorts": structure.get("spot_inside_shorts"),
             "short_abs_delta": structure.get("short_abs_delta"),
             "wing_width": WING_WIDTH,
@@ -254,16 +259,24 @@ def enumerate_iron_condor_candidates(
                 "management_quote_max_skew_seconds": 30.0,
             },
             "production_evidence": {
-                "contract": "rth_20delta_fixed10_daily_first_credit20.v2",
-                "opportunity_sessions": 12,
-                "sessions": 9,
-                "resolved_trades": 9,
-                "wins": 8,
-                "mean_net_pnl_dollars": 73.88,
-                "mean_net_pnl_per_opportunity_dollars": 55.41,
-                "opportunity_mean_bootstrap_95pct_ci_dollars": [18.88, 85.74],
+                "contract": "rth_20delta_fixed10_daily_first_credit25_iv_smile.v3",
+                "opportunity_sessions": 22,
+                "no_trade_sessions": 9,
+                "resolved_trades": 12,
+                "unresolved_trades": 1,
+                "wins": 12,
+                "mean_net_pnl_dollars": 112.36,
+                "observed_mean_net_pnl_per_opportunity_dollars": 61.29,
+                "pessimistic_mean_net_pnl_per_opportunity_dollars": 27.62,
+                "pessimistic_total_net_pnl_dollars": 607.72,
+                "pessimistic_opportunity_bootstrap_95pct_ci_dollars": [
+                    -58.92,
+                    81.64,
+                ],
                 "limitations": [
-                    "small_session_sample",
+                    "same_sample_policy_search",
+                    "iv_gate_removed_only_winners_in_august_holdout",
+                    "one_unresolved_exit_path",
                     "one_minute_stop_sampling",
                     "not_fill_probability",
                 ],
@@ -272,6 +285,106 @@ def enumerate_iron_condor_candidates(
             "manual_action_only": True,
         }
     ]
+
+
+def human_iron_condor_surface_gate(facts: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the frozen v49 ATM/smile entry gate for the RTH human lane."""
+
+    volatility = _map(facts.get("volatility"))
+    atm_iv = _number(volatility.get("atm_iv_0dte"))
+    put_skew = _number(volatility.get("put_skew_25d_0dte"))
+    call_skew = _number(volatility.get("call_skew_25d_0dte"))
+    if atm_iv is None or put_skew is None or call_skew is None:
+        return {
+            "status": "unavailable",
+            "passed": False,
+            "atm_iv_0dte": atm_iv,
+            "smile_richness": None,
+            "max_atm_iv": HUMAN_MAX_ATM_IV,
+            "max_smile_richness": HUMAN_MAX_SMILE_RICHNESS,
+            "reasons": ["iron_condor_surface_gate_unavailable"],
+        }
+    smile_richness = 0.5 * (put_skew + call_skew)
+    reasons = []
+    if atm_iv > HUMAN_MAX_ATM_IV:
+        reasons.append("iron_condor_atm_iv_high")
+    if smile_richness > HUMAN_MAX_SMILE_RICHNESS:
+        reasons.append("iron_condor_smile_richness_high")
+    return {
+        "status": "ready",
+        "passed": not reasons,
+        "atm_iv_0dte": round(atm_iv, 10),
+        "smile_richness": round(smile_richness, 10),
+        "max_atm_iv": HUMAN_MAX_ATM_IV,
+        "max_smile_richness": HUMAN_MAX_SMILE_RICHNESS,
+        "reasons": reasons,
+    }
+
+
+def iron_condor_session_state(
+    payload: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """Freeze the first qualifying RTH candidate's surface verdict for the session."""
+
+    session_date = str(facts.get("session_date") or "")
+    previous = _map(payload.get("previous_strategy_decision"))
+    previous_facts = _map(previous.get("market_facts"))
+    previous_state = _map(previous_facts.get(HUMAN_SESSION_STATE_KEY))
+    if (
+        str(previous.get("session_date") or previous_facts.get("session_date") or "")
+        == session_date
+        and previous_state.get("status") in {"blocked", "eligible"}
+    ):
+        return {**previous_state, "carried_forward": True}
+
+    current_state = _map(facts.get(HUMAN_SESSION_STATE_KEY))
+    if current_state.get("status") in {"blocked", "eligible"}:
+        return dict(current_state)
+
+    base = {
+        "status": "waiting",
+        "session_date": session_date,
+        "contract": "daily_first_credit25_surface_verdict",
+        "carried_forward": False,
+    }
+    if str(_map(facts.get("session")).get("mode") or "").lower() != "rth":
+        return base
+    for candidate in candidates:
+        if not _qualifies_for_human_surface_verdict(candidate):
+            continue
+        surface_gate = _map(candidate.get("human_surface_gate"))
+        passed = surface_gate.get("passed") is True
+        return {
+            **base,
+            "status": "eligible" if passed else "blocked",
+            "attempted_at": _utc(now).isoformat(),
+            "candidate_id": candidate.get("candidate_id"),
+            "surface_gate": dict(surface_gate),
+            "reasons": list(surface_gate.get("reasons") or ()),
+        }
+    return base
+
+
+def _qualifies_for_human_surface_verdict(candidate: Mapping[str, Any]) -> bool:
+    if candidate.get("manual_authority_eligible") is not True:
+        return False
+    if abs((_number(candidate.get("short_abs_delta")) or 0.0) - HUMAN_SHORT_DELTA) > 1e-9:
+        return False
+    economics = _map(candidate.get("economics"))
+    credit_fraction = _number(economics.get("credit_fraction_of_width"))
+    loss = _number(economics.get("max_loss_points"))
+    return bool(
+        credit_fraction is not None
+        and MIN_CREDIT_FRACTION <= credit_fraction <= MAX_CREDIT_FRACTION
+        and loss is not None
+        and 0.0 < loss * 100.0 <= HUMAN_MAX_RISK_DOLLARS
+        and candidate.get("spot_inside_shorts") is True
+        and candidate.get("evidence_contract_hash") == HUMAN_EVIDENCE_CONTRACT_HASH
+    )
 
 
 def _structure_selection_score(structure: Mapping[str, Any]) -> float:
