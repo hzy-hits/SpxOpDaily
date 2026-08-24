@@ -41,6 +41,7 @@ from spx_spark.application.order_map.decision_consistency import (
     apply_decision_projections,
 )
 from spx_spark.application.order_map.delivery import (
+    publish_open_interest_image,
     publish_strategy_risk_image,
     send_order_map,
 )
@@ -114,7 +115,6 @@ from spx_spark.application.order_map.state import (
 )
 from spx_spark.application.order_map.volume_machine import default_es_volume_sample_path
 from spx_spark.config import NotificationSettings, StorageSettings
-from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import (
     build_zero_dte_greeks_reference,
     write_zero_dte_greeks_snapshot,
@@ -128,16 +128,10 @@ from spx_spark.notifier.dispatcher import inspect_notification_event, notificati
 from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.options_map import (
     build_options_map,
-    group_spxw_option_quotes,
-    write_open_interest_mirror_png,
 )
 from spx_spark.storage import LatestState, LatestStateStore
 from spx_spark.settings import load_app_settings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
-
-
-OI_IMAGE_REPORT_TIME_ET = "11:00"
-OI_IMAGE_PUBLIC_PATH = "/oi/latest.png"
 
 
 def build_order_payload(
@@ -597,20 +591,6 @@ def run_status(
         print(json.dumps(snapshot_result, ensure_ascii=False))
         return 0
 
-    rust_owner = rust_report_owner_enabled()
-    rust_projection = persist_desk_map_projection(
-        payload,
-        [] if rust_owner else changes,
-        now=now,
-        trading_date=trading_date,
-        storage=storage_settings,
-        published_at=datetime.now(timezone.utc),
-    )
-    oi_image = publish_daily_open_interest_image(
-        storage_settings,
-        now=now,
-        current_rth_slot=current_rth_slot,
-    )
     # The quarter-hour timer remains the standardized snapshot recorder.  Human
     # delivery is a separate material-change/desk-map decision below.
     delivery_reason = (
@@ -624,6 +604,20 @@ def run_status(
             trading_date=trading_date,
             position_risk=_has_open_position_risk(storage_settings),
         )
+    )
+    rust_owner = rust_report_owner_enabled()
+    oi_image = (
+        publish_open_interest_image(storage_settings, now=now)
+        if delivery_reason is not None
+        else None
+    )
+    rust_projection = persist_desk_map_projection(
+        payload,
+        [] if rust_owner else changes,
+        now=now,
+        trading_date=trading_date,
+        storage=storage_settings,
+        published_at=datetime.now(timezone.utc),
     )
     if delivery_reason is None:
         snapshot_result = {
@@ -804,50 +798,6 @@ def run_status(
     if not accepted:
         return 1
     return 0
-
-
-def publish_daily_open_interest_image(
-    storage_settings: StorageSettings,
-    *,
-    now: datetime,
-    current_rth_slot: Any,
-) -> dict[str, object] | None:
-    """Publish the 11:00 ET OI mirror without creating another scheduler."""
-    if (
-        current_rth_slot is None
-        or current_rth_slot.slot_at.strftime("%H:%M") != OI_IMAGE_REPORT_TIME_ET
-    ):
-        return None
-    output = (
-        Path(storage_settings.data_root)
-        / "published"
-        / "spxw-surface"
-        / "oi"
-        / "latest.png"
-    )
-    try:
-        state = LatestStateStore(storage_settings).load(now=now)
-        grouped = group_spxw_option_quotes(state, storage_settings=storage_settings)
-        exposure = build_exposure_map(state, grouped_quotes=grouped)
-        if not exposure.expiries:
-            raise ValueError("front expiry exposure unavailable")
-        front = exposure.expiries[0]
-        if len(front.walls.put_walls) < 3 or len(front.walls.call_walls) < 3:
-            raise ValueError("top-3 put/call walls unavailable")
-        write_open_interest_mirror_png(exposure.to_dict(), output)
-    except Exception as exc:  # noqa: BLE001 - report delivery must remain independent
-        return {
-            "status": "failed",
-            "error": f"{type(exc).__name__}:{exc}",
-            "public_path": OI_IMAGE_PUBLIC_PATH,
-        }
-    return {
-        "status": "published",
-        "as_of": exposure.as_of.isoformat(),
-        "expiry": front.expiry,
-        "public_path": OI_IMAGE_PUBLIC_PATH,
-        "bytes": output.stat().st_size,
-    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -2202,6 +2202,7 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
         "research_reference": {"price": 7520.0, "source": "hl_perp"},
     }
     captured: dict[str, object] = {}
+    oi_refreshes: list[datetime] = []
     monkeypatch.setattr(order_map_module, "load_order_map_state", lambda path: {})
     monkeypatch.setattr(
         order_map_module,
@@ -2231,6 +2232,12 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
         return {"accepted": True, "delivered_ok": False, "queued": True}
 
     monkeypatch.setattr(order_map_module, "enqueue_order_map_status", enqueue_status)
+    monkeypatch.setattr(
+        order_map_module,
+        "publish_open_interest_image",
+        lambda _settings, *, now: oi_refreshes.append(now)
+        or {"status": "published"},
+    )
     monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
     monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -2255,16 +2262,13 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
     assert captured["delivery_reason"] == "forced"
     assert captured["current_rth_slot"] is None
     assert captured["fingerprint"] == {}
+    assert oi_refreshes == [datetime(2026, 7, 7, 6, 0, tzinfo=timezone.utc)]
 
 
-def test_daily_open_interest_image_publishes_once_at_11_et(
-    monkeypatch, tmp_path
-) -> None:
-    import spx_spark.application.order_map.service as order_map_module
+def test_open_interest_image_publishes_for_card(monkeypatch, tmp_path) -> None:
+    import spx_spark.application.order_map.delivery as delivery_module
 
-    now = datetime(2026, 8, 20, 15, 0, tzinfo=timezone.utc)
-    slot = order_map_module.rth_report_slot(now)
-    assert slot is not None and slot.slot_at.strftime("%H:%M") == "11:00"
+    now = datetime(2026, 8, 20, 16, 45, tzinfo=timezone.utc)
     state = object()
     front = SimpleNamespace(
         expiry="20260820",
@@ -2276,17 +2280,17 @@ def test_daily_open_interest_image_publishes_once_at_11_et(
         to_dict=lambda: {"expiries": []},
     )
     monkeypatch.setattr(
-        order_map_module,
+        delivery_module,
         "LatestStateStore",
         lambda _settings: SimpleNamespace(load=lambda **_kwargs: state),
     )
     monkeypatch.setattr(
-        order_map_module,
+        delivery_module,
         "group_spxw_option_quotes",
         lambda *_args, **_kwargs: {"20260820": []},
     )
     monkeypatch.setattr(
-        order_map_module,
+        delivery_module,
         "build_exposure_map",
         lambda *_args, **_kwargs: exposure,
     )
@@ -2295,13 +2299,12 @@ def test_daily_open_interest_image_publishes_once_at_11_et(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"png")
 
-    monkeypatch.setattr(order_map_module, "write_open_interest_mirror_png", write_png)
+    monkeypatch.setattr(delivery_module, "write_open_interest_mirror_png", write_png)
     settings = SimpleNamespace(data_root=str(tmp_path))
 
-    result = order_map_module.publish_daily_open_interest_image(
+    result = delivery_module.publish_open_interest_image(
         settings,
         now=now,
-        current_rth_slot=slot,
     )
 
     assert result == {
@@ -2309,19 +2312,10 @@ def test_daily_open_interest_image_publishes_once_at_11_et(
         "as_of": now.isoformat(),
         "expiry": "20260820",
         "public_path": "/oi/latest.png",
+        "public_url": "https://spx.zh3nyu.com/oi/latest.png",
         "bytes": 3,
     }
     assert (tmp_path / "published/spxw-surface/oi/latest.png").read_bytes() == b"png"
-    assert (
-        order_map_module.publish_daily_open_interest_image(
-            settings,
-            now=now,
-            current_rth_slot=SimpleNamespace(
-                slot_at=now.astimezone(ZoneInfo("America/New_York")).replace(hour=10)
-            ),
-        )
-        is None
-    )
 
 
 def test_strategy_risk_image_publishes_for_trade_ready_delivery(
@@ -4053,6 +4047,11 @@ def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
     monkeypatch.setattr(order_map_module, "_has_open_position_risk", lambda settings: False)
     monkeypatch.setattr(
         order_map_module,
+        "publish_open_interest_image",
+        lambda *args, **kwargs: pytest.fail("snapshot-only cycle must not redraw OI"),
+    )
+    monkeypatch.setattr(
+        order_map_module,
         "render_operator_status_brief",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("brief rendered")),
     )
@@ -4958,6 +4957,13 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
             "public_url": "https://spx.zh3nyu.com/strategy-risk/latest.png",
         }
 
+    def publish_oi(storage_settings, *, now):
+        captured["oi_storage"] = storage_settings
+        return {
+            "status": "published",
+            "public_url": "https://spx.zh3nyu.com/oi/latest.png",
+        }
+
     def enqueue(_settings, envelope, **kwargs):
         captured["text"] = kwargs["text"]
         captured["feishu_text"] = kwargs["feishu_text"]
@@ -4971,6 +4977,7 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
         )
 
     monkeypatch.setattr(delivery_module, "publish_strategy_risk_image", publish)
+    monkeypatch.setattr(delivery_module, "publish_open_interest_image", publish_oi)
     monkeypatch.setattr(delivery_module, "enqueue_notification", enqueue)
     storage = SimpleNamespace(data_root=str(tmp_path))
 
@@ -4987,8 +4994,13 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
     assert captured["storage"] is storage
     assert captured["decision"] == decision
     assert expected_link in str(captured["text"])
+    assert "[查看最新 OI 墙位图](https://spx.zh3nyu.com/oi/latest.png)" in str(
+        captured["text"]
+    )
+    assert captured["oi_storage"] is storage
     assert captured["text"] == captured["feishu_text"]
     assert result["strategy_risk_image"]["status"] == "published"
+    assert result["oi_image"]["status"] == "published"
 
 
 def _strategy_decision_payload(now: datetime) -> dict[str, object]:

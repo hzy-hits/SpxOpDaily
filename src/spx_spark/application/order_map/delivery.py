@@ -34,6 +34,7 @@ from spx_spark.application.order_map.strategy_regime import (
     pin_stable_watch_phase,
     pin_watch_center,
 )
+from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.llm_writer import (
@@ -44,13 +45,20 @@ from spx_spark.notifier.llm_writer import (
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.model import NotificationEnvelope
-from spx_spark.options_map import write_strategy_risk_png
+from spx_spark.options_map import (
+    group_spxw_option_quotes,
+    write_open_interest_mirror_png,
+    write_strategy_risk_png,
+)
+from spx_spark.storage import LatestStateStore
 
 
 STRATEGY_RISK_IMAGE_PUBLIC_PATH = "/strategy-risk/latest.png"
 STRATEGY_RISK_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/strategy-risk/latest.png"
 STRATEGY_RISK_GTH_IMAGE_PUBLIC_PATH = "/strategy-risk/gth-latest.png"
 STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/strategy-risk/gth-latest.png"
+OPEN_INTEREST_IMAGE_PUBLIC_PATH = "/oi/latest.png"
+OPEN_INTEREST_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/oi/latest.png"
 
 
 def enqueue_pin_stable_watch(
@@ -152,6 +160,11 @@ def enqueue_strategy_decision(
         if storage_settings is not None
         else None
     )
+    open_interest_image = (
+        publish_open_interest_image(storage_settings, now=now)
+        if storage_settings is not None
+        else None
+    )
     text = _render_strategy_candidate(decision, candidate)
     # Memo is research-only and must never block trade_ready delivery.
     memo = None
@@ -164,6 +177,8 @@ def enqueue_strategy_decision(
         text = f"{text}\n\n{_render_strategy_idea_memo(memo)}"
     if strategy_risk_image and strategy_risk_image.get("status") == "published":
         text = f"{text}\n\n## 策略图\n[查看概率、结构与损益图]({strategy_risk_image['public_url']})"
+    if open_interest_image and open_interest_image.get("status") == "published":
+        text = f"{text}\n[查看最新 OI 墙位图]({open_interest_image['public_url']})"
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -193,7 +208,50 @@ def enqueue_strategy_decision(
         outcome["idea_memo"] = f"omitted:{memo_error or 'unavailable'}"
     if strategy_risk_image is not None:
         outcome["strategy_risk_image"] = strategy_risk_image
+    if open_interest_image is not None:
+        outcome["oi_image"] = open_interest_image
     return outcome
+
+
+def publish_open_interest_image(
+    storage_settings: StorageSettings,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    """Refresh the stable OI image immediately before a human-visible card."""
+
+    try:
+        output = (
+            Path(storage_settings.data_root)
+            / "published"
+            / "spxw-surface"
+            / "oi"
+            / "latest.png"
+        )
+        state = LatestStateStore(storage_settings).load(now=now)
+        grouped = group_spxw_option_quotes(state, storage_settings=storage_settings)
+        exposure = build_exposure_map(state, grouped_quotes=grouped)
+        if not exposure.expiries:
+            raise ValueError("front expiry exposure unavailable")
+        front = exposure.expiries[0]
+        if len(front.walls.put_walls) < 3 or len(front.walls.call_walls) < 3:
+            raise ValueError("top-3 put/call walls unavailable")
+        write_open_interest_mirror_png(exposure.to_dict(), output)
+    except Exception as exc:  # noqa: BLE001 - card delivery must remain independent
+        return {
+            "status": "failed",
+            "error": f"{type(exc).__name__}:{exc}",
+            "public_path": OPEN_INTEREST_IMAGE_PUBLIC_PATH,
+            "public_url": OPEN_INTEREST_IMAGE_PUBLIC_URL,
+        }
+    return {
+        "status": "published",
+        "as_of": exposure.as_of.isoformat(),
+        "expiry": front.expiry,
+        "public_path": OPEN_INTEREST_IMAGE_PUBLIC_PATH,
+        "public_url": OPEN_INTEREST_IMAGE_PUBLIC_URL,
+        "bytes": output.stat().st_size,
+    }
 
 
 def publish_strategy_risk_image(
