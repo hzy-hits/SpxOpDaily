@@ -167,13 +167,14 @@ def enumerate_iron_condor_candidates(
             if expiry and spot is not None
             else None
         )
-        if human_structure is not None and human_structure.get("status") == "ready":
-            structure = _with_surface_score(
-                human_structure,
-                facts,
-                now=now,
-                policy=policy,
-            )
+        if human_structure is None or human_structure.get("status") != "ready":
+            return []
+        structure = _with_surface_score(
+            human_structure,
+            facts,
+            now=now,
+            policy=policy,
+        )
     legs = list(structure.get("legs") or ())
     quote = _map(structure.get("quote"))
     economics = _map(structure.get("economics"))

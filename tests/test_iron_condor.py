@@ -431,6 +431,27 @@ def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
     assert later[0]["manual_authority_eligible"] is False
 
 
+def test_rth_human_iron_condor_does_not_fall_back_to_ibkr_delta_map() -> None:
+    ibkr_only = _state(RTH_NOW)
+    structure = build_iron_condor_map(
+        _payload(),
+        _rth_facts(),
+        ibkr_only,
+        now=RTH_NOW,
+        policy=StrategyPolicy(),
+    )
+
+    assert structure["status"] == "ready"
+    assert structure["provider"] == "ibkr"
+    assert enumerate_iron_condor_candidates(
+        _payload(),
+        _rth_facts(),
+        ibkr_only,
+        now=RTH_NOW,
+        policy=StrategyPolicy(),
+    ) == []
+
+
 def test_rth_iron_condor_locks_first_qualifying_candidate_id() -> None:
     facts = _rth_facts()
     facts["iron_condor_session_state"] = {
