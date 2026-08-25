@@ -364,8 +364,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v51"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v51"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v52"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v52"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -605,7 +605,7 @@ def test_rth_iron_condor_reaches_single_strategy_decision_authority(
     assert "iron_condor_credit_fraction" in low_credit["why_not"]["reasons"]
 
 
-def test_rth_iron_condor_fails_closed_on_high_or_missing_surface(
+def test_rth_iron_condor_surface_is_advisory_when_high_or_missing(
     monkeypatch, tmp_path
 ) -> None:
     from spx_spark.application.order_map.strategy_edge_model import (
@@ -636,11 +636,14 @@ def test_rth_iron_condor_fails_closed_on_high_or_missing_surface(
         decision = build_strategy_decision(
             _payload(), _rth_state(), RTH_NOW, data_root=tmp_path
         )
-        assert decision["decision_type"] == "NO_TRADE"
-        assert expected_reason in decision["why_not"]["reasons"]
+        assert decision["decision_type"] == "IRON_CONDOR", decision["why_not"]
+        context = decision["candidate"]["human_surface_gate"]
+        assert context["blocking"] is False
+        assert context["decision_effect"] == "explanation_only"
+        assert expected_reason in context["reasons"]
 
 
-def test_rth_iron_condor_surface_rejection_locks_the_session(
+def test_rth_iron_condor_surface_warning_does_not_poison_session(
     monkeypatch, tmp_path
 ) -> None:
     from spx_spark.application.order_map.strategy_edge_model import (
@@ -677,12 +680,13 @@ def test_rth_iron_condor_surface_rejection_locks_the_session(
 
     first_state = first["market_facts"]["iron_condor_session_state"]
     second_state = second["market_facts"]["iron_condor_session_state"]
-    assert first_state["status"] == "blocked"
+    assert first["decision_type"] == "IRON_CONDOR", first["why_not"]
+    assert first_state["status"] == "eligible"
     assert first_state["surface_gate"]["atm_iv_0dte"] == 0.24
-    assert second["decision_type"] == "NO_TRADE"
-    assert second_state["status"] == "blocked"
+    assert first_state["surface_gate"]["blocking"] is False
+    assert second["decision_type"] == "IRON_CONDOR", second["why_not"]
+    assert second_state["status"] == "eligible"
     assert second_state["carried_forward"] is True
-    assert "iron_condor_session_surface_blocked" in second["why_not"]["reasons"]
 
 
 def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:

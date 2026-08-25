@@ -55,7 +55,7 @@ GAMMA_RISK_LOW_GCR10 = 0.10
 GAMMA_RISK_NORMAL_GCR10 = 0.20
 GAMMA_RISK_HOT_GCR10 = 0.30
 HUMAN_EVIDENCE_CONTRACT_HASH = (
-    "sha256:ac8e09149686e929e939682b102c3da3fc54cf55a349ff2b28c7c1904f8b978a"
+    "sha256:313451f209e4aea9ad930d57fb0bc451098071eb8ee90f3ee47185affbae71c6"
 )
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -338,19 +338,19 @@ def enumerate_iron_condor_candidates(
                 "management_quote_max_skew_seconds": 30.0,
             },
             "production_evidence": {
-                "contract": "rth_20delta_fixed10_daily_first_credit25_iv_smile_schwab_only_1000_1100_locked.v4",
+                "contract": "rth_20delta_fixed10_daily_first_credit25_schwab_only_1000_1100_locked_surface_advisory.v5",
                 "opportunity_sessions": 21,
-                "no_trade_sessions": 9,
-                "resolved_trades": 11,
+                "no_trade_sessions": 13,
+                "resolved_trades": 20,
                 "unresolved_trades": 1,
-                "wins": 11,
-                "mean_net_pnl_dollars": 112.62,
-                "observed_mean_net_pnl_per_opportunity_dollars": 58.99,
-                "pessimistic_mean_net_pnl_per_opportunity_dollars": 23.73,
-                "pessimistic_total_net_pnl_dollars": 498.28,
+                "wins": 17,
+                "mean_net_pnl_dollars": 35.44,
+                "observed_mean_net_pnl_per_opportunity_dollars": 26.11,
+                "pessimistic_mean_net_pnl_per_opportunity_dollars": -1.51,
+                "pessimistic_total_net_pnl_dollars": -31.76,
                 "limitations": [
                     "same_sample_policy_search",
-                    "iv_gate_removed_only_winners_in_august_holdout",
+                    "surface_hard_gate_removed_by_user_override",
                     "one_unresolved_exit_path",
                     "one_minute_stop_sampling",
                     "not_fill_probability",
@@ -363,7 +363,7 @@ def enumerate_iron_condor_candidates(
 
 
 def human_iron_condor_surface_gate(facts: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the frozen v49 ATM/smile entry gate for the RTH human lane."""
+    """Return ATM/smile context for explanation, never entry authorization."""
 
     volatility = _map(facts.get("volatility"))
     atm_iv = _number(volatility.get("atm_iv_0dte"))
@@ -373,6 +373,8 @@ def human_iron_condor_surface_gate(facts: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "status": "unavailable",
             "passed": False,
+            "blocking": False,
+            "decision_effect": "explanation_only",
             "atm_iv_0dte": atm_iv,
             "smile_richness": None,
             "max_atm_iv": HUMAN_MAX_ATM_IV,
@@ -388,6 +390,8 @@ def human_iron_condor_surface_gate(facts: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": "ready",
         "passed": not reasons,
+        "blocking": False,
+        "decision_effect": "explanation_only",
         "atm_iv_0dte": round(atm_iv, 10),
         "smile_richness": round(smile_richness, 10),
         "max_atm_iv": HUMAN_MAX_ATM_IV,
@@ -403,7 +407,7 @@ def iron_condor_session_state(
     *,
     now: datetime,
 ) -> dict[str, Any]:
-    """Freeze the first qualifying RTH candidate's surface verdict for the session."""
+    """Freeze the first qualifying RTH candidate; surface remains advisory."""
 
     session_date = str(facts.get("session_date") or "")
     previous = _map(payload.get("previous_strategy_decision"))
@@ -412,40 +416,39 @@ def iron_condor_session_state(
     if (
         str(previous.get("session_date") or previous_facts.get("session_date") or "")
         == session_date
-        and previous_state.get("status") in {"blocked", "eligible"}
+        and previous_state.get("status") == "eligible"
     ):
         return {**previous_state, "carried_forward": True}
 
     current_state = _map(facts.get(HUMAN_SESSION_STATE_KEY))
-    if current_state.get("status") in {"blocked", "eligible"}:
+    if current_state.get("status") == "eligible":
         return dict(current_state)
 
     base = {
         "status": "waiting",
         "session_date": session_date,
-        "contract": "daily_first_credit25_surface_verdict",
+        "contract": "daily_first_credit25_candidate_lock_surface_advisory",
         "carried_forward": False,
     }
     if str(_map(facts.get("session")).get("mode") or "").lower() != "rth":
         return base
     for candidate in candidates:
-        if not _qualifies_for_human_surface_verdict(candidate):
+        if not _qualifies_for_human_candidate_lock(candidate):
             continue
         surface_gate = _map(candidate.get("human_surface_gate"))
-        passed = surface_gate.get("passed") is True
         return {
             **base,
-            "status": "eligible" if passed else "blocked",
+            "status": "eligible",
             "attempted_at": _utc(now).isoformat(),
             "candidate_id": candidate.get("candidate_id"),
             "strikes": list(candidate.get("strikes") or ()),
             "surface_gate": dict(surface_gate),
-            "reasons": list(surface_gate.get("reasons") or ()),
+            "reasons": [],
         }
     return base
 
 
-def _qualifies_for_human_surface_verdict(candidate: Mapping[str, Any]) -> bool:
+def _qualifies_for_human_candidate_lock(candidate: Mapping[str, Any]) -> bool:
     if candidate.get("manual_authority_eligible") is not True:
         return False
     if abs((_number(candidate.get("short_abs_delta")) or 0.0) - HUMAN_SHORT_DELTA) > 1e-9:

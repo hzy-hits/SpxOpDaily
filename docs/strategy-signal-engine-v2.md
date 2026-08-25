@@ -1150,6 +1150,20 @@ sticky-IV 的 ±10 点四腿完整重估门存在小样本筛选偏差，也不�
 回放仍受一分钟采样、两个 exact-leg 退出路径缺口和缺少独立历史
 `greeks_observed_at` 的限制；`automatic_ordering=false` 不变。
 
+### 11.18 v52：RTH 铁鹰曲面降为解释层
+
+历史分钟回放没有证明 v49 的 ATM IV／smile 硬门有增量价值。按当前
+10:00–11:00 ET 截止重算，同一 25% 贷记基线中，无曲面门为 20 笔已解析
+交易平均 +$35.44，另有 1 笔退出路径未解析；启用曲面门为 19 笔已解析
+交易平均 -$25.30，另有 1 笔未解析。用户据此明确取消曲面的拒绝权限。
+
+v52 保留 `human_surface_gate`、entry-frozen 曲面归因及非正向排序降权用于解释，
+但 ATM IV、smile 高值或缺失均不得形成 hard gate，也不得把当日 session 标成
+surface blocked。当天首个满足 20Δ、10 点翼、25%–55% 贷记、风险和几何门的
+候选仍锁定行权价；v51 `rth_environment`、报价新鲜度、单日一张、人工-only、
+TP50、3C 与 15:45 ET 退出保持不变。策略版本为
+`strategy_policy.bootstrap.v52`，证据仍是用户覆盖且前向未验证，不声明长期 alpha。
+
 ---
 
 ## 12. 正式 NoTrade

@@ -46,7 +46,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v51"
+    policy_version: str = "strategy_policy.bootstrap.v52"
     # Policy history and frozen thresholds: docs/strategy-signal-engine-v2.md.
     trend_score: float = 6.0
     trend_efficiency: float = 0.45

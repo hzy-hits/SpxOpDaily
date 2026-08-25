@@ -1414,7 +1414,6 @@ def _iron_condor_hard_gates(
         HUMAN_SESSION_STATE_KEY,
         HUMAN_SHORT_DELTA,
         WING_WIDTH,
-        human_iron_condor_surface_gate,
     )
 
     gates: list[dict[str, Any]] = []
@@ -1519,17 +1518,7 @@ def _iron_condor_hard_gates(
             }
         )
     session_state = _map(facts.get(HUMAN_SESSION_STATE_KEY))
-    if session_state.get("status") == "blocked":
-        gates.append(
-            {
-                "gate": "iron_condor_session_surface_blocked",
-                "actual": session_state.get("attempted_at"),
-                "threshold": "first_25pct_candidate_surface_pass",
-            }
-        )
-        surface_gate = _map(session_state.get("surface_gate"))
-    elif session_state.get("status") == "eligible":
-        surface_gate = {"reasons": []}
+    if session_state.get("status") == "eligible":
         locked_candidate_id = str(session_state.get("candidate_id") or "")
         if locked_candidate_id and candidate.get("candidate_id") != locked_candidate_id:
             gates.append(
@@ -1539,26 +1528,6 @@ def _iron_condor_hard_gates(
                     "threshold": locked_candidate_id,
                 }
             )
-    else:
-        surface_gate = human_iron_condor_surface_gate(facts)
-    for reason in surface_gate["reasons"]:
-        actual = (
-            surface_gate.get("atm_iv_0dte")
-            if reason == "iron_condor_atm_iv_high"
-            else surface_gate.get("smile_richness")
-        )
-        threshold = (
-            surface_gate.get("max_atm_iv")
-            if reason == "iron_condor_atm_iv_high"
-            else surface_gate.get("max_smile_richness")
-        )
-        gates.append(
-            {
-                "gate": reason,
-                "actual": actual,
-                "threshold": threshold,
-            }
-        )
     deltas = [
         abs(delta)
         for delta in (
