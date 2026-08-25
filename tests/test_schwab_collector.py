@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,16 @@ def _isolate_collector_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(data_root))
     monkeypatch.setenv("MAINTENANCE_DATA_ROOT", str(data_root))
     monkeypatch.setenv("SCHWAB_STREAMING_MODE", "off")
+    app_settings = schwab_collector.load_app_settings()
+    disabled = replace(
+        app_settings.schwab,
+        research_chain=replace(app_settings.schwab.research_chain, enabled=False),
+    )
+    monkeypatch.setattr(
+        schwab_collector,
+        "load_app_settings",
+        lambda: SimpleNamespace(schwab=disabled),
+    )
     return data_root
 
 
@@ -241,6 +252,64 @@ def test_collector_discovers_front_pairs_before_hot_quote_batch(
     assert output["coverage"]["SPX:front"]["two_sided_ratio"] == 1.0
     assert output["coverage"]["SPX:front"]["next_strike_count"] == 100
     assert len(persisted) == 4
+
+
+def test_research_chains_land_raw_without_entering_latest_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    data_root = _isolate_collector_storage(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCHWAB_COLLECT_QUOTES", "$SPX")
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "SPX")
+
+    class FakeClient:
+        def get_json(self, path: str, params: dict[str, Any]):
+            if path == "/marketdata/v1/quotes":
+                return 200, {
+                    "$SPX": {
+                        "assetMainType": "INDEX",
+                        "quote": {"lastPrice": 7500.0},
+                    }
+                }
+            underlier = str(params["symbol"]).lstrip("$")
+            trading_class = "SPXW" if underlier == "SPX" else underlier
+            return 200, _chain_payload(trading_class, strike=7500.0 if underlier == "SPX" else 100.0)
+
+    persisted: list[ProviderSnapshot] = []
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _settings: FakeClient())
+    monkeypatch.setattr(
+        schwab_collector,
+        "persist_provider_snapshot",
+        lambda snapshot, _storage: persisted.append(snapshot),
+    )
+    disabled = schwab_collector.load_app_settings().schwab
+    enabled = replace(
+        disabled,
+        research_chain=replace(disabled.research_chain, enabled=True),
+    )
+
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    assert schwab_collector.run(now=now, typed_settings=enabled) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert sorted(output["chain_lanes_fetched"]) == [
+        "IEF:research_30d",
+        "SPX:front",
+        "SPX:next",
+        "SPX:research_30d",
+        "SPX:research_7d",
+        "TLT:research_30d",
+    ]
+    assert all(
+        not snapshot.quotes
+        or snapshot.quotes[0].sampling_mode != "schwab_research_chain"
+        for snapshot in persisted
+    )
+    raw_path = data_root / "raw/provider=schwab/date=2026-07-06/hour=14/quotes.jsonl"
+    raw_rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    assert len(raw_rows) == 4
+    assert {row["sampling_mode"] for row in raw_rows} == {"schwab_research_chain"}
 
 
 def test_runtime_chain_cadence_and_strike_overrides() -> None:

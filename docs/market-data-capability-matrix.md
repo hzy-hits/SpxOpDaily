@@ -13,6 +13,7 @@ live market data; the provider source timestamp must advance.
 | Schwab stream one ES futures option | Globex | validation | entitlement, continuity, timestamp, spread and OI probe | ES surface/GEX; SPXW pricing |
 | IBKR SPXW current expiry | Cboe GTH | production | exclusive GTH SPXW bid/ask, IV and option pricing | replacement with stale Schwab rows |
 | Schwab SPXW current expiry | Cboe GTH | unavailable for live pricing | frozen audit/last structure only | GTH model price, limit, probability or entry |
+| Schwab SPX 7D/30D + TLT/IEF option research chains | US RTH normal profile | forward collection, raw-only | constant-tenor ATM-IV and same-expiry call-put skew research after coverage accumulates | latest-state pricing, alerts, strategy gates, GTH use |
 | Schwab SPX cash index | outside RTH | frozen reference | last cash close/reference | executable spot or fresh GTH direction |
 | Hyperliquid proxy | 24/7 | fallback context | thin directional cross-check | SPX price, option repricing or execution |
 
@@ -43,3 +44,11 @@ a strategy hard gate.
 Promotion of any remaining validation lane requires a separate reviewed change
 after continuous session coverage is measured. It must not happen automatically
 from one successful subscription.
+
+The raw-only research chains run once per minute only during the RTH normal
+profile. Two SPX target expiries and one bounded monthly expiry for each of TLT
+and IEF add four scheduled requests per minute; active/burst, GTH, off-hours and
+quota-pressure profiles skip them. Their normalized rows carry
+`sampling_mode=schwab_research_chain`; in-memory quotes are also marked
+`analytical_only=true`, and the lane never enters the executable latest-state
+projection.

@@ -29,6 +29,7 @@ from spx_spark.settings.schwab import (
     SchwabCadenceSettings,
     SchwabCapacitySettings,
     SchwabHotLaneSettings,
+    SchwabResearchChainSettings,
     SchwabSettingsSlice,
     SchwabWideChainSettings,
 )
@@ -519,6 +520,9 @@ def load_settings(
             next_chain_seconds=float(get("schwab.collection.cadence.next_chain_seconds")),
             spy_xsp_chain_seconds=float(get("schwab.collection.cadence.spy_xsp_chain_seconds")),
             qqq_iwm_chain_seconds=float(get("schwab.collection.cadence.qqq_iwm_chain_seconds")),
+            research_chain_seconds=float(
+                get("schwab.collection.cadence.research_chain_seconds")
+            ),
         ),
         wide_chain=SchwabWideChainSettings(
             strike_count_candidates=tuple(
@@ -541,6 +545,18 @@ def load_settings(
             ),
             max_plan_age_seconds=float(get("schwab.collection.hot_lane.max_plan_age_seconds")),
             recenter_drift_points=float(get("schwab.collection.hot_lane.recenter_drift_points")),
+        ),
+        research_chain=SchwabResearchChainSettings(
+            enabled=bool(get("schwab.collection.research_chain.enabled")),
+            spx_target_dtes=tuple(
+                map(int, get("schwab.collection.research_chain.spx_target_dtes"))
+            ),
+            spx_strike_count=int(get("schwab.collection.research_chain.spx_strike_count")),
+            bond_underliers=tuple(
+                map(str, get("schwab.collection.research_chain.bond_underliers"))
+            ),
+            bond_target_dte=int(get("schwab.collection.research_chain.bond_target_dte")),
+            bond_strike_count=int(get("schwab.collection.research_chain.bond_strike_count")),
         ),
     )
     growth_dislocation = load_growth_dislocation_settings(get)

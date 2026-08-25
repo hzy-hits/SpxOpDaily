@@ -28,6 +28,22 @@ def test_profiles_cover_open_normal_burst_and_off_hours() -> None:
     assert planned_requests_per_minute(CollectionProfile.NORMAL, policy) == 64
     assert planned_requests_per_minute(CollectionProfile.ACTIVE, policy) == 78
     assert planned_requests_per_minute(CollectionProfile.BURST, policy) == 84
+    assert (
+        planned_requests_per_minute(
+            CollectionProfile.NORMAL,
+            policy,
+            research_chain_count=4,
+        )
+        == 68
+    )
+    assert (
+        planned_requests_per_minute(
+            CollectionProfile.ACTIVE,
+            policy,
+            research_chain_count=4,
+        )
+        == 78
+    )
     assert planner_tick_seconds(CollectionProfile.OFF_HOURS, policy) == 5.0
     assert planner_tick_seconds(CollectionProfile.GTH, policy) == 5.0
     assert planner_tick_seconds(CollectionProfile.NORMAL, policy) == 2.0 / 3.0

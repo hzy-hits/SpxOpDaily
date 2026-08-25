@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import date, datetime
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 
 from spx_spark.config import SchwabSettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.provider_adapter import ProviderSnapshot
 from spx_spark.schwab.adapter import snapshot_from_chain_payload
 from spx_spark.schwab.collector_state import CollectorBudgetState
@@ -44,6 +46,7 @@ class ChainLanePlan:
     disposition: LaneDisposition
     last_fetched_at: datetime | None
     updates_canonical_clock: bool
+    raw_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,12 +73,33 @@ def plan_chain_lanes(
 ) -> tuple[ChainLanePlan, ...]:
     candidates = [_front_candidate(symbol, current_expiry) for symbol in chain_symbols]
     if any(candidate[2] == "SPX" for candidate in candidates):
-        candidates.append((SchwabLane.NEXT_CHAIN, "SPX", "SPX", next_expiry, 2, False))
+        candidates.append(
+            (
+                SchwabLane.NEXT_CHAIN,
+                "SPX",
+                "SPX",
+                next_expiry,
+                2,
+                False,
+                "SPX:next",
+                False,
+            )
+        )
+    if typed_settings.research_chain.enabled and profile is CollectionProfile.NORMAL:
+        candidates.extend(_research_candidates(now, typed_settings.research_chain))
 
     plans: list[ChainLanePlan] = []
     remaining = max(available_requests, 0)
-    for lane, symbol, canonical, expiry, priority, updates_canonical in candidates:
-        lane_key = f"{canonical}:{'next' if lane is SchwabLane.NEXT_CHAIN else 'front'}"
+    for (
+        lane,
+        symbol,
+        canonical,
+        expiry,
+        priority,
+        updates_canonical,
+        lane_key,
+        raw_only,
+    ) in candidates:
         last_fetched = budget_state.chain_last_fetched_at.get(lane_key)
         if last_fetched is None and updates_canonical:
             last_fetched = budget_state.chain_last_fetched_at.get(canonical)
@@ -112,6 +136,7 @@ def plan_chain_lanes(
                 disposition=disposition,
                 last_fetched_at=last_fetched,
                 updates_canonical_clock=updates_canonical,
+                raw_only=raw_only,
             )
         )
     return tuple(plans)
@@ -141,6 +166,8 @@ def execute_chain_lane(
             underlier=plan.canonical,
             received_at=now,
         )
+        if plan.raw_only:
+            snapshot = _research_snapshot(snapshot, lane_key=plan.lane_key)
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
         return ChainLaneResult(
             plan=plan,
@@ -158,11 +185,100 @@ def execute_chain_lane(
 def _front_candidate(
     symbol: str,
     expiry: date,
-) -> tuple[SchwabLane, str, str, date, int, bool]:
+) -> tuple[SchwabLane, str, str, date, int, bool, str, bool]:
     canonical = canonical_underlier_for_schwab(symbol)
     lane = SchwabLane.FRONT_CHAIN if canonical == "SPX" else SchwabLane.CONFIRMATION_CHAIN
     priority = 0 if canonical == "SPX" else 3 if canonical in {"SPY", "XSP"} else 4
-    return lane, symbol, canonical, expiry, priority, True
+    return lane, symbol, canonical, expiry, priority, True, f"{canonical}:front", False
+
+
+def _research_candidates(
+    now: datetime,
+    settings: Any,
+) -> list[tuple[SchwabLane, str, str, date, int, bool, str, bool]]:
+    anchor = now.astimezone(ET).date()
+    candidates = []
+    for target_dte in settings.spx_target_dtes:
+        expiry = _nearest_trading_day(anchor + timedelta(days=int(target_dte)))
+        candidates.append(
+            (
+                SchwabLane.RESEARCH_CHAIN,
+                "SPX",
+                "SPX",
+                expiry,
+                4,
+                False,
+                f"SPX:research_{int(target_dte)}d",
+                True,
+            )
+        )
+    bond_expiry = _nearest_monthly_expiry(anchor, int(settings.bond_target_dte))
+    for underlier in settings.bond_underliers:
+        canonical = str(underlier).upper()
+        candidates.append(
+            (
+                SchwabLane.RESEARCH_CHAIN,
+                canonical,
+                canonical,
+                bond_expiry,
+                4,
+                False,
+                f"{canonical}:research_{int(settings.bond_target_dte)}d",
+                True,
+            )
+        )
+    return candidates
+
+
+def _nearest_trading_day(target: date) -> date:
+    if DEFAULT_MARKET_CALENDAR.is_trading_day(target):
+        return target
+    previous = DEFAULT_MARKET_CALENDAR.previous_trading_day(target)
+    following = DEFAULT_MARKET_CALENDAR.next_trading_day(target)
+    return previous if target - previous <= following - target else following
+
+
+def _nearest_monthly_expiry(anchor: date, target_dte: int) -> date:
+    target = anchor + timedelta(days=target_dte)
+    month_index = target.year * 12 + target.month - 1
+    candidates = []
+    for offset in (-1, 0, 1):
+        year, zero_based_month = divmod(month_index + offset, 12)
+        month = zero_based_month + 1
+        first = date(year, month, 1)
+        third_friday = first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+        expiry = (
+            third_friday
+            if DEFAULT_MARKET_CALENDAR.is_trading_day(third_friday)
+            else DEFAULT_MARKET_CALENDAR.previous_trading_day(third_friday)
+        )
+        if expiry > anchor:
+            candidates.append(expiry)
+    if not candidates:
+        raise ValueError("unable to resolve a future monthly option expiry")
+    return min(candidates, key=lambda expiry: (abs(expiry - target), expiry))
+
+
+def _research_snapshot(snapshot: ProviderSnapshot, *, lane_key: str) -> ProviderSnapshot:
+    quotes = tuple(
+        replace(
+            quote,
+            sampling_mode="schwab_research_chain",
+            raw={
+                **(dict(quote.raw) if isinstance(quote.raw, Mapping) else {}),
+                "analytical_only": True,
+                "research_lane": lane_key,
+            },
+        )
+        for quote in snapshot.quotes
+    )
+    return ProviderSnapshot(
+        provider=snapshot.provider,
+        received_at=snapshot.received_at,
+        quotes=quotes,
+        provider_states=snapshot.provider_states,
+        metadata={**snapshot.metadata, "raw_only": True, "research_lane": lane_key},
+    )
 
 
 def _lane_disposition(*, due: bool, quota_allowed: bool, has_budget: bool) -> LaneDisposition:
@@ -186,6 +302,12 @@ def _strike_count(
 ) -> int:
     if lane is SchwabLane.NEXT_CHAIN:
         return int(typed_settings.wide_chain.next_expiry_strike_count)
+    if lane is SchwabLane.RESEARCH_CHAIN:
+        return (
+            int(typed_settings.research_chain.spx_strike_count)
+            if canonical == "SPX"
+            else int(typed_settings.research_chain.bond_strike_count)
+        )
     if canonical == "SPX":
         return budget_state.strike_counts.get(
             lane_key,

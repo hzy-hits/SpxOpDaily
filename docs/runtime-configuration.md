@@ -144,6 +144,15 @@ the sole precedence rule. Put machine-specific overrides in the ignored
 - Schwab option-chain identity (`$SPX`);
 - returned option trading classes (`SPX`, `SPXW`).
 
+`schwab.collection.research_chain` controls a bounded raw-only RTH lane for
+SPX 7D/30D ATM-IV and TLT/IEF call-put skew research. It reuses the Schwab
+collector and raw quote writer, runs only in the normal RTH profile, and skips
+active/burst, GTH, off-hours and quota-pressure modes. With the default two SPX
+targets and two Treasury ETFs at a 60-second cadence, it adds four scheduled
+requests per minute without consuming IBKR ticker lines. These rows are
+compacted by the existing quote pipeline but are excluded from executable
+latest-state pricing and strategy authority.
+
 Schwab exposes SPX and SPXW contracts through the `$SPX` chain. XSP uses
 `$XSP`. Collectors and verifiers resolve these values through the table; they
 do not carry their own provider aliases.

@@ -199,6 +199,5 @@ def _normalize_state_key(value: str) -> str:
         return "quotes:hot_context"
     if ":" in text:
         symbol, lane = text.split(":", 1)
-        if lane.upper() in {"FRONT", "NEXT"}:
-            return f"{symbol.upper()}:{lane.lower()}"
+        return f"{symbol.upper()}:{lane.lower()}"
     return upper

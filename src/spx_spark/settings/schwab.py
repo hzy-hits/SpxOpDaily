@@ -42,6 +42,7 @@ class SchwabCadenceSettings:
     next_chain_seconds: float
     spy_xsp_chain_seconds: float
     qqq_iwm_chain_seconds: float
+    research_chain_seconds: float
 
     def __post_init__(self) -> None:
         if any(value <= 0 for value in self.__dict__.values()):
@@ -81,6 +82,30 @@ class SchwabWideChainSettings:
 
 
 @dataclass(frozen=True)
+class SchwabResearchChainSettings:
+    enabled: bool
+    spx_target_dtes: tuple[int, ...]
+    spx_strike_count: int
+    bond_underliers: tuple[str, ...]
+    bond_target_dte: int
+    bond_strike_count: int
+
+    def __post_init__(self) -> None:
+        if tuple(sorted(set(self.spx_target_dtes))) != self.spx_target_dtes:
+            raise ValueError("Schwab research SPX DTEs must be unique and ascending")
+        if not self.spx_target_dtes or any(value <= 1 for value in self.spx_target_dtes):
+            raise ValueError("Schwab research SPX DTEs must be greater than one")
+        if self.spx_strike_count <= 0 or self.bond_strike_count <= 0:
+            raise ValueError("Schwab research strike counts must be positive")
+        if self.bond_target_dte <= 1:
+            raise ValueError("Schwab research bond DTE must be greater than one")
+        normalized = tuple(symbol.strip().upper() for symbol in self.bond_underliers)
+        if not normalized or len(normalized) != len(set(normalized)):
+            raise ValueError("Schwab research bond underliers must be unique and non-empty")
+        object.__setattr__(self, "bond_underliers", normalized)
+
+
+@dataclass(frozen=True)
 class SchwabHotLaneSettings:
     minimum_dynamic_symbol_reserve: int
     max_plan_age_seconds: float
@@ -105,7 +130,7 @@ class SchwabSettingsSlice:
     )
     cadence: SchwabCadenceSettings = field(
         default_factory=lambda: SchwabCadenceSettings(
-            15, 60, 300, 300, 15, 15, 60, 300, 2, 3, 1.5, 2.5, 1.5, 2, 30, 15, 30
+            15, 60, 300, 300, 15, 15, 60, 300, 2, 3, 1.5, 2.5, 1.5, 2, 30, 15, 30, 60
         )
     )
     wide_chain: SchwabWideChainSettings = field(
@@ -115,4 +140,14 @@ class SchwabSettingsSlice:
     )
     hot_lane: SchwabHotLaneSettings = field(
         default_factory=lambda: SchwabHotLaneSettings(10, 30, 10)
+    )
+    research_chain: SchwabResearchChainSettings = field(
+        default_factory=lambda: SchwabResearchChainSettings(
+            True,
+            (7, 30),
+            10,
+            ("TLT", "IEF"),
+            30,
+            20,
+        )
     )

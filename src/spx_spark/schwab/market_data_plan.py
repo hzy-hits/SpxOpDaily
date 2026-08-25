@@ -30,6 +30,7 @@ class CadencePolicy:
     next_chain_seconds: float = 30.0
     spy_xsp_chain_seconds: float = 15.0
     qqq_iwm_chain_seconds: float = 30.0
+    research_chain_seconds: float = 60.0
 
 
 class CadenceConfig(Protocol):
@@ -50,6 +51,7 @@ class CadenceConfig(Protocol):
     next_chain_seconds: float
     spy_xsp_chain_seconds: float
     qqq_iwm_chain_seconds: float
+    research_chain_seconds: float
 
 
 def collection_profile(
@@ -105,6 +107,8 @@ def cadence_seconds(
             if profile is CollectionProfile.OFF_HOURS
             else policy.next_chain_seconds
         )
+    if lane is SchwabLane.RESEARCH_CHAIN:
+        return policy.research_chain_seconds
     if underlier in {"SPY", "XSP"}:
         if profile is CollectionProfile.GTH:
             return policy.gth_confirmation_chain_seconds
@@ -168,6 +172,8 @@ def planner_tick_seconds(profile: CollectionProfile, policy: CadenceConfig) -> f
 def planned_requests_per_minute(
     profile: CollectionProfile,
     policy: CadenceConfig,
+    *,
+    research_chain_count: int = 0,
 ) -> int:
     """Return the worst-case scheduled RPM implied by all configured lanes."""
 
@@ -219,7 +225,12 @@ def planned_requests_per_minute(
             )
         )
     )
-    return quote_rpm + front_rpm + next_rpm + confirmation_rpm
+    research_rpm = (
+        research_chain_count * ceil(60 / policy.research_chain_seconds)
+        if profile is CollectionProfile.NORMAL
+        else 0
+    )
+    return quote_rpm + front_rpm + next_rpm + confirmation_rpm + research_rpm
 
 
 def effective_profile(profile: CollectionProfile, quota_mode: QuotaMode) -> CollectionProfile:

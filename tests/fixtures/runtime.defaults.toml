@@ -213,6 +213,7 @@ burst_front_chain_seconds = { value = 2.0, description = "SPX front-chain cadenc
 next_chain_seconds = { value = 30.0, description = "Next-expiry SPXW structure cadence." }
 spy_xsp_chain_seconds = { value = 15.0, description = "Front-expiry SPY and XSP confirmation-chain cadence." }
 qqq_iwm_chain_seconds = { value = 30.0, description = "Front-expiry QQQ and IWM confirmation-chain cadence." }
+research_chain_seconds = { value = 60.0, description = "RTH-normal-only cadence for bounded raw-only SPX term and Treasury ETF option research chains; active/burst/GTH/off-hours profiles skip this lane." }
 
 [schwab.collection.wide_chain]
 strike_count_candidates = { value = [80, 100, 120], description = "Ascending SPX chain widths used by adaptive coverage planning." }
@@ -222,6 +223,14 @@ min_two_sided_ratio = { value = 0.8, description = "Minimum fraction of usable s
 expected_move_multiple = { value = 2.5, description = "Acquisition target on each side of spot as a multiple of expected move." }
 min_width_points = { value = 150.0, description = "Minimum acquisition width on each side of SPX spot." }
 max_gap_multiple = { value = 2.0, description = "Maximum usable strike gap as a multiple of median strike spacing." }
+
+[schwab.collection.research_chain]
+enabled = { value = true, description = "Collects explanation-only raw option rows for SPX term structure and Treasury ETF skew without adding them to the executable latest-state projection." }
+spx_target_dtes = { value = [7, 30], description = "Calendar-DTE targets mapped to the nearest SPX trading-day expiry for ATM term-structure research." }
+spx_strike_count = { value = 10, description = "Bounded strikes around ATM for each SPX research expiry; this lane estimates ATM IV and does not build wide GEX walls." }
+bond_underliers = { value = ["TLT", "IEF"], description = "Treasury ETF option underliers collected for same-expiry call-put IV skew research." }
+bond_target_dte = { value = 30, description = "Calendar-DTE target mapped to the nearest standard monthly expiry for each Treasury ETF." }
+bond_strike_count = { value = 20, description = "Bounded strikes around ATM retained for Treasury ETF 25-delta call-put skew estimation." }
 
 [schwab.collection.hot_lane]
 dynamic_symbol_reserve = { value = 10, description = "Unused slots retained inside the 500-symbol quote batch for plan changes." }

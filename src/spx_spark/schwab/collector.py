@@ -317,6 +317,7 @@ def run(
         "planned_requests_per_minute": planned_requests_per_minute(
             profile,
             typed_settings.cadence,
+            research_chain_count=_research_chain_count(typed_settings),
         ),
         "request_ceiling": request_ceiling,
         "quota_mode": quota_state.mode.value,
@@ -331,6 +332,14 @@ def run(
     }
     print(json.dumps(summary, sort_keys=True))
     return 0 if ok or not quote_symbols and not chain_symbols else 1
+
+
+def _research_chain_count(settings: SchwabSettingsSlice) -> int:
+    if not settings.research_chain.enabled:
+        return 0
+    return len(settings.research_chain.spx_target_dtes) + len(
+        settings.research_chain.bond_underliers
+    )
 
 
 def main() -> None:

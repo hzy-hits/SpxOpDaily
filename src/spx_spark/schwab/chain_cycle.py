@@ -17,6 +17,7 @@ from spx_spark.schwab.collector_io import chain_spot
 from spx_spark.schwab.collector_state import CollectorBudgetState
 from spx_spark.schwab.front_discovery import build_front_discovery
 from spx_spark.schwab.request_models import CollectionProfile, QuotaMode, SchwabLane
+from spx_spark.storage import JsonlQuoteWriter
 
 
 @dataclass
@@ -88,7 +89,10 @@ def collect_chain_cycle(
         if snapshot is None:
             result.errors.append(f"{plan.lane_key}: missing_snapshot")
             continue
-        persist(snapshot, storage_settings)
+        if plan.raw_only:
+            JsonlQuoteWriter(storage_settings).write_quotes(snapshot.quotes)
+        else:
+            persist(snapshot, storage_settings)
         result.request_count += 1
         result.lanes_fetched.append(plan.lane_key)
         result.quote_counts[plan.canonical if plan.updates_canonical_clock else plan.lane_key] = (

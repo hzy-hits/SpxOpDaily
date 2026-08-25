@@ -57,6 +57,9 @@ def test_load_settings_from_fixture_is_stable(
     assert settings.schwab.capacity.planned_requests_per_minute == 84
     assert settings.schwab.wide_chain.strike_count_candidates == (80, 100, 120)
     assert settings.schwab.wide_chain.next_expiry_strike_count == 40
+    assert settings.schwab.cadence.research_chain_seconds == 60.0
+    assert settings.schwab.research_chain.spx_target_dtes == (7, 30)
+    assert settings.schwab.research_chain.bond_underliers == ("TLT", "IEF")
     assert settings.market_features.enabled is True
     assert settings.market_features.volume_baseline_sessions == 20
     assert isinstance(settings.spring_gamma_v3, SpringGammaV3Settings)

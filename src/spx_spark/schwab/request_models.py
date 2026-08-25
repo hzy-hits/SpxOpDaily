@@ -12,6 +12,7 @@ class SchwabLane(str, Enum):
     FRONT_CHAIN = "front_chain"
     NEXT_CHAIN = "next_chain"
     CONFIRMATION_CHAIN = "confirmation_chain"
+    RESEARCH_CHAIN = "research_chain"
     RECOVERY_PROBE = "recovery_probe"
 
 
