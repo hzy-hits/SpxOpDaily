@@ -128,6 +128,46 @@ def test_open_interest_mirror_keeps_wall_rank_distinct_from_bar_value() -> None:
     assert "Not a direction or trade signal." in svg
 
 
+def test_open_interest_mirror_distinguishes_gth_location_from_rth_oi() -> None:
+    exposure = {
+        "as_of": "2026-08-25T02:14:00+00:00",
+        "underlier": {"price": 7652.57},
+        "display_context": {
+            "session_mode": "gth",
+            "oi_as_of": "2026-08-24T19:59:59+00:00",
+            "location_as_of": "2026-08-25T02:14:00+00:00",
+            "location_source": "ES 7,668.75 − frozen basis 16.18pt",
+            "option_coverage": "unavailable · GTH SPXW coverage 0/20 contracts",
+        },
+        "expiries": [
+            {
+                "expiry": "20260825",
+                "quality": "ok",
+                "oi_quality": "schwab_rth_close_oi",
+                "strikes": [
+                    {"strike": 7650.0, "put_open_interest": 1678.0, "call_open_interest": 1589.0},
+                    {"strike": 7655.0, "put_open_interest": 200.0, "call_open_interest": 300.0},
+                    {"strike": 7660.0, "put_open_interest": 100.0, "call_open_interest": 400.0},
+                ],
+                "walls": {
+                    "put_walls": [{"strike": 7650.0, "open_interest": 1678.0}],
+                    "call_walls": [{"strike": 7660.0, "open_interest": 400.0}],
+                },
+            }
+        ],
+    }
+
+    svg = render_open_interest_mirror_svg(exposure)
+
+    assert "SPXW 0DTE OI Structure · GTH Location" in svg
+    assert "GTH SPX equiv 7,652.57" in svg
+    assert "OI snapshot 2026-08-24 15:59 ET" in svg
+    assert "ES 7,668.75 − frozen basis 16.18pt" in svg
+    assert "GTH SPXW coverage 0/20 contracts" in svg
+    assert "missing GTH quotes are not zero-filled" in svg
+    assert "GTH≈7,652.57" in svg
+
+
 def test_open_interest_mirror_png_atomically_replaces_one_bark_safe_file(tmp_path) -> None:
     exposure = {
         "as_of": "2026-08-20T15:00:00+00:00",

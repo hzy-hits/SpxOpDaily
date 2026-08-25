@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from statistics import median
 
 from spx_spark.analytics.options.chain import (
@@ -18,6 +19,7 @@ from spx_spark.analytics.options.chain import (
 from spx_spark.analytics.options.constants import BAD_QUALITIES, UNDERLIER_CANDIDATES, UNDERLIER_MISMATCH_SOURCES
 from spx_spark.analytics.options.levels import build_spy_confluence
 from spx_spark.analytics.options.models import OptionsMap, UnderlierReference
+from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.analytics.options.quote_policy import analytical_option_quote
 from spx_spark.analytics.options.service import build_expiry_map
 from spx_spark.config import StorageSettings
@@ -36,8 +38,10 @@ from spx_spark.storage import (
     degrade_stale_quote,
     select_best_quotes,
 )
+from spx_spark.state_io import atomic_write_json_secure, read_json_object
 
 DIRECT_UNDERLIER_SOURCE_MAX_AGE_SECONDS = 90.0
+OPEN_INTEREST_COMPLETE_CACHE = "last-complete.json"
 
 
 @dataclass(frozen=True)
@@ -588,3 +592,146 @@ def build_options_map(
         warnings=tuple(dict.fromkeys(warnings)),
         spy_confluence=spy_confluence,
     )
+
+
+def cache_complete_open_interest_payload(
+    storage_settings: StorageSettings,
+    payload: Mapping[str, object],
+) -> None:
+    complete = [
+        dict(item)
+        for item in payload.get("expiries", ())
+        if isinstance(item, Mapping) and _complete_open_interest_expiry(item)
+    ]
+    if not complete:
+        return
+    cached = dict(payload)
+    cached["expiries"] = complete
+    atomic_write_json_secure(_open_interest_cache_path(storage_settings), cached)
+
+
+def gth_open_interest_payload(
+    storage_settings: StorageSettings,
+    *,
+    state: object,
+    now: datetime,
+) -> dict[str, object]:
+    session_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(now)
+    if session_date is None:
+        raise ValueError("GTH trading date unavailable")
+    target_expiry = session_date.strftime("%Y%m%d")
+    cached = read_json_object(_open_interest_cache_path(storage_settings))
+    expiry = next(
+        (
+            dict(item)
+            for item in cached.get("expiries", ())
+            if isinstance(item, Mapping)
+            and str(item.get("expiry") or "") == target_expiry
+            and _complete_open_interest_expiry(item)
+        ),
+        None,
+    )
+    if expiry is None:
+        raise ValueError(f"complete RTH OI unavailable for {target_expiry}")
+
+    best_quote = getattr(state, "best_quote", None)
+    es_quote = best_quote("future:ES") if callable(best_quote) else None
+    es_price = finite_float(getattr(es_quote, "effective_price", None))
+    if es_price is None:
+        raise ValueError("fresh GTH ES location unavailable")
+
+    basis_state = read_json_object(
+        Path(storage_settings.data_root) / "state" / "ibkr_atm_reference.json"
+    )
+    basis = basis_state.get("basis")
+    basis = dict(basis) if isinstance(basis, Mapping) else {}
+    basis_points = finite_float(basis.get("median"))
+    basis_day = str(basis.get("trading_date") or "")
+    if basis_points is None or not basis_day:
+        raise ValueError("qualified ES-SPX basis unavailable")
+    try:
+        elapsed = DEFAULT_MARKET_CALENDAR.trading_days_elapsed(
+            datetime.fromisoformat(basis_day).date(),
+            session_date,
+        )
+    except ValueError as exc:
+        raise ValueError("invalid ES-SPX basis trading date") from exc
+    if elapsed is None or elapsed > 1:
+        raise ValueError("ES-SPX basis is not from the preceding RTH session")
+    es_expiry = str(getattr(getattr(es_quote, "instrument", None), "expiry", None) or "")
+    basis_contract = str(basis.get("es_contract") or "")
+    if es_expiry and basis_contract and es_expiry != basis_contract:
+        raise ValueError("ES-SPX basis contract mismatch")
+
+    source_at = (
+        getattr(es_quote, "quote_time", None)
+        or getattr(es_quote, "trade_time", None)
+        or getattr(es_quote, "received_at", None)
+        or now
+    )
+    provider_control = read_json_object(
+        Path(
+            getattr(storage_settings, "provider_failover_state_path", "")
+            or Path(storage_settings.data_root) / "latest" / "provider_failover_state.json"
+        )
+    )
+    option_coverage = _gth_option_coverage_label(provider_control)
+    spx_equivalent = es_price - basis_points
+    payload = dict(cached)
+    payload["as_of"] = now.isoformat()
+    payload["underlier"] = {
+        "price": spx_equivalent,
+        "source": "future:ES_minus_frozen_rth_basis",
+        "source_at": source_at.isoformat(),
+        "quality": "es_equivalent",
+    }
+    payload["expiries"] = [expiry]
+    payload["display_context"] = {
+        "session_mode": "gth",
+        "oi_as_of": cached.get("as_of"),
+        "location_as_of": source_at.isoformat(),
+        "location_source": f"ES {es_price:,.2f} − frozen basis {basis_points:,.2f}pt",
+        "option_coverage": option_coverage,
+    }
+    return payload
+
+
+def _open_interest_cache_path(storage_settings: StorageSettings) -> Path:
+    return (
+        Path(storage_settings.data_root)
+        / "published"
+        / "spxw-surface"
+        / "oi"
+        / OPEN_INTEREST_COMPLETE_CACHE
+    )
+
+
+def _complete_open_interest_expiry(expiry: Mapping[str, object]) -> bool:
+    strikes = [item for item in expiry.get("strikes", ()) if isinstance(item, Mapping)]
+    walls = expiry.get("walls")
+    walls = dict(walls) if isinstance(walls, Mapping) else {}
+    put_walls = [item for item in walls.get("put_walls", ()) if isinstance(item, Mapping)]
+    call_walls = [item for item in walls.get("call_walls", ()) if isinstance(item, Mapping)]
+    put_observed = sum(finite_float(item.get("put_open_interest")) is not None for item in strikes)
+    call_observed = sum(
+        finite_float(item.get("call_open_interest")) is not None for item in strikes
+    )
+    return (
+        len(strikes) >= 12
+        and put_observed >= 12
+        and call_observed >= 12
+        and len(put_walls) >= 3
+        and len(call_walls) >= 3
+    )
+
+
+def _gth_option_coverage_label(provider_control: Mapping[str, object]) -> str:
+    dimensions = provider_control.get("health_dimensions")
+    dimensions = dict(dimensions) if isinstance(dimensions, Mapping) else {}
+    ibkr = dimensions.get("ibkr")
+    ibkr = dict(ibkr) if isinstance(ibkr, Mapping) else {}
+    options = ibkr.get("gth_options")
+    options = dict(options) if isinstance(options, Mapping) else {}
+    reason = str(options.get("reason") or "coverage unavailable")
+    status = "available" if options.get("healthy") is True else "unavailable"
+    return f"{status} · {reason}"

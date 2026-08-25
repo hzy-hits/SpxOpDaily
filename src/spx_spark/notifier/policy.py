@@ -128,6 +128,12 @@ CONTEXT_ONLY_ALERT_KINDS = frozenset(
         "globex_trend_continuation",
         "gth_directional_advisory",
         "gth_advisory_management",
+        # Raw wall proximity and gamma-state snapshots are structural context,
+        # not decisions.  Actionable wall/flip lifecycle transitions have
+        # dedicated direct-push kinds, so reviewing these every recompute only
+        # spends model calls on unchanged observations.
+        "option_gamma_regime",
+        "option_wall_proximity",
     }
 )
 

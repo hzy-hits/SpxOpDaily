@@ -50,6 +50,10 @@ from spx_spark.options_map import (
     write_open_interest_mirror_png,
     write_strategy_risk_png,
 )
+from spx_spark.options_map.orchestration import (
+    cache_complete_open_interest_payload,
+    gth_open_interest_payload,
+)
 from spx_spark.storage import LatestStateStore
 
 
@@ -234,14 +238,28 @@ def publish_open_interest_image(
         # future-dated and can suppress the entire front expiry.  Let the
         # store take a fresh evaluation clock for this fresh state read.
         state = LatestStateStore(storage_settings).load()
-        grouped = group_spxw_option_quotes(state, storage_settings=storage_settings)
-        exposure = build_exposure_map(state, grouped_quotes=grouped)
-        if not exposure.expiries:
-            raise ValueError("front expiry exposure unavailable")
-        front = exposure.expiries[0]
-        if len(front.walls.put_walls) < 3 or len(front.walls.call_walls) < 3:
-            raise ValueError("top-3 put/call walls unavailable")
-        write_open_interest_mirror_png(exposure.to_dict(), output)
+        if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
+            payload = gth_open_interest_payload(
+                storage_settings,
+                state=state,
+                now=now,
+            )
+            front_payload = payload["expiries"][0]
+            expiry = str(front_payload.get("expiry") or "unknown")
+            rendered_as_of = now.isoformat()
+        else:
+            grouped = group_spxw_option_quotes(state, storage_settings=storage_settings)
+            exposure = build_exposure_map(state, grouped_quotes=grouped)
+            if not exposure.expiries:
+                raise ValueError("front expiry exposure unavailable")
+            front = exposure.expiries[0]
+            if len(front.walls.put_walls) < 3 or len(front.walls.call_walls) < 3:
+                raise ValueError("top-3 put/call walls unavailable")
+            payload = exposure.to_dict()
+            cache_complete_open_interest_payload(storage_settings, payload)
+            expiry = front.expiry
+            rendered_as_of = exposure.as_of.isoformat()
+        write_open_interest_mirror_png(payload, output)
     except Exception as exc:  # noqa: BLE001 - card delivery must remain independent
         return {
             "status": "failed",
@@ -251,8 +269,8 @@ def publish_open_interest_image(
         }
     return {
         "status": "published",
-        "as_of": exposure.as_of.isoformat(),
-        "expiry": front.expiry,
+        "as_of": rendered_as_of,
+        "expiry": expiry,
         "public_path": OPEN_INTEREST_IMAGE_PUBLIC_PATH,
         "public_url": OPEN_INTEREST_IMAGE_PUBLIC_URL,
         "bytes": output.stat().st_size,

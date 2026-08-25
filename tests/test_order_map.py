@@ -2325,6 +2325,120 @@ def test_open_interest_image_publishes_for_card(monkeypatch, tmp_path) -> None:
     assert (tmp_path / "published/spxw-surface/oi/latest.png").read_bytes() == b"png"
 
 
+def test_open_interest_image_uses_complete_rth_oi_for_gth_location(
+    monkeypatch, tmp_path
+) -> None:
+    import spx_spark.application.order_map.delivery as delivery_module
+
+    now = datetime(2026, 8, 25, 2, 14, tzinfo=timezone.utc)
+    cache_path = tmp_path / "published/spxw-surface/oi/last-complete.json"
+    cache_path.parent.mkdir(parents=True)
+    strikes = [
+        {
+            "strike": float(7625 + index * 5),
+            "put_open_interest": float(100 + index),
+            "call_open_interest": float(200 + index),
+        }
+        for index in range(12)
+    ]
+    cache_path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-08-24T19:59:59+00:00",
+                "underlier": {"price": 7652.96},
+                "expiries": [
+                    {
+                        "expiry": "20260825",
+                        "oi_quality": "schwab_rth_close_oi",
+                        "strikes": strikes,
+                        "walls": {
+                            "put_walls": [
+                                {"strike": 7650.0, "open_interest": 500.0}
+                                for _ in range(3)
+                            ],
+                            "call_walls": [
+                                {"strike": 7700.0, "open_interest": 600.0}
+                                for _ in range(3)
+                            ],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    basis_path = tmp_path / "state/ibkr_atm_reference.json"
+    basis_path.parent.mkdir(parents=True)
+    basis_path.write_text(
+        json.dumps(
+            {
+                "basis": {
+                    "median": 16.18,
+                    "trading_date": "2026-08-24",
+                    "es_contract": "20260918",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    health_path = tmp_path / "latest/provider_failover_state.json"
+    health_path.parent.mkdir(parents=True)
+    health_path.write_text(
+        json.dumps(
+            {
+                "health_dimensions": {
+                    "ibkr": {
+                        "gth_options": {
+                            "healthy": False,
+                            "reason": "GTH SPXW coverage 0/20 contracts",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    es_quote = SimpleNamespace(
+        effective_price=7668.75,
+        quote_time=now,
+        trade_time=None,
+        received_at=now,
+        instrument=SimpleNamespace(expiry="20260918"),
+    )
+    state = SimpleNamespace(
+        best_quote=lambda instrument: es_quote if instrument == "future:ES" else None
+    )
+    monkeypatch.setattr(
+        delivery_module,
+        "LatestStateStore",
+        lambda _settings: SimpleNamespace(load=lambda: state),
+    )
+    captured: dict[str, object] = {}
+
+    def write_png(payload, output) -> None:
+        captured.update(payload)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"gth-png")
+
+    monkeypatch.setattr(delivery_module, "write_open_interest_mirror_png", write_png)
+
+    result = delivery_module.publish_open_interest_image(
+        SimpleNamespace(data_root=str(tmp_path)),
+        now=now,
+    )
+
+    assert result["status"] == "published"
+    assert result["expiry"] == "20260825"
+    assert captured["underlier"]["price"] == pytest.approx(7652.57)
+    assert captured["display_context"] == {
+        "session_mode": "gth",
+        "oi_as_of": "2026-08-24T19:59:59+00:00",
+        "location_as_of": now.isoformat(),
+        "location_source": "ES 7,668.75 − frozen basis 16.18pt",
+        "option_coverage": "unavailable · GTH SPXW coverage 0/20 contracts",
+    }
+
+
 def test_strategy_risk_image_publishes_for_trade_ready_delivery(
     monkeypatch, tmp_path
 ) -> None:
@@ -4228,6 +4342,58 @@ def test_status_delivery_gate_sends_gth_hourly_summary() -> None:
         )
         == "gth_hourly_summary:asia_globex"
     )
+
+
+def test_gth_provider_transition_pushes_once_and_suppresses_repeated_outage() -> None:
+    from spx_spark.application.order_map.service import (
+        _status_delivery_reason,
+        _status_fingerprint,
+        _status_material_changes,
+    )
+
+    now = datetime(2026, 8, 25, 11, 20, tzinfo=timezone.utc)
+    payload = {
+        "expiry": "20260825",
+        "session_phase": {"name": "us_data_hour"},
+        "strategy_entry_control": {"allowed": True, "reason": "allowed"},
+    }
+    healthy = _status_fingerprint(payload)
+    payload["strategy_entry_control"] = {
+        "allowed": False,
+        "reason": "ibkr_competing_session",
+    }
+    blocked = _status_fingerprint(payload)
+    changes = _status_material_changes(healthy, blocked)
+    previous = {
+        "last_status_date": "2026-08-25",
+        "last_status_at": now.timestamp() - 61 * 60,
+        "status_fingerprint": blocked,
+    }
+
+    assert changes == ["GTH执行行情暂停 · IBKR 10197"]
+    assert (
+        _status_delivery_reason(
+            previous,
+            blocked,
+            changes,
+            now=now,
+            trading_date="2026-08-25",
+            position_risk=False,
+        )
+        == "material_changes"
+    )
+    assert (
+        _status_delivery_reason(
+            previous,
+            blocked,
+            [],
+            now=now,
+            trading_date="2026-08-25",
+            position_risk=False,
+        )
+        is None
+    )
+    assert _status_material_changes(blocked, healthy) == ["GTH执行行情恢复"]
 
 
 def test_status_delivery_gate_sends_rth_structure_aware_desk_map_cadence() -> None:

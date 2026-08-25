@@ -701,6 +701,32 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 
+def test_gth_competing_session_is_rendered_as_paused_not_scanning() -> None:
+    gth_now = datetime(2026, 8, 25, 11, 20, tzinfo=timezone.utc)
+    payload = _payload()
+    payload["session_phase"] = {"name": "us_data_hour", "name_cn": "美股数据时段"}
+    payload["strategy_entry_control"] = {
+        "allowed": False,
+        "reason": "ibkr_competing_session",
+    }
+    payload["option_structure_frame"] = {
+        "as_of": gth_now.isoformat(),
+        "quality": "unavailable",
+        "l1": {"quality": "unavailable"},
+        "structure": {},
+    }
+    payload["strategy_decision"] = {
+        "decision_type": "NO_TRADE",
+        "why_not": {"reasons": ["ibkr_competing_session"]},
+    }
+
+    sections = build_desk_message_sections(payload, gth_now)
+
+    assert "GTH实时期权行情暂停（IBKR 10197" in sections.structure
+    assert "PAUSED · IBKR 10197实时行情冲突" in sections.execution
+    assert "主要影响：IBKR返回实时行情会话冲突（10197）" in sections.data_quality
+
+
 @pytest.mark.parametrize(
     "frame_update",
     (

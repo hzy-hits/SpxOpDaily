@@ -14,6 +14,9 @@ from typing import Any
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
 from spx_spark.application.market_features.greek_decision import build_greek_decision
+from spx_spark.application.market_features.provider_entry_control import (
+    gth_ibkr_entry_control,
+)
 from spx_spark.application.market_features.state import load_json, projection_paths
 from spx_spark.application.notifications.report_enqueue import (
     daily_report_semantic,
@@ -403,6 +406,11 @@ def build_order_payload_with_retry(
         payload["minute_market_frame"] = market_frame
         _apply_gth_em_usage(payload, market_frame)
         payload["option_structure_frame"] = option_frame
+        if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(evaluation_now):
+            payload["strategy_entry_control"] = gth_ibkr_entry_control(
+                storage_settings.data_root,
+                now=evaluation_now,
+            )
         apply_decision_projections(
             payload,
             level_decision=load_level_decision_shadow(storage_settings),

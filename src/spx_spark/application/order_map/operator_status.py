@@ -573,6 +573,7 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
     )
     live_frame = option_structure_frame_is_live(payload, now=now)
     gth = current_session_is_gth(payload, decision)
+    provider_block_reason = _gth_provider_block_reason(payload)
     if frame_ready:
         # GTH/RTH option-frame walls own the first Structure line.
         levels = f"Put/Flip/Call {live_text} · event=live"
@@ -587,11 +588,19 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
         source_label = "source=live"
         current_levels = frozen if frozen else live
     elif gth:
-        levels = (
-            f"Put/Flip/Call {frozen_text} · GTH期权帧未就绪（参考位，非当前确认）"
-            if frozen
-            else f"Put/Flip/Call {live_text} · GTH期权帧未就绪"
-        )
+        if provider_block_reason == "ibkr_competing_session":
+            levels = (
+                f"Put/Flip/Call {frozen_text} · GTH实时期权行情暂停"
+                "（IBKR 10197；参考位，非当前确认）"
+                if frozen
+                else f"Put/Flip/Call {live_text} · GTH实时期权行情暂停（IBKR 10197）"
+            )
+        else:
+            levels = (
+                f"Put/Flip/Call {frozen_text} · GTH期权帧未就绪（参考位，非当前确认）"
+                if frozen
+                else f"Put/Flip/Call {live_text} · GTH期权帧未就绪"
+            )
         source_label = "source=gth_reference_pending"
         current_levels = frozen if frozen else live
     else:
@@ -906,6 +915,11 @@ def _execution_line(
                 f"机会 {short_opportunity}"
             )
         if current_session_is_gth(payload, _mapping(payload.get("level_decision"))):
+            if _gth_provider_block_reason(payload) == "ibkr_competing_session":
+                return (
+                    "Execution  PAUSED · IBKR 10197实时行情冲突 · "
+                    "等待新鲜SPXW双边报价自动恢复"
+                )
             return "Execution  扫描中 · 仅人工候选可做"
         reasons = list(_mapping(strategy_decision.get("why_not")).get("reasons") or ())
         blocker = humanize_strategy_reason(
@@ -956,6 +970,11 @@ def _data_quality(
     invalid_phase: bool = False,
 ) -> tuple[str, tuple[str, ...]]:
     reasons: list[str] = []
+    if (
+        current_session_is_gth(payload, decision)
+        and _gth_provider_block_reason(payload) == "ibkr_competing_session"
+    ):
+        reasons.append("ibkr_competing_session")
     if invalid_phase:
         reasons.append("unknown_level_phase")
     if decision.get("snapshot_consistent") is False:
@@ -1117,6 +1136,13 @@ def _levels_text(levels: Mapping[str, Any]) -> str:
 
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _gth_provider_block_reason(payload: Mapping[str, Any]) -> str:
+    control = _mapping(payload.get("strategy_entry_control"))
+    if control.get("allowed") is True:
+        return ""
+    return str(control.get("reason") or "")
 
 
 def _rth_only_quality_reason(reason: str) -> bool:

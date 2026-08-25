@@ -1486,8 +1486,6 @@ def test_quiet_window_consumes_structure_signal_but_allows_execution_interruptio
 @pytest.mark.parametrize(
     "kind",
     (
-        "option_gamma_regime",
-        "option_wall_proximity",
         "iv_term_gap",
         "atm_iv_jump_5m",
         "put_skew_steepening_5m",
@@ -1524,6 +1522,40 @@ def test_market_observations_reach_reviewer_lane(kind: str, tmp_path, monkeypatc
     assert result.sent_count >= 1
     assert result.outcome == "delivered"
     assert any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
+
+
+@pytest.mark.parametrize("kind", ("option_gamma_regime", "option_wall_proximity"))
+def test_raw_option_structure_observations_are_consumed_without_reviewer(
+    kind: str, tmp_path, monkeypatch
+) -> None:
+    def unexpected_reviewer(*_args, **_kwargs):
+        raise AssertionError("raw Gamma/Wall observations must not call the reviewer")
+
+    monkeypatch.setattr(
+        "spx_spark.notifier.pipeline.run_deepseek_reviewer",
+        unexpected_reviewer,
+    )
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": kind,
+            "instrument_id": "option_map:SPXW:20260707",
+            "title": kind,
+            "detail": "raw structural observation",
+            "dedup_group": f"{kind}:1",
+        }
+    ]
+
+    result = notify_payload(
+        payload,
+        settings=make_settings(str(tmp_path / "notify-state.json")),
+        now=datetime(2026, 7, 7, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.sent_count == 0
+    assert result.outcome == "consumed"
+    assert [sink.sink for sink in result.sinks] == ["context_policy"]
 
 
 def test_medium_price_move_is_consumed_without_reviewer(tmp_path, monkeypatch) -> None:
@@ -1590,11 +1622,11 @@ def test_reviewer_cannot_replace_deterministic_market_facts(tmp_path, monkeypatc
     payload["alerts"] = [
         {
             "severity": "high",
-            "kind": "option_wall_proximity",
-            "instrument_id": "option_map:SPXW:20260707",
-            "title": "SPX near SPXW wall 7450 (-4.0 pts)",
-            "detail": "Nearest wall is 7450; threshold=15.0 pts.",
-            "dedup_group": "band:7450",
+            "kind": "iv_term_gap",
+            "instrument_id": "iv_surface:SPXW:20260707",
+            "title": "SPXW IV term gap 2.1 vol points",
+            "detail": "Front IV exceeds next-expiry IV by 2.1 points.",
+            "dedup_group": "term-gap:2",
         }
     ]
 
@@ -1606,7 +1638,7 @@ def test_reviewer_cannot_replace_deterministic_market_facts(tmp_path, monkeypatc
 
     assert result.outcome == "delivered"
     assert captured
-    assert "SPX near SPXW wall 7450" in captured[0]
+    assert "SPXW IV term gap 2.1" in captured[0]
     assert "7000" not in captured[0]
 
 
@@ -2801,7 +2833,7 @@ def _agent_failopen_payload(*, critical_title: str, include_critical: bool) -> d
     }
 
 
-def test_price_is_audit_only_while_failed_gamma_review_stays_pending(tmp_path) -> None:
+def test_price_and_raw_gamma_are_audit_only_without_agent_review(tmp_path) -> None:
     calls: list[list[str]] = []
 
     def runner(command: list[str], timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -2839,8 +2871,8 @@ def test_price_is_audit_only_while_failed_gamma_review_stays_pending(tmp_path) -
         json.loads(line)
         for line in (tmp_path / "review-audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert entries[-1]["outcome"] == "review_failed_pending"
-    assert calls and calls[0][:2] == ["openclaw", "agent"]
+    assert entries[-1]["outcome"] == "context_only_consumed"
+    assert calls == []
 
 
 def test_notifier_high_price_alert_is_audit_only(tmp_path) -> None:

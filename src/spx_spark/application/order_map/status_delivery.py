@@ -94,6 +94,15 @@ def _status_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         fingerprint["trade_intent_status"] = ""
         fingerprint["opportunity_key"] = ""
+    provider_control = payload.get("strategy_entry_control")
+    if isinstance(provider_control, dict):
+        fingerprint["gth_provider_block_reason"] = (
+            ""
+            if provider_control.get("allowed") is True
+            else str(provider_control.get("reason") or "provider_unavailable")
+        )
+    else:
+        fingerprint["gth_provider_block_reason"] = ""
     return fingerprint
 
 
@@ -150,6 +159,17 @@ def _status_material_changes(
     current_intent_status = str(current.get("trade_intent_status") or "")
     if prior_intent_status != current_intent_status and current_intent_status:
         changes.append(f"执行状态 {prior_intent_status or '-'}→{current_intent_status}")
+    prior_provider = str(previous.get("gth_provider_block_reason") or "")
+    current_provider = str(current.get("gth_provider_block_reason") or "")
+    if prior_provider != current_provider:
+        if current_provider == "ibkr_competing_session":
+            changes.append("GTH执行行情暂停 · IBKR 10197")
+        elif prior_provider == "ibkr_competing_session" and not current_provider:
+            changes.append("GTH执行行情恢复")
+        elif current_provider:
+            changes.append(f"GTH执行行情暂停 · {current_provider}")
+        else:
+            changes.append("GTH执行行情恢复")
     prior_thesis = str(previous.get("decision_thesis") or "")
     current_thesis = str(current.get("decision_thesis") or "")
     if prior_thesis != current_thesis and (prior_thesis or current_thesis):
@@ -224,6 +244,8 @@ def status_delivery_reason(
     if phase in GTH_STATUS_PHASES:
         if changes:
             return "material_changes"
+        if fingerprint.get("gth_provider_block_reason") == "ibkr_competing_session":
+            return None
         last_status_at = finite_float(previous.get("last_status_at"))
         if (
             last_status_at is None

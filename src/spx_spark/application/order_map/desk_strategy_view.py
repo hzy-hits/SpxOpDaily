@@ -447,6 +447,7 @@ def quality_reason_text(reason: str) -> str:
         "oi:schwab_unverified": "Schwab OI 未验证，Gamma 代理仅供审计",
         "gex:no_open_interest_gex": "缺少 OI-GEX，不能解释 Gamma 机制",
         "ibkr_feed_unavailable": "IBKR 源不可用，已抑制陈旧 SPXW 报价",
+        "ibkr_competing_session": "IBKR返回实时行情会话冲突（10197），GTH执行报价暂停",
         "schwab_oi_unverified": "Schwab OI 未验证，Gamma 代理仅供审计",
         "open interest wall scope:schwab_rth_lane": "RTH 墙位使用 Schwab OI（IBKR 热通道不可用）",
         "open interest wall scope:ibkr_hot_lane": "墙位范围仅含 IBKR 热通道 OI",

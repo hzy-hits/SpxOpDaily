@@ -101,6 +101,9 @@ def render_open_interest_mirror_svg(
     window_points: float = 100.0,
 ) -> str:
     """Render a mobile-readable SPXW put/call open-interest mirror chart."""
+    display_context = _mapping(exposure_map.get("display_context"))
+    session_mode = str(display_context.get("session_mode") or "").strip().lower()
+    is_gth = session_mode == "gth"
     expiry = _front_expiry(exposure_map)
     underlier = _number(_mapping(exposure_map.get("underlier")).get("price"))
     if underlier is None:
@@ -157,7 +160,8 @@ def render_open_interest_mirror_svg(
     call_axis = center + center_gap / 2
     max_bar_width = put_axis - plot_left - 78.0
     row_height = 31.0
-    plot_top = 442.0
+    context_offset = 92.0 if is_gth else 0.0
+    plot_top = 442.0 + context_offset
     plot_bottom = plot_top + len(visible) * row_height
     height = int(plot_bottom + 164)
     max_oi = max(
@@ -172,6 +176,12 @@ def render_open_interest_mirror_svg(
     )
 
     as_of = _format_as_of(exposure_map.get("as_of"))
+    oi_as_of = _format_as_of(display_context.get("oi_as_of") or exposure_map.get("as_of"))
+    location_as_of = _format_as_of(
+        display_context.get("location_as_of") or exposure_map.get("as_of")
+    )
+    location_source = escape(str(display_context.get("location_source") or "unknown"))
+    option_coverage = escape(str(display_context.get("option_coverage") or "unknown"))
     expiry_label = escape(str(expiry.get("expiry") or "unknown"))
     quality = escape(str(expiry.get("oi_quality") or expiry.get("quality") or "unknown"))
     oi_age = _open_interest_age(expiry)
@@ -185,24 +195,69 @@ def render_open_interest_mirror_svg(
         ".rank { font-size: 18px; font-weight: 700; fill: #FFFFFF; }",
         "</style>",
         f'<rect width="{width}" height="{height}" fill="#F8FAFC"/>',
-        '<rect x="34" y="28" width="1132" height="362" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
-        '<text x="60" y="78" font-size="34" font-weight="700">SPXW 0DTE Open Interest · ATM Mirror</text>',
-        f'<text x="60" y="116" class="body muted">Expiry {expiry_label} · SPX {underlier:,.2f} · ATM {atm:,.0f} · {escape(as_of)}</text>',
-        '<text x="60" y="150" class="small muted">Bars = open interest (same scale) · P1/C1 = OI-GEX wall rank · MAX = longest visible OI bar</text>',
-        f'<text x="60" y="196" font-size="21" font-weight="700" fill="{_PUT_COLOR}">{escape(_primary_wall_label(put_walls, underlier=underlier, side="PUT"))}</text>',
-        f'<text x="650" y="196" font-size="21" font-weight="700" fill="{_CALL_COLOR}">{escape(_primary_wall_label(call_walls, underlier=underlier, side="CALL"))}</text>',
+        f'<rect x="34" y="28" width="1132" height="{362 + context_offset:.0f}" rx="24" fill="#FFFFFF" stroke="#E2E8F0"/>',
+        f'<text x="60" y="78" font-size="34" font-weight="700">{"SPXW 0DTE OI Structure · GTH Location" if is_gth else "SPXW 0DTE Open Interest · ATM Mirror"}</text>',
+        f'<text x="60" y="116" class="body muted">Expiry {expiry_label} · {"GTH SPX equiv" if is_gth else "SPX"} {underlier:,.2f} · ATM {atm:,.0f} · {escape(location_as_of if is_gth else as_of)}</text>',
+        *(
+            [
+                f'<text x="60" y="150" class="small muted">OI snapshot {escape(oi_as_of)} · Position {location_source}</text>',
+                f'<text x="60" y="180" class="small muted">GTH SPXW live coverage: {option_coverage}</text>',
+                '<text x="60" y="214" class="small muted">Bars = last complete official OI (same scale) · P1/C1 = OI-GEX wall rank · missing GTH quotes are not zero-filled</text>',
+            ]
+            if is_gth
+            else [
+                '<text x="60" y="150" class="small muted">Bars = open interest (same scale) · P1/C1 = OI-GEX wall rank · MAX = longest visible OI bar</text>'
+            ]
+        ),
+        f'<text x="60" y="{196 + context_offset:.0f}" font-size="21" font-weight="700" fill="{_PUT_COLOR}">{escape(_primary_wall_label(put_walls, underlier=underlier, side="PUT"))}</text>',
+        f'<text x="650" y="{196 + context_offset:.0f}" font-size="21" font-weight="700" fill="{_CALL_COLOR}">{escape(_primary_wall_label(call_walls, underlier=underlier, side="CALL"))}</text>',
     ]
-    parts.extend(_wall_summary(put_walls, x=60, y=232, prefix="P", color=_WALL_PUT_COLOR))
-    parts.extend(_wall_summary(call_walls, x=650, y=232, prefix="C", color=_WALL_CALL_COLOR))
+    parts.extend(
+        _wall_summary(
+            put_walls,
+            x=60,
+            y=232 + context_offset,
+            prefix="P",
+            color=_WALL_PUT_COLOR,
+        )
+    )
+    parts.extend(
+        _wall_summary(
+            call_walls,
+            x=650,
+            y=232 + context_offset,
+            prefix="C",
+            color=_WALL_CALL_COLOR,
+        )
+    )
     parts.extend(
         [
-            f'<text x="60" y="344" class="small" font-weight="700" fill="{_PUT_COLOR}">VISIBLE MAX PUT OI · SPX {max_put_strike:,.0f} · OI {max_put_oi:,.0f}</text>',
-            f'<text x="650" y="344" class="small" font-weight="700" fill="{_CALL_COLOR}">VISIBLE MAX CALL OI · SPX {max_call_strike:,.0f} · OI {max_call_oi:,.0f}</text>',
-            f'<text x="72" y="426" font-size="22" font-weight="700" fill="{_PUT_COLOR}">PUT OI</text>',
-            f'<text x="1128" y="426" font-size="22" font-weight="700" text-anchor="end" fill="{_CALL_COLOR}">CALL OI</text>',
-            '<text x="600" y="426" font-size="20" font-weight="700" text-anchor="middle">SPX STRIKE</text>',
+            f'<text x="60" y="{344 + context_offset:.0f}" class="small" font-weight="700" fill="{_PUT_COLOR}">VISIBLE MAX PUT OI · SPX {max_put_strike:,.0f} · OI {max_put_oi:,.0f}</text>',
+            f'<text x="650" y="{344 + context_offset:.0f}" class="small" font-weight="700" fill="{_CALL_COLOR}">VISIBLE MAX CALL OI · SPX {max_call_strike:,.0f} · OI {max_call_oi:,.0f}</text>',
+            f'<text x="72" y="{426 + context_offset:.0f}" font-size="22" font-weight="700" fill="{_PUT_COLOR}">PUT OI</text>',
+            f'<text x="1128" y="{426 + context_offset:.0f}" font-size="22" font-weight="700" text-anchor="end" fill="{_CALL_COLOR}">CALL OI</text>',
+            f'<text x="600" y="{426 + context_offset:.0f}" font-size="20" font-weight="700" text-anchor="middle">SPX STRIKE</text>',
         ]
     )
+
+    visible_high = max(_number(item.get("strike")) or 0.0 for item in visible)
+    visible_low = min(_number(item.get("strike")) or 0.0 for item in visible)
+    spot_y = (
+        _scale(
+            min(max(underlier, visible_low), visible_high),
+            visible_high,
+            visible_low,
+            plot_top + 12.0,
+            plot_bottom - row_height + 12.0,
+        )
+        if visible_high > visible_low
+        else plot_top + 12.0
+    )
+    if visible_high > visible_low:
+        parts.append(
+            f'<line x1="42" y1="{spot_y:.1f}" x2="1158" y2="{spot_y:.1f}" '
+            f'stroke="{_SPOT_COLOR}" stroke-width="3" opacity="0.9"/>'
+        )
 
     for index, item in enumerate(visible):
         y = plot_top + index * row_height
@@ -255,6 +310,14 @@ def render_open_interest_mirror_svg(
             parts.append(_rank_badge(put_axis - 96, y + 2, "MAX", "#172033", width=48))
         if call_is_max:
             parts.append(_rank_badge(call_axis + 50, y + 2, "MAX", "#172033", width=48))
+
+    spot_badge = "GTH≈" if is_gth else "SPX "
+    parts.extend(
+        [
+            f'<rect x="922" y="{spot_y - 15:.1f}" width="226" height="30" rx="8" fill="{_SPOT_COLOR}"/>',
+            f'<text x="1035" y="{spot_y + 7:.1f}" font-size="18" font-weight="700" text-anchor="middle" fill="#FFFFFF">{spot_badge}{underlier:,.2f}</text>',
+        ]
+    )
 
     footer_y = plot_bottom + 50
     parts.extend(
