@@ -172,7 +172,9 @@ def _rust_report_checks(
 ):
     session = DEFAULT_MARKET_CALENDAR.session(date(2026, 8, 10))
     assert session is not None
-    expected_slots = rth_report_schedule_for_session(session)
+    expected_slots = tuple(
+        slot for slot in rth_report_schedule_for_session(session) if slot.minute % 30 == 0
+    )
     slots = tuple(
         slot
         for slot in expected_slots
@@ -202,14 +204,14 @@ def _rust_report_checks(
     )
 
 
-def test_rust_owner_uses_25_of_26_ledger_slots_not_python_snapshots(
+def test_rust_owner_uses_12_of_13_ledger_slots_not_python_snapshots(
     tmp_path: Path,
 ) -> None:
     checks = _rust_report_checks(tmp_path, missing_hour=12)
     by_name = {check.name: check for check in checks}
 
-    assert by_name["rth_report_slot_coverage"].measured == round(25 / 26, 6)
-    assert by_name["rth_report_delivery_coverage"].measured == round(25 / 26, 6)
+    assert by_name["rth_report_slot_coverage"].measured == round(12 / 13, 6)
+    assert by_name["rth_report_delivery_coverage"].measured == round(12 / 13, 6)
     assert by_name["rth_report_slot_coverage"].passed is False
     assert by_name["rth_report_delivery_coverage"].passed is False
     assert "Python status_snapshot is projection input only" in by_name[

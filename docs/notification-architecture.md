@@ -9,11 +9,11 @@
 
 This document defines the Python notification lanes. Python continues to own
 operations, market-warning, trade-ready, position-safety, and legacy report
-delivery. The Rust workspace owns only the explicitly cut over quarter-hour
+delivery. The Rust workspace owns only the explicitly cut over half-hour
 `scheduled_report` lane, using its single SQLite/WAL ledger and receipted
 delivery worker as defined in `rust/docs/ARCHITECTURE.md`.
 
-The `SPX_RUST_REPORT_OWNER` fence selects exactly one quarter-hour report producer.
+The `SPX_RUST_REPORT_OWNER` fence selects exactly one half-hour report producer.
 When false, the Python contract below applies to that lane. When true, Python
 still publishes the atomic desk projection but must not enqueue the same slot;
 Rust report and delivery own it end to end. The two outboxes are not merged and
@@ -29,7 +29,7 @@ Every human-facing message uses one of five lanes and the shared notifier dispat
 | `market_warning` | Fast market movement warning, not an entry instruction | Deterministic, no LLM latency or veto | SPX/ES shock, reclaim, flip reclaim, call-wall breakout |
 | `trade_ready` | Fully gated executable intent | Deterministic strategy gates; LLM is writer only | Contract, entry limit, invalidation, target, expiry |
 | `position_safety` | Existing-position or execution safety | Deterministic, never blocked by a reviewer | Open/close/quantity/PnL safety events when account tracking is explicitly enabled |
-| `scheduled_report` | Time-based map/status/review | Writer allowed; delivery is still receipted and retryable | Morning map, 15-minute status (including the read-only [Call / Put Skew Spread Shadow](call-skew-spread-shadow.md)), post-close review |
+| `scheduled_report` | Time-based map/status/review | Writer allowed; delivery is still receipted and retryable | Morning map, half-hour Desk Map (including the read-only [Call / Put Skew Spread Shadow](call-skew-spread-shadow.md)), post-close review |
 
 IV, Gamma and option-structure observations enter the reviewer lane. Explicit
 data-quality observations remain audit-only. The direct and audit-only sets are
@@ -103,7 +103,7 @@ identity, exact contract or spread, decision NBBO, limit, validity, invalidation
 risk, target and reward/risk. `exit` retains the terminal lifecycle account.
 Research prose is audit context and cannot displace those operational fields.
 
-The quarter-hour `scheduled_report` is not a lifecycle notification. If its source
+The half-hour `scheduled_report` is not a lifecycle notification. If its source
 projection is already `invalidated` or `expired`, Rust emits a deterministic
 neutral `STANDBY` status. Its current location and reference structure come
 from the original typed projection, and its next trigger is fixed to waiting

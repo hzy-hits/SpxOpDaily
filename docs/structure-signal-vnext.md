@@ -27,13 +27,10 @@ Automatic broker ordering remains disabled.
 
 ### Desk Map
 
-The 15-minute timer continues to persist a normalized audit snapshot, but an
-unchanged snapshot is not sent to the operator. A Desk Map is sent on a
-material structure or execution-state change and at the following low-frequency
-RTH checkpoints:
-
-- 09:30, 10:00 and 10:30 America/New_York;
-- then 11:30, 12:30, 13:30, 14:30 and 15:30.
+The 15-minute timer continues to persist a normalized audit snapshot. Human
+Desk Maps are limited to `:00` / `:30` America/New_York with a hard 30-minute
+minimum interval; material structure or execution-state changes are reflected
+in the next half-hour map rather than creating another card between slots.
 
 The deterministic card includes:
 
@@ -157,4 +154,3 @@ Code completion is not end-to-end acceptance. After deployment verify:
 6. the cross-index document contains all four observations or explicit
    missing reasons and has no execution authority;
 7. outbox targets reach terminal receipts rather than merely being accepted.
-

@@ -4271,7 +4271,22 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
         )
         == "material_changes"
     )
+    previous["last_status_at"] = datetime(
+        2026, 7, 14, 6, 0, tzinfo=timezone.utc
+    ).timestamp()
+    assert (
+        _status_delivery_reason(
+            previous,
+            current,
+            ["决策剧本 bullish→bearish"],
+            now=datetime(2026, 7, 14, 6, 15, tzinfo=timezone.utc),
+            trading_date="2026-07-14",
+            position_risk=False,
+        )
+        is None
+    )
     current["status_phase"] = "us_open_hour"
+    previous.pop("last_status_at")
     assert (
         _status_delivery_reason(
             previous,
@@ -4300,18 +4315,30 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
 def test_status_delivery_gate_sends_gth_hourly_summary() -> None:
     from spx_spark.application.order_map.service import _status_delivery_reason
 
-    now = datetime(2026, 7, 15, 4, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 15, 4, 30, tzinfo=timezone.utc)
     fingerprint = {"status_phase": "asia_globex", "trade_intent_id": "stale-rth-intent"}
     recent = {
         "last_status_date": "2026-07-15",
         "last_status_at": now.timestamp() - 13 * 60,
         "status_fingerprint": fingerprint,
     }
+    material_due = {**recent, "last_status_at": now.timestamp() - 31 * 60}
     due = {**recent, "last_status_at": now.timestamp() - 61 * 60}
 
     assert (
         _status_delivery_reason(
             recent,
+            fingerprint,
+            ["决策剧本 过渡偏多→过渡偏空"],
+            now=now,
+            trading_date="2026-07-15",
+            position_risk=False,
+        )
+        is None
+    )
+    assert (
+        _status_delivery_reason(
+            material_due,
             fingerprint,
             ["决策剧本 过渡偏多→过渡偏空"],
             now=now,
@@ -4351,7 +4378,7 @@ def test_gth_provider_transition_pushes_once_and_suppresses_repeated_outage() ->
         _status_material_changes,
     )
 
-    now = datetime(2026, 8, 25, 11, 20, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 25, 11, 30, tzinfo=timezone.utc)
     payload = {
         "expiry": "20260825",
         "session_phase": {"name": "us_data_hour"},
@@ -4404,7 +4431,7 @@ def test_status_delivery_gate_sends_rth_structure_aware_desk_map_cadence() -> No
     previous_slot = {
         "last_status_date": "2026-07-24",
         "last_status_at": datetime(
-            2026, 7, 24, 13, 15, 9, tzinfo=ZoneInfo("America/New_York")
+            2026, 7, 24, 13, 0, 0, tzinfo=ZoneInfo("America/New_York")
         ).timestamp(),
         "status_fingerprint": fingerprint,
     }
@@ -4426,7 +4453,7 @@ def test_status_delivery_gate_sends_rth_structure_aware_desk_map_cadence() -> No
         )
         == "rth_desk_map:2026-07-24:13:30"
     )
-    non_summary = datetime(2026, 7, 24, 14, 0, 8, tzinfo=ZoneInfo("America/New_York"))
+    non_summary = datetime(2026, 7, 24, 13, 45, 8, tzinfo=ZoneInfo("America/New_York"))
     assert (
         _status_delivery_reason(
             previous_slot,
@@ -4438,7 +4465,7 @@ def test_status_delivery_gate_sends_rth_structure_aware_desk_map_cadence() -> No
         )
         is None
     )
-    hourly = datetime(2026, 7, 24, 14, 30, 8, tzinfo=ZoneInfo("America/New_York"))
+    hourly = datetime(2026, 7, 24, 14, 0, 8, tzinfo=ZoneInfo("America/New_York"))
     assert (
         _status_delivery_reason(
             previous_slot,
@@ -4448,7 +4475,7 @@ def test_status_delivery_gate_sends_rth_structure_aware_desk_map_cadence() -> No
             trading_date="2026-07-24",
             position_risk=False,
         )
-        == "rth_desk_map:2026-07-24:14:30"
+        == "rth_desk_map:2026-07-24:14:00"
     )
     assert (
         _status_delivery_reason(

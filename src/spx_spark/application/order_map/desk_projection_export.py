@@ -686,7 +686,7 @@ def _sha256(value: object) -> str:
 
 
 def _projection_slot_key(now: datetime, trading_date: str, session: str) -> str:
-    """Build a GTH/RTH source_slot that matches the Rust quarter-hour lane."""
+    """Build a quarter-hour audit slot; Rust delivers only the :00/:30 subset."""
 
     slot_at = floor_report_slot_et(now)
     return f"{trading_date}:{session}:{slot_at.strftime('%H:%M')}"

@@ -159,7 +159,7 @@ def order_map_status_semantic(
             fingerprint=fingerprint,
         )
     else:
-        occurred_at = stable_report_slot(now, cadence_minutes=15)
+        occurred_at = stable_report_slot(now, cadence_minutes=30)
         slot_key = f"gth:{trading_date}:{occurred_at.astimezone(timezone.utc).isoformat()}"
         identity = material_report_identity(
             "gth_status",

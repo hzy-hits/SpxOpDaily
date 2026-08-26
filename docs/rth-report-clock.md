@@ -5,25 +5,26 @@ clock. `America/New_York` determines the trading date, daylight-saving
 offset, regular close, and early close. Beijing time remains a presentation
 field; it does not own report eligibility.
 
-GTH desk-map `source_slot` keys reuse the same ET quarter-hour floor
-(`floor_report_slot_et`, cadence 15 minutes) so Python projections and the
-Rust `scheduled_report` lane share one slot identity, including the `20:15`
-GTH open.
+Python continues to record ET quarter-hour snapshots. Human Desk Maps consume
+only the `:00` / `:30` projections, so the first GTH notification is `20:30`
+rather than the audit-only `20:15` snapshot.
 
 ## Schedule and jitter
 
 - `rth_report_schedule()` returns 15-minute boundaries from the session open
   through the last boundary before the actual close. A regular session has
   26 slots (`09:30` through `15:45` ET); a `13:00` early close has 14.
+- Human-report acceptance uses the 13 regular-session `:00` / `:30` slots;
+  the other quarter-hour rows remain audit snapshots only.
 - `rth_report_slot()` and `rth_report_slot_for_session()` accept a timer start
   up to 120 seconds after a boundary. An arbitrary later in-session call is
   not treated as another scheduled report.
 - The systemd timer is expressed in `America/New_York`, has
   `AccuracySec=1s`, and covers the full RTH. Calendar and application gates
   still reject holidays and post-close invocations.
-- During RTH, an unchanged or thin snapshot still produces the scheduled
-  heartbeat. A thin snapshot is marked `rth_heartbeat_degraded_snapshot`
-  rather than being silently skipped.
+- During RTH, quarter-hour snapshots remain available for audit. Human
+  notifications are generated only on half-hour boundaries; a thin delivered
+  map is marked `rth_heartbeat_degraded_snapshot` rather than hidden.
 - The RTH notification identity uses the resolved slot timestamp and slot
   key, so a process retry cannot create another event for the same boundary.
 - The pricing audit stores that slot as `occurred_at`/`report_slot_key`, keeps
@@ -33,7 +34,7 @@ GTH open.
 The shared implementation is
 `spx_spark.application.order_map.report_clock`. Daily post-close acceptance
 must reuse it instead of implementing another tolerance or timezone rule.
-When Rust owns quarter-hour reports, acceptance reads `scheduled_report`
+When Rust owns half-hour reports, acceptance reads `scheduled_report`
 intents from the Rust delivery ledger for slot/delivery coverage and treats
 Python `status_snapshot` audit rows as Spring projection inputs only.
 

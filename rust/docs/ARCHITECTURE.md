@@ -8,7 +8,7 @@ Nothing is deployed merely because a config or unit exists in this repository.
 
 The Rust workspace owns the production control plane: accept already-normalized
 market-data and advisory projections, build one decision-time snapshot, apply
-deterministic readiness rules, schedule the quarter-hour GTH/RTH Desk Map, persist
+deterministic readiness rules, schedule the half-hour GTH/RTH Desk Map, persist
 manual-advisory and scheduled-report intents, and deliver them through one
 auditable ledger. Python retains provider SDKs and research computation, but it
 does not own report timing, report writing, outbox state or delivery after the
@@ -64,7 +64,7 @@ contains only SPX `GTH` and `RTH`; CME `Globex` metadata and the independent
 permissions: typed configuration and an explicit CLI flag. Checked-in examples
 remain disabled and are not deployment authority.
 
-## Quarter-hour Desk Map ownership
+## Half-hour Desk Map ownership
 
 Python continuously publishes one complete `desk_map_projection.v1` by atomic
 replace. The projection contains typed lifecycle, level, direction, thesis,
@@ -74,8 +74,8 @@ eight-section source message. It carries `action_authority=none` and
 
 The bridge validates and mirrors that projection into core's durable latest
 file. During active GTH and RTH segments, `spx-report` alone owns the ET
-quarter-hour slots (`:00` / `:15` / `:30` / `:45`), including the GTH open at
-`20:15`. GTH source-slot keys include the explicit `gth` session token and both
+half-hour slots (`:00` / `:30`). The `20:15` GTH projection remains an audit
+snapshot; the first GTH human map is `20:30`. GTH source-slot keys include the explicit `gth` session token and both
 sessions use ET wall time. The service reads only a fresh, still-valid core
 projection, checks the stable slot in the ledger before a model call, and uses
 a generation-fenced `report` owner lease. A report is stored as

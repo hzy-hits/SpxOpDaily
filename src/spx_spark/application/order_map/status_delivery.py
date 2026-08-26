@@ -7,6 +7,7 @@ from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map.report_clock import rth_report_slot
+from spx_spark.market_calendar import ET
 from spx_spark.application.order_map.state import material_changes, payload_fingerprint
 
 
@@ -17,7 +18,7 @@ GTH_STATUS_PHASES = frozenset({"asia_globex", "europe_session", "us_data_hour"})
 STATUS_SUMMARY_CADENCE_SECONDS = 60.0 * 60.0
 GTH_STATUS_SUMMARY_CADENCE_SECONDS = 60.0 * 60.0
 RTH_SLOT_LOOKBACK_GRACE_SECONDS = 15.0 * 60.0 - 0.001
-RTH_OPEN_DESK_MAP_SLOT_INDEXES = frozenset({0, 2, 4})
+HUMAN_DESK_MAP_CADENCE_SECONDS = 30.0 * 60.0
 
 
 def _decision_thesis(payload: dict[str, Any]) -> str:
@@ -204,11 +205,23 @@ def status_delivery_reason(
     trading_date: str,
     position_risk: bool,
 ) -> str | None:
+    current_rth_slot = rth_report_slot(now)
+    human_map_boundary = (
+        _rth_desk_map_summary_due(current_rth_slot.index)
+        if current_rth_slot is not None
+        else now.astimezone(ET).minute % 30 == 0
+    )
+    if not human_map_boundary:
+        return None
     if previous.get("last_status_date") != trading_date:
         return "initial_status"
-    current_rth_slot = rth_report_slot(now)
+    last_status_at = finite_float(previous.get("last_status_at"))
+    if (
+        last_status_at is not None
+        and 0 <= now.timestamp() - last_status_at < HUMAN_DESK_MAP_CADENCE_SECONDS
+    ):
+        return None
     if current_rth_slot is not None:
-        last_status_at = finite_float(previous.get("last_status_at"))
         previous_rth_slot = (
             rth_report_slot(
                 datetime.fromtimestamp(last_status_at, tz=timezone.utc),
@@ -257,11 +270,9 @@ def status_delivery_reason(
 
 
 def _rth_desk_map_summary_due(slot_index: int) -> bool:
-    """Open-window maps are half-hourly; later unchanged maps are hourly."""
+    """Human Desk Maps use every second quarter-hour audit slot."""
 
-    return slot_index in RTH_OPEN_DESK_MAP_SLOT_INDEXES or (
-        slot_index >= 8 and slot_index % 4 == 0
-    )
+    return slot_index % 2 == 0
 
 
 def _phase_label(value: str) -> str:

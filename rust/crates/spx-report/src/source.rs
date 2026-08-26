@@ -178,14 +178,18 @@ impl ReportSlot {
     }
 }
 
-/// Returns an active GTH or RTH ET quarter-hour slot during its bounded grace window.
+const HUMAN_REPORT_CADENCE_MINUTES: u32 = 30;
+
+/// Returns an active GTH or RTH ET half-hour slot during its bounded grace window.
 ///
-/// Slot identity matches the Python `order-map-status` timer and desk-map
-/// `source_slot` contract: ET `:00` / `:15` / `:30` / `:45`, including the
-/// Sunday/weekday GTH open at `20:15`.
+/// Python may continue recording quarter-hour snapshots, but the human Desk Map
+/// is generated only at ET `:00` / `:30`.  The first GTH map is therefore
+/// `20:30`; the `20:15` projection remains audit input and does not call the
+/// writer.
 pub fn active_report_slot(now: DateTime<Utc>, grace_seconds: i64) -> Option<ReportSlot> {
     let now_et = now.with_timezone(&New_York);
-    let boundary_minute = (now_et.minute() / 15) * 15;
+    let boundary_minute =
+        (now_et.minute() / HUMAN_REPORT_CADENCE_MINUTES) * HUMAN_REPORT_CADENCE_MINUTES;
     let local = now_et
         .date_naive()
         .and_hms_opt(now_et.hour(), boundary_minute, 0)?;
@@ -314,7 +318,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quarter_hour_slots_use_dst_correct_et_offsets_and_bounded_grace() {
+    fn half_hour_slots_use_dst_correct_et_offsets_and_bounded_grace() {
         let summer = Utc.with_ymd_and_hms(2026, 8, 4, 14, 1, 53).unwrap();
         let slot = active_report_slot(summer, 180).unwrap();
         assert_eq!(slot.source_slot(), "2026-08-04:10:00");
@@ -326,9 +330,7 @@ mod tests {
         assert_eq!(slot.ledger_slot(), "2026-01-05T10:30:00-05:00");
 
         let rth_quarter = Utc.with_ymd_and_hms(2026, 8, 4, 14, 15, 45).unwrap();
-        let slot = active_report_slot(rth_quarter, 180).unwrap();
-        assert_eq!(slot.source_slot(), "2026-08-04:10:15");
-        assert_eq!(slot.ledger_slot(), "2026-08-04T10:15:00-04:00");
+        assert!(active_report_slot(rth_quarter, 180).is_none());
 
         assert!(active_report_slot(summer + chrono::TimeDelta::seconds(88), 180).is_none());
     }
@@ -357,15 +359,14 @@ mod tests {
         assert_eq!(slot.source_slot(), "2026-08-04:gth:09:00");
 
         let gth_open = Utc.with_ymd_and_hms(2026, 8, 4, 0, 15, 30).unwrap();
-        let slot = active_report_slot(gth_open, 180).unwrap();
+        assert!(active_report_slot(gth_open, 180).is_none());
+
+        let first_gth_map = Utc.with_ymd_and_hms(2026, 8, 4, 0, 30, 30).unwrap();
+        let slot = active_report_slot(first_gth_map, 180).unwrap();
         assert_eq!(slot.session(), MarketSession::Gth);
         assert_eq!(slot.trading_date_et().to_string(), "2026-08-04");
-        assert_eq!(slot.source_slot(), "2026-08-04:gth:20:15");
-        assert_eq!(slot.ledger_slot(), "2026-08-03T20:15:00-04:00");
-
-        // Outside the 180s start grace for the 20:15 open slot.
-        let after_open_grace = Utc.with_ymd_and_hms(2026, 8, 4, 0, 20, 0).unwrap();
-        assert!(active_report_slot(after_open_grace, 180).is_none());
+        assert_eq!(slot.source_slot(), "2026-08-04:gth:20:30");
+        assert_eq!(slot.ledger_slot(), "2026-08-03T20:30:00-04:00");
     }
 
     #[test]

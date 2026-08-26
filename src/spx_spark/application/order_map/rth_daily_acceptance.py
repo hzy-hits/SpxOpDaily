@@ -2,7 +2,7 @@
 
 The regular post-close review validates market-data completeness. This
 projection adds the cross-process contracts that unit tests cannot observe:
-five-minute TradeIntent producer coverage, quarter-hour report delivery,
+five-minute TradeIntent producer coverage, half-hour report delivery,
 per-event notification settlement, and the outbox/receipt durability chain.
 """
 
@@ -793,7 +793,7 @@ def _expected_minute_count(session: MarketSession) -> int:
 
 
 def _expected_report_slots(session: MarketSession) -> tuple[datetime, ...]:
-    return rth_report_schedule_for_session(session)
+    return tuple(slot for slot in rth_report_schedule_for_session(session) if slot.minute % 30 == 0)
 
 
 def _report_slot(observed: datetime | None, session: MarketSession) -> datetime | None:
