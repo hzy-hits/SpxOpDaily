@@ -540,27 +540,64 @@ def persist_strategy_outcomes(
 
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     now_text = _utc_text(datetime.now(tz=timezone.utc))
-    outcome_ids: list[str] = []
+    prepared: list[dict[str, object]] = []
+    for value in batch:
+        decision_id = _required_text(value, "decision_id")
+        horizon_minutes = int(value.get("horizon_minutes") or 0)
+        if horizon_minutes <= 0:
+            raise ValueError("strategy outcome horizon must be positive")
+        target_at = _time(value.get("target_at"), "target_at")
+        sampled_at = _time(value.get("sampled_at"), "sampled_at")
+        attributes = _mapping(value.get("attributes"))
+        censor_kind = str(attributes.get("censor_kind") or "")
+        if sampled_at < target_at and not (
+            str(value.get("status") or "") == "censored"
+            and censor_kind == "session_end_before_horizon"
+        ):
+            raise ValueError("strategy outcome cannot be sampled before target")
+        prepared.append(
+            {
+                "value": value,
+                "decision_id": decision_id,
+                "horizon_minutes": horizon_minutes,
+                "target_at": target_at,
+                "sampled_at": sampled_at,
+                "attributes": attributes,
+                "censor_kind": censor_kind,
+                "outcome_id": f"strategy-outcome:{decision_id}:{horizon_minutes}m",
+                "event_key": f"strategy-observation:{decision_id}:{horizon_minutes}m",
+            }
+        )
+
+    outcome_ids = tuple(str(item["outcome_id"]) for item in prepared)
+    event_keys = tuple(str(item["event_key"]) for item in prepared)
+    decision_ids = tuple(dict.fromkeys(str(item["decision_id"]) for item in prepared))
     with _engine(str(path)).begin() as connection:
-        for value in batch:
-            decision_id = _required_text(value, "decision_id")
-            horizon_minutes = int(value.get("horizon_minutes") or 0)
-            if horizon_minutes <= 0:
-                raise ValueError("strategy outcome horizon must be positive")
-            target_at = _time(value.get("target_at"), "target_at")
-            sampled_at = _time(value.get("sampled_at"), "sampled_at")
-            attributes = _mapping(value.get("attributes"))
-            censor_kind = str(attributes.get("censor_kind") or "")
-            if sampled_at < target_at and not (
-                str(value.get("status") or "") == "censored"
-                and censor_kind == "session_end_before_horizon"
-            ):
-                raise ValueError("strategy outcome cannot be sampled before target")
-            outcome_id = f"strategy-outcome:{decision_id}:{horizon_minutes}m"
-            event_key = f"strategy-observation:{decision_id}:{horizon_minutes}m"
-            decision = connection.execute(
-                sa.select(decisions).where(decisions.c.decision_id == decision_id)
-            ).mappings().one()
+        decisions_by_id = {
+            str(row["decision_id"]): row
+            for row in connection.execute(
+                sa.select(decisions).where(decisions.c.decision_id.in_(decision_ids))
+            ).mappings()
+        }
+        if missing := set(decision_ids) - decisions_by_id.keys():
+            raise sa.exc.NoResultFound(
+                f"strategy outcome decision is missing: {sorted(missing)[0]}"
+            )
+        event_rows: list[dict[str, object]] = []
+        outcome_rows: list[dict[str, object]] = []
+        for item in prepared:
+            value = _mapping(item["value"])
+            decision_id = str(item["decision_id"])
+            horizon_minutes = int(item["horizon_minutes"])
+            target_at = item["target_at"]
+            sampled_at = item["sampled_at"]
+            assert isinstance(target_at, datetime)
+            assert isinstance(sampled_at, datetime)
+            attributes = _mapping(item["attributes"])
+            censor_kind = str(item["censor_kind"])
+            outcome_id = str(item["outcome_id"])
+            event_key = str(item["event_key"])
+            decision = decisions_by_id[decision_id]
             event_source_at = (
                 sampled_at
                 if str(value.get("status") or "") == "censored"
@@ -585,13 +622,7 @@ def persist_strategy_outcomes(
                 ),
                 "created_at": now_text,
             }
-            connection.execute(
-                sqlite_insert(events).values(event_row).on_conflict_do_nothing()
-            )
-            stored_event = connection.execute(
-                sa.select(events).where(events.c.event_key == event_key)
-            ).mappings().one()
-            _assert_same("strategy outcome event", stored_event, event_row)
+            event_rows.append(event_row)
             outcome_row = {
                 "outcome_id": outcome_id,
                 "event_key": event_key,
@@ -609,15 +640,42 @@ def persist_strategy_outcomes(
                 "attributes_json": _json(attributes),
                 "created_at": now_text,
             }
-            connection.execute(
-                sqlite_insert(outcomes).values(outcome_row).on_conflict_do_nothing()
+            outcome_rows.append(outcome_row)
+
+        connection.execute(
+            sqlite_insert(events).on_conflict_do_nothing(),
+            event_rows,
+        )
+        stored_events = {
+            str(row["event_key"]): row
+            for row in connection.execute(
+                sa.select(events).where(events.c.event_key.in_(event_keys))
+            ).mappings()
+        }
+        for row in event_rows:
+            _assert_same(
+                "strategy outcome event",
+                stored_events[str(row["event_key"])],
+                row,
             )
-            stored = connection.execute(
-                sa.select(outcomes).where(outcomes.c.outcome_id == outcome_id)
-            ).mappings().one()
-            _assert_same("strategy outcome", stored, outcome_row)
-            outcome_ids.append(outcome_id)
-    return tuple(outcome_ids)
+
+        connection.execute(
+            sqlite_insert(outcomes).on_conflict_do_nothing(),
+            outcome_rows,
+        )
+        stored_outcomes = {
+            str(row["outcome_id"]): row
+            for row in connection.execute(
+                sa.select(outcomes).where(outcomes.c.outcome_id.in_(outcome_ids))
+            ).mappings()
+        }
+        for row in outcome_rows:
+            _assert_same(
+                "strategy outcome",
+                stored_outcomes[str(row["outcome_id"])],
+                row,
+            )
+    return outcome_ids
 
 
 def _decision_rows(

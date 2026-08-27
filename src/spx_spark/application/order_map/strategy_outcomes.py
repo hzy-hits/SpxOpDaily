@@ -15,7 +15,7 @@ from spx_spark.infrastructure.operational_db import (
     persist_strategy_outcomes,
     read_due_strategy_observations,
 )
-from spx_spark.marketdata import Quote, as_utc, instrument_matches_id
+from spx_spark.marketdata import Quote, as_utc
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -43,12 +43,15 @@ def observe_due_strategy_outcomes(
         horizon_minutes=horizons,
         database_path=database_path,
     )
+    exit_quotes = _exit_quote_index(latest, sampled_at) if pending else {}
+    current_spx = _current_spx(latest, sampled_at) if pending else (None, None)
     statuses: dict[str, int] = {}
     values = []
     for observation in pending:
         value = _observe(
             observation,
-            latest=latest,
+            exit_quotes=exit_quotes,
+            current_spx=current_spx,
             sampled_at=sampled_at,
             data_root=Path(data_root),
         )
@@ -67,7 +70,8 @@ def observe_due_strategy_outcomes(
 def _observe(
     observation: Mapping[str, Any],
     *,
-    latest: LatestState,
+    exit_quotes: Mapping[tuple[str, str], Quote],
+    current_spx: tuple[float | None, str | None],
     sampled_at: datetime,
     data_root: Path,
 ) -> dict[str, Any]:
@@ -83,18 +87,18 @@ def _observe(
     )
     credit_entry = str(candidate.get("strategy_type") or "") == "IRON_CONDOR"
     entry_value = _entry_credit(legs) if credit_entry else _entry_debit(legs)
-    exit_legs, exit_reasons = _exit_legs(legs, latest=latest, now=sampled_at)
+    exit_legs, exit_reasons = _exit_legs(legs, exit_quotes=exit_quotes)
     exit_value = (
         _exit_liability(exit_legs) if credit_entry else _exit_credit(exit_legs)
     ) if not exit_reasons else None
     entry_spx = _number(_map(_map(decision.get("market_facts")).get("spot")).get("spx"))
-    current_spx, spx_reason = _current_spx(latest, sampled_at)
+    current_spx_value, spx_reason = current_spx
     reasons = [*exit_reasons]
     if entry_value is None:
         reasons.append(
             "entry_credit_unavailable" if credit_entry else "entry_debit_unavailable"
         )
-    if current_spx is None:
+    if current_spx_value is None:
         reasons.append(spx_reason or "exit_spx_unavailable")
     regime = _map(decision.get("regime"))
     breach = _invalidation_breach(
@@ -139,8 +143,10 @@ def _observe(
         else None
     )
     spx_return = (
-        (current_spx / entry_spx - 1.0) * 10_000.0
-        if status == "observed" and current_spx is not None and entry_spx not in (None, 0.0)
+        (current_spx_value / entry_spx - 1.0) * 10_000.0
+        if status == "observed"
+        and current_spx_value is not None
+        and entry_spx not in (None, 0.0)
         else None
     )
     return {
@@ -173,7 +179,7 @@ def _observe(
             "reasons": sorted(set(reasons)),
             "exit_legs": exit_legs,
             "sample_lag_seconds": round((sampled_at - target_at).total_seconds(), 3),
-            "spot_spx": current_spx,
+            "spot_spx": current_spx_value,
             "regime_terminal_state": regime.get("terminal_state") or regime.get("path_state"),
             "censor_kind": censor_kind,
             "invalidation_breached": breach["invalidation_breached"],
@@ -415,23 +421,16 @@ def _exit_ask(legs: list[dict[str, Any]]) -> float | None:
 
 
 def _exit_legs(
-    entry_legs: list[dict[str, Any]], *, latest: LatestState, now: datetime
+    entry_legs: list[dict[str, Any]],
+    *,
+    exit_quotes: Mapping[tuple[str, str], Quote],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     result, reasons = [], []
     for leg in entry_legs:
         contract_id = str(leg.get("instrument_id") or "")
         attributes = _json_map(leg.get("attributes_json"))
         provider = str(attributes.get("provider") or "")
-        candidates = [
-            quote
-            for quote in latest.quotes
-            if instrument_matches_id(quote.instrument, contract_id)
-            and quote.provider.value == provider
-            and quote.bid is not None
-            and quote.ask is not None
-            and configured_quote_use_decision(quote, as_of=now).pricing_allowed
-        ]
-        quote = max(candidates, key=_transport_at, default=None)
+        quote = exit_quotes.get((contract_id, provider))
         if quote is None:
             reasons.append(f"exit_leg_unavailable:{contract_id}:{provider or 'unknown'}")
             continue
@@ -453,6 +452,25 @@ def _exit_legs(
     if len(result) != len(entry_legs):
         reasons.append("exit_combo_incomplete")
     return result, reasons
+
+
+def _exit_quote_index(
+    latest: LatestState,
+    now: datetime,
+) -> dict[tuple[str, str], Quote]:
+    result: dict[tuple[str, str], Quote] = {}
+    for quote in latest.quotes:
+        if (
+            quote.bid is None
+            or quote.ask is None
+            or not configured_quote_use_decision(quote, as_of=now).pricing_allowed
+        ):
+            continue
+        key = (quote.instrument.canonical_id, quote.provider.value)
+        previous = result.get(key)
+        if previous is None or _transport_at(quote) > _transport_at(previous):
+            result[key] = quote
+    return result
 
 
 def _current_spx(latest: LatestState, now: datetime) -> tuple[float | None, str | None]:
