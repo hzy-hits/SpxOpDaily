@@ -46,7 +46,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v52"
+    policy_version: str = "strategy_policy.bootstrap.v53"
     # Policy history and frozen thresholds: docs/strategy-signal-engine-v2.md.
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
@@ -72,6 +72,7 @@ class StrategyPolicy:
     rth_straddle_reexpansion_15m: float = -0.02
     rth_breadth_balance_min: float = 0.35
     rth_breadth_balance_max: float = 0.65
+    rth_expansion_transition_max_age_seconds: float = 1_200.0
     rth_short_rate_proxy_fast_15m_pct: float = 0.0002
     rth_long_rate_proxy_fast_15m_pct: float = 0.0008
     rth_credit_stress_15m_pct: float = -0.001
@@ -480,9 +481,34 @@ def assess_rth_environment(
         and (path_state == "BALANCED" or terminal_state == "PIN_STABLE")
         and gamma_state != "negative_gamma_acceleration"
     )
+    decision_at = _time(facts.get("decision_at"))
+    previous_environment = _map(facts.get("previous_rth_environment"))
+    previous_observed_at = _time(previous_environment.get("observed_at"))
+    last_expansion_at = _time(previous_environment.get("last_expansion_at"))
+    if (
+        last_expansion_at is None
+        and previous_environment.get("state") == "RISK_EXPANSION"
+    ):
+        last_expansion_at = previous_observed_at
+    if expansion_confirmed:
+        last_expansion_at = decision_at
+    transition_age_seconds = (
+        (decision_at - last_expansion_at).total_seconds()
+        if decision_at is not None
+        and last_expansion_at is not None
+        and last_expansion_at <= decision_at
+        else None
+    )
+    recent_expansion = bool(
+        transition_age_seconds is not None
+        and transition_age_seconds <= policy.rth_expansion_transition_max_age_seconds
+    )
+    expansion_to_contraction = contraction_confirmed and recent_expansion
     state = (
         "RISK_EXPANSION"
         if expansion_confirmed
+        else "EXPANSION_TO_CONTRACTION"
+        if expansion_to_contraction
         else "VOL_CONTRACTION_BALANCE"
         if contraction_confirmed
         else "MIXED_UNCONFIRMED"
@@ -492,7 +518,13 @@ def assess_rth_environment(
         "status": "ready",
         "direction_authority": "none",
         "directional_structures_allowed": state == "RISK_EXPANSION",
-        "range_structures_allowed": state == "VOL_CONTRACTION_BALANCE",
+        "range_structures_allowed": state
+        in {"VOL_CONTRACTION_BALANCE", "EXPANSION_TO_CONTRACTION"},
+        "observed_at": decision_at.isoformat() if decision_at is not None else None,
+        "last_expansion_at": (
+            last_expansion_at.isoformat() if last_expansion_at is not None else None
+        ),
+        "transition_age_seconds": transition_age_seconds,
         "expansion_signals": expansion_signals,
         "contraction_signals": contraction_signals,
         "macro_confirmations": confirmations,

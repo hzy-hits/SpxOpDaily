@@ -57,6 +57,7 @@ from spx_spark.application.market_features.options import (
     level_decision_live_structure,
     merge_option_history,
     option_frame_has_usable_live_structure,
+    update_atm_straddle_session,
 )
 from spx_spark.application.market_features.play_outcome_stats import (
     PlayOutcomeStats,
@@ -216,6 +217,18 @@ def run(
         policy=policy,
         exposure_map=exposure_map,
         last_usable_frame=_dict(persisted.get("last_usable_option_frame")),
+    )
+    atm_straddle_session, atm_straddle_projection = update_atm_straddle_session(
+        _dict(persisted.get("atm_straddle_session")),
+        option_frame,
+        now=evaluation_now,
+    )
+    option_frame = replace(
+        option_frame,
+        volatility={
+            **option_frame.volatility,
+            "atm_straddle_session": atm_straddle_projection,
+        },
     )
     last_usable_option_frame = _dict(persisted.get("last_usable_option_frame"))
     if option_frame_has_usable_live_structure(option_frame):
@@ -784,6 +797,7 @@ def run(
         "option_history": option_history,
         "option_contracts": contracts,
         "last_usable_option_frame": last_usable_option_frame,
+        "atm_straddle_session": atm_straddle_session,
         "volume_baselines": volume_baselines,
         "session_episode": session_episode,
         "last_decision_context": context.to_dict(),

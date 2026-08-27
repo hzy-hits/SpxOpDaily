@@ -120,6 +120,49 @@ def test_rth_environment_separates_expansion_balance_and_missing_data() -> None:
     assert missing["range_structures_allowed"] is False
 
 
+def test_rth_environment_marks_recent_expansion_turning_into_contraction() -> None:
+    decision_at = datetime(2026, 8, 25, 14, 13, tzinfo=timezone.utc)
+    facts = {
+        "decision_at": decision_at.isoformat(),
+        "session": {"mode": "rth"},
+        "event": {"state": "normal", "entry_allowed": True},
+        "path": {"breadth_above_vwap": 0.50},
+        "volatility": {
+            "vix1d_return_15m_pct": -0.01,
+            "atm_iv_change_5m": -0.003,
+            "atm_iv_change_15m": -0.002,
+            "atm_straddle_decay_15m": 0.04,
+        },
+        "structure": {"gamma_state": "zero_gamma_transition"},
+        "macro_context": {"status": "ready"},
+        "previous_rth_environment": {
+            "state": "MIXED_UNCONFIRMED",
+            "observed_at": (decision_at - timedelta(seconds=5)).isoformat(),
+            "last_expansion_at": (decision_at - timedelta(minutes=7)).isoformat(),
+        },
+    }
+
+    result = assess_rth_environment(
+        facts,
+        path_state="BALANCED",
+        terminal_state="NONE",
+    )
+
+    assert result["state"] == "EXPANSION_TO_CONTRACTION"
+    assert result["range_structures_allowed"] is True
+    assert result["transition_age_seconds"] == 420.0
+
+    facts["previous_rth_environment"]["last_expansion_at"] = (
+        decision_at - timedelta(minutes=21)
+    ).isoformat()
+    expired = assess_rth_environment(
+        facts,
+        path_state="BALANCED",
+        terminal_state="NONE",
+    )
+    assert expired["state"] == "VOL_CONTRACTION_BALANCE"
+
+
 def test_rth_environment_event_risk_blocks_both_structure_families() -> None:
     result = assess_rth_environment(
         {
@@ -671,7 +714,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v52"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v53"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -960,7 +1003,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v52"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v53"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1130,7 +1173,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v52"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v53"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1211,8 +1254,20 @@ def test_rth_preaverage_signal_reaches_manual_decision_with_frozen_contract(
     assert len(rows) == 1
     assert rows[0]["long"]["delta"] == pytest.approx(0.60)
     assert rows[0]["short"]["strike"] - rows[0]["long"]["strike"] == 15.0
+    assert rows[0]["evidence_valid_until"] == (
+        now + timedelta(seconds=10)
+    ).isoformat()
+    assert rows[0]["opportunity_valid_until"] == (
+        now + timedelta(minutes=5)
+    ).isoformat()
+    assert now < datetime.fromisoformat(rows[0]["quote_valid_until"]) <= (
+        now + timedelta(seconds=5)
+    )
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "PREAVERAGE15_PULLBACK"
+    assert decision["candidate"]["opportunity_valid_until"] == (
+        now + timedelta(minutes=5)
+    ).isoformat()
     assert decision["geometry_source"] == "preaverage_local_scale_first_passage"
     assert decision["candidate"]["edge"]["strategy_edge"]["status"] == (
         "explicit_policy_authority_unvalidated"

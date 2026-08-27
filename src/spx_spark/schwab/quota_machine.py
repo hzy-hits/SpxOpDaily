@@ -10,7 +10,7 @@ from spx_spark.schwab.request_models import QuotaMode, RequestWindow
 @dataclass(frozen=True)
 class QuotaPolicy:
     nominal_requests_per_minute: int = 120
-    planned_requests_per_minute: int = 84
+    planned_requests_per_minute: int = 96
     pressure_fraction: float = 0.70
     recovery_fraction: float = 0.50
     recovery_successes: int = 10

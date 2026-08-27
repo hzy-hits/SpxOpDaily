@@ -192,8 +192,8 @@ retry_after_max_seconds = { value = 30, description = "Longest provider Retry-Af
 enabled = { value = true, description = "Enables the dedicated long-running Schwab market-data collector." }
 service_loop_enabled = { value = false, description = "Legacy embedded collector gate; keep false when the dedicated market-data service is enabled." }
 interval_seconds = { value = 1, description = "One-second planner tick needed to realize 1.5-3 second lane cadences; each lane independently decides whether it is due." }
-request_budget_warning_per_minute = { value = 84, description = "Planned request ceiling using 70 percent of the nominal 120/min capacity and reserving 30 percent for retries and recovery." }
-planned_requests_per_minute = { value = 84, description = "Hard scheduler plan ceiling; the gateway separately enforces the nominal provider attempt rate." }
+request_budget_warning_per_minute = { value = 84, description = "Pressure threshold at 70 percent of nominal capacity; priority-4 research and secondary confirmation lanes stop here." }
+planned_requests_per_minute = { value = 96, description = "Hard scheduler ceiling at 80 percent of nominal capacity; only priority 0-3 lanes may use the 84-96/min band, leaving 24/min for retries and recovery." }
 
 [schwab.collection.cadence]
 off_hours_quote_seconds = { value = 15.0, description = "REST quote cadence outside regular trading hours, when option prices are static." }

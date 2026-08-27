@@ -415,7 +415,7 @@ def _hard_gate_candidate(
     elif strategy_type.endswith("_BUTTERFLY"):
         gates.extend(_butterfly_hard_gates(candidate, facts, regime, policy=policy))
     elif strategy_type == _IRON_CONDOR_TYPE:
-        gates.extend(_iron_condor_hard_gates(candidate, facts))
+        gates.extend(_iron_condor_hard_gates(candidate, facts, regime))
     else:
         gates.append(
             {
@@ -498,8 +498,17 @@ def _rth_environment_hard_gates(
                 "threshold": "causal_vix1d_atm_straddle_breadth",
             }
         ]
-    expected = "VOL_CONTRACTION_BALANCE" if range_structure else "RISK_EXPANSION"
-    if state == expected:
+    expected = (
+        "VOL_CONTRACTION_BALANCE_or_EXPANSION_TO_CONTRACTION"
+        if range_structure
+        else "RISK_EXPANSION"
+    )
+    accepted_states = (
+        {"VOL_CONTRACTION_BALANCE", "EXPANSION_TO_CONTRACTION"}
+        if range_structure
+        else {"RISK_EXPANSION"}
+    )
+    if state in accepted_states:
         return []
     return [
         {
@@ -1401,10 +1410,10 @@ def _gth_scan_butterfly_hard_gates(
 def _iron_condor_hard_gates(
     candidate: Mapping[str, Any],
     facts: Mapping[str, Any],
+    regime: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     from spx_spark.application.order_map.iron_condor import (
         MAX_CREDIT_FRACTION,
-        MIN_CREDIT_FRACTION,
         SHORT_DELTA_MAX,
         SHORT_DELTA_MIN,
         HUMAN_ENTRY_END_ET,
@@ -1414,6 +1423,7 @@ def _iron_condor_hard_gates(
         HUMAN_SESSION_STATE_KEY,
         HUMAN_SHORT_DELTA,
         WING_WIDTH,
+        human_iron_condor_entry_contract,
     )
 
     gates: list[dict[str, Any]] = []
@@ -1485,6 +1495,16 @@ def _iron_condor_hard_gates(
     credit_fraction = _number(economics.get("credit_fraction_of_width"))
     gain = _number(economics.get("max_gain_points"))
     loss = _number(economics.get("max_loss_points"))
+    environment = _map(regime.get("rth_environment"))
+    entry_contract = human_iron_condor_entry_contract(
+        candidate,
+        {**dict(facts), "rth_environment": dict(environment)},
+    )
+    minimum_credit_fraction = float(entry_contract["minimum_credit_fraction"])
+    minimum_side_credit_share = _number(
+        entry_contract.get("minimum_side_credit_share")
+    )
+    actual_side_credit_share = _number(candidate.get("minimum_side_credit_share"))
     if gain is None or loss is None or gain <= 0 or loss <= 0 or credit_fraction is None:
         gates.append(
             {
@@ -1493,12 +1513,26 @@ def _iron_condor_hard_gates(
                 "threshold": "valid_credit",
             }
         )
-    elif not MIN_CREDIT_FRACTION <= credit_fraction <= MAX_CREDIT_FRACTION:
+    elif not minimum_credit_fraction - 1e-9 <= credit_fraction <= MAX_CREDIT_FRACTION:
         gates.append(
             {
                 "gate": "iron_condor_credit_fraction",
                 "actual": credit_fraction,
-                "threshold": f"{MIN_CREDIT_FRACTION}-{MAX_CREDIT_FRACTION}",
+                "threshold": f"{minimum_credit_fraction}-{MAX_CREDIT_FRACTION}",
+            }
+        )
+    if (
+        minimum_side_credit_share is not None
+        and (
+            actual_side_credit_share is None
+            or actual_side_credit_share + 1e-9 < minimum_side_credit_share
+        )
+    ):
+        gates.append(
+            {
+                "gate": "iron_condor_transition_credit_imbalance",
+                "actual": actual_side_credit_share,
+                "threshold": minimum_side_credit_share,
             }
         )
     if loss is not None and loss * 100.0 > HUMAN_MAX_RISK_DOLLARS:

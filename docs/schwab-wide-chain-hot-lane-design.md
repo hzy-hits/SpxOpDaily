@@ -109,7 +109,7 @@ src/spx_spark/ibkr/stream/quota_plan.py       # pure line allocator
 @dataclass(frozen=True)
 class SchwabCapacitySettings:
     nominal_requests_per_minute: int = 120
-    planned_requests_per_minute: int = 84
+    planned_requests_per_minute: int = 96
     max_symbols_per_quote_request: int = 500
 
 @dataclass(frozen=True)
@@ -363,11 +363,14 @@ context 与 hot options 合并为同一个 quote batch：
 | next SPXW chain | 30s | 30s | 30s | 2 |
 | SPY + XSP chains | 15s | 15s | 15s | 8 |
 | QQQ + IWM chains | 30s | 30s | 30s | 4 |
-| **合计** | | | | **64 / 78 / 84** |
+| research chains | 60s | disabled | disabled | 4 / 0 / 0 |
+| **逻辑计划合计** | | | | **68 / 78 / 84** |
 
-planned ceiling 固定为 84/min，即使用 nominal 120 的 70%，严格保留 36 attempts/min
-（30%）供 retry、OAuth、operator probes 和短时调度碰撞。BURST 可以用满 planned
-capacity，gateway 以 120/min 做最终串行限速。
+84/min 是 pressure threshold；到达后停止 priority-4 research 与 QQQ/IWM lanes。
+hard scheduler ceiling 为 96/min，84–96/min 只供 priority 0–3 核心链路，仍保留
+24 attempts/min（20%）供 retry、OAuth、operator probes 和短时调度碰撞。gateway
+继续以 120/min 做最终串行限速。计划与 telemetry 必须按实际 HTTP batch 数核算，不能
+把一次逻辑 lane refresh 固定计为一个 request。
 
 profile 切换：
 
@@ -517,7 +520,7 @@ analytics shadow 改用 assembled observation，执行 legacy/new differential�
 - hot pricing age p95 `<=5s`，volatile profile 目标 `<=3s`；
 - max gap p95 `<=2*median step`；
 - gateway 429 为 0；如发生必须证明状态机正确降速且无数据链路失控；
-- attempt p99 不超过 84/min planned ceiling；
+- attempt p99 不超过 96/min hard ceiling，priority-4 lanes 在 84/min 后停止；
 - HTTP p95 `<2s`、normalize p95 `<150ms`，或有实测后修订阈值；
 - shadow human notification 为 0；
 - IBKR active lines 不超过 discovered capacity，reserve 不低于 mode 下限。
@@ -533,9 +536,11 @@ analytics shadow 改用 assembled observation，执行 legacy/new differential�
 - IBKR lines 与 Schwab HTTP requests 是不同配额，不能相加；
 - 没有 telemetry 时把 cadence 调到极限，只会在首个波动时段暴露 429 和 stale chain。
 
-本设计将 NORMAL/ACTIVE/BURST 计划提高到约 64/78/84 attempts/min，BURST 用满 84 的
-70% planned ceiling，同时把 SPXW acquisition target 提高到 80/100/120 strikes 和
-2.5 expected moves。固定剩余 30% 是 retry/failure capacity，不再额外保留隐性冗余。
+本设计的 NORMAL/ACTIVE/BURST 逻辑 lane 计划约为 68/78/84 attempts/min；84/min
+进入 pressure 并停止 priority-4 lanes，核心链路可在 hard ceiling 96/min 前继续。
+SPXW acquisition target 保持 80/100/120 strikes 和 2.5 expected moves，固定剩余
+20% 是 retry/failure capacity，不再额外保留隐性冗余。实际计划必须展开 quote batches
+后再与这些边界比较。
 OFF_HOURS 单独降到约 10 attempts/min，并由最短 cadence 推导 5 秒 planner tick；静态期权
 数据不消耗 RTH 的激进预算。
 

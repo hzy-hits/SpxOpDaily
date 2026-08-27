@@ -5113,21 +5113,13 @@ def test_unified_strategy_candidate_enqueues_once_on_trade_ready_lane(
     settings = make_settings(str(tmp_path / "strategy.json"))
     monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
     decision = _strategy_decision_payload(now)
-    calls = {"count": 0}
-
-    def fake_call_strategy_idea_memo(*_args, **_kwargs):
-        calls["count"] += 1
-        return None, "disabled"
-
-    monkeypatch.setattr(delivery_module, "call_strategy_idea_memo", fake_call_strategy_idea_memo)
     first = delivery_module.enqueue_strategy_decision(decision, now=now)
     second = delivery_module.enqueue_strategy_decision(decision, now=now + timedelta(seconds=1))
     assert first["accepted"] is True and first["targets"] == ["feishu"]
-    assert first["idea_memo"] == "omitted:disabled"
+    assert first["idea_memo"] == "omitted:trade_ready_latency_budget"
     assert second == {"accepted": True, "inserted": False, "duplicate": True,
                       "outcome": "outbox_already_accepted",
                       "event_id": "strategy-opportunity:test:ready"}
-    assert calls["count"] == 1
 
 
 def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
@@ -5143,11 +5135,6 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
     monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(delivery_module, "notification_event_exists", lambda *_args: False)
     monkeypatch.setattr(delivery_module, "_flood_control_block", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        delivery_module,
-        "call_strategy_idea_memo",
-        lambda *_args, **_kwargs: (None, "disabled"),
-    )
 
     def publish(storage_settings, *, decision, now):
         captured["storage"] = storage_settings
@@ -5237,7 +5224,9 @@ def _strategy_decision_payload(now: datetime) -> dict[str, object]:
     }
 
 
-def test_strategy_decision_renders_idea_memo_when_valid(tmp_path: Path, monkeypatch) -> None:
+def test_strategy_decision_omits_research_memo_from_trade_ready_path(
+    tmp_path: Path, monkeypatch
+) -> None:
     from spx_spark.application.order_map import delivery as delivery_module
 
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
@@ -5245,21 +5234,10 @@ def test_strategy_decision_renders_idea_memo_when_valid(tmp_path: Path, monkeypa
     decision = _strategy_decision_payload(now)
     base_text = delivery_module._render_strategy_candidate(decision, decision["candidate"])
     captured: dict[str, object] = {}
-    memo = {
-        "thesis": "Wait for 7705.0 to hold before leaning toward 7730.0.",
-        "falsification": ["Lose 7705.0 on refresh."],
-        "watch_levels": [7705.0, 7730.0],
-        "risks": ["Synthetic BBO can widen."],
-    }
 
     monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(delivery_module, "notification_event_exists", lambda *_args: False)
     monkeypatch.setattr(delivery_module, "_flood_control_block", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        delivery_module,
-        "call_strategy_idea_memo",
-        lambda *_args, **_kwargs: (memo, None),
-    )
 
     def fake_enqueue_notification(settings, envelope, **kwargs):
         captured["text"] = kwargs["text"]
@@ -5277,51 +5255,9 @@ def test_strategy_decision_renders_idea_memo_when_valid(tmp_path: Path, monkeypa
     result = delivery_module.enqueue_strategy_decision(decision, now=now)
 
     assert result["accepted"] is True
-    assert "idea_memo" not in result
-    assert str(captured["text"]).startswith(base_text)
-    assert "\n\n## 研究备忘\n" in str(captured["text"])
-    assert "看法  Wait for 7705.0 to hold before leaning toward 7730.0." in str(captured["text"])
-    assert "盯盘  7705、7730" in str(captured["text"])
-    assert captured["text"] == captured["feishu_text"]
-
-
-def test_strategy_decision_omits_failed_idea_memo_without_changing_body(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from spx_spark.application.order_map import delivery as delivery_module
-
-    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
-    settings = make_settings(str(tmp_path / "strategy.json"))
-    decision = _strategy_decision_payload(now)
-    base_text = delivery_module._render_strategy_candidate(decision, decision["candidate"])
-    captured: dict[str, object] = {}
-
-    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
-    monkeypatch.setattr(delivery_module, "notification_event_exists", lambda *_args: False)
-    monkeypatch.setattr(delivery_module, "_flood_control_block", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        delivery_module,
-        "call_strategy_idea_memo",
-        lambda *_args, **_kwargs: (None, "timeout"),
-    )
-
-    def fake_enqueue_notification(settings, envelope, **kwargs):
-        captured["text"] = kwargs["text"]
-        return SimpleNamespace(
-            accepted=True,
-            inserted=True,
-            duplicate=False,
-            outcome="pending",
-            envelope=envelope,
-            targets=("feishu",),
-        )
-
-    monkeypatch.setattr(delivery_module, "enqueue_notification", fake_enqueue_notification)
-    result = delivery_module.enqueue_strategy_decision(decision, now=now)
-
-    assert result["accepted"] is True
-    assert result["idea_memo"] == "omitted:timeout"
+    assert result["idea_memo"] == "omitted:trade_ready_latency_budget"
     assert captured["text"] == base_text
+    assert captured["text"] == captured["feishu_text"]
 
 
 def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> None:
@@ -6470,42 +6406,3 @@ def test_compact_price_line_leaves_cash_index_untagged() -> None:
 
     assert "SPX 7550　" in line
     assert "期权隐含" not in line
-
-
-def test_strategy_decision_fail_open_when_idea_memo_raises(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from spx_spark.application.order_map import delivery as delivery_module
-
-    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
-    settings = make_settings(str(tmp_path / "strategy.json"))
-    decision = _strategy_decision_payload(now)
-    base_text = delivery_module._render_strategy_candidate(decision, decision["candidate"])
-    captured: dict[str, object] = {}
-
-    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
-    monkeypatch.setattr(delivery_module, "notification_event_exists", lambda *_args: False)
-    monkeypatch.setattr(delivery_module, "_flood_control_block", lambda *_args, **_kwargs: None)
-
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("memo crashed")
-
-    monkeypatch.setattr(delivery_module, "call_strategy_idea_memo", boom)
-
-    def fake_enqueue_notification(settings, envelope, **kwargs):
-        captured["text"] = kwargs["text"]
-        return SimpleNamespace(
-            accepted=True,
-            inserted=True,
-            duplicate=False,
-            outcome="pending",
-            envelope=envelope,
-            targets=("feishu",),
-        )
-
-    monkeypatch.setattr(delivery_module, "enqueue_notification", fake_enqueue_notification)
-    result = delivery_module.enqueue_strategy_decision(decision, now=now)
-
-    assert result["accepted"] is True
-    assert result["idea_memo"] == "omitted:idea_memo_exception:RuntimeError"
-    assert captured["text"] == base_text

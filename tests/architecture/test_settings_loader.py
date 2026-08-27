@@ -54,7 +54,7 @@ def test_load_settings_from_fixture_is_stable(
     assert settings.runtime.control_ibkr_stream_enabled is False
     assert settings.schwab.streaming_mode == "live"
     assert settings.schwab.service_loop_enabled is False
-    assert settings.schwab.capacity.planned_requests_per_minute == 84
+    assert settings.schwab.capacity.planned_requests_per_minute == 96
     assert settings.schwab.wide_chain.strike_count_candidates == (80, 100, 120)
     assert settings.schwab.wide_chain.next_expiry_strike_count == 40
     assert settings.schwab.cadence.research_chain_seconds == 60.0

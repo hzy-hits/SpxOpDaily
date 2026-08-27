@@ -1164,6 +1164,38 @@ surface blocked。当天首个满足 20Δ、10 点翼、25%–55% 贷记、风�
 TP50、3C 与 15:45 ET 退出保持不变。策略版本为
 `strategy_policy.bootstrap.v52`，证据仍是用户覆盖且前向未验证，不声明长期 alpha。
 
+### 11.19 v53：RTH 波动扩张失败后的铁鹰转折通道
+
+v53 不在 `RISK_EXPANSION` 中提前卖铁鹰，也不把所有铁鹰贷记门统一下调。
+`rth_environment` 因果携带最近一次扩张时间；若其后 20 分钟内 VIX1D、ATM IV、
+跨式四项中至少三项转为收缩，breadth 回到 35%–65%，路径为 `BALANCED` 或
+`PIN_STABLE`，且 Gamma 不处于负向加速，则状态为
+`EXPANSION_TO_CONTRACTION`。
+
+该状态允许一个独立的 RTH 人工铁鹰合同：
+
+- Put/Call 仍分别选择不超过且最接近 20Δ 的短腿，固定 10 点翼；
+- 保守贷记占翼宽底线从普通平衡日的 25% 降为 23%，上限仍为 55%；
+- Put spread 与 Call spread 较小一侧必须贡献总贷记至少 25%；
+- 只在 10:00–11:00 ET、exact BBO/Greeks 新鲜、定义风险不超过 $1,000 时生效；
+- 当日首个合格候选继续锁定，TP50、3C、15:45 ET、人工-only 与
+  `automatic_ordering=false` 不变；
+- 普通 `VOL_CONTRACTION_BALANCE` 仍使用 25% 贷记底线，GTH 不变。
+
+2026-07-07 至 2026-08-25 的 36 个 RTH 日分钟因果工程回放中，取消曲面拒绝后，
+“早盘波动释放、15 分钟振幅/效率收缩、ATM IV 5 分钟转负、两侧贷记平衡”的
+23% 通道得到 18 笔已解析交易，16 笔盈利，平均约 +$60.00/张；最差一笔
+-$605.56。20% 全样本均值为负，22.5% 验证段被一笔止损拖为负，25% 则漏掉
+2026-08-25 的 2.30 贷记止盈机会。该窄阈值仍有同样本选择和一分钟止损采样
+限制，因此标记 `forward_unvalidated_user_override`，不声明长期 alpha。
+策略版本为 `strategy_policy.bootstrap.v53`。
+
+同一版本在现有 `market_feature_state` 内按交易日/到期日持续记录 ready 期权帧的
+GTH/RTH ATM 跨式中价与 ATM IV 高低点。Desk Map 固定展示当前跨式、GTH 高低、
+当前相对 GTH 高点的收缩比例以及已有的 RTH 高低。该观测只用于判断“GTH 风险预算
+是否已释放并开始收敛”的人工上下文，不增加正向分数、不绕过贷记/Delta/BBO/环境门，
+也不让 GTH 铁鹰获得人工交易授权；数据陈旧或期权帧降级时停止更新高低点。
+
 ---
 
 ## 12. 正式 NoTrade

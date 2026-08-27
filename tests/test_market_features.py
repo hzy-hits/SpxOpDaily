@@ -36,6 +36,7 @@ from spx_spark.application.market_features.options import (
     level_decision_live_structure,
     option_volatility_features,
     provider_mid_divergences,
+    update_atm_straddle_session,
 )
 from spx_spark.analytics.options.models import OptionsMap, UnderlierReference
 from spx_spark.marketdata import (
@@ -186,6 +187,98 @@ def test_option_volatility_features_keep_both_expiry_contexts() -> None:
     assert result["put_skew_25d_1dte"] == 0.02
     assert result["call_skew_25d_1dte"] == -0.02
     assert result["term_gap"] == pytest.approx(0.02)
+
+
+def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
+    gth_high_at = datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
+    base = OptionStructureFrame(
+        schema_version=1,
+        frame_id="options:20260827",
+        as_of=gth_high_at,
+        quality=FrameQuality.READY,
+        front_expiry="20260827",
+        next_expiry="20260828",
+        structure={},
+        volatility={"atm_straddle_mid": 24.0, "atm_iv_0dte": 0.14},
+        concentration={},
+        density={},
+        l1=L1MicrostructureFrame(
+            quality=FrameQuality.READY,
+            expiry="20260827",
+            contract_count=20,
+            metrics={},
+            diagnostics={},
+        ),
+        diagnostics={},
+    )
+
+    state, projection = update_atm_straddle_session({}, base, now=gth_high_at)
+    gth_low_at = datetime(2026, 8, 27, 2, 0, tzinfo=UTC)
+    state, projection = update_atm_straddle_session(
+        state,
+        replace(
+            base,
+            as_of=gth_low_at,
+            volatility={"atm_straddle_mid": 18.0, "atm_iv_0dte": 0.12},
+        ),
+        now=gth_low_at,
+    )
+
+    assert projection["segment"] == "gth"
+    assert projection["gth"]["observations"] == 2
+    assert projection["gth"]["straddle_mid"]["high"] == 24.0
+    assert projection["gth"]["straddle_mid"]["low"] == 18.0
+    assert projection["gth"]["atm_iv"]["high"] == 0.14
+    assert projection["gth"]["atm_iv"]["low"] == 0.12
+
+    degraded_at = datetime(2026, 8, 27, 3, 0, tzinfo=UTC)
+    state, degraded = update_atm_straddle_session(
+        state,
+        replace(
+            base,
+            as_of=degraded_at,
+            quality=FrameQuality.DEGRADED,
+            volatility={"atm_straddle_mid": 30.0, "atm_iv_0dte": 0.18},
+        ),
+        now=degraded_at,
+    )
+    assert degraded["quality"] == "unavailable"
+    assert degraded["current"]["straddle_mid"] is None
+    assert state["gth"]["straddle_mid_high"] == 24.0
+
+    rth_at = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
+    state, rth = update_atm_straddle_session(
+        state,
+        replace(
+            base,
+            as_of=rth_at,
+            volatility={"atm_straddle_mid": 20.0, "atm_iv_0dte": 0.125},
+        ),
+        now=rth_at,
+    )
+    assert rth["segment"] == "rth"
+    assert rth["rth"]["observations"] == 1
+    assert rth["gth"]["straddle_mid"]["current_vs_high_fraction"] == pytest.approx(
+        -1 / 6
+    )
+
+    next_gth_at = datetime(2026, 8, 28, 1, 0, tzinfo=UTC)
+    next_frame = replace(
+        base,
+        frame_id="options:20260828",
+        as_of=next_gth_at,
+        front_expiry="20260828",
+        next_expiry="20260831",
+        volatility={"atm_straddle_mid": 31.0, "atm_iv_0dte": 0.16},
+    )
+    reset_state, reset = update_atm_straddle_session(
+        state,
+        next_frame,
+        now=next_gth_at,
+    )
+    assert reset_state["session_date"] == "2026-08-28"
+    assert reset["gth"]["straddle_mid"]["high"] == 31.0
+    assert reset["rth"]["observations"] == 0
 
 
 def test_wall_rank_persistence_tracks_primary_rank_and_confidence() -> None:

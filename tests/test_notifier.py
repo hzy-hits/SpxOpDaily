@@ -2031,6 +2031,42 @@ def test_call_path_delivers_without_reviewer_and_records_strategy_ack(tmp_path) 
     )
 
 
+def test_net_premium_bearish_divergence_delivers_without_llm_review(tmp_path) -> None:
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "severity": "high",
+            "kind": "captured_net_premium_bearish_divergence",
+            "instrument_id": "index:SPX",
+            "title": "SPX 熊背离观察：局部新高失败",
+            "detail": "捕获的 0DTE Put 净权利金占优；仅观察，不是入场授权。",
+            "quality": "live",
+            "source_gate": "captured_net_premium_proxy_bearish_divergence_v1",
+            "dedup_group": "spx_net_premium_bearish_divergence:20260710:1500:observe",
+            "event_id": "spx_net_premium_bearish_divergence:20260710:1500",
+        }
+    ]
+    settings = replace(
+        make_settings(str(tmp_path / "notify-state.json")),
+        deepseek_enabled=True,
+        direct_push_llm_enabled=False,
+    )
+
+    result = notify_payload(
+        payload,
+        settings=settings,
+        now=datetime(2026, 7, 10, 15, 1, tzinfo=timezone.utc),
+    )
+
+    assert result.selected_count == 1
+    assert result.sent_count == 1
+    assert [sink.sink for sink in result.sinks] == ["feishu"]
+    assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
+    assert result.acknowledged_event_ids == (
+        "spx_net_premium_bearish_divergence:20260710:1500",
+    )
+
+
 def test_recent_shock_suppresses_same_direction_fixed_cycle_price_move(tmp_path) -> None:
     settings = make_settings(str(tmp_path / "notify-state.json"))
     shock_at = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)

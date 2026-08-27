@@ -486,9 +486,10 @@ def _vertical_candidate_from_evidence(
         right,
     )
     quote_valid = _quote_valid_until((long, short), now=now, policy=policy)
+    source_valid = _time(evidence.get("valid_until"))
+    # Evidence freshness gates candidate creation; it must not consume the
+    # separate operator window that starts when the candidate is selected.
     opportunity_valid = now + timedelta(seconds=policy.opportunity_ttl_seconds)
-    if source_valid := _time(evidence.get("valid_until")):
-        opportunity_valid = min(opportunity_valid, source_valid)
     identity = {
         "session_date": facts.get("session_date"),
         "candidate_id": candidate_id,
@@ -533,6 +534,7 @@ def _vertical_candidate_from_evidence(
         "economics": economics,
         "selection_score": _vertical_selection_score(economics, bbo),
         "quote_valid_until": quote_valid.isoformat() if quote_valid else now.isoformat(),
+        "evidence_valid_until": source_valid.isoformat() if source_valid else None,
         "opportunity_valid_until": opportunity_valid.isoformat(),
         "automatic_ordering": False,
         "manual_action_only": True,

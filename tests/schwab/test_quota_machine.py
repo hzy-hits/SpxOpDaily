@@ -39,9 +39,12 @@ def test_quota_state_throttles_on_429_and_recovers_in_stages() -> None:
 
 def test_quota_pressure_uses_seventy_percent_of_nominal_capacity() -> None:
     policy = QuotaPolicy()
+    assert policy.planned_requests_per_minute == 96
     state = advance_quota_state(
         QuotaState(),
         RequestWindow(attempts=84),
         policy=policy,
     )
     assert state.mode is QuotaMode.PRESSURE
+    assert lane_allowed(state.mode, priority=3)
+    assert not lane_allowed(state.mode, priority=4)

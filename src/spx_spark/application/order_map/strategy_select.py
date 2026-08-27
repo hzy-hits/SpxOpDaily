@@ -81,6 +81,11 @@ def build_strategy_decision(
                 trading_date=trading_date,
             ).to_dict()
     regime = assess_regime(facts)
+    facts["rth_environment"] = dict(
+        regime.get("rth_environment")
+        if isinstance(regime.get("rth_environment"), Mapping)
+        else {}
+    )
     committed = _rth_committed_direction(
         facts,
         payload=payload,

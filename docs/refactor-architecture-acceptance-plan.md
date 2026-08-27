@@ -1578,8 +1578,9 @@ Schwab 的优势是“一个 request 带大量 symbols 或一段完整 chain”�
 2. 500 是 payload ceiling，不是“必须请求 500 个 symbols”的目标；只请求能进入 feature/health 的 universe。
 3. SPX chain request 优先于次要 ETF chain。
 4. 先增加同一次 SPX chain 的 strike width，再考虑增加相同 chain 的请求频率。
-5. scheduler ceiling 使用 nominal limit 的 70%，即配置 120 时最多规划 84/min。
-6. 固定剩余 30% 给 retry、OAuth/session maintenance、operator probes；不再额外保留
+5. 84/min（nominal 的 70%）进入 pressure 并停止 priority-4 lanes；核心链路 hard
+   ceiling 为 96/min（80%），且按实际 HTTP batch 数核算。
+6. 固定剩余 20% 给 retry、OAuth/session maintenance、operator probes；不再额外保留
    未登记的隐性冗余。
 7. 429 立即进入 THROTTLED，服从 `Retry-After`，成功窗口逐步恢复，不瞬间回到 nominal rate。
 

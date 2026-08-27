@@ -39,7 +39,6 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.notifier.llm_writer import (
     call_hypothesis_critic,
-    call_strategy_idea_memo,
     generate_push_text,
 )
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
@@ -159,30 +158,24 @@ def enqueue_strategy_decision(
     flood = _flood_control_block(decision, candidate, settings, now=now)
     if flood is not None:
         return flood
-    strategy_risk_image = (
-        publish_strategy_risk_image(storage_settings, decision=decision, now=now)
-        if storage_settings is not None
-        else None
-    )
-    open_interest_image = (
-        publish_open_interest_image(storage_settings, now=now)
-        if storage_settings is not None
-        else None
-    )
     text = _render_strategy_candidate(decision, candidate)
-    # Memo is research-only and must never block trade_ready delivery.
-    memo = None
-    memo_error: str | None = None
-    try:
-        memo, memo_error = call_strategy_idea_memo(decision)
-    except Exception as exc:  # noqa: BLE001 - fail-open for bounded LLM side path
-        memo, memo_error = None, f"idea_memo_exception:{type(exc).__name__}"
-    if memo is not None:
-        text = f"{text}\n\n{_render_strategy_idea_memo(memo)}"
-    if strategy_risk_image and strategy_risk_image.get("status") == "published":
-        text = f"{text}\n\n## 策略图\n[查看概率、结构与损益图]({strategy_risk_image['public_url']})"
-    if open_interest_image and open_interest_image.get("status") == "published":
-        text = f"{text}\n[查看最新 OI 墙位图]({open_interest_image['public_url']})"
+    if storage_settings is not None:
+        facts = (
+            decision.get("market_facts")
+            if isinstance(decision.get("market_facts"), dict)
+            else {}
+        )
+        session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
+        strategy_risk_url = (
+            STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL
+            if str(session.get("mode") or "").lower() == "gth"
+            else STRATEGY_RISK_IMAGE_PUBLIC_URL
+        )
+        text = (
+            f"{text}\n\n## 策略图\n"
+            f"[查看概率、结构与损益图]({strategy_risk_url})\n"
+            f"[查看最新 OI 墙位图]({OPEN_INTEREST_IMAGE_PUBLIC_URL})"
+        )
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -207,9 +200,17 @@ def enqueue_strategy_decision(
         "outcome": result.outcome,
         "event_id": result.envelope.event_id,
         "targets": list(result.targets),
+        "idea_memo": "omitted:trade_ready_latency_budget",
     }
-    if memo is None:
-        outcome["idea_memo"] = f"omitted:{memo_error or 'unavailable'}"
+    strategy_risk_image = None
+    open_interest_image = None
+    # The operator card must enter the outbox before optional image rendering.
+    # Delivery can proceed while the stable image URLs are refreshed in place.
+    if storage_settings is not None and result.accepted and result.inserted:
+        strategy_risk_image = publish_strategy_risk_image(
+            storage_settings, decision=decision, now=now
+        )
+        open_interest_image = publish_open_interest_image(storage_settings, now=now)
     if strategy_risk_image is not None:
         outcome["strategy_risk_image"] = strategy_risk_image
     if open_interest_image is not None:

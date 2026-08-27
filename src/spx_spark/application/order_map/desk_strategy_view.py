@@ -230,6 +230,7 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
         label = {
             "EVENT_RISK": "事件风险，普通入场关闭",
             "RISK_EXPANSION": "风险扩张，只考虑已有触发的方向结构",
+            "EXPANSION_TO_CONTRACTION": "波动扩张失败并转为收敛，可评估平衡铁鹰",
             "VOL_CONTRACTION_BALANCE": "波动收缩且平衡，可评估区间结构",
             "MIXED_UNCONFIRMED": "混合未确认，暂不授权新结构",
             "INSUFFICIENT_DATA": "核心输入不足，失效关闭",

@@ -16,6 +16,7 @@ from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.render import (
     _candidate_by_play,
     _dash,
+    atm_straddle_session_line,
     underlier_source_label,
 )
 from spx_spark.application.order_map.state import _session_phase_of, current_session_is_gth
@@ -619,6 +620,9 @@ def _structure_line(payload: Mapping[str, Any], *, now: datetime) -> str:
     parts = [f"Structure  {levels}"]
     if change_line:
         parts.append(change_line)
+    volatility = _mapping(frame.get("volatility"))
+    if straddle_line := atm_straddle_session_line(dict(volatility)):
+        parts.append(straddle_line)
     parts.append(f"Gamma职责  {_gamma_feedback_text(payload)}")
     lane_lines = strategy_lane_status_lines(payload)
     if lane_lines:

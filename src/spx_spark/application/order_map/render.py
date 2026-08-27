@@ -137,6 +137,58 @@ def _wall_rank_persistence_line(payload: dict[str, Any]) -> str | None:
     return f"墙位Rank持续: {'; '.join(parts)}" if parts else None
 
 
+def atm_straddle_session_line(option_vol: dict[str, Any]) -> str | None:
+    session = option_vol.get("atm_straddle_session")
+    if not isinstance(session, dict):
+        return None
+    current = session.get("current") if isinstance(session.get("current"), dict) else {}
+    gth = session.get("gth") if isinstance(session.get("gth"), dict) else {}
+    rth = session.get("rth") if isinstance(session.get("rth"), dict) else {}
+    gth_straddle = (
+        gth.get("straddle_mid") if isinstance(gth.get("straddle_mid"), dict) else {}
+    )
+    rth_straddle = (
+        rth.get("straddle_mid") if isinstance(rth.get("straddle_mid"), dict) else {}
+    )
+    gth_iv = gth.get("atm_iv") if isinstance(gth.get("atm_iv"), dict) else {}
+    if not int(gth.get("observations") or 0) and not int(rth.get("observations") or 0):
+        return None
+
+    straddle_parts = [f"当前 {_fmt_premium(finite_float(current.get('straddle_mid')))}"]
+    if int(gth.get("observations") or 0):
+        straddle_parts.append(
+            "GTH高/低 "
+            f"{_fmt_premium(finite_float(gth_straddle.get('high')))}/"
+            f"{_fmt_premium(finite_float(gth_straddle.get('low')))}"
+        )
+        from_high = finite_float(gth_straddle.get("current_vs_high_fraction"))
+        if from_high is not None:
+            straddle_parts.append(f"较GTH高 {from_high:+.2%}")
+    if int(rth.get("observations") or 0):
+        straddle_parts.append(
+            "RTH高/低 "
+            f"{_fmt_premium(finite_float(rth_straddle.get('high')))}/"
+            f"{_fmt_premium(finite_float(rth_straddle.get('low')))}"
+        )
+
+    iv_parts: list[str] = []
+    current_iv = finite_float(current.get("atm_iv"))
+    if current_iv is not None:
+        iv_parts.append(f"当前 {current_iv:.2%}")
+    if int(gth.get("observations") or 0):
+        iv_high = finite_float(gth_iv.get("high"))
+        iv_low = finite_float(gth_iv.get("low"))
+        if iv_high is not None or iv_low is not None:
+            high_text = f"{iv_high:.2%}" if iv_high is not None else "-"
+            low_text = f"{iv_low:.2%}" if iv_low is not None else "-"
+            iv_parts.append(f"GTH高/低 {high_text}/{low_text}")
+    segment = str(session.get("segment") or "-").upper()
+    line = f"ATM跨式({segment}): {' · '.join(straddle_parts)}"
+    if iv_parts:
+        line += f"；ATM IV {' · '.join(iv_parts)}"
+    return line
+
+
 def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
     market = payload.get("minute_market_frame")
     options = payload.get("option_structure_frame")
@@ -182,6 +234,8 @@ def _market_feature_lines(payload: dict[str, Any]) -> list[str]:
             f"{_dash(option_vol.get('atm_iv_change_60m'))}; "
             f"L1流动性 {_l1_liquidity_text(l1)}"
         )
+        if line := atm_straddle_session_line(option_vol):
+            lines.append(line)
         if line := _wall_rank_persistence_line(payload):
             lines.append(line)
     macro = payload.get("macro_event")

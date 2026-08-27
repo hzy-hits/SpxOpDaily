@@ -12,6 +12,7 @@ from spx_spark.application.order_map.iron_condor import (
     IRON_CONDOR_DELTA,
     build_iron_condor_map,
     enumerate_iron_condor_candidates,
+    iron_condor_session_state,
 )
 from spx_spark.application.order_map.operator_status import build_desk_message_sections
 from spx_spark.application.order_map.strategy_ranker import rank_candidates
@@ -364,8 +365,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v52"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v52"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v53"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v53"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -491,6 +492,51 @@ def test_rth_iron_condor_gamma_risk_uses_signed_four_leg_gamma() -> None:
     assert candidate["gamma_risk"]["gcr10"] == 0.20
     assert candidate["gamma_risk"]["state"] == "NORMAL"
     assert candidate["gamma_risk"]["entry_gate_applied"] is False
+
+
+def test_expansion_to_contraction_uses_balanced_23pct_credit_lane() -> None:
+    facts = _rth_facts()
+    facts["rth_environment"] = {"state": "EXPANSION_TO_CONTRACTION"}
+    rows = enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _rth_state(short_quote_bonus=0.65),
+        now=RTH_NOW,
+        policy=StrategyPolicy(),
+    )
+
+    assert rows[0]["quote"]["credit"] == 2.3
+    assert rows[0]["minimum_side_credit_share"] >= 0.25
+    transition_state = iron_condor_session_state(
+        _payload(), facts, rows, now=RTH_NOW
+    )
+    assert transition_state["status"] == "eligible"
+    facts["iron_condor_session_state"] = transition_state
+    ranked = rank_candidates(
+        rows,
+        facts,
+        {
+            "rth_environment": {
+                "state": "EXPANSION_TO_CONTRACTION",
+                "status": "ready",
+            },
+            "path_state": "BALANCED",
+            "terminal_state": "NONE",
+            "pin": {},
+        },
+        policy=StrategyPolicy(),
+        data_root=None,
+        probability_settings=None,
+        now=RTH_NOW,
+    )
+    assert ranked.passed, ranked.near_misses
+
+    balanced_facts = {**facts, "rth_environment": {"state": "VOL_CONTRACTION_BALANCE"}}
+    balanced_facts.pop("iron_condor_session_state")
+    balanced_state = iron_condor_session_state(
+        _payload(), balanced_facts, rows, now=RTH_NOW
+    )
+    assert balanced_state["status"] == "waiting"
 
 
 def test_rth_human_iron_condor_does_not_fall_back_to_ibkr_delta_map() -> None:

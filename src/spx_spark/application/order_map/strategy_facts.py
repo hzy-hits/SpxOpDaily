@@ -38,6 +38,11 @@ def build_market_fact_pack(
     opening, averages = _map(diagnostics.get("opening_range")), _map(diagnostics.get("moving_averages"))
     structure, density = _map(option.get("structure")), _map(option.get("density"))
     volatility = _map(option.get("volatility"))
+    atm_straddle_session = _map(volatility.get("atm_straddle_session"))
+    atm_straddle_current = _map(atm_straddle_session.get("current"))
+    atm_straddle_gth = _map(atm_straddle_session.get("gth"))
+    atm_straddle_gth_mid = _map(atm_straddle_gth.get("straddle_mid"))
+    atm_straddle_gth_iv = _map(atm_straddle_gth.get("atm_iv"))
     market_volatility, volume = _map(market.get("volatility")), _map(market.get("volume"))
     cross_asset = _map(market.get("cross_asset"))
     relative_strength = _map(cross_asset.get("relative_strength_15m"))
@@ -54,6 +59,23 @@ def build_market_fact_pack(
     forecast = _map(payload.get("strategy_distribution_forecast"))
     q_event, p_event = _map(forecast.get("q_event")), _map(forecast.get("p_event"))
     trading_date = str(payload.get("trading_date") or "")
+    previous_decision = _map(payload.get("previous_strategy_decision"))
+    previous_decision_at = _time(previous_decision.get("decision_at"))
+    previous_environment = _map(
+        _map(previous_decision.get("regime")).get("rth_environment")
+    )
+    previous_session_date = str(previous_decision.get("session_date") or "")
+    if (
+        previous_decision_at is None
+        or previous_decision_at > decision_at
+        or (trading_date and previous_session_date != trading_date)
+    ):
+        previous_environment = {}
+    elif previous_environment and not previous_environment.get("observed_at"):
+        previous_environment = {
+            **previous_environment,
+            "observed_at": previous_decision_at.isoformat(),
+        }
     spx = _first(
         underlier.get("spx_observed_value"),
         underlier.get("price"),
@@ -264,6 +286,7 @@ def build_market_fact_pack(
         "decision_at": decision_at.isoformat(),
         "available_at": max(source_times, default=decision_at).isoformat(),
         "session_date": trading_date or None,
+        "previous_rth_environment": dict(previous_environment),
         "minutes_to_close": _minutes_to_close(trading_date, decision_at),
         "session": {"mode": session_mode, "legal": session_legal},
         "spot": {
@@ -325,7 +348,15 @@ def build_market_fact_pack(
             "vix1d_return_15m_pct": _number(
                 market_volatility.get("vix1d_return_15m_pct")
             ),
+            "atm_straddle_mid": _number(atm_straddle_current.get("straddle_mid")),
             "atm_straddle_decay_15m": _number(volatility.get("atm_straddle_decay_15m")),
+            "atm_straddle_gth_high": _number(atm_straddle_gth_mid.get("high")),
+            "atm_straddle_gth_low": _number(atm_straddle_gth_mid.get("low")),
+            "atm_straddle_vs_gth_high_fraction": _number(
+                atm_straddle_gth_mid.get("current_vs_high_fraction")
+            ),
+            "atm_iv_gth_high": _number(atm_straddle_gth_iv.get("high")),
+            "atm_iv_gth_low": _number(atm_straddle_gth_iv.get("low")),
         },
         "internals": {
             "qqq_minus_spy_15m_pct": _number(relative_strength.get("qqq_minus_spy_pct")),

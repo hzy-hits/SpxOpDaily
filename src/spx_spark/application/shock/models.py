@@ -16,6 +16,7 @@ from spx_spark.settings.shock import DEFAULT_SHOCK_SETTINGS, validate_gth_spread
 STATE_SCHEMA_VERSION = 1
 SHOCK_KIND = "intraday_price_shock"
 RECLAIM_KIND = "intraday_price_reclaim"
+NET_PREMIUM_BEARISH_DIVERGENCE_KIND = "captured_net_premium_bearish_divergence"
 
 
 @dataclass(frozen=True)

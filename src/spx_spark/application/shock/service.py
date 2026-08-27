@@ -41,6 +41,7 @@ from spx_spark.application.shock.level_projection import project_level_decision_
 from spx_spark.application.shock.machine import (
     _strategy_alert,
     advance_monitor_state,
+    advance_net_premium_bearish_divergence,
 )
 from spx_spark.application.shock.models import (
     RECLAIM_KIND,
@@ -185,6 +186,13 @@ def run(
             with exclusive_state_lock(state_path):
                 monitor_state = load_monitor_state(settings.state_path, session_date=session_date)
                 monitor_state, price_alerts = advance_monitor_state(monitor_state, sample, settings)
+                monitor_state, divergence_alerts = advance_net_premium_bearish_divergence(
+                    monitor_state,
+                    sample,
+                    quotes=latest.quotes,
+                    decision_at=latest.as_of,
+                    session_date=session_date,
+                )
                 monitor_state, path_decision, strategy_signals = project_level_decision_machine(
                     monitor_state,
                     load_level_decision_shadow(storage_settings),
@@ -194,6 +202,7 @@ def run(
                 )
                 alerts = [
                     *price_alerts,
+                    *divergence_alerts,
                     *(_strategy_alert(row, provider=sample.provider) for row in strategy_signals),
                 ]
                 raw_price_alerts = tuple(price_alerts)

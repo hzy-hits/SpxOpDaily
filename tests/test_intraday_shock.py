@@ -8,6 +8,10 @@ import pytest
 
 from spx_spark.alert_model import Alert
 from spx_spark.application.shock.evaluator import live_es_sample
+from spx_spark.application.shock.machine import (
+    advance_net_premium_bearish_divergence,
+)
+from spx_spark.application.shock.models import NET_PREMIUM_BEARISH_DIVERGENCE_KIND
 from spx_spark.intraday_shock import (
     RECLAIM_KIND,
     SHOCK_KIND,
@@ -55,6 +59,88 @@ def sample(
         es_source_at=at,
         provider=provider,
     )
+
+
+def _captured_trade_quote(
+    *,
+    right: str,
+    at: datetime,
+    volume: float,
+    last: float,
+) -> Quote:
+    instrument = InstrumentId.option(
+        "SPX",
+        expiry="20260710",
+        strike=7500.0,
+        right=right,
+        trading_class="SPXW",
+    )
+    return Quote(
+        instrument=instrument,
+        provider=Provider.SCHWAB,
+        provider_symbol=instrument.canonical_id,
+        received_at=at,
+        quality=MarketDataQuality.LIVE,
+        bid=1.0,
+        ask=1.2,
+        last=last,
+        last_size=1.0,
+        volume=volume,
+        quote_time=at,
+        trade_time=at,
+        sampling_mode="schwab_stream",
+    )
+
+
+def _run_net_premium_divergence_path(
+    *, volume_step: float
+) -> tuple[dict[str, object], list[Alert]]:
+    state = empty_monitor_state("2026-07-10")
+    start = datetime(2026, 7, 10, 13, 59, 5, tzinfo=UTC)
+    prices = [100.0] * 16 + [101.0, 103.0, 102.0, 101.0, 100.0]
+    all_alerts: list[Alert] = []
+    for offset, price in enumerate([100.0, *prices, 100.0]):
+        at = start + timedelta(minutes=offset)
+        volume = 100.0 + offset * volume_step
+        quotes = (
+            _captured_trade_quote(right="C", at=at, volume=volume, last=1.0),
+            _captured_trade_quote(right="P", at=at, volume=volume, last=1.2),
+        )
+        state, alerts = advance_net_premium_bearish_divergence(
+            state,
+            sample(at, price, price + 50.0, provider=Provider.SCHWAB.value),
+            quotes=quotes,
+            decision_at=at,
+            session_date="2026-07-10",
+        )
+        all_alerts.extend(alerts)
+    return state, all_alerts
+
+
+def test_captured_net_premium_bearish_divergence_is_observe_only() -> None:
+    state, alerts = _run_net_premium_divergence_path(volume_step=1.0)
+
+    assert [alert.kind for alert in alerts] == [NET_PREMIUM_BEARISH_DIVERGENCE_KIND]
+    alert = alerts[0]
+    assert alert.research_only is False
+    assert alert.source_gate == "captured_net_premium_proxy_bearish_divergence_v1"
+    assert alert.audit_context is not None
+    assert alert.audit_context["authority"] == "observe_only"
+    assert alert.audit_context["execution_eligible"] is False
+    assert alert.audit_context["automatic_ordering"] is False
+    assert "不是做空或 Put 入场授权" in alert.detail
+    tape = state["captured_net_premium_divergence"]
+    assert isinstance(tape, dict)
+    assert tape["coverage"] == pytest.approx(1.0)
+
+
+def test_captured_net_premium_divergence_fails_closed_on_low_tape_coverage() -> None:
+    state, alerts = _run_net_premium_divergence_path(volume_step=20.0)
+
+    assert alerts == []
+    tape = state["captured_net_premium_divergence"]
+    assert isinstance(tape, dict)
+    assert float(tape["coverage"]) < 0.10
 
 
 def test_trump_style_down_shock_then_v_reclaim_is_two_phases(tmp_path) -> None:

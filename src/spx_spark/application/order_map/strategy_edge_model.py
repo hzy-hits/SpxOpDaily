@@ -36,7 +36,7 @@ _CLOSE_CONVERGENCE_CONTRACT_HASH = (
 )
 _IRON_CONDOR_SETUP = "IRON_CONDOR_DELTA"
 _IRON_CONDOR_CONTRACT_HASH = (
-    "sha256:313451f209e4aea9ad930d57fb0bc451098071eb8ee90f3ee47185affbae71c6"
+    "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
 )
 _GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v48"
 _GTH_MINUTE_GATE_CONTRACT_HASH = (
@@ -209,17 +209,17 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v52",
+                "strategy_policy.bootstrap.v53",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v52",
+                "strategy_policy.bootstrap.v53",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v52",
+                "strategy_policy.bootstrap.v53",
                 _IRON_CONDOR_CONTRACT_HASH,
                 "iron_condor_policy_authority_invalid",
             ),

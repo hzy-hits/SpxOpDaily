@@ -76,6 +76,45 @@ def test_guidance_turns_regime_into_directional_wait_conditions() -> None:
     assert "SPX 收回 7565" in guidance.invalidation_text
 
 
+def test_desk_map_shows_gth_atm_straddle_and_iv_extrema() -> None:
+    payload = _payload()
+    option_frame = payload["option_structure_frame"]
+    assert isinstance(option_frame, dict)
+    option_frame["structure"] = {
+        "put_wall": 7550.0,
+        "flip_zone": [7560.0, 7565.0],
+        "call_wall": 7600.0,
+    }
+    option_frame["volatility"] = {
+        "atm_straddle_session": {
+            "segment": "rth",
+            "current": {"straddle_mid": 20.0, "atm_iv": 0.125},
+            "gth": {
+                "observations": 120,
+                "straddle_mid": {
+                    "high": 24.0,
+                    "low": 18.0,
+                    "current_vs_high_fraction": -1 / 6,
+                },
+                "atm_iv": {"high": 0.14, "low": 0.12},
+            },
+            "rth": {
+                "observations": 8,
+                "straddle_mid": {"high": 21.0, "low": 19.5},
+                "atm_iv": {"high": 0.13, "low": 0.12},
+            },
+        }
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert (
+        "ATM跨式(RTH): 当前 20.00 · GTH高/低 24.00/18.00 · "
+        "较GTH高 -16.67% · RTH高/低 21.00/19.50；"
+        "ATM IV 当前 12.50% · GTH高/低 14.00%/12.00%"
+    ) in sections.structure
+
+
 def test_guidance_translates_joined_quality_failures() -> None:
     payload = _payload()
     payload["level_decision"] = {

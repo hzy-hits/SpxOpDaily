@@ -39,6 +39,8 @@ SHORT_DELTA_MAX = 0.20
 SHORT_DELTA_TOLERANCE = 0.05
 WING_WIDTH = 10.0
 MIN_CREDIT_FRACTION = 0.25
+TRANSITION_MIN_CREDIT_FRACTION = 0.23
+TRANSITION_MIN_SIDE_CREDIT_SHARE = 0.25
 MAX_CREDIT_FRACTION = 0.55
 HUMAN_MAX_ATM_IV = 0.2374713681
 HUMAN_MAX_SMILE_RICHNESS = 0.0313827831
@@ -55,7 +57,7 @@ GAMMA_RISK_LOW_GCR10 = 0.10
 GAMMA_RISK_NORMAL_GCR10 = 0.20
 GAMMA_RISK_HOT_GCR10 = 0.30
 HUMAN_EVIDENCE_CONTRACT_HASH = (
-    "sha256:313451f209e4aea9ad930d57fb0bc451098071eb8ee90f3ee47185affbae71c6"
+    "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
 )
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -216,6 +218,19 @@ def enumerate_iron_condor_candidates(
     gamma_values = [_number(leg.get("gamma")) for leg in legs]
     gamma_times = [_time(leg.get("greeks_observed_at")) for leg in legs]
     credit = _number(quote.get("credit"))
+    put_side_credit = (
+        (_number(put_short.get("bid")) or 0.0)
+        - (_number(put_long.get("ask")) or 0.0)
+    )
+    call_side_credit = (
+        (_number(call_short.get("bid")) or 0.0)
+        - (_number(call_long.get("ask")) or 0.0)
+    )
+    minimum_side_credit_share = (
+        min(put_side_credit, call_side_credit) / credit
+        if credit is not None and credit > 0
+        else None
+    )
     if (
         len(gamma_values) == 4
         and all(value is not None for value in gamma_values)
@@ -307,6 +322,13 @@ def enumerate_iron_condor_candidates(
             "call_short_distance_points": (
                 round(call_short_distance, 4) if call_short_distance is not None else None
             ),
+            "put_side_credit": round(put_side_credit, 4),
+            "call_side_credit": round(call_side_credit, 4),
+            "minimum_side_credit_share": (
+                round(minimum_side_credit_share, 8)
+                if minimum_side_credit_share is not None
+                else None
+            ),
             "gamma_risk": gamma_risk,
             "wing_width": WING_WIDTH,
             "quote_valid_until": quote_valid.isoformat() if quote_valid else now.isoformat(),
@@ -338,20 +360,16 @@ def enumerate_iron_condor_candidates(
                 "management_quote_max_skew_seconds": 30.0,
             },
             "production_evidence": {
-                "contract": "rth_20delta_fixed10_daily_first_credit25_schwab_only_1000_1100_locked_surface_advisory.v5",
-                "opportunity_sessions": 21,
-                "no_trade_sessions": 13,
-                "resolved_trades": 20,
-                "unresolved_trades": 1,
-                "wins": 17,
-                "mean_net_pnl_dollars": 35.44,
-                "observed_mean_net_pnl_per_opportunity_dollars": 26.11,
-                "pessimistic_mean_net_pnl_per_opportunity_dollars": -1.51,
-                "pessimistic_total_net_pnl_dollars": -31.76,
+                "contract": "rth_20delta_fixed10_daily_first_credit25_or_expansion_to_contraction_credit23_balanced_sides_schwab_only_1000_1100_locked_surface_advisory.v6",
+                "transition_replay_sessions": 36,
+                "transition_resolved_trades": 18,
+                "transition_wins": 16,
+                "transition_mean_net_pnl_dollars": 60.00,
+                "transition_minimum_net_pnl_dollars": -605.56,
                 "limitations": [
                     "same_sample_policy_search",
-                    "surface_hard_gate_removed_by_user_override",
-                    "one_unresolved_exit_path",
+                    "production_v51_environment_not_fully_reconstructable",
+                    "credit23_boundary_uses_displayed_bbo",
                     "one_minute_stop_sampling",
                     "not_fill_probability",
                 ],
@@ -427,13 +445,13 @@ def iron_condor_session_state(
     base = {
         "status": "waiting",
         "session_date": session_date,
-        "contract": "daily_first_credit25_candidate_lock_surface_advisory",
+        "contract": "daily_first_credit25_or_transition_credit23_candidate_lock_surface_advisory",
         "carried_forward": False,
     }
     if str(_map(facts.get("session")).get("mode") or "").lower() != "rth":
         return base
     for candidate in candidates:
-        if not _qualifies_for_human_candidate_lock(candidate):
+        if not _qualifies_for_human_candidate_lock(candidate, facts):
             continue
         surface_gate = _map(candidate.get("human_surface_gate"))
         return {
@@ -448,7 +466,26 @@ def iron_condor_session_state(
     return base
 
 
-def _qualifies_for_human_candidate_lock(candidate: Mapping[str, Any]) -> bool:
+def human_iron_condor_entry_contract(
+    candidate: Mapping[str, Any], facts: Mapping[str, Any]
+) -> dict[str, Any]:
+    environment = _map(facts.get("rth_environment"))
+    transition = environment.get("state") == "EXPANSION_TO_CONTRACTION"
+    return {
+        "minimum_credit_fraction": (
+            TRANSITION_MIN_CREDIT_FRACTION if transition else MIN_CREDIT_FRACTION
+        ),
+        "minimum_side_credit_share": (
+            TRANSITION_MIN_SIDE_CREDIT_SHARE if transition else None
+        ),
+        "environment_state": environment.get("state"),
+        "transition_contract": transition,
+    }
+
+
+def _qualifies_for_human_candidate_lock(
+    candidate: Mapping[str, Any], facts: Mapping[str, Any]
+) -> bool:
     if candidate.get("manual_authority_eligible") is not True:
         return False
     if abs((_number(candidate.get("short_abs_delta")) or 0.0) - HUMAN_SHORT_DELTA) > 1e-9:
@@ -456,9 +493,20 @@ def _qualifies_for_human_candidate_lock(candidate: Mapping[str, Any]) -> bool:
     economics = _map(candidate.get("economics"))
     credit_fraction = _number(economics.get("credit_fraction_of_width"))
     loss = _number(economics.get("max_loss_points"))
+    entry_contract = human_iron_condor_entry_contract(candidate, facts)
+    minimum_credit = float(entry_contract["minimum_credit_fraction"])
+    minimum_side_share = _number(entry_contract.get("minimum_side_credit_share"))
+    actual_side_share = _number(candidate.get("minimum_side_credit_share"))
     return bool(
         credit_fraction is not None
-        and MIN_CREDIT_FRACTION <= credit_fraction <= MAX_CREDIT_FRACTION
+        and minimum_credit - 1e-9 <= credit_fraction <= MAX_CREDIT_FRACTION
+        and (
+            minimum_side_share is None
+            or (
+                actual_side_share is not None
+                and actual_side_share + 1e-9 >= minimum_side_share
+            )
+        )
         and loss is not None
         and 0.0 < loss * 100.0 <= HUMAN_MAX_RISK_DOLLARS
         and candidate.get("spot_inside_shorts") is True
