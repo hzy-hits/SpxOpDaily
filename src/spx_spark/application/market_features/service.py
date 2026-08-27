@@ -514,6 +514,17 @@ def run(
         datetime.fromisoformat(str(producer_deadline["action_revalidation_at"]))
     )
     finish_stage("market_and_trigger")
+    research_component_started = perf_counter()
+    research_component_durations_ms: dict[str, float] = {}
+
+    def finish_research_component(name: str) -> None:
+        nonlocal research_component_started
+        finished = perf_counter()
+        research_component_durations_ms[name] = round(
+            (finished - research_component_started) * 1000.0,
+            3,
+        )
+        research_component_started = finished
 
     # Research overlays enrich the persisted/output context only. They run
     # after the trade-critical producer ledger and durable delivery attempt.
@@ -562,6 +573,7 @@ def run(
             state_cache["greek_cache_token"] = greek_cache_token
             state_cache["greeks_reference_0dte"] = focused
             state_cache["greek_decision"] = greek_decision
+    finish_research_component("greeks")
     spring_gamma_v3 = _process_spring_gamma_v3_shadow(
         storage=storage,
         latest_state=latest,
@@ -575,6 +587,7 @@ def run(
         settings=app.spring_gamma_v3,
     )
     spring_gamma_snapshot = load_json(latest_spring_gamma_v3_shadow_path(storage.data_root))
+    finish_research_component("spring_gamma")
     if contract_id:
         score = greek_decision.get("contract_scores", {}).get(contract_id)
         if isinstance(score, dict):
@@ -618,6 +631,7 @@ def run(
         if state_cache is not None:
             state_cache["strategy_outcome_observation_minute"] = outcome_minute
             state_cache["strategy_outcome_observation"] = strategy_outcome_observation
+    finish_research_component("outcomes")
     # Freeze the authority clock only after the action snapshot and due outcomes
     # have been read.  The failover controller runs independently in this same
     # process; reusing the earlier snapshot clock can otherwise make its newly
@@ -685,6 +699,7 @@ def run(
             # failure must remain visible without interrupting the price-confirmed
             # manual signal lifecycle that was durably processed above.
             strategy_distribution_forecast_error = f"{type(exc).__name__}:{exc}"
+    finish_research_component("forecast")
     gamma_prearm_plan = process_gamma_prearm_plan(
         storage,
         repricing,
@@ -722,6 +737,7 @@ def run(
         new_entries_block_reason=gth_entry_block_reason,
         selector_evidence=True,
     )
+    finish_research_component("gth_context")
     strategy_es_basis = qualified_es_basis_points(
         raw_level_decision,
         cross_asset_basis=_number(market_frame.cross_asset.get("es_spx_basis_points")),
@@ -783,6 +799,7 @@ def run(
         data_root=storage.data_root,
         probability_settings=app.strategy_distribution,
     )
+    finish_research_component("strategy_build")
     finish_stage("research_and_strategy")
     try:
         persisted_decision_id = persist_strategy_decision(
@@ -972,6 +989,7 @@ def run(
             "strategy_decision_delivery": strategy_delivery,
             "strategy_outcome_observation": strategy_outcome_observation,
             "stage_durations_ms": stage_durations_ms,
+            "research_component_durations_ms": research_component_durations_ms,
             "duration_ms": total_duration_ms,
             "state_checkpointed": state_checkpointed,
         }
@@ -986,6 +1004,7 @@ def run(
                     "at": output["at"],
                     "duration_ms": total_duration_ms,
                     "stage_durations_ms": stage_durations_ms,
+                    "research_component_durations_ms": research_component_durations_ms,
                     "market_quality": output.get("market_quality"),
                     "option_quality": output.get("option_quality"),
                     "l1_quality": output.get("l1_quality"),
