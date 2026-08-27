@@ -524,77 +524,100 @@ def persist_strategy_outcome(
 ) -> str:
     """Atomically persist an immutable strategy mark and its audit event."""
 
-    decision_id = _required_text(value, "decision_id")
-    horizon_minutes = int(value.get("horizon_minutes") or 0)
-    if horizon_minutes <= 0:
-        raise ValueError("strategy outcome horizon must be positive")
-    target_at = _time(value.get("target_at"), "target_at")
-    sampled_at = _time(value.get("sampled_at"), "sampled_at")
-    attributes = _mapping(value.get("attributes"))
-    censor_kind = str(attributes.get("censor_kind") or "")
-    if sampled_at < target_at and not (
-        str(value.get("status") or "") == "censored"
-        and censor_kind == "session_end_before_horizon"
-    ):
-        raise ValueError("strategy outcome cannot be sampled before target")
-    outcome_id = f"strategy-outcome:{decision_id}:{horizon_minutes}m"
-    event_key = f"strategy-observation:{decision_id}:{horizon_minutes}m"
+    return persist_strategy_outcomes((value,), database_path=database_path)[0]
+
+
+def persist_strategy_outcomes(
+    values: Sequence[Mapping[str, object]],
+    *,
+    database_path: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Persist a due-mark batch in one transaction while preserving idempotency."""
+
+    batch = tuple(values)
+    if not batch:
+        return ()
+
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     now_text = _utc_text(datetime.now(tz=timezone.utc))
+    outcome_ids: list[str] = []
     with _engine(str(path)).begin() as connection:
-        decision = connection.execute(
-            sa.select(decisions).where(decisions.c.decision_id == decision_id)
-        ).mappings().one()
-        event_source_at = (
-            sampled_at
-            if str(value.get("status") or "") == "censored"
-            and censor_kind == "session_end_before_horizon"
-            else target_at
-        )
-        event_row = {
-            "event_key": event_key,
-            "event_type": "strategy_outcome_observation",
-            "session_date": str(decision["session_date"] or ""),
-            "source_at": _utc_text(event_source_at),
-            "available_at": _utc_text(sampled_at),
-            "received_at": _utc_text(sampled_at),
-            "phase": str(value.get("status") or "unavailable"),
-            "direction": str(value.get("hypothesis_direction") or "none"),
-            "data_quality": "ready" if value.get("status") == "observed" else "degraded",
-            "schema_version": 1,
-            "attributes_json": _json(
-                {"decision_id": decision_id, "horizon_minutes": horizon_minutes}
-            ),
-            "created_at": now_text,
-        }
-        connection.execute(sqlite_insert(events).values(event_row).on_conflict_do_nothing())
-        stored_event = connection.execute(
-            sa.select(events).where(events.c.event_key == event_key)
-        ).mappings().one()
-        _assert_same("strategy outcome event", stored_event, event_row)
-        outcome_row = {
-            "outcome_id": outcome_id,
-            "event_key": event_key,
-            "decision_id": decision_id,
-            "horizon_minutes": horizon_minutes,
-            "status": str(value.get("status") or "unavailable"),
-            "target_at": _utc_text(target_at),
-            "sampled_at": _utc_text(sampled_at),
-            "hypothesis_direction": str(value.get("hypothesis_direction") or "none"),
-            "spx_return_bps": _number(value.get("spx_return_bps")),
-            "spx_mfe_bps": None,
-            "spx_mae_bps": None,
-            "option_return_bps": _number(value.get("option_return_bps")),
-            "option_pnl": None,
-            "attributes_json": _json(attributes),
-            "created_at": now_text,
-        }
-        connection.execute(sqlite_insert(outcomes).values(outcome_row).on_conflict_do_nothing())
-        stored = connection.execute(
-            sa.select(outcomes).where(outcomes.c.outcome_id == outcome_id)
-        ).mappings().one()
-        _assert_same("strategy outcome", stored, outcome_row)
-    return outcome_id
+        for value in batch:
+            decision_id = _required_text(value, "decision_id")
+            horizon_minutes = int(value.get("horizon_minutes") or 0)
+            if horizon_minutes <= 0:
+                raise ValueError("strategy outcome horizon must be positive")
+            target_at = _time(value.get("target_at"), "target_at")
+            sampled_at = _time(value.get("sampled_at"), "sampled_at")
+            attributes = _mapping(value.get("attributes"))
+            censor_kind = str(attributes.get("censor_kind") or "")
+            if sampled_at < target_at and not (
+                str(value.get("status") or "") == "censored"
+                and censor_kind == "session_end_before_horizon"
+            ):
+                raise ValueError("strategy outcome cannot be sampled before target")
+            outcome_id = f"strategy-outcome:{decision_id}:{horizon_minutes}m"
+            event_key = f"strategy-observation:{decision_id}:{horizon_minutes}m"
+            decision = connection.execute(
+                sa.select(decisions).where(decisions.c.decision_id == decision_id)
+            ).mappings().one()
+            event_source_at = (
+                sampled_at
+                if str(value.get("status") or "") == "censored"
+                and censor_kind == "session_end_before_horizon"
+                else target_at
+            )
+            event_row = {
+                "event_key": event_key,
+                "event_type": "strategy_outcome_observation",
+                "session_date": str(decision["session_date"] or ""),
+                "source_at": _utc_text(event_source_at),
+                "available_at": _utc_text(sampled_at),
+                "received_at": _utc_text(sampled_at),
+                "phase": str(value.get("status") or "unavailable"),
+                "direction": str(value.get("hypothesis_direction") or "none"),
+                "data_quality": (
+                    "ready" if value.get("status") == "observed" else "degraded"
+                ),
+                "schema_version": 1,
+                "attributes_json": _json(
+                    {"decision_id": decision_id, "horizon_minutes": horizon_minutes}
+                ),
+                "created_at": now_text,
+            }
+            connection.execute(
+                sqlite_insert(events).values(event_row).on_conflict_do_nothing()
+            )
+            stored_event = connection.execute(
+                sa.select(events).where(events.c.event_key == event_key)
+            ).mappings().one()
+            _assert_same("strategy outcome event", stored_event, event_row)
+            outcome_row = {
+                "outcome_id": outcome_id,
+                "event_key": event_key,
+                "decision_id": decision_id,
+                "horizon_minutes": horizon_minutes,
+                "status": str(value.get("status") or "unavailable"),
+                "target_at": _utc_text(target_at),
+                "sampled_at": _utc_text(sampled_at),
+                "hypothesis_direction": str(value.get("hypothesis_direction") or "none"),
+                "spx_return_bps": _number(value.get("spx_return_bps")),
+                "spx_mfe_bps": None,
+                "spx_mae_bps": None,
+                "option_return_bps": _number(value.get("option_return_bps")),
+                "option_pnl": None,
+                "attributes_json": _json(attributes),
+                "created_at": now_text,
+            }
+            connection.execute(
+                sqlite_insert(outcomes).values(outcome_row).on_conflict_do_nothing()
+            )
+            stored = connection.execute(
+                sa.select(outcomes).where(outcomes.c.outcome_id == outcome_id)
+            ).mappings().one()
+            _assert_same("strategy outcome", stored, outcome_row)
+            outcome_ids.append(outcome_id)
+    return tuple(outcome_ids)
 
 
 def _decision_rows(

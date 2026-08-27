@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from spx_spark.application.order_map.strategy_regime import MARK_HORIZONS_MINUTES
 from spx_spark.infrastructure.operational_db import (
-    persist_strategy_outcome,
+    persist_strategy_outcomes,
     read_due_strategy_observations,
 )
 from spx_spark.marketdata import Quote, as_utc, instrument_matches_id
@@ -44,7 +44,7 @@ def observe_due_strategy_outcomes(
         database_path=database_path,
     )
     statuses: dict[str, int] = {}
-    outcome_ids = []
+    values = []
     for observation in pending:
         value = _observe(
             observation,
@@ -52,10 +52,10 @@ def observe_due_strategy_outcomes(
             sampled_at=sampled_at,
             data_root=Path(data_root),
         )
-        outcome_id = persist_strategy_outcome(value, database_path=database_path)
         status = str(value["status"])
         statuses[status] = statuses.get(status, 0) + 1
-        outcome_ids.append(outcome_id)
+        values.append(value)
+    outcome_ids = persist_strategy_outcomes(values, database_path=database_path)
     return {
         "observed": len(outcome_ids),
         "statuses": statuses,
