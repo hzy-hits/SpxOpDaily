@@ -143,6 +143,46 @@ def test_no_trade_is_idempotent_and_replay_reads_sql(tmp_path: Path) -> None:
     ) == (decision,)
 
 
+def test_repeated_no_trade_is_sampled_once_per_minute_but_changes_persist(
+    tmp_path: Path,
+) -> None:
+    database = _migrate(tmp_path)
+    first = _no_trade()
+    repeated_at = NOW + timedelta(seconds=10)
+    repeated = {
+        **first,
+        "decision_id": "strategy:no-trade-repeat",
+        "decision_at": repeated_at.isoformat(),
+        "available_at": repeated_at.isoformat(),
+    }
+    changed_at = NOW + timedelta(seconds=20)
+    changed = {
+        **repeated,
+        "decision_id": "strategy:no-trade-changed",
+        "decision_at": changed_at.isoformat(),
+        "available_at": changed_at.isoformat(),
+        "why_not": {"reasons": ["option_structure_unavailable"]},
+    }
+
+    assert persist_strategy_decision(first, database_path=database) == "strategy:no-trade"
+    assert (
+        persist_strategy_decision(
+            repeated,
+            database_path=database,
+            previous_decision=first,
+        )
+        is None
+    )
+    assert persist_strategy_decision(
+        changed,
+        database_path=database,
+        previous_decision=repeated,
+    ) == "strategy:no-trade-changed"
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM decisions").fetchone()[0] == 2
+
+
 def test_default_database_is_app_root_not_market_data_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

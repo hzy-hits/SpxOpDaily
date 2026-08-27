@@ -81,7 +81,9 @@ async def main() -> None:
             app_settings=app_settings, storage_settings=storage, emit_json=False),
         additional_lock_path=str(settings.core_lock_root /
                                  intraday_shock_hot_worker.LOCK_FILE_NAME),
-        emit_json=False,
+        # The market-feature service now emits one bounded timing summary,
+        # rather than serializing the full decision payload into journald.
+        emit_json=True,
     )
     try:
         async with asyncio.TaskGroup() as tasks:

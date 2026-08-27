@@ -69,6 +69,21 @@ TRACKED_INSTRUMENTS = (
     "equity:XLV",
     "equity:XLY",
 )
+_PERSISTED_QUOTE_KEYS = (
+    "price",
+    "price_kind",
+    "reference_close",
+    "provider",
+    "contract_identity",
+    "source_at",
+    "transport_at",
+    "volume",
+    "quality",
+)
+_LONG_HORIZON_INSTRUMENTS = frozenset(
+    {"future:ES", "index:SPX", "index:NDX", "index:DJI", "index:RUT"}
+)
+_FULL_CROSS_ASSET_HISTORY_MINUTES = 75
 _CME_MONTH_CODES = {
     "F": 1,
     "G": 2,
@@ -237,7 +252,26 @@ def merge_minute_sample(
     policy: MarketFeatureSettings,
 ) -> list[dict[str, Any]]:
     current_minute = as_utc(now).replace(second=0, microsecond=0)
-    retained = [row for row in samples if isinstance(row, dict)]
+    current_segment = session_segment(now, policy=policy)
+    full_history_cutoff = as_utc(now) - timedelta(minutes=_FULL_CROSS_ASSET_HISTORY_MINUTES)
+    retained = [
+        compact_market_sample(
+            row,
+            instrument_ids=(
+                None
+                if _sample_needs_full_instrument_history(
+                    row,
+                    now=now,
+                    current_segment=current_segment,
+                    full_history_cutoff=full_history_cutoff,
+                )
+                else _LONG_HORIZON_INSTRUMENTS
+            ),
+        )
+        for row in samples
+        if isinstance(row, dict)
+    ]
+    sample = compact_market_sample(sample)
     if retained:
         last_at = _parse_at(retained[-1].get("at"))
         if last_at is not None and last_at.replace(second=0, microsecond=0) == current_minute:
@@ -251,6 +285,59 @@ def merge_minute_sample(
         retained.append(sample)
     cutoff = as_utc(now) - timedelta(hours=policy.retention_hours)
     return [row for row in retained if (_parse_at(row.get("at")) or cutoff) >= cutoff]
+
+
+def compact_market_sample(
+    sample: dict[str, Any],
+    *,
+    instrument_ids: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Keep only fields consumed by rolling market-feature calculations.
+
+    Exact BBO and execution quotes always come from ``LatestState``.  Carrying
+    those fields in every minute sample duplicated several megabytes of data
+    without contributing to any historical calculation.
+    """
+
+    compact: dict[str, Any] = {
+        key: sample[key]
+        for key in ("at", "session_id", "segment")
+        if key in sample
+    }
+    for collection in ("instruments", "es_by_provider"):
+        raw = sample.get(collection)
+        if not isinstance(raw, dict):
+            continue
+        compact[collection] = {
+            str(identifier): {
+                key: quote[key]
+                for key in _PERSISTED_QUOTE_KEYS
+                if key in quote and quote[key] is not None
+            }
+            for identifier, quote in raw.items()
+            if isinstance(quote, dict)
+            and (collection == "es_by_provider" or instrument_ids is None or identifier in instrument_ids)
+        }
+    if "spx_sampling" in sample:
+        compact["spx_sampling"] = sample["spx_sampling"]
+    return compact
+
+
+def _sample_needs_full_instrument_history(
+    sample: dict[str, Any],
+    *,
+    now: datetime,
+    current_segment: str,
+    full_history_cutoff: datetime,
+) -> bool:
+    observed_at = _parse_at(sample.get("at"))
+    if observed_at is None or observed_at >= full_history_cutoff:
+        return True
+    return bool(
+        current_segment == MarketSessionSegment.RTH.value
+        and sample.get("segment") == MarketSessionSegment.RTH.value
+        and observed_at.astimezone(NY_TZ).date() == as_utc(now).astimezone(NY_TZ).date()
+    )
 
 
 def build_minute_market_frame(

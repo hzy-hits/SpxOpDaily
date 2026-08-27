@@ -17,7 +17,9 @@ from spx_spark.application.market_features.decision_filters import (
 )
 from spx_spark.application.market_features.market import (
     build_minute_market_frame,
+    compact_market_sample,
     freshest_quote,
+    merge_minute_sample,
     normalized_market_sample,
     normalized_quote,
     session_segment,
@@ -34,6 +36,7 @@ from spx_spark.application.market_features.options import (
     build_option_structure_frame,
     imbalance,
     level_decision_live_structure,
+    merge_option_history,
     option_volatility_features,
     provider_mid_divergences,
     update_atm_straddle_session,
@@ -50,6 +53,120 @@ from spx_spark.storage import LatestState
 
 
 UTC = timezone.utc
+
+
+def test_persisted_market_sample_keeps_features_but_drops_unused_bbo_fields() -> None:
+    at = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
+    raw = {
+        "at": at.isoformat(),
+        "session_id": "2026-08-27",
+        "segment": "rth",
+        "instruments": {
+            "future:ES": {
+                "price": 6500.0,
+                "price_kind": "mid",
+                "provider": "schwab",
+                "contract_identity": "ES:202609",
+                "source_at": at.isoformat(),
+                "transport_at": at.isoformat(),
+                "volume": 1234.0,
+                "quality": "live",
+                "bid": 6499.75,
+                "ask": 6500.25,
+                "bid_size": 20,
+                "ask_size": 21,
+                "provider_symbol": "/ESU26",
+            }
+        },
+    }
+
+    compact = compact_market_sample(raw)
+    merged = merge_minute_sample([], raw, now=at, policy=MarketFeatureSettings())
+
+    assert merged == [compact]
+    assert compact["instruments"]["future:ES"]["price"] == 6500.0
+    assert compact["instruments"]["future:ES"]["volume"] == 1234.0
+    assert "bid" not in compact["instruments"]["future:ES"]
+    assert "provider_symbol" not in compact["instruments"]["future:ES"]
+
+
+def test_market_sample_history_keeps_rth_breadth_only_during_current_rth() -> None:
+    rth_sample_at = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
+    row = {
+        "at": rth_sample_at.isoformat(),
+        "session_id": "2026-08-27",
+        "segment": "rth",
+        "instruments": {
+            "future:ES": {"price": 6500.0, "source_at": rth_sample_at.isoformat()},
+            "index:SPX": {"price": 6480.0, "source_at": rth_sample_at.isoformat()},
+            "equity:XLK": {
+                "price": 300.0,
+                "source_at": rth_sample_at.isoformat(),
+                "volume": 1000.0,
+            },
+        },
+    }
+    current_rth = datetime(2026, 8, 27, 17, 0, tzinfo=UTC)
+    gth = datetime(2026, 8, 28, 1, 0, tzinfo=UTC)
+
+    during_rth = merge_minute_sample(
+        [row],
+        {**row, "at": current_rth.isoformat()},
+        now=current_rth,
+        policy=MarketFeatureSettings(),
+    )
+    during_gth = merge_minute_sample(
+        [row],
+        {**row, "at": gth.isoformat(), "segment": "asia"},
+        now=gth,
+        policy=MarketFeatureSettings(),
+    )
+
+    assert "equity:XLK" in during_rth[0]["instruments"]
+    assert "equity:XLK" not in during_gth[0]["instruments"]
+    assert "index:SPX" in during_gth[0]["instruments"]
+
+
+def test_option_history_is_a_compact_rolling_feature_projection() -> None:
+    at = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
+    frame = OptionStructureFrame(
+        schema_version=1,
+        frame_id="options:20260827",
+        as_of=at,
+        quality=FrameQuality.READY,
+        front_expiry="20260827",
+        next_expiry="20260828",
+        structure={
+            "put_wall": 6450.0,
+            "call_wall": 6550.0,
+            "zero_gamma": 6500.0,
+            "call_walls": [{"strike": 6550.0, "open_interest": 9000}],
+            "put_walls": [{"strike": 6450.0, "open_interest": 8000}],
+            "large_unused_payload": list(range(100)),
+        },
+        volatility={"atm_straddle_mid": 22.0, "atm_iv_0dte": 0.14, "unused": 1},
+        concentration={"unused": list(range(100))},
+        density={"median": 6500.0, "p10": 6460.0, "p90": 6540.0, "unused": 1},
+        l1=L1MicrostructureFrame(
+            quality=FrameQuality.READY,
+            expiry="20260827",
+            contract_count=20,
+            metrics={"spread_p50_bps": 120.0, "unused": 1},
+            diagnostics={"unused": list(range(100))},
+        ),
+        diagnostics={"unused": list(range(100))},
+    )
+
+    history = merge_option_history([], frame, policy=MarketFeatureSettings())
+
+    assert len(history) == 1
+    assert history[0]["structure"]["call_walls"] == [{"strike": 6550.0}]
+    assert history[0]["volatility"] == {
+        "atm_straddle_mid": 22.0,
+        "atm_iv_0dte": 0.14,
+    }
+    assert history[0]["l1"]["metrics"] == {"spread_p50_bps": 120.0}
+    assert "concentration" not in history[0]
 
 
 def test_normalized_future_quote_exposes_only_specific_contract_identity() -> None:

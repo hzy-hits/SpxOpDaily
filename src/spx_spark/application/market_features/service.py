@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
@@ -163,7 +164,18 @@ def run(
     on_analytical_snapshot: Callable[[LatestState, OptionsMap], None] | None = None,
     app_settings: AppSettings | None = None,
     storage_settings: StorageSettings | None = None,
+    state_cache: dict[str, object] | None = None,
 ) -> int:
+    cycle_started = perf_counter()
+    stage_started = cycle_started
+    stage_durations_ms: dict[str, float] = {}
+
+    def finish_stage(name: str) -> None:
+        nonlocal stage_started
+        finished = perf_counter()
+        stage_durations_ms[name] = round((finished - stage_started) * 1000.0, 3)
+        stage_started = finished
+
     args = parse_args(argv)
     evaluation_now = as_utc(now or datetime.now(tz=timezone.utc))
     resolved_action_clock = _resolve_action_clock(
@@ -195,7 +207,27 @@ def run(
         cache_path=Path(storage.data_root) / "latest" / "play_outcome_stats_cache.json",
     )
     state_path = feature_state_path(storage.data_root)
-    persisted = load_json(state_path)
+    state_checkpointed = False
+    cached_payload = state_cache.get("payload") if state_cache is not None else None
+    cache_matches = bool(
+        state_cache is not None
+        and str(state_cache.get("path") or "") == str(state_path)
+        and isinstance(cached_payload, dict)
+    )
+    if cache_matches:
+        cached_updated_at = _timestamp(cached_payload.get("updated_at"))
+        if cached_updated_at is not None and cached_updated_at > evaluation_now:
+            cache_matches = False
+        elif (
+            cached_updated_at is not None
+            and cached_updated_at.replace(second=0, microsecond=0)
+            < evaluation_now.replace(second=0, microsecond=0)
+        ):
+            # Publish the completed prior minute before the new minute uses it.
+            # The in-process payload remains current at the five-second cadence.
+            save_json(state_path, cached_payload)
+            state_checkpointed = True
+    persisted = cached_payload if cache_matches else load_json(state_path)
     trend = load_trend_state(trend_state_path(storage.data_root))
     latest = LatestStateStore(storage).load(now=evaluation_now)
     grouped_quotes = group_spxw_option_quotes(latest, storage_settings=storage)
@@ -230,6 +262,7 @@ def run(
             "atm_straddle_session": atm_straddle_projection,
         },
     )
+    finish_stage("state_and_options")
     last_usable_option_frame = _dict(persisted.get("last_usable_option_frame"))
     if option_frame_has_usable_live_structure(option_frame):
         last_usable_option_frame = option_frame.to_dict()
@@ -480,6 +513,7 @@ def run(
     delivery_action_now = as_utc(
         datetime.fromisoformat(str(producer_deadline["action_revalidation_at"]))
     )
+    finish_stage("market_and_trigger")
 
     # Research overlays enrich the persisted/output context only. They run
     # after the trade-critical producer ledger and durable delivery attempt.
@@ -642,6 +676,7 @@ def run(
         "basis_points": strategy_coordinate.basis_points,
         "instrument_id": strategy_coordinate.instrument_id,
     }
+    previous_strategy_decision = load_json(latest_root / "strategy_decision.json")
     strategy_payload = {
         "trading_date": market_frame.session_id,
         "pricing_allowed": option_frame.quality.value == "ready" and option_frame.l1.quality.value == "ready",
@@ -664,9 +699,7 @@ def run(
         "experimental_research_signals": load_json(
             latest_root / "experimental_research_signals.json"
         ),
-        "previous_strategy_decision": load_json(
-            latest_root / "strategy_decision.json"
-        ),
+        "previous_strategy_decision": previous_strategy_decision,
         "candidates": [],
     }
     attach_es_volume_signal(
@@ -683,9 +716,11 @@ def run(
         data_root=storage.data_root,
         probability_settings=app.strategy_distribution,
     )
+    finish_stage("research_and_strategy")
     try:
         persisted_decision_id = persist_strategy_decision(
             strategy_decision,
+            previous_decision=previous_strategy_decision,
         )
     except Exception as exc:  # persistence must block READY, not feature collection
         strategy_persistence = {
@@ -708,20 +743,27 @@ def run(
                 )
             )
     else:
-        try:
-            shadow_persisted_ids = persist_strategy_shadow_candidates(strategy_decision)
-        except Exception as exc:
+        if persisted_decision_id is None:
             strategy_persistence = {
                 "ok": True,
-                "decision_id": persisted_decision_id,
-                "shadow_error": f"{type(exc).__name__}:{exc}",
+                "skipped": True,
+                "reason": "repeated_no_trade_same_minute",
             }
         else:
-            strategy_persistence = {
-                "ok": True,
-                "decision_id": persisted_decision_id,
-                "shadow_persisted_ids": list(shadow_persisted_ids),
-            }
+            try:
+                shadow_persisted_ids = persist_strategy_shadow_candidates(strategy_decision)
+            except Exception as exc:
+                strategy_persistence = {
+                    "ok": True,
+                    "decision_id": persisted_decision_id,
+                    "shadow_error": f"{type(exc).__name__}:{exc}",
+                }
+            else:
+                strategy_persistence = {
+                    "ok": True,
+                    "decision_id": persisted_decision_id,
+                    "shadow_persisted_ids": list(shadow_persisted_ids),
+                }
         save_json(
             Path(storage.data_root) / "latest" / "strategy_decision.json",
             strategy_decision,
@@ -769,6 +811,7 @@ def run(
         new_entries_allowed=action_provider_entry_control["allowed"] is True,
         new_entries_block_reason=str(action_provider_entry_control.get("reason") or "unknown"),
     )
+    finish_stage("persistence_and_virtual")
     context = replace(
         context,
         virtual_strategy=virtual_strategy,
@@ -809,9 +852,19 @@ def run(
         state_payload["updated_at"] = persisted["updated_at"]
     else:
         state_payload["updated_at"] = evaluation_now.isoformat()
-    save_json(state_path, state_payload)
+    if state_cache is None:
+        save_json(state_path, state_payload)
+        state_checkpointed = True
+    else:
+        state_cache["path"] = str(state_path)
+        state_cache["payload"] = state_payload
+        if not state_path.exists():
+            save_json(state_path, state_payload)
+            state_checkpointed = True
     if on_frames is not None:
         on_frames(market_frame.to_dict(), option_frame.to_dict())
+    finish_stage("projections_and_state")
+    total_duration_ms = round((perf_counter() - cycle_started) * 1000.0, 3)
     output.update(
         {
             "market_frame_id": market_frame.frame_id,
@@ -851,10 +904,33 @@ def run(
             "strategy_decision_persistence": strategy_persistence,
             "strategy_decision_delivery": strategy_delivery,
             "strategy_outcome_observation": strategy_outcome_observation,
+            "stage_durations_ms": stage_durations_ms,
+            "duration_ms": total_duration_ms,
+            "state_checkpointed": state_checkpointed,
         }
     )
     if args.json:
-        print(json.dumps(output, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "task": "market_features",
+                    "event": "cycle_summary",
+                    "ok": output["ok"],
+                    "at": output["at"],
+                    "duration_ms": total_duration_ms,
+                    "stage_durations_ms": stage_durations_ms,
+                    "market_quality": output.get("market_quality"),
+                    "option_quality": output.get("option_quality"),
+                    "l1_quality": output.get("l1_quality"),
+                    "trade_intent_status": output.get("trade_intent_status"),
+                    "strategy_decision_id": strategy_decision.get("decision_id"),
+                    "strategy_decision_type": strategy_decision.get("decision_type"),
+                    "strategy_persistence": strategy_persistence,
+                    "state_checkpointed": state_checkpointed,
+                },
+                sort_keys=True,
+            )
+        )
     return 0
 
 
@@ -961,6 +1037,15 @@ def _dict_list(value: object) -> list[dict[str, Any]]:
 
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
+
+
+def _timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return as_utc(datetime.fromisoformat(value))
+    except ValueError:
+        return None
 
 
 def main() -> None:

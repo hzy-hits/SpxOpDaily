@@ -822,14 +822,74 @@ def merge_option_history(
     *,
     policy: MarketFeatureSettings,
 ) -> list[dict[str, Any]]:
-    payload = frame.to_dict()
-    retained = [item for item in history if isinstance(item, dict)]
+    payload = _compact_option_history_frame(frame.to_dict())
+    retained = [
+        _compact_option_history_frame(item)
+        for item in history
+        if isinstance(item, dict)
+    ]
     if retained and str(retained[-1].get("as_of", ""))[:16] == frame.as_of.isoformat()[:16]:
         retained[-1] = payload
     else:
         retained.append(payload)
     cutoff = frame.as_of - timedelta(minutes=policy.option_history_minutes)
     return [item for item in retained if (_parse_at(item.get("as_of")) or cutoff) >= cutoff]
+
+
+def _compact_option_history_frame(payload: dict[str, Any]) -> dict[str, Any]:
+    """Project a full option frame to the fields used by rolling comparisons."""
+
+    structure = payload.get("structure")
+    structure = structure if isinstance(structure, dict) else {}
+    volatility = payload.get("volatility")
+    volatility = volatility if isinstance(volatility, dict) else {}
+    density = payload.get("density")
+    density = density if isinstance(density, dict) else {}
+    l1 = payload.get("l1")
+    l1 = l1 if isinstance(l1, dict) else {}
+    metrics = l1.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+
+    compact_structure = {
+        key: structure.get(key)
+        for key in ("put_wall", "call_wall", "zero_gamma", "frozen")
+        if key in structure
+    }
+    for key in ("call_walls", "put_walls"):
+        rows = structure.get(key)
+        if isinstance(rows, list):
+            compact_structure[key] = [
+                {"strike": row.get("strike")}
+                for row in rows[:4]
+                if isinstance(row, dict) and _number(row.get("strike")) is not None
+            ]
+
+    return {
+        "as_of": payload.get("as_of"),
+        "front_expiry": payload.get("front_expiry"),
+        "structure": compact_structure,
+        "volatility": {
+            key: volatility.get(key)
+            for key in ("atm_straddle_mid", "atm_iv_0dte")
+            if key in volatility
+        },
+        "density": {
+            key: density.get(key)
+            for key in (
+                "median",
+                "p10",
+                "p90",
+                "prob_below_put_wall",
+                "prob_above_call_wall",
+            )
+            if key in density
+        },
+        "l1": {
+            "metrics": {
+                "spread_p50_bps": metrics.get("spread_p50_bps"),
+            }
+        },
+    }
 
 
 def _fresh_front_quotes(

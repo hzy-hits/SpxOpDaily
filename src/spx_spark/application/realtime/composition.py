@@ -359,7 +359,25 @@ def run_realtime_engine_cycle(
     payload["level_decision_shadow"] = level_shadow
     payload["level_trigger_repricing"] = level_repricing
     payload["pricing_outcomes"] = pricing_outcomes
-    print(json.dumps(payload, sort_keys=True))
+    tick = payload.get("tick") if isinstance(payload.get("tick"), dict) else {}
+    print(
+        json.dumps(
+            {
+                "task": "realtime_engine",
+                "event": "cycle_summary",
+                "ok": payload.get("ok"),
+                "mode": payload.get("mode"),
+                "tick_id": tick.get("tick_id"),
+                "duration_ms": tick.get("duration_ms"),
+                "event_count": tick.get("event_count"),
+                "level_status": level_shadow.get("status"),
+                "level_actionable": level_shadow.get("actionable"),
+                "repricing_status": level_repricing.get("status"),
+                "pricing_outcomes_status": pricing_outcomes.get("status"),
+            },
+            sort_keys=True,
+        )
+    )
     return 0 if result.ok else 1
 
 

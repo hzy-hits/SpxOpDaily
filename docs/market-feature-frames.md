@@ -17,9 +17,18 @@ The feature pipeline converts provider-neutral `Quote` records and the existing
   - Globex regime, mutually-exclusive wall/flip state, confirmations,
     invalidations and source-frame identifiers.
 
-Durable calculation state is stored in `latest/market_feature_state.json`.
+Durable calculation state is stored in `latest/market_feature_state.json`. The
+persistent hot owner keeps the current five-second calculation state in memory
+and checkpoints the completed state once per minute. Rolling samples contain
+only feature inputs; exact BBO is always reloaded from `LatestState` at the
+action boundary. Option history is a compact projection of the fields consumed
+by rolling wall, IV, density and spread comparisons rather than full frames.
 Material decision-context changes are appended to
 `audit/decision_context/date=YYYY-MM-DD/events.jsonl`.
+
+Operational strategy decisions remain full fidelity for selected candidates
+and semantic changes. Identical `NO_TRADE` meaning is sampled once per minute;
+`latest/strategy_decision.json` continues to expose the newest evaluation.
 
 ## Availability Rules
 

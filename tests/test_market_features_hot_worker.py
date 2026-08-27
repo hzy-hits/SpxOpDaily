@@ -282,8 +282,9 @@ def test_cycle_forwards_frames_to_the_core_callback(
     observed: list[tuple[dict[str, object], dict[str, object]]] = []
     snapshots: list[tuple[object, object]] = []
 
-    def run(argv, *, on_frames, on_analytical_snapshot) -> int:
+    def run(argv, *, on_frames, on_analytical_snapshot, state_cache) -> int:
         assert argv == []
+        assert state_cache == {"sentinel": True}
         on_analytical_snapshot("latest-state", "options-map")
         on_frames({"frame_id": "market:1"}, {"frame_id": "options:1"})
         return 0
@@ -294,6 +295,7 @@ def test_cycle_forwards_frames_to_the_core_callback(
         lambda market, options: observed.append((dict(market), dict(options))),
         on_analytical_snapshot=lambda latest, options: snapshots.append((latest, options)),
         emit_json=False,
+        state_cache={"sentinel": True},
     )
 
     assert result == 0

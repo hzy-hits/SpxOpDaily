@@ -142,8 +142,20 @@ def persist_strategy_decision(
     decision: Mapping[str, object],
     *,
     database_path: str | Path | None = None,
-) -> str:
-    """Atomically persist one strategy decision and its frozen execution legs."""
+    previous_decision: Mapping[str, object] | None = None,
+) -> str | None:
+    """Atomically persist one material strategy decision and its frozen legs.
+
+    Repeated NO_TRADE observations with the same operator meaning are sampled
+    once per minute.  Selected candidates and any intra-minute regime/blocker
+    change remain immutable, full-fidelity rows.
+    """
+
+    if previous_decision is not None and _repeated_no_trade_same_minute(
+        decision,
+        previous_decision,
+    ):
+        return None
 
     row, legs = _decision_rows(decision)
     event_row = _strategy_opportunity_event_row(decision, created_at=str(row["created_at"]))
@@ -176,6 +188,68 @@ def persist_strategy_decision(
         if stored_count != len(legs):
             raise OperationalDecisionConflict("conflicting immutable decision leg set")
     return str(row["decision_id"])
+
+
+def _repeated_no_trade_same_minute(
+    current: Mapping[str, object],
+    previous: Mapping[str, object],
+) -> bool:
+    if (
+        str(current.get("decision_type") or "") != "NO_TRADE"
+        or str(previous.get("decision_type") or "") != "NO_TRADE"
+        or _mapping(current.get("candidate"))
+        or _mapping(previous.get("candidate"))
+    ):
+        return False
+    current_at = _time(current.get("decision_at"), "decision_at")
+    previous_at = _time(previous.get("decision_at"), "decision_at")
+    if current_at.replace(second=0, microsecond=0) != previous_at.replace(
+        second=0,
+        microsecond=0,
+    ):
+        return False
+    return _no_trade_semantic_key(current) == _no_trade_semantic_key(previous)
+
+
+def _no_trade_semantic_key(value: Mapping[str, object]) -> tuple[object, ...]:
+    why_not = _mapping(value.get("why_not"))
+    nearest = _mapping(why_not.get("nearest_candidate"))
+    regime = _mapping(value.get("regime"))
+    raw_reasons = why_not.get("reasons")
+    reasons = (
+        tuple(str(reason) for reason in raw_reasons if str(reason))
+        if isinstance(raw_reasons, list)
+        else ()
+    )
+    raw_legs = nearest.get("legs")
+    if isinstance(raw_legs, Sequence) and not isinstance(raw_legs, (str, bytes)):
+        legs = tuple(_mapping(item) for item in raw_legs)
+    else:
+        legs = (_mapping(nearest.get("long")), _mapping(nearest.get("short")))
+    leg_identity = tuple(
+        (
+            str(leg.get("contract_id") or ""),
+            _number(leg.get("strike")),
+            str(leg.get("right") or ""),
+        )
+        for leg in legs
+        if leg
+    )
+    return (
+        str(value.get("policy_version") or ""),
+        str(value.get("session_date") or ""),
+        str(value.get("action_authority") or "none"),
+        str(regime.get("path_state") or ""),
+        str(regime.get("path_direction") or ""),
+        str(regime.get("terminal_state") or ""),
+        str(why_not.get("primary_blocker") or ""),
+        reasons,
+        str(nearest.get("candidate_id") or ""),
+        str(nearest.get("strategy_type") or ""),
+        str(nearest.get("setup_kind") or ""),
+        str(nearest.get("direction") or ""),
+        leg_identity,
+    )
 
 
 def read_strategy_decisions(

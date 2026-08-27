@@ -112,6 +112,7 @@ def run_market_features_cycle(
     emit_json: bool = True,
     app_settings: AppSettings | None = None,
     storage_settings: StorageSettings | None = None,
+    state_cache: dict[str, object] | None = None,
 ) -> int:
     # Import once on the first cycle; subsequent calls reuse the same interpreter
     # and module graph instead of paying subprocess and import cost every five seconds.
@@ -124,6 +125,8 @@ def run_market_features_cycle(
         kwargs["app_settings"] = app_settings
     if storage_settings is not None:
         kwargs["storage_settings"] = storage_settings
+    if state_cache is not None:
+        kwargs["state_cache"] = state_cache
     return service.run(["--json"] if emit_json else [], **kwargs)
 
 
@@ -348,6 +351,8 @@ def run_with_stop(
 
     storage = StorageSettings.from_env()
     lease_path = Path(storage.data_root) / "latest" / "market_features_hot_worker.lease.json"
+    state_cache: dict[str, object] = {}
+
     def cycle() -> int:
         return run_market_features_cycle(
             on_frames,
@@ -355,6 +360,7 @@ def run_with_stop(
             emit_json=emit_json,
             app_settings=app,
             storage_settings=storage,
+            state_cache=state_cache,
         )
     try:
         with ExitStack() as locks:
