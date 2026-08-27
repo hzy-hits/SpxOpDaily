@@ -429,6 +429,7 @@ def read_due_strategy_observations(
             decisions.c.decision_id,
             decisions.c.decision_at,
             decisions.c.session_date,
+            decisions.c.status,
         )
         .where(
             decisions.c.strategy_name == "strategy_signal_engine_v2",
@@ -445,6 +446,21 @@ def read_due_strategy_observations(
         rows = list(connection.execute(statement).mappings())
         if not rows:
             return ()
+        # Rejected five-second snapshots are highly autocorrelated research
+        # labels. Keep one causal sample per minute while retaining every
+        # selected and shadow candidate observation.
+        no_trade_by_minute: dict[str, Mapping[str, object]] = {}
+        retained_rows: list[Mapping[str, object]] = []
+        for row in reversed(rows):
+            if row["status"] == "no_trade":
+                no_trade_by_minute.setdefault(str(row["decision_at"])[:16], row)
+            else:
+                retained_rows.append(row)
+        rows = sorted(
+            (*retained_rows, *no_trade_by_minute.values()),
+            key=lambda row: str(row["decision_at"]),
+            reverse=True,
+        )
         decision_ids = [row["decision_id"] for row in rows]
         outcome_pairs_by_id = {
             f"strategy-outcome:{decision_id}:{horizon}m": (decision_id, horizon)
