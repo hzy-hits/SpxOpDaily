@@ -425,7 +425,11 @@ def read_due_strategy_observations(
         )
     )
     statement = (
-        sa.select(decisions.c.decision_id, decisions.c.decision_at, decisions.c.attributes_json)
+        sa.select(
+            decisions.c.decision_id,
+            decisions.c.decision_at,
+            decisions.c.session_date,
+        )
         .where(
             decisions.c.strategy_name == "strategy_signal_engine_v2",
             decisions.c.decision_at <= _utc_text(observed_at),
@@ -435,40 +439,33 @@ def read_due_strategy_observations(
         .order_by(decisions.c.decision_at.desc())
         .limit(max(limit * len(horizons), limit))
     )
-    fresh: list[dict[str, object]] = []
-    censored: list[dict[str, object]] = []
+    fresh_refs: list[dict[str, object]] = []
+    censored_refs: list[dict[str, object]] = []
     with _engine(str(path)).begin() as connection:
         rows = list(connection.execute(statement).mappings())
         if not rows:
             return ()
         decision_ids = [row["decision_id"] for row in rows]
+        outcome_pairs_by_id = {
+            f"strategy-outcome:{decision_id}:{horizon}m": (decision_id, horizon)
+            for decision_id in decision_ids
+            for horizon in horizons
+        }
         observed_pairs = {
-            (item["decision_id"], int(item["horizon_minutes"]))
+            outcome_pairs_by_id[str(item["outcome_id"])]
             for item in connection.execute(
-                sa.select(outcomes.c.decision_id, outcomes.c.horizon_minutes).where(
-                    outcomes.c.decision_id.in_(decision_ids),
-                    outcomes.c.horizon_minutes.in_(list(horizons)),
+                sa.select(outcomes.c.outcome_id).where(
+                    outcomes.c.outcome_id.in_(tuple(outcome_pairs_by_id))
                 )
             ).mappings()
         }
-        legs_by_decision: dict[str, list[dict[str, object]]] = {decision_id: [] for decision_id in decision_ids}
-        for leg in connection.execute(
-            sa.select(decision_legs)
-            .where(decision_legs.c.decision_id.in_(decision_ids))
-            .order_by(decision_legs.c.decision_id, decision_legs.c.leg_index)
-        ).mappings():
-            legs_by_decision[str(leg["decision_id"])].append(dict(leg))
         for row in rows:
             decision_at = _time(row["decision_at"], "decision_at")
-            legs = legs_by_decision.get(str(row["decision_id"]), [])
-            if not legs:
-                continue
-            decision_payload = json.loads(row["attributes_json"])
+            session_close = _session_close_utc(row["session_date"])
             for horizon in horizons:
                 if (row["decision_id"], horizon) in observed_pairs:
                     continue
                 target_at = decision_at + timedelta(minutes=horizon)
-                session_close = _session_close_utc(decision_payload.get("session_date"))
                 session_end_before_horizon = (
                     session_close is not None
                     and target_at > session_close
@@ -482,21 +479,56 @@ def read_due_strategy_observations(
                     censor_hint = "service_gap"
                 elif session_end_before_horizon:
                     censor_hint = "session_end_before_horizon"
-                item = {
-                    "decision": decision_payload,
+                item_ref = {
+                    "decision_id": str(row["decision_id"]),
                     "decision_at": row["decision_at"],
                     "target_at": target_at.isoformat(),
                     "horizon_minutes": horizon,
-                    "legs": legs,
                     "censor_hint": censor_hint,
                 }
                 if censor_hint is None:
-                    fresh.append(item)
+                    fresh_refs.append(item_ref)
                 else:
-                    censored.append(item)
+                    censored_refs.append(item_ref)
+
+        selected_refs = (fresh_refs + censored_refs)[:limit]
+        if not selected_refs:
+            return ()
+        selected_decision_ids = tuple(
+            dict.fromkeys(str(item["decision_id"]) for item in selected_refs)
+        )
+        payloads_by_decision = {
+            str(row["decision_id"]): json.loads(row["attributes_json"])
+            for row in connection.execute(
+                sa.select(decisions.c.decision_id, decisions.c.attributes_json).where(
+                    decisions.c.decision_id.in_(selected_decision_ids)
+                )
+            ).mappings()
+        }
+        legs_by_decision: dict[str, list[dict[str, object]]] = {
+            decision_id: [] for decision_id in selected_decision_ids
+        }
+        for leg in connection.execute(
+            sa.select(decision_legs)
+            .where(decision_legs.c.decision_id.in_(selected_decision_ids))
+            .order_by(decision_legs.c.decision_id, decision_legs.c.leg_index)
+        ).mappings():
+            legs_by_decision[str(leg["decision_id"])].append(dict(leg))
     # Fresh marks first so a burst of overdue service_gap rows cannot consume
     # the entire limit and starve the live labeling path.
-    return tuple((fresh + censored)[:limit])
+    return tuple(
+        {
+            "decision": payloads_by_decision[decision_id],
+            "decision_at": item["decision_at"],
+            "target_at": item["target_at"],
+            "horizon_minutes": item["horizon_minutes"],
+            "legs": legs_by_decision[decision_id],
+            "censor_hint": item["censor_hint"],
+        }
+        for item in selected_refs
+        if (decision_id := str(item["decision_id"])) in payloads_by_decision
+        and legs_by_decision.get(decision_id)
+    )
 
 
 def _normalize_horizons(value: int | Sequence[int]) -> tuple[int, ...]:
