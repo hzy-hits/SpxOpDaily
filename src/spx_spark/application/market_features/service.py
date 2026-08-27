@@ -518,27 +518,50 @@ def run(
     # Research overlays enrich the persisted/output context only. They run
     # after the trade-critical producer ledger and durable delivery attempt.
     contract_id = str(trade_intent.get("contract_id") or "")
-    focused = build_zero_dte_greeks_reference(
-        latest,
-        options_map=options_map,
-        grouped_quotes=grouped_quotes,
-        storage_settings=storage,
-        focus_contract_ids=(contract_id,) if contract_id else (),
-        max_serialized_contracts=1 if contract_id else 0,
-        serialized_scenario_names=(
-            "clock_plus_5m",
-            "clock_plus_15m",
-            "clock_plus_30m",
-            "iv_down_1vol",
-            "iv_down_3vol",
-        ),
+    greek_cache_token = (
+        evaluation_now.replace(second=0, microsecond=0).isoformat(),
+        contract_id,
     )
-    greek_decision = build_greek_decision(
-        focused,
-        [trade_intent] if contract_id else [],
-        macro_event=macro_event,
-        policy=policy,
+    cached_focused = (
+        state_cache.get("greeks_reference_0dte") if state_cache is not None else None
     )
+    cached_greek_decision = (
+        state_cache.get("greek_decision") if state_cache is not None else None
+    )
+    if (
+        state_cache is not None
+        and state_cache.get("greek_cache_token") == greek_cache_token
+        and isinstance(cached_focused, dict)
+        and isinstance(cached_greek_decision, dict)
+    ):
+        focused = cached_focused
+        greek_decision = cached_greek_decision
+    else:
+        focused = build_zero_dte_greeks_reference(
+            latest,
+            options_map=options_map,
+            grouped_quotes=grouped_quotes,
+            storage_settings=storage,
+            focus_contract_ids=(contract_id,) if contract_id else (),
+            max_serialized_contracts=1 if contract_id else 0,
+            serialized_scenario_names=(
+                "clock_plus_5m",
+                "clock_plus_15m",
+                "clock_plus_30m",
+                "iv_down_1vol",
+                "iv_down_3vol",
+            ),
+        )
+        greek_decision = build_greek_decision(
+            focused,
+            [trade_intent] if contract_id else [],
+            macro_event=macro_event,
+            policy=policy,
+        )
+        if state_cache is not None:
+            state_cache["greek_cache_token"] = greek_cache_token
+            state_cache["greeks_reference_0dte"] = focused
+            state_cache["greek_decision"] = greek_decision
     spring_gamma_v3 = _process_spring_gamma_v3_shadow(
         storage=storage,
         latest_state=latest,
