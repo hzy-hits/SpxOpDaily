@@ -22,15 +22,31 @@ from spx_spark.config import StorageSettings
 from spx_spark.logging_setup import configure_logging
 from spx_spark.settings import current_app_settings
 from spx_spark.strategy import steven
+async def _wait_for_start(delay_seconds: float, shutdown: asyncio.Event) -> bool:
+    if delay_seconds <= 0:
+        return not shutdown.is_set()
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=delay_seconds)
+    except TimeoutError:
+        return True
+    return False
+
+
 async def _run_owner(name: str, runner: Callable[[], int],
-                     shutdown: asyncio.Event) -> None:
+                     shutdown: asyncio.Event,
+                     *, initial_delay_seconds: float = 0.0) -> None:
+    if not await _wait_for_start(initial_delay_seconds, shutdown):
+        return
     code = await asyncio.to_thread(runner)
     if code != 0:
         raise RuntimeError(f"{name} exited with status {code}")
     if not shutdown.is_set():
         raise RuntimeError(f"{name} exited unexpectedly")
 async def _run_periodic(name: str, runner: Callable[[], int],
-                        interval_seconds: float, shutdown: asyncio.Event) -> None:
+                        interval_seconds: float, shutdown: asyncio.Event,
+                        *, initial_delay_seconds: float = 0.0) -> None:
+    if not await _wait_for_start(initial_delay_seconds, shutdown):
+        return
     while not shutdown.is_set():
         code = await asyncio.to_thread(runner)
         if code != 0:
@@ -89,10 +105,12 @@ async def main() -> None:
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(_run_owner("es_bar_sampler", partial(
                 es_bar_sampler.run_with_stop, stop_event=stop_event, lock_path=str(
-                    settings.core_lock_root / es_bar_sampler.LOCK_FILE_NAME)), shutdown))
+                    settings.core_lock_root / es_bar_sampler.LOCK_FILE_NAME)), shutdown,
+                initial_delay_seconds=1.0))
             tasks.create_task(_run_owner("spx_minute_sampler", partial(
                 spx_minute_sampler.run_with_stop, stop_event=stop_event, lock_path=str(
-                    settings.core_lock_root / "spx-spark-spx-minute-sampler.lock")), shutdown))
+                    settings.core_lock_root / "spx-spark-spx-minute-sampler.lock")), shutdown,
+                initial_delay_seconds=2.5))
             tasks.create_task(_run_owner("market_features_hot_worker", partial(
                 feature_runner, stop_event=stop_event, lock_path=str(
                     settings.core_lock_root / market_features_hot_worker.LOCK_FILE_NAME)), shutdown))
@@ -104,7 +122,8 @@ async def main() -> None:
                         app_settings=app_settings,
                         storage_settings=storage,
                     ),
-                    runtime.provider_failover_interval_seconds, shutdown))
+                    runtime.provider_failover_interval_seconds, shutdown,
+                    initial_delay_seconds=2.0))
             if app_settings.globex_trend.enabled:
                 tasks.create_task(_run_periodic(
                     "globex_trend", partial(
@@ -112,7 +131,8 @@ async def main() -> None:
                         ["--json"],
                         unavailable_is_error=False,
                     ),
-                    app_settings.globex_trend.interval_seconds, shutdown))
+                    app_settings.globex_trend.interval_seconds, shutdown,
+                    initial_delay_seconds=12.0))
             if runtime.realtime_engine_enabled:
                 tasks.create_task(_run_periodic(
                     "realtime_engine", partial(
@@ -120,7 +140,8 @@ async def main() -> None:
                         app_settings=app_settings,
                         storage_settings=storage,
                     ),
-                    runtime.realtime_engine_interval_seconds, shutdown))
+                    runtime.realtime_engine_interval_seconds, shutdown,
+                    initial_delay_seconds=7.0))
             if runtime.alerts_enabled:
                 tasks.create_task(_run_periodic(
                     "alert_engine", partial(
@@ -129,10 +150,12 @@ async def main() -> None:
                         app_settings=app_settings,
                         storage_settings=storage,
                     ),
-                    runtime.alert_interval_seconds, shutdown))
+                    runtime.alert_interval_seconds, shutdown,
+                    initial_delay_seconds=4.0))
             if app_settings.alerts.steven_enabled:
                 tasks.create_task(_run_periodic(
                     "steven", partial(steven.run, ["--summary-json"]),
-                    runtime.alert_interval_seconds, shutdown))
+                    runtime.alert_interval_seconds, shutdown,
+                    initial_delay_seconds=9.0))
     finally:
         request_shutdown()
