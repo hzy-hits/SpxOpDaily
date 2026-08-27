@@ -196,8 +196,12 @@ class LatestStateStore:
             quote_from_dict(item) for item in quotes_payload if isinstance(item, dict)
         )
         quotes = prune_expired_option_quotes(quotes, now=now)
-        best_quotes = tuple(
-            quote_from_dict(item) for item in best_payload if isinstance(item, dict)
+        best_quotes = (
+            ()
+            if refresh_quality
+            else tuple(
+                quote_from_dict(item) for item in best_payload if isinstance(item, dict)
+            )
         )
         provider_states = tuple(
             provider_state_from_dict(item)
@@ -205,40 +209,54 @@ class LatestStateStore:
             if isinstance(item, dict)
         )
         created_at = as_utc_from_payload(payload.get("created_at")) if isinstance(payload, dict) else now
-        as_of = now if refresh_quality else (
-            as_utc_from_payload(payload.get("as_of")) if isinstance(payload, dict) else now
-        )
-        failover_mode = (
-            self._provider_failover_mode(now=as_of)
-            if refresh_quality
-            else str(payload.get("failover_mode") or "") or None
-        )
-        if refresh_quality:
-            quotes = tuple(
-                degrade_stale_quote(
-                    quote,
-                    as_of=as_of,
-                    stale_after_seconds=self.settings.latest_stale_after_seconds,
-                    delayed_stale_after_seconds=self.settings.delayed_stale_after_seconds,
-                    slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
-                    slow_labels=self.settings.slow_index_labels,
-                    rotation_stale_after_seconds=self.settings.rotation_stale_after_seconds,
-                )
-                for quote in quotes
-            )
-            best_quotes = select_best_quotes(
-                quotes,
-                as_of=as_of,
-                provider_priority=self.settings.provider_priority,
-                failover_mode=failover_mode,
-            )
-            provider_states = latest_provider_states(provider_states, now=as_of)
-        return LatestState(
+        as_of = as_utc_from_payload(payload.get("as_of")) if isinstance(payload, dict) else now
+        failover_mode = str(payload.get("failover_mode") or "") or None
+        state = LatestState(
             created_at=created_at,
             as_of=as_of,
             quotes=quotes,
             best_quotes=best_quotes,
             provider_states=provider_states,
+            failover_mode=failover_mode,
+        )
+        if refresh_quality:
+            return self.refresh_quality(state, now=now)
+        return state
+
+    def refresh_quality(
+        self,
+        state: LatestState,
+        *,
+        now: datetime | None = None,
+    ) -> LatestState:
+        """Re-evaluate freshness without reparsing an unchanged projection."""
+
+        as_of = as_utc(now or datetime.now(tz=timezone.utc))
+        quotes = prune_expired_option_quotes(state.quotes, now=as_of)
+        quotes = tuple(
+            degrade_stale_quote(
+                quote,
+                as_of=as_of,
+                stale_after_seconds=self.settings.latest_stale_after_seconds,
+                delayed_stale_after_seconds=self.settings.delayed_stale_after_seconds,
+                slow_stale_after_seconds=self.settings.slow_index_stale_after_seconds,
+                slow_labels=self.settings.slow_index_labels,
+                rotation_stale_after_seconds=self.settings.rotation_stale_after_seconds,
+            )
+            for quote in quotes
+        )
+        failover_mode = self._provider_failover_mode(now=as_of)
+        return LatestState(
+            created_at=state.created_at,
+            as_of=as_of,
+            quotes=quotes,
+            best_quotes=select_best_quotes(
+                quotes,
+                as_of=as_of,
+                provider_priority=self.settings.provider_priority,
+                failover_mode=failover_mode,
+            ),
+            provider_states=latest_provider_states(state.provider_states, now=as_of),
             failover_mode=failover_mode,
         )
 

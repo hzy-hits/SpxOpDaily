@@ -169,12 +169,23 @@ def run(
     cycle_started = perf_counter()
     stage_started = cycle_started
     stage_durations_ms: dict[str, float] = {}
+    state_component_started = cycle_started
+    state_component_durations_ms: dict[str, float] = {}
 
     def finish_stage(name: str) -> None:
         nonlocal stage_started
         finished = perf_counter()
         stage_durations_ms[name] = round((finished - stage_started) * 1000.0, 3)
         stage_started = finished
+
+    def finish_state_component(name: str) -> None:
+        nonlocal state_component_started
+        finished = perf_counter()
+        state_component_durations_ms[name] = round(
+            (finished - state_component_started) * 1000.0,
+            3,
+        )
+        state_component_started = finished
 
     args = parse_args(argv)
     evaluation_now = as_utc(now or datetime.now(tz=timezone.utc))
@@ -229,7 +240,25 @@ def run(
             state_checkpointed = True
     persisted = cached_payload if cache_matches else load_json(state_path)
     trend = load_trend_state(trend_state_path(storage.data_root))
-    latest = LatestStateStore(storage).load(now=evaluation_now)
+    latest_store = LatestStateStore(storage)
+
+    def projection_version() -> tuple[int, int, int] | None:
+        try:
+            stat = latest_store.path.stat()
+        except OSError:
+            return None
+        return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+    projection_version_before_load = projection_version()
+    finish_state_component("settings_and_feature_state")
+    latest = latest_store.load(now=evaluation_now)
+    projection_version_after_load = projection_version()
+    latest_projection_version = (
+        projection_version_after_load
+        if projection_version_before_load == projection_version_after_load
+        else None
+    )
+    finish_state_component("latest_state_load")
     grouped_quotes = group_spxw_option_quotes(latest, storage_settings=storage)
     options_map = build_options_map(
         latest,
@@ -237,6 +266,7 @@ def run(
         grouped_quotes=grouped_quotes,
     )
     exposure_map = build_exposure_map(latest, grouped_quotes=grouped_quotes)
+    finish_state_component("option_analytics")
     if on_analytical_snapshot is not None:
         on_analytical_snapshot(latest, options_map)
     option_history = _dict_list(persisted.get("option_history"))
@@ -262,6 +292,7 @@ def run(
             "atm_straddle_session": atm_straddle_projection,
         },
     )
+    finish_state_component("option_frame")
     finish_stage("state_and_options")
     last_usable_option_frame = _dict(persisted.get("last_usable_option_frame"))
     if option_frame_has_usable_live_structure(option_frame):
@@ -602,7 +633,12 @@ def run(
     # Delivery may cross a process/network boundary.  Never open or close a
     # lifecycle episode from the evaluation clock or the earlier quote snapshot.
     action_snapshot_at = as_utc(resolved_action_clock())
-    action_latest = LatestStateStore(storage).load(now=action_snapshot_at)
+    action_latest = (
+        latest_store.refresh_quality(latest, now=action_snapshot_at)
+        if latest_projection_version is not None
+        and latest_projection_version == projection_version()
+        else latest_store.load(now=action_snapshot_at)
+    )
     outcome_minute = action_snapshot_at.replace(second=0, microsecond=0).isoformat()
     cached_outcome_minute = (
         state_cache.get("strategy_outcome_observation_minute")
@@ -989,6 +1025,7 @@ def run(
             "strategy_decision_delivery": strategy_delivery,
             "strategy_outcome_observation": strategy_outcome_observation,
             "stage_durations_ms": stage_durations_ms,
+            "state_component_durations_ms": state_component_durations_ms,
             "research_component_durations_ms": research_component_durations_ms,
             "duration_ms": total_duration_ms,
             "state_checkpointed": state_checkpointed,
@@ -1004,6 +1041,7 @@ def run(
                     "at": output["at"],
                     "duration_ms": total_duration_ms,
                     "stage_durations_ms": stage_durations_ms,
+                    "state_component_durations_ms": state_component_durations_ms,
                     "research_component_durations_ms": research_component_durations_ms,
                     "market_quality": output.get("market_quality"),
                     "option_quality": output.get("option_quality"),
