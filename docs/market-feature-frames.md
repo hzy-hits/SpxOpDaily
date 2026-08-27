@@ -35,6 +35,9 @@ BBO. Historical spot/surface path repricing uses one NumPy path-by-time matrix
 per leg instead of Python work per timestamp.
 Core emits bounded alert and Steven cycle summaries; complete payloads remain
 in their existing projections instead of being copied into journald.
+The immutable storage/freshness policy is resolved once per process and reused
+by per-contract quote checks; explicit settings passed by tests or callers
+continue to take precedence.
 
 ## Availability Rules
 

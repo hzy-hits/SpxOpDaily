@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import tomllib
 from functools import lru_cache
 from pathlib import Path
@@ -935,6 +936,10 @@ def clear_settings_cache() -> None:
     """Drop cached AppSettings (tests that retarget runtime TOML must call this)."""
 
     _cached_app_settings.cache_clear()
+    config_module = sys.modules.get("spx_spark.config")
+    clear_storage = getattr(config_module, "clear_storage_settings_cache", None)
+    if callable(clear_storage):
+        clear_storage()
 
 
 def current_app_settings() -> AppSettings:

@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from spx_spark.config import StorageSettings
+from spx_spark.config import StorageSettings, current_storage_settings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.market_data_policy import pricing_candidates, pricing_provider_priority
 from spx_spark.marketdata import (
@@ -806,7 +806,7 @@ def configured_quote_use_decision(
     settings: StorageSettings | None = None,
     allow_frozen: bool = False,
 ) -> QuoteUseDecision:
-    settings = settings or StorageSettings.from_env()
+    settings = settings or current_storage_settings()
     is_slow = quote.instrument.canonical_id in settings.slow_index_labels
     if _is_ibkr_rotated_option(quote):
         # See degrade_stale_quote: rotation rows use the wider of the rotation

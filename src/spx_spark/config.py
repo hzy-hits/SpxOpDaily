@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 
 from spx_spark.market_calendar import ET as NY_TZ
 from spx_spark.market_calendar import default_spxw_expiry as _default_spxw_expiry
@@ -416,6 +417,19 @@ class StorageSettings:
                 float(settings_value("provider_failover.control_state_max_age_seconds")),
             ),
         )
+
+
+@lru_cache(maxsize=1)
+def current_storage_settings() -> StorageSettings:
+    """Return immutable process-lifetime storage policy for hot quote paths."""
+
+    return StorageSettings.from_env()
+
+
+def clear_storage_settings_cache() -> None:
+    """Clear the process cache after tests or an explicit settings reload."""
+
+    current_storage_settings.cache_clear()
 
 
 @dataclass(frozen=True)

@@ -22,7 +22,7 @@ from spx_spark.analytics.options.models import OptionsMap, UnderlierReference
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.analytics.options.quote_policy import analytical_option_quote
 from spx_spark.analytics.options.service import build_expiry_map
-from spx_spark.config import StorageSettings
+from spx_spark.config import StorageSettings, current_storage_settings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import (
     FUTURE_TIMESTAMP_TOLERANCE_SECONDS,
@@ -453,7 +453,7 @@ def group_spxw_option_quotes(
     storage_settings: StorageSettings | None = None,
 ) -> dict[str, list[Quote]]:
     ibkr_down = ibkr_provider_unavailable(state)
-    settings = storage_settings or StorageSettings.from_env()
+    settings = storage_settings or current_storage_settings()
     core_analytical_max_age = (
         settings.rotation_stale_after_seconds
         if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(state.as_of)
