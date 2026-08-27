@@ -5,6 +5,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import cached_property
 from typing import Any
 
 class Provider(str, Enum):
@@ -207,7 +208,7 @@ class InstrumentId:
             trading_class=trading_class,
         )
 
-    @property
+    @cached_property
     def canonical_id(self) -> str:
         if self.instrument_type == InstrumentType.OPTION:
             trading_class = self.trading_class or self.underlier or self.symbol
@@ -225,7 +226,7 @@ class InstrumentId:
             return f"{self.instrument_type.value}:{self.symbol}:{self.expiry}"
         return f"{self.instrument_type.value}:{self.symbol}"
 
-    @property
+    @cached_property
     def family_id(self) -> str:
         return f"future:{self.symbol}" if self.instrument_type == InstrumentType.FUTURE else self.canonical_id
 
@@ -513,12 +514,18 @@ class NormalizedSnapshot:
 
 def instrument_matches_id(instrument: Any, requested_id: str) -> bool:
     canonical_id = str(getattr(instrument, "canonical_id", ""))
+    if canonical_id == requested_id:
+        return True
     instrument_type = getattr(instrument, "instrument_type", InstrumentType.UNKNOWN)
     kind = str(getattr(instrument_type, "value", instrument_type)).lower()
-    family_id = getattr(instrument, "family_id", f"{kind}:{getattr(instrument, 'symbol', '')}")
-    return canonical_id == requested_id or (
-        kind == InstrumentType.FUTURE.value and family_id == requested_id
+    if kind != InstrumentType.FUTURE.value:
+        return False
+    family_id = getattr(
+        instrument,
+        "family_id",
+        f"{kind}:{getattr(instrument, 'symbol', '')}",
     )
+    return family_id == requested_id
 
 
 def instrument_from_dict(payload: Mapping[str, Any]) -> InstrumentId:
