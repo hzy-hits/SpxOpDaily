@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from statistics import median
@@ -863,14 +863,18 @@ def _exact_analytical_quotes(
     state: LatestState,
     *,
     expiry: str,
+    grouped_quotes: Mapping[str, Sequence[Quote]] | None = None,
+    storage_settings: StorageSettings | None = None,
 ) -> tuple[list[Quote], StorageSettings]:
-    settings = StorageSettings.from_env()
-    from spx_spark.options_map import group_spxw_option_quotes
+    settings = storage_settings or StorageSettings.from_env()
 
-    grouped = group_spxw_option_quotes(state, storage_settings=settings)
+    if grouped_quotes is None:
+        from spx_spark.options_map import group_spxw_option_quotes
+
+        grouped_quotes = group_spxw_option_quotes(state, storage_settings=settings)
     quotes = [
         quote
-        for quote in grouped.get(expiry, ())
+        for quote in grouped_quotes.get(expiry, ())
         if is_spxw_zero_dte(quote, as_of=state.as_of)
     ]
     return quotes, settings
@@ -880,6 +884,8 @@ def build_zero_dte_greeks_reference(
     state: LatestState,
     *,
     options_map: OptionsMap,
+    grouped_quotes: Mapping[str, Sequence[Quote]] | None = None,
+    storage_settings: StorageSettings | None = None,
     focus_contract_ids: Iterable[str] = (),
     max_serialized_contracts: int = MAX_SERIALIZED_CONTRACTS,
     serialized_scenario_names: Iterable[str] = DEFAULT_SERIALIZED_SCENARIOS,
@@ -901,6 +907,8 @@ def build_zero_dte_greeks_reference(
     exact_quotes, storage_settings = _exact_analytical_quotes(
         state,
         expiry=exact_expiry,
+        grouped_quotes=grouped_quotes,
+        storage_settings=storage_settings,
     )
     if not exact_quotes:
         return _unavailable_payload(as_of, exact_expiry, "exact_same_day_quotes_unavailable")

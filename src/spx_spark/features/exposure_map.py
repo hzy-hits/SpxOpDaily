@@ -72,6 +72,7 @@ from spx_spark.features.exposure_schema import (
     net_dex_proxy_by_expiry,
     persist_exposure_map,
 )
+from spx_spark.config import current_storage_settings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import Quote
 from spx_spark.settings import settings_value
@@ -240,8 +241,9 @@ def exposure_input_row_from_quote(quote: Quote, *, as_of: datetime) -> ExposureI
         analytical_reason = str(greek_rejections[0])
     pricing_lane = option_analytical_lane(quote, field="pricing")
     greeks_lane = option_analytical_lane(quote, field="greeks")
-    core_max_age = float(settings_value("market_data.latest_stale_after_seconds"))
-    rotation_max_age = float(settings_value("market_data.rotation_stale_after_seconds"))
+    storage_settings = current_storage_settings()
+    core_max_age = storage_settings.latest_stale_after_seconds
+    rotation_max_age = storage_settings.rotation_stale_after_seconds
     analytical_max_age = option_analytical_max_age_seconds(
         quote,
         core_max_age_seconds=core_max_age,

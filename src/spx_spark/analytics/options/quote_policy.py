@@ -29,28 +29,37 @@ def _explicit_delayed_flag(raw: Mapping[str, Any] | None) -> bool | None:
 
     if not isinstance(raw, Mapping):
         return None
-    values: list[bool] = []
+    saw_false = False
     for key, value in raw.items():
+        key_text = str(key).lower()
+        # Provider payloads contain dozens of unrelated provenance keys.  Keep
+        # accepting punctuation/case variants, but do not normalize every key
+        # on every analytical pass.
+        if "delay" not in key_text and not all(
+            character in key_text for character in "delay"
+        ):
+            continue
         normalized = "".join(
-            character for character in str(key).lower() if character.isalnum()
+            character for character in key_text if character.isalnum()
         )
         if normalized not in {"isdelayed", "delayed"}:
             continue
+        parsed: bool | None = None
         if isinstance(value, bool):
-            values.append(value)
+            parsed = value
         elif isinstance(value, (int, float)) and value in {0, 1}:
-            values.append(bool(value))
+            parsed = bool(value)
         elif isinstance(value, str):
             text = value.strip().lower()
             if text in {"true", "1", "yes"}:
-                values.append(True)
+                parsed = True
             elif text in {"false", "0", "no"}:
-                values.append(False)
-    if True in values:
-        return True
-    if False in values:
-        return False
-    return None
+                parsed = False
+        if parsed is True:
+            return True
+        if parsed is False:
+            saw_false = True
+    return False if saw_false else None
 
 
 def _bool_or_none(value: object) -> bool | None:

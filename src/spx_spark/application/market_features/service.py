@@ -521,6 +521,8 @@ def run(
     focused = build_zero_dte_greeks_reference(
         latest,
         options_map=options_map,
+        grouped_quotes=grouped_quotes,
+        storage_settings=storage,
         focus_contract_ids=(contract_id,) if contract_id else (),
         max_serialized_contracts=1 if contract_id else 0,
         serialized_scenario_names=(
@@ -621,20 +623,45 @@ def run(
     )
     strategy_distribution_forecast: dict[str, object] = {}
     strategy_distribution_forecast_error: str | None = None
-    try:
-        strategy_distribution_forecast = process_strategy_distribution_forecast(
-            data_root=storage.data_root,
-            action_state=action_latest,
-            option_frame=option_frame,
-            raw_level_decision=raw_level_decision,
-            now=action_now,
-            settings=app.strategy_distribution,
-        )
-    except Exception as exc:
-        # This lane is an append-only research projection.  A model or IO
-        # failure must remain visible without interrupting the price-confirmed
-        # manual signal lifecycle that was durably processed above.
-        strategy_distribution_forecast_error = f"{type(exc).__name__}:{exc}"
+    cached_forecast_at = (
+        _timestamp(state_cache.get("strategy_distribution_forecast_at"))
+        if state_cache is not None
+        else None
+    )
+    cached_forecast = (
+        state_cache.get("strategy_distribution_forecast")
+        if state_cache is not None
+        else None
+    )
+    forecast_cache_age = (
+        (action_now - cached_forecast_at).total_seconds()
+        if cached_forecast_at is not None
+        else None
+    )
+    if (
+        isinstance(cached_forecast, dict)
+        and forecast_cache_age is not None
+        and 0.0 <= forecast_cache_age < app.strategy_distribution.refresh_seconds
+    ):
+        strategy_distribution_forecast = cached_forecast
+    else:
+        try:
+            strategy_distribution_forecast = process_strategy_distribution_forecast(
+                data_root=storage.data_root,
+                action_state=action_latest,
+                option_frame=option_frame,
+                raw_level_decision=raw_level_decision,
+                now=action_now,
+                settings=app.strategy_distribution,
+            )
+            if state_cache is not None:
+                state_cache["strategy_distribution_forecast_at"] = action_now.isoformat()
+                state_cache["strategy_distribution_forecast"] = strategy_distribution_forecast
+        except Exception as exc:
+            # This lane is an append-only research projection.  A model or IO
+            # failure must remain visible without interrupting the price-confirmed
+            # manual signal lifecycle that was durably processed above.
+            strategy_distribution_forecast_error = f"{type(exc).__name__}:{exc}"
     gamma_prearm_plan = process_gamma_prearm_plan(
         storage,
         repricing,

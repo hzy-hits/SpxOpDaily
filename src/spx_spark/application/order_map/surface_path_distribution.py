@@ -35,8 +35,12 @@ JOINT_SURFACE_COORDINATE = "historical_dynamic_25d_to_entry_frozen_strikes.v1"
 PHYSICAL_METHOD = "physical_path_management_policy.v3"
 PHYSICAL_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v1"
 SURFACE_CADENCE_MINUTES = 5
+SURFACE_HISTORY_REFRESH_MINUTES = 30
+SURFACE_SESSION_INDEX_MINUTES = 24 * 60
 MAX_PATHS = 4000
 NEW_YORK = ZoneInfo("America/New_York")
+SurfaceCoordinate = tuple[float, float, float, float, float, float]
+SurfacePoint = tuple[SurfaceCoordinate, bool]
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,12 @@ def load_joint_surface_paths(
     now: datetime,
     horizon_minutes: int,
 ) -> tuple[tuple[JointSurfacePath, ...], str]:
-    """Load prior-session five-minute spot/surface paths without future leakage."""
+    """Load prior-session five-minute spot/surface paths without future leakage.
+
+    Historical surface files and the same-clock path library are immutable for
+    the active decision minute.  Refreshing them once per minute keeps this
+    explanation-only overlay off the five-second decision hot path.
+    """
 
     if data_root is None or horizon_minutes <= 0:
         return (), "unavailable"
@@ -102,56 +111,65 @@ def load_joint_surface_paths(
     if start_offset < 0:
         return (), "unavailable"
     steps = max(int(math.ceil(horizon_minutes / SURFACE_CADENCE_MINUTES)), 1)
+    settings = probability_settings or StrategyDistributionSettings()
+    root = Path(data_root).expanduser() / "features" / "iv_surface"
+    # The minute-start cutoff is deliberately conservative: a historical
+    # backfill arriving during this minute becomes visible next minute, never
+    # retroactively to an earlier decision in the same minute.
+    available_before = now_utc.replace(second=0, microsecond=0)
+    return _load_joint_surface_paths_for_minute(
+        str(root),
+        trading_date.isoformat(),
+        start_offset,
+        steps,
+        settings.window_days,
+        available_before.isoformat(),
+    )
+
+
+@lru_cache(maxsize=256)
+def _load_joint_surface_paths_for_minute(
+    root_text: str,
+    trading_date_text: str,
+    start_offset: int,
+    steps: int,
+    window_days: int,
+    available_before_text: str,
+) -> tuple[tuple[JointSurfacePath, ...], str]:
+    root = Path(root_text)
+    trading_date = date.fromisoformat(trading_date_text)
+    available_before = _utc(datetime.fromisoformat(available_before_text))
     targets = tuple(
         start_offset + index * SURFACE_CADENCE_MINUTES for index in range(steps + 1)
     )
-    settings = probability_settings or StrategyDistributionSettings()
-    root = Path(data_root).expanduser() / "features" / "iv_surface"
-    grouped: dict[
-        date, list[tuple[int, int, IvSurfaceSnapshot, IvSurfaceExpiry]]
-    ] = {}
-    day = trading_date - timedelta(days=settings.window_days + 4)
-    while day < trading_date:
-        for path in sorted((root / f"date={day.isoformat()}").glob("hour=*/*.jsonl")):
-            try:
-                snapshots = _surface_file_snapshots(str(path), path.stat().st_mtime_ns)
-            except OSError:
-                continue
-            for snapshot in snapshots:
-                as_of, created_at = _utc(snapshot.as_of), _utc(snapshot.created_at)
-                if as_of >= now_utc or created_at >= now_utc:
-                    continue
-                session_day = DEFAULT_MARKET_CALENDAR.spx_session_date_for(as_of)
-                if session_day is None or session_day >= trading_date:
-                    continue
-                window = DEFAULT_MARKET_CALENDAR.spx_session_window(session_day)
-                expiry = _front_surface(snapshot)
-                if window is None or expiry is None or _surface_coordinate(snapshot, expiry) is None:
-                    continue
-                offset = int(
-                    (as_of.astimezone(NEW_YORK) - window.session_start).total_seconds()
-                    // 60
-                )
-                available_offset = int(
-                    (created_at.astimezone(NEW_YORK) - window.session_start).total_seconds()
-                    // 60
-                )
-                grouped.setdefault(session_day, []).append(
-                    (offset, available_offset, snapshot, expiry)
-                )
-        day += timedelta(days=1)
+    history_cutoff = available_before.replace(
+        minute=(available_before.minute // SURFACE_HISTORY_REFRESH_MINUTES)
+        * SURFACE_HISTORY_REFRESH_MINUTES,
+        second=0,
+        microsecond=0,
+    )
+    indexed_sessions = _historical_surface_minute_index(
+        str(root),
+        trading_date.isoformat(),
+        window_days,
+        history_cutoff.isoformat(),
+    )
 
     paths: list[JointSurfacePath] = []
-    for session_day, rows in sorted(grouped.items()):
-        rows.sort(key=lambda item: (item[0], item[1], item[2].as_of))
-        selected = [_surface_row_at(rows, target=target) for target in targets]
+    for session_day_text, minute_index in indexed_sessions:
+        selected = [
+            minute_index[target]
+            if 0 <= target < len(minute_index)
+            else None
+            for target in targets
+        ]
         if any(item is None for item in selected):
             continue
         resolved = [item for item in selected if item is not None]
         coordinates = [item[0] for item in resolved]
         paths.append(
             JointSurfacePath(
-                session_date=session_day,
+                session_date=date.fromisoformat(session_day_text),
                 prices=tuple(item[0] for item in coordinates),
                 atm=tuple(item[1] for item in coordinates),
                 put_skew=tuple(item[2] for item in coordinates),
@@ -162,6 +180,92 @@ def load_joint_surface_paths(
             )
         )
     return tuple(paths[-MAX_PATHS:]), "same_session_clock_5m" if paths else "unavailable"
+
+
+@lru_cache(maxsize=16)
+def _historical_surface_minute_index(
+    root_text: str,
+    trading_date_text: str,
+    window_days: int,
+    available_before_text: str,
+) -> tuple[tuple[str, tuple[SurfacePoint | None, ...]], ...]:
+    """Index immutable prior-session surface rows once per 30-minute bucket."""
+
+    root = Path(root_text)
+    trading_date = date.fromisoformat(trading_date_text)
+    available_before = _utc(datetime.fromisoformat(available_before_text))
+    grouped: dict[
+        date,
+        list[tuple[int, int, datetime, SurfaceCoordinate, bool]],
+    ] = {}
+    day = trading_date - timedelta(days=window_days + 4)
+    while day < trading_date:
+        for path in sorted((root / f"date={day.isoformat()}").glob("hour=*/*.jsonl")):
+            try:
+                snapshots = _surface_file_snapshots(str(path), path.stat().st_mtime_ns)
+            except OSError:
+                continue
+            for snapshot in snapshots:
+                as_of, created_at = _utc(snapshot.as_of), _utc(snapshot.created_at)
+                if as_of >= available_before or created_at >= available_before:
+                    continue
+                session_day = DEFAULT_MARKET_CALENDAR.spx_session_date_for(as_of)
+                if session_day is None or session_day >= trading_date:
+                    continue
+                window = DEFAULT_MARKET_CALENDAR.spx_session_window(session_day)
+                expiry = _front_surface(snapshot)
+                coordinate = (
+                    _surface_coordinate(snapshot, expiry) if expiry is not None else None
+                )
+                if window is None or expiry is None or coordinate is None:
+                    continue
+                offset = int(
+                    (as_of.astimezone(NEW_YORK) - window.session_start).total_seconds()
+                    // 60
+                )
+                available_offset = int(
+                    (created_at.astimezone(NEW_YORK) - window.session_start).total_seconds()
+                    // 60
+                )
+                grouped.setdefault(session_day, []).append(
+                    (
+                        offset,
+                        available_offset,
+                        as_of,
+                        coordinate,
+                        expiry.surface_fit_quality != "raw_grid",
+                    )
+                )
+        day += timedelta(days=1)
+
+    indexed: list[tuple[str, tuple[SurfacePoint | None, ...]]] = []
+    for session_day, rows in sorted(grouped.items()):
+        pending = sorted(
+            rows,
+            key=lambda item: (max(item[0], item[1]), item[0], item[1], item[2]),
+        )
+        cursor = 0
+        best: tuple[int, int, datetime, SurfaceCoordinate, bool] | None = None
+        minute_rows: list[SurfacePoint | None] = []
+        for target in range(SURFACE_SESSION_INDEX_MINUTES + 1):
+            while cursor < len(pending) and max(
+                pending[cursor][0], pending[cursor][1]
+            ) <= target:
+                candidate = pending[cursor]
+                if best is None or (candidate[0], candidate[1]) > (
+                    best[0],
+                    best[1],
+                ):
+                    best = candidate
+                cursor += 1
+            age = target - best[0] if best is not None else -1
+            minute_rows.append(
+                None
+                if best is None or age < 0 or age > 30
+                else (best[3], best[4] or age > 4)
+            )
+        indexed.append((session_day.isoformat(), tuple(minute_rows)))
+    return tuple(indexed)
 
 
 def estimate_joint_debit_distribution(
@@ -362,23 +466,9 @@ def _front_surface(snapshot: IvSurfaceSnapshot) -> IvSurfaceExpiry | None:
     )
 
 
-def _surface_row_at(
-    rows: Sequence[tuple[int, int, IvSurfaceSnapshot, IvSurfaceExpiry]], *, target: int
-) -> tuple[tuple[float, float, float, float, float, float], bool] | None:
-    eligible = [item for item in rows if item[0] <= target and item[1] <= target]
-    if not eligible:
-        return None
-    latest = max(eligible, key=lambda item: (item[0], item[1]))
-    age = target - latest[0]
-    coordinate = _surface_coordinate(latest[2], latest[3])
-    if age < 0 or age > 30 or coordinate is None:
-        return None
-    return coordinate, latest[3].surface_fit_quality != "raw_grid" or age > 4
-
-
 def _surface_coordinate(
     snapshot: IvSurfaceSnapshot, expiry: IvSurfaceExpiry
-) -> tuple[float, float, float, float, float, float] | None:
+) -> SurfaceCoordinate | None:
     values = tuple(
         _number(value)
         for value in (
