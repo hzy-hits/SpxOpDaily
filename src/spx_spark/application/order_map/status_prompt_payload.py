@@ -75,6 +75,8 @@ def build_status_writer_payload(payload: dict[str, Any]) -> dict[str, Any]:
     spring_gamma_summary = spring_gamma_v3_writer_summary(spring_gamma_shadow)
     if spring_gamma_summary is not None:
         compact["spring_gamma_v3_shadow"] = spring_gamma_summary
+    else:
+        compact.pop("spring_gamma_v3_shadow", None)
     radar_summary = compact_convexity_idea_radar(compact.get("convexity_idea_radar"))
     if radar_summary is not None:
         compact["convexity_idea_radar"] = radar_summary

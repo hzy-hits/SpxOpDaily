@@ -361,40 +361,10 @@ def attach_wall_probability_shadow(
     shadow: dict[str, object],
     wall_probability: dict[str, object],
 ) -> dict[str, object]:
-    """Combine isolated shadows while preserving the complete input identity."""
+    """Attach expression research without erasing an independent ES direction."""
 
     combined = dict(shadow)
     combined["wall_probability"] = wall_probability
-    if wall_probability.get("status") != "ready":
-        if combined.get("status") == "ready":
-            direction = combined.get("direction")
-            if isinstance(direction, dict):
-                combined["direction"] = {**direction, "decision": "abstain"}
-            combined.update(
-                {
-                    "status": "abstain",
-                    "regime": "abstain",
-                    "opportunity": "abstain",
-                    "abstain": True,
-                }
-            )
-        wall_reasons = [
-            str(reason)
-            for reason in wall_probability.get("abstain_reasons", [])
-            if str(reason)
-        ]
-        combined["abstain_reasons"] = list(
-            dict.fromkeys(
-                [
-                    *[
-                        str(reason)
-                        for reason in combined.get("abstain_reasons", [])
-                        if str(reason)
-                    ],
-                    *[f"wall_probability:{reason}" for reason in wall_reasons],
-                ]
-            )
-        )
 
     direction_fingerprint = str(combined.get("input_fingerprint") or "")
     combined["direction_input_fingerprint"] = direction_fingerprint

@@ -1,4 +1,4 @@
-"""Bounded Spring Gamma context for human Gamma-plan cards."""
+"""Bounded Spring Gamma context retained in non-authoritative research payloads."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def spring_gamma_operator_view(
     now: datetime,
     expected_expiry: str,
 ) -> dict[str, object]:
-    """Return a fresh, non-authoritative model view for one operator card."""
+    """Return a fresh, non-authoritative model view for causal research joins."""
 
     base: dict[str, object] = {
         "status": "unavailable",
@@ -67,29 +67,6 @@ def spring_gamma_operator_view(
             "as_of": as_of.isoformat(),
         }
     return {**base, "status": "unavailable", "as_of": as_of.isoformat()}
-
-
-def spring_gamma_operator_line(
-    view: Mapping[str, object] | None,
-    *,
-    ticket_side: str | None = None,
-) -> str:
-    """Render one short model line without exposing internal gate enums."""
-
-    model = view if isinstance(view, Mapping) else {}
-    if model.get("status") == "ready":
-        preferred = str(model.get("preferred_side") or "")
-        bias = "偏多" if preferred == "CALL" else "偏空"
-        score = _number(model.get("score"))
-        score_text = f"（{score:.2f}）" if score is not None else ""
-        if ticket_side in {"CALL", "PUT"}:
-            relation = "与本卡同向" if ticket_side == preferred else "与本卡背离"
-        else:
-            relation = f"{preferred} 路径优先"
-        return f"方向模型  Spring v3（ES）{bias}{score_text} · {relation} · 只作排序，不作门禁"
-    if model.get("status") == "abstain":
-        return "方向模型  Spring v3（ES）弃权 · 不改变价格触发"
-    return "方向模型  Spring v3（ES）数据未就绪 · 不阻断结构观察"
 
 
 def _number(value: object) -> float | None:

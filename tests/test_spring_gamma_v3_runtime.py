@@ -151,7 +151,7 @@ def test_runtime_does_not_recompute_inside_existing_minute_bucket(tmp_path, monk
     }
 
 
-def test_wall_shadow_can_only_downgrade_the_direction_shadow() -> None:
+def test_wall_shadow_cannot_downgrade_the_direction_shadow() -> None:
     combined = spring_gamma_v3_io.attach_wall_probability_shadow(
         _record(),
         {
@@ -162,14 +162,17 @@ def test_wall_shadow_can_only_downgrade_the_direction_shadow() -> None:
         },
     )
 
-    assert combined["status"] == "abstain"
-    assert combined["direction"]["decision"] == "abstain"
-    assert combined["opportunity"] == "abstain"
+    assert combined["status"] == "ready"
+    assert combined["direction"]["decision"] == "up"
+    assert combined["opportunity"] == "trend_continuation"
     assert combined["actionable"] is False
     assert combined["automatic_ordering"] is False
     assert combined["direction_authority"] == "none"
     assert combined["action_authority"] == "none"
-    assert "wall_probability:front_structure_frozen" in combined["abstain_reasons"]
+    assert combined["abstain_reasons"] == []
+    assert combined["wall_probability"]["abstain_reasons"] == [
+        "front_structure_frozen"
+    ]
     assert combined["direction_input_fingerprint"] == "a" * 64
     assert combined["input_fingerprint"] != combined["direction_input_fingerprint"]
 

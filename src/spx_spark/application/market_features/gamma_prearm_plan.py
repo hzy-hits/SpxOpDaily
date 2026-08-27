@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Mapping
 
 from spx_spark.application.market_features.spring_gamma_operator import (
-    spring_gamma_operator_line,
     spring_gamma_operator_view,
 )
 from spx_spark.application.market_features.prior_rth_context import (
@@ -356,19 +355,45 @@ def _notification_intent(
         if selected_side == "PUT"
         else "DIRECTION UNKNOWN"
     )
-    desk_view = [
-        (
-            f"🟠 {decision} 候选 · 价格条件已出现，尚未确认"
-            if pending
-            else "🟡 结构观察 · NO TRADE · 等价格选边"
-        ),
-        (
-            f"区域  {level_label} {float(plan['level']):.2f} · "
-            f"当前 SPX {float(plan['current_spx']):.2f} · "
+    headline = (
+        f"🟠 {decision} 候选 · 价格条件已出现，尚未确认"
+        if pending
+        else "🟡 结构观察 · NO TRADE · 等价格选边"
+    )
+    spot = float(plan["current_spx"])
+    level = float(plan["level"])
+    if spot > level:
+        position = f"{level_label} {level:.2f} 上方 {spot - level:.2f} 点"
+    elif spot < level:
+        position = f"{level_label} {level:.2f} 下方 {level - spot:.2f} 点"
+    else:
+        position = f"正在 {level_label} {level:.2f}"
+    desk_view = [headline]
+    if selected is not None:
+        entry_limit = _entry_price_limit(selected)
+        current_ask = _number(selected.get("decision_ask"))
+        entry_limit_label = (
+            f"≤ {entry_limit:.2f}" if entry_limit is not None else "触位时重算"
+        )
+        current_ask_label = f"{current_ask:.2f}" if current_ask is not None else "不可用"
+        chase_state = "⛔ 禁止追价" if _quote_above_reference(selected) else "⏳ 等确认后重报"
+        desk_view.append(
+            f"**💵 入场上限  {entry_limit_label} · 当前 Ask {current_ask_label}"
+            f" · {chase_state}**"
+        )
+        desk_view.append(
+            f"合约  {option_contract_label(str(selected['contract_id']))} · "
+            f"当前 Bid/Ask {_quote_range(selected)} · 触位参考 {_price_range(selected)}"
+        )
+        desk_view.append(
+            f"**📍 位置  SPX {spot:.2f} · {position}**"
+        )
+    else:
+        desk_view.append(
+            f"区域  {level_label} {level:.2f} · 当前 SPX {spot:.2f} · "
             f"距离 {float(plan['distance_points']):.2f} 点"
-        ),
-        _gamma_feedback_line(plan),
-    ]
+        )
+    desk_view.append(_gamma_feedback_line(plan))
     execution: list[str] = []
     risk = [
         "失效  结构位变化、状态机离开本事件，或出现相反路径确认",
@@ -390,12 +415,24 @@ def _notification_intent(
             "Gamma 只解释该路径可能被压制或放大"
         )
         price_range = _price_range(selected)
+        entry_limit = _entry_price_limit(selected)
+        current_ask = _number(selected.get("decision_ask"))
+        execution.append(
+            "**💵 入场价格（确认后）  "
+            f"{'限价 ≤ ' + format(entry_limit, '.2f') if entry_limit is not None else '触位时重算'}"
+            f" · 参考区间 {price_range}**"
+        )
         execution.append(
             f"合约  {option_contract_label(str(selected['contract_id']))} · "
-            f"当前报价 {_quote_range(selected)} · 触发后参考 {price_range} · 提交前重报"
+            f"当前 Bid/Ask {_quote_range(selected)} · 提交前必须重报"
         )
         if _quote_above_reference(selected):
-            execution.append("追价限制  当前 ask 高于触位参考上限；即使确认也不得按现价追入")
+            execution.append(
+                "**⛔ 当前 Ask "
+                f"{current_ask:.2f} > 入场上限 {entry_limit:.2f} · 不得入场/追价**"
+                if current_ask is not None and entry_limit is not None
+                else "**⛔ 当前 Ask 高于入场上限 · 不得入场/追价**"
+            )
         invalidation = _number(selected.get("invalidation_spx"))
         target = _geometry_target(selected.get("confirmation_geometry"))
         execution.append("触发  状态机 CONFIRMED 后才入场；重新报价通过后才允许人工提交。")
@@ -409,7 +446,6 @@ def _notification_intent(
             targets.append(f"下一有效结构目标 {target:.2f}；READY 时重算盈亏比。")
         else:
             targets.append("结构目标不可用；进入 READY 时再计算目标与盈亏比。")
-    desk_view.append(spring_gamma_operator_line(plan.get("spring_gamma")))
     desk_view.append(_prior_session_plan_line(plan))
     if selected is not None:
         provider = str(selected.get("quote_provider") or "不可用")
@@ -506,7 +542,7 @@ def _price_range(path: Mapping[str, object]) -> str:
     high = _number(path.get("projected_high"))
     if low is not None and high is not None:
         return f"{low:.2f}–{high:.2f}"
-    limit = _number(path.get("limit_conservative"))
+    limit = _entry_price_limit(path)
     return f"≤ {limit:.2f}" if limit is not None else "触位时重算"
 
 
@@ -520,8 +556,15 @@ def _quote_range(path: Mapping[str, object]) -> str:
 
 def _quote_above_reference(path: Mapping[str, object]) -> bool:
     ask = _number(path.get("decision_ask"))
-    high = _number(path.get("projected_high"))
-    return ask is not None and high is not None and ask > high
+    limit = _entry_price_limit(path)
+    return ask is not None and limit is not None and ask > limit
+
+
+def _entry_price_limit(path: Mapping[str, object]) -> float | None:
+    projected_high = _number(path.get("projected_high"))
+    if projected_high is not None:
+        return projected_high
+    return _number(path.get("limit_conservative"))
 
 
 def _gamma_feedback_line(plan: Mapping[str, object]) -> str:

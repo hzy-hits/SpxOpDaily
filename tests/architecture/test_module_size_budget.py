@@ -7,7 +7,6 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "spx_spark"
 MAX_PRODUCTION_MODULE_LINES = 1000
 # Monotonic debt baseline: values may only decrease; remove an entry once it reaches the limit.
 OVERSIZED_MODULE_LINE_BASELINE = {
-    "application/market_features/gth_manual_candidate.py": 1001,
     "application/order_map/candidate_factory.py": 1451,
     "application/order_map/operator_status.py": 1214,
     "application/order_map/rth_daily_acceptance.py": 1046,

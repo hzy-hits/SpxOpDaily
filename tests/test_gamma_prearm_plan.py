@@ -59,9 +59,7 @@ def test_approaching_gamma_level_builds_two_sided_prearm_plan() -> None:
     assert "SHORT条件  向下接受并保持" in card["text"]
     assert "SPXW 7375" not in card["text"]
     assert "当前报价" not in card["text"]
-    assert "Spring v3（ES）偏多（0.67）" in card["text"]
-    assert "CALL 路径优先" in card["text"]
-    assert "只作排序，不作门禁" in card["text"]
+    assert "Spring v3" not in card["text"]
     assert "前日  -1.52%" in card["text"]
     assert "PUT 同向极值追单需等待墙位接受" in card["text"]
     assert "只观察结构，不展示合约" in card["text"]
@@ -227,8 +225,12 @@ def test_break_pending_emits_one_sided_human_conditional_card() -> None:
     assert [item["side"] for item in plan["paths"]] == ["PUT"]
     assert card["title"] == "SPX SHORT / PUT 候选 · 等最终确认"
     assert "🟠 SHORT / PUT 候选 · 价格条件已出现，尚未确认" in card["text"]
+    assert "💵 入场上限  ≤ 12.80 · 当前 Ask 12.30 · ⏳ 等确认后重报" in card["text"]
+    assert "合约  SPXW 07-30 7375P · 当前 Bid/Ask 12.10/12.30" in card["text"]
+    assert "📍 位置  SPX 7390.00 · Flip Low 7375.00 上方 15.00 点" in card["text"]
     assert "方向来源  SHORT / PUT 来自价格向下接受并保持" in card["text"]
-    assert "当前报价 12.10/12.30" in card["text"]
+    assert "💵 入场价格（确认后）  限价 ≤ 12.80 · 参考区间 12.20–12.80" in card["text"]
+    assert "当前 Bid/Ask 12.10/12.30 · 提交前必须重报" in card["text"]
     assert "状态机 CONFIRMED 后才入场" in card["text"]
     assert "失效 SPX 收回 7378.00" in card["text"]
     assert "下一有效结构目标 7365.00" in card["text"]
@@ -248,8 +250,8 @@ def test_pending_card_explicitly_blocks_a_quote_above_touch_reference() -> None:
     plan = evaluate_gamma_prearm_plan(repricing, level, now=NOW)
     card = _notification_intent(plan, event_id="gamma-plan:over-reference", now=NOW)
 
-    assert "当前 ask 高于触位参考上限" in card["text"]
-    assert "不得按现价追入" in card["text"]
+    assert "⛔ 禁止追价" in card["text"]
+    assert "⛔ 当前 Ask 14.00 > 入场上限 12.80 · 不得入场/追价" in card["text"]
 
 
 def _break_pending_inputs(*, as_of: datetime) -> tuple[dict[str, object], dict[str, object]]:

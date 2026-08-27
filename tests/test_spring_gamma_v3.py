@@ -241,13 +241,14 @@ def test_rth_state_is_independent_and_gates_directional_setup() -> None:
     assert "rth_market_state:trend_state_conflict" in chop["abstain_reasons"]
 
 
-def test_option_failure_does_not_erase_ready_rth_market_state() -> None:
+def test_option_failure_does_not_erase_es_direction_or_rth_market_state() -> None:
     inputs = _inputs()
     _attach_rth_market_state(inputs[0], "TREND_UP", direction_score=7)
     inputs[1]["quality"] = "unavailable"
     result = _build(inputs)
 
-    assert result["status"] == "abstain"
+    assert result["status"] == "ready"
+    assert result["direction"]["decision"] == "up"
     assert result["rth_market_state"]["status"] == "ready"
     assert result["rth_market_state"]["state"] == "TREND_UP"
     assert result["option_overlay"]["status"] == "unavailable"
@@ -274,7 +275,8 @@ def test_missing_open_interest_still_fails_spring_structure_gate() -> None:
 
     result = _build(inputs)
 
-    assert result["status"] == "abstain"
+    assert result["status"] == "ready"
+    assert result["direction"]["decision"] == "up"
     assert "open_interest_quality_unavailable" in result["option_overlay"]["reasons"]
 
 
@@ -353,7 +355,7 @@ def test_stale_rth_state_is_rejected_instead_of_reused() -> None:
     ]
 
 
-def test_charm_vanna_only_reduce_confidence_and_never_flip_direction() -> None:
+def test_charm_vanna_only_reduce_expression_confidence_and_never_flip_direction() -> None:
     low_risk = _build(_inputs())
     high_inputs = deepcopy(_inputs())
     high_inputs[2]["aggregate"]["gross_charm_5m_abs"] = 100_000_000.0
@@ -361,8 +363,11 @@ def test_charm_vanna_only_reduce_confidence_and_never_flip_direction() -> None:
     high_risk = _build(high_inputs)
 
     assert high_risk["risk"]["bounded_penalty"] > low_risk["risk"]["bounded_penalty"]
-    assert abs(high_risk["direction"]["confidence_score"]) < abs(
-        low_risk["direction"]["confidence_score"]
+    assert high_risk["direction"]["confidence_score"] == low_risk["direction"][
+        "confidence_score"
+    ]
+    assert abs(high_risk["direction"]["structure_adjusted_confidence_score"]) < abs(
+        low_risk["direction"]["structure_adjusted_confidence_score"]
     )
     assert high_risk["direction"]["diagnostic_es_direction"] == "up"
     assert high_risk["risk"]["direction_sign_effect"] == "none"
@@ -443,7 +448,7 @@ def test_spring_reversion_requires_es_reversal_and_whitelisted_fade_path() -> No
         ),
     ],
 )
-def test_missing_iv_delta_or_greeks_fail_closed(
+def test_missing_iv_delta_or_greeks_only_disable_the_option_overlay(
     mutation: Any,
     reason: str,
 ) -> None:
@@ -456,11 +461,11 @@ def test_missing_iv_delta_or_greeks_fail_closed(
     )
     result = _build(inputs, settings=strict)
 
-    assert result["status"] == "abstain"
-    assert result["direction"]["decision"] == "abstain"
-    assert reason in result["abstain_reasons"]
+    assert result["status"] == "ready"
+    assert result["direction"]["decision"] == "up"
+    assert reason in result["option_overlay"]["reasons"]
     assert result["direction"]["diagnostic_es_direction"] == "up"
-    assert max(result["direction"]["p_up"], result["direction"]["p_down"]) < 0.60
+    assert max(result["direction"]["p_up"], result["direction"]["p_down"]) >= 0.60
 
 
 def test_zero_oi_leg_is_not_mislabeled_as_a_missing_call_put_pair() -> None:
@@ -487,7 +492,7 @@ def test_zero_charm_and_vanna_are_valid_observations_not_missing_values() -> Non
     assert result["risk"]["bounded_penalty"] == 0.0
 
 
-def test_one_sided_wing_abstains_even_when_global_ratio_passes() -> None:
+def test_one_sided_wing_disables_expression_without_erasing_direction() -> None:
     inputs = _inputs()
     for row in inputs[3]["expiries"][0]["strikes"]:
         if row["strike"] < 6000.0:
@@ -505,8 +510,9 @@ def test_one_sided_wing_abstains_even_when_global_ratio_passes() -> None:
     assert coverage["complete_pair_ratio"] >= 0.50
     assert coverage["core_complete_pair_ratio"] >= 0.50
     assert coverage["left_wing_paired_strikes"] == 0
-    assert result["status"] == "abstain"
-    assert "left_wing_unpaired" in result["abstain_reasons"]
+    assert result["status"] == "ready"
+    assert result["direction"]["decision"] == "up"
+    assert "left_wing_unpaired" in result["option_overlay"]["reasons"]
 
 
 def test_rth_and_gth_use_independent_freshness_profiles() -> None:
@@ -520,8 +526,8 @@ def test_rth_and_gth_use_independent_freshness_profiles() -> None:
     assert rth["session"] == "rth"
     assert rth["status"] == "abstain"
     assert "market_frame_stale" in rth["abstain_reasons"]
-    assert "greek_reference_stale" in rth["abstain_reasons"]
-    assert "iv_surface_stale" in rth["abstain_reasons"]
+    assert "greek_reference_stale" in rth["option_overlay"]["reasons"]
+    assert "iv_surface_stale" in rth["option_overlay"]["reasons"]
     assert rth["direction"]["diagnostic_es_direction"] == "up"
     assert max(rth["direction"]["p_up"], rth["direction"]["p_down"]) < 0.60
 
@@ -557,7 +563,7 @@ def test_rth_and_gth_use_independent_freshness_profiles() -> None:
         ),
     ],
 )
-def test_frozen_or_non_exact_expiry_inputs_fail_closed(
+def test_frozen_or_non_exact_expiry_inputs_disable_expression_only(
     mutation: Any,
     reason: str,
 ) -> None:
@@ -565,9 +571,10 @@ def test_frozen_or_non_exact_expiry_inputs_fail_closed(
     mutation(inputs)
     result = _build(inputs)
 
-    assert result["status"] == "abstain"
-    assert result["opportunity"] == "abstain"
-    assert reason in result["abstain_reasons"]
+    assert result["status"] == "ready"
+    assert result["opportunity"] == "trend_continuation"
+    assert result["direction"]["decision"] == "up"
+    assert reason in result["option_overlay"]["reasons"]
 
 
 def test_missing_es_does_not_default_to_down() -> None:
@@ -603,5 +610,5 @@ def test_nonfinite_inputs_abstain_without_breaking_fingerprint_serialization() -
     assert len(result["input_fingerprint"]) == 64
     assert result["status"] == "abstain"
     assert result["direction"]["scores"]["15m"] is None
-    assert "greek_gamma_missing" in result["abstain_reasons"]
-    assert "greek_coverage_insufficient" in result["abstain_reasons"]
+    assert "greek_gamma_missing" in result["option_overlay"]["reasons"]
+    assert "greek_coverage_insufficient" in result["option_overlay"]["reasons"]

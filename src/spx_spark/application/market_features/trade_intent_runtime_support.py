@@ -10,9 +10,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
-from spx_spark.application.market_features.spring_gamma_operator import (
-    spring_gamma_operator_line,
-)
 from spx_spark.config import StorageSettings
 from spx_spark.notifier.operator_cards import (
     beijing_time,
@@ -53,12 +50,6 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
         intent.get("contract_id"),
         fallback=intent.get("contract_label"),
     )
-    spring_gamma = intent.get("spring_gamma")
-    spring_gamma_line = (
-        spring_gamma_operator_line(spring_gamma, ticket_side=right)
-        if isinstance(spring_gamma, Mapping)
-        else None
-    )
     play_stats_line = _play_stats_line(intent.get("play_stats"))
     desk_lines = [
         f"🟢 MANUAL READY · {right}",
@@ -67,8 +58,6 @@ def render_trade_intent(intent: Mapping[str, object]) -> str:
         f"触发  {_operator_trigger(intent)}",
         f"解释  {_operator_explanation(intent)}",
     ]
-    if spring_gamma_line:
-        desk_lines.append(spring_gamma_line)
     execution = "\n".join(
         (
             f"🟢 MANUAL READY · {right}",

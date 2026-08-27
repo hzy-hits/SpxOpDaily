@@ -15,7 +15,7 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 SPRING_GAMMA_V3_SHADOW_SYSTEM_RULE = (
     "Spring Gamma v3 的方向分数未校准，墙触达概率仅为风险中性启发式，"
     "Shadow 与 RTH 15分钟状态窗均无方向/执行权限；"
-    "若输入存在该 Shadow 或状态窗，必须逐字保留模板中的确定性摘要行，"
+    "仅 READY Shadow 可保留模板中的确定性摘要行；弃权或不可用时不得展示，"
     "不得据此修改生产 guidance、候选、裁决、限价或下单动作。"
 )
 
@@ -48,6 +48,8 @@ def spring_gamma_v3_shadow_line(payload: dict[str, Any]) -> str | None:
     if not isinstance(shadow, dict):
         return state_window_line
     status = str(shadow.get("status") or "unknown").strip().upper()
+    if status != "READY":
+        return state_window_line
     direction = shadow.get("direction")
     direction_payload = direction if isinstance(direction, dict) else {}
     decision = direction_payload.get("decision") if direction_payload else direction
@@ -103,7 +105,7 @@ def spring_gamma_v3_shadow_line(payload: dict[str, Any]) -> str | None:
 def spring_gamma_v3_writer_summary(shadow: object) -> dict[str, Any] | None:
     """Return only the small read-only subset allowed into writer prompts."""
 
-    if not isinstance(shadow, dict):
+    if not isinstance(shadow, dict) or str(shadow.get("status") or "").lower() != "ready":
         return None
     direction = shadow.get("direction")
     direction_payload = direction if isinstance(direction, dict) else {}

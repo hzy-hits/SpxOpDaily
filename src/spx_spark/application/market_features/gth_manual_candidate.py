@@ -15,9 +15,6 @@ from spx_spark.analytics.options.quote_policy import (
 from spx_spark.application.market_features.virtual_strategy_spread import (
     spread_snapshot_decision,
 )
-from spx_spark.application.market_features.spring_gamma_operator import (
-    spring_gamma_operator_line,
-)
 from spx_spark.application.market_features.virtual_strategy_state import (
     flush_pending_notifications,
 )
@@ -880,10 +877,6 @@ def _notification_intent(
         if replacement_reason
         else None
     )
-    spring_gamma_line = spring_gamma_operator_line(
-        candidate.get("spring_gamma"),
-        ticket_side=side,
-    )
     prior_session_line = prior_session_operator_line(candidate.get("prior_session"))
     reward_risk = _number(candidate.get("reward_risk_at_limit"))
     reward_risk_line = (
@@ -896,7 +889,6 @@ def _notification_intent(
         f"🟢 MANUAL READY · {side} SPREAD",
         f"路径  {level_path or 'gth_dip_reclaim'} · {explanation}",
         f"触发  {trigger_text}",
-        spring_gamma_line,
         prior_session_line,
     ]
     if replacement_line:

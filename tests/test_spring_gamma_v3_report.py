@@ -786,7 +786,7 @@ def test_state_window_uses_precise_causal_boundary_not_minute_bucket(
     assert window["max_future_skew_seconds"] == 2.0
 
 
-def test_ready_and_abstain_shadow_lines_are_deterministic_and_two_decimal() -> None:
+def test_ready_shadow_is_deterministic_and_abstain_is_hidden() -> None:
     ready = _production_payload()
     ready["spring_gamma_v3_shadow"] = _shadow()
 
@@ -815,13 +815,9 @@ def test_ready_and_abstain_shadow_lines_are_deterministic_and_two_decimal() -> N
         ),
     }
     gth = render_research_only_template(research)
-    assert gth.count("Spring Gamma v3 Shadow") == 1
-    assert (
-        "Spring Gamma v3 Shadow  ABSTAIN · 方向诊断 弃权 · 方向分数 -0.13 · "
-        "首要原因 greek_frame_stale；方向分数未校准；"
-        "墙触达概率为风险中性启发式；无方向/执行权限"
-    ) in gth
-    assert gth.index("Spring Gamma v3 Shadow") < gth.index("执行限制:")
+    assert "Spring Gamma v3 Shadow" not in gth
+    assert "方向诊断 弃权" not in gth
+    assert "spring_gamma_v3_shadow" not in _status_writer_payload(research)
 
 
 def test_rth_eight_feature_state_renders_state_to_expression_path() -> None:
@@ -1063,7 +1059,7 @@ def test_nested_wall_probability_allows_exit_at_exactly_1300() -> None:
     assert compact["wall_probability_horizon"] == "30m"
 
 
-def test_gth_abstain_uses_partial_wall_contract_upstream_direction_only() -> None:
+def test_gth_abstain_and_partial_wall_contract_stay_out_of_human_output() -> None:
     payload = _production_payload()
     shadow = _shadow(
         status="abstain",
@@ -1099,22 +1095,17 @@ def test_gth_abstain_uses_partial_wall_contract_upstream_direction_only() -> Non
     payload["spring_gamma_v3_shadow"] = shadow
 
     rendered = render_status_template(payload, [], NOW)
-    compact = _status_writer_payload(payload)["spring_gamma_v3_shadow"]
+    compact = _status_writer_payload(payload)
 
-    assert "Shadow  ABSTAIN · 方向诊断 弃权" in rendered
-    assert "原始 ES 诊断 偏多（仅诊断）" in rendered
-    assert "墙触达概率 0.46（15m Flip High）" in rendered
-    assert compact["direction"]["decision"] == "abstain"
-    assert compact["direction"]["diagnostic_es_direction"] == "up"
-    assert compact["wall_probability"] == 0.46
-    assert compact["direction_authority"] == "none"
-    assert compact["action_authority"] == "none"
+    assert "Spring Gamma v3 Shadow" not in rendered
+    assert "原始 ES 诊断" not in rendered
+    assert "墙触达概率 0.46" not in rendered
+    assert "spring_gamma_v3_shadow" not in compact
 
     shadow["wall_probability"]["probability_status"] = "unavailable"
     unavailable = render_status_template(payload, [], NOW)
-    unavailable_compact = _status_writer_payload(payload)["spring_gamma_v3_shadow"]
     assert "墙触达概率 0.46" not in unavailable
-    assert "wall_probability" not in unavailable_compact
+    assert "spring_gamma_v3_shadow" not in _status_writer_payload(payload)
 
 
 def test_opposite_shadow_cannot_change_production_guidance_or_fingerprint() -> None:

@@ -1,8 +1,9 @@
 """Pure, fail-closed Spring Gamma v3 shadow inference.
 
-ES is the sole direction backbone. Option structure and the public level path
-may reduce confidence or validate a setup, but neither may create or reverse a
-direction. This module performs no I/O and has no production authority.
+ES is the sole direction backbone. Option structure is retained as a separate
+expression-risk diagnostic and cannot erase, create or reverse an ES direction.
+The public level path may validate a Spring-reversion setup. This module performs
+no I/O and has no production authority.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
 
 
 SCHEMA_VERSION = "spring_gamma_v3_shadow.v1"
-MODEL_VERSION = "spring_gamma_v3_rth_state_shadow.v2"
+MODEL_VERSION = "spring_gamma_v3_decoupled_es_shadow.v3"
 CALIBRATION_STATUS = "uncalibrated_shadow"
 
 _HORIZONS = (15, 30, 60)
@@ -128,7 +129,13 @@ def build_spring_gamma_v3_shadow(
         coverage=coverage,
         freshness=freshness,
     )
-    gate_passed = not gate_reasons
+    direction_gate_reasons = [
+        reason for reason in gate_reasons if reason in _MARKET_GATE_REASONS
+    ]
+    option_gate_reasons = [
+        reason for reason in gate_reasons if reason not in _MARKET_GATE_REASONS
+    ]
+    direction_gate_passed = not direction_gate_reasons
     es_diagnostic, es_values = _es_projection(market)
     decision, opportunity, direction_reasons = _decide(
         es_diagnostic,
@@ -138,9 +145,9 @@ def build_spring_gamma_v3_shadow(
         structure_risk,
         rth_market_state,
         selected_session,
-        gate_passed=gate_passed,
+        gate_passed=direction_gate_passed,
     )
-    reasons = list(dict.fromkeys([*gate_reasons, *direction_reasons]))
+    reasons = list(dict.fromkeys([*direction_gate_reasons, *direction_reasons]))
     abstain = decision["decision"] == "abstain"
     disabled = not policy.enabled
     if not abstain:
@@ -183,16 +190,14 @@ def build_spring_gamma_v3_shadow(
         "opportunity": opportunity,
         "rth_market_state": rth_market_state or missing_rth_market_state(selected_session),
         "option_overlay": {
-            "status": (
-                "ready"
-                if not [reason for reason in gate_reasons if reason not in _MARKET_GATE_REASONS]
-                else "unavailable"
-            ),
-            "reasons": [reason for reason in gate_reasons if reason not in _MARKET_GATE_REASONS],
+            "status": "ready" if not option_gate_reasons else "unavailable",
+            "reasons": option_gate_reasons,
             "market_state_independent": True,
         },
         "quality": {
-            "gate_status": "pass" if gate_passed else "fail",
+            "gate_status": "pass" if not gate_reasons else "fail",
+            "direction_gate_status": "pass" if direction_gate_passed else "fail",
+            "expression_gate_status": "pass" if not option_gate_reasons else "fail",
             "policy_session": selected_session,
             "policy": policy_payload,
             "freshness": freshness,
@@ -332,8 +337,12 @@ def _decide(
         else:
             state_alignment = "no_directional_setup"
 
-    multiplier = finite_float(structure_risk.get("confidence_multiplier")) or 0.0
-    confidence_score = raw_score * multiplier if raw_score is not None else None
+    multiplier = finite_float(structure_risk.get("confidence_multiplier"))
+    multiplier = multiplier if multiplier is not None else 1.0
+    confidence_score = raw_score
+    structure_adjusted_score = (
+        raw_score * multiplier if raw_score is not None else None
+    )
     confident = _confident(confidence_score, policy)
     opportunity = (
         candidate if gate_passed and (confident or candidate == "transition") else "abstain"
@@ -343,7 +352,7 @@ def _decide(
     if score_15 is None or score_60 is None or composite is None:
         reasons.append("es_direction_inputs_incomplete")
     elif not gate_passed:
-        reasons.append("structure_gate_failed")
+        reasons.append("direction_input_gate_failed")
     elif candidate == "transition":
         reasons.append("transition_no_direction")
         if state_required and state_alignment in {
@@ -378,6 +387,7 @@ def _decide(
             "calibration_status": CALIBRATION_STATUS,
             "direction_score_adjustment_from_structure": 0.0,
             "confidence_multiplier_from_structure_risk": _round(multiplier),
+            "structure_adjusted_confidence_score": _round(structure_adjusted_score),
             "rth_market_state": state_name or None,
             "rth_market_state_alignment": state_alignment,
         },
@@ -397,11 +407,12 @@ def _structure_risk(
     charm_equiv = charm / gamma if gamma and charm is not None else None
     vanna_equiv = vanna / gamma if gamma and vanna is not None else None
     charm_weight, vanna_weight = (0.20, 0.10) if session == "rth" else (0.06, 0.03)
+    structure_available = charm_equiv is not None and vanna_equiv is not None
     penalty = (
         charm_weight * float(np.tanh(charm_equiv / 5.0))
         + vanna_weight * float(np.tanh(vanna_equiv / 5.0))
-        if charm_equiv is not None and vanna_equiv is not None
-        else 1.0
+        if structure_available
+        else 0.0
     )
     penalty = float(np.clip(penalty, 0.0, 0.30 if session == "rth" else 0.09))
     return {
@@ -409,6 +420,7 @@ def _structure_risk(
         "vanna_equiv_1vol": _round(vanna_equiv),
         "bounded_penalty": _round(penalty),
         "confidence_multiplier": _round(1.0 - penalty),
+        "status": "ready" if structure_available else "unavailable",
         "prior": "fixed_weak_rth" if session == "rth" else "fixed_weak_gth",
         "direction_sign_effect": "none",
     }

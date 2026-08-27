@@ -57,7 +57,7 @@ from spx_spark.state_io import atomic_write_json_secure
 
 
 SCHEMA_VERSION = "rth_daily_acceptance.v1"
-SPRING_MODEL_VERSION = "spring_gamma_v3_rth_state_shadow.v2"
+SPRING_MODEL_VERSION = "spring_gamma_v3_decoupled_es_shadow.v3"
 MIN_SPRING_MINUTE_COVERAGE = 0.95
 MIN_REPORT_SLOT_COVERAGE = 1.0
 MIN_REPORT_PROJECTION_COVERAGE = 0.95
