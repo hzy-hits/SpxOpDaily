@@ -101,7 +101,7 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
   operator status / transition / render / delivery / service；其中
   `surface_path_distribution` 负责 Debit 与 Iron Condor 共用的因果五坐标曲面路径回放；
   `order_map.py` 为门面
-- `application/shock/` — models / machine / evaluator / delivery / service；
+- `application/shock/` — models / machine / net_premium_flow / evaluator / delivery / service；
   `intraday_shock.py` 为门面（保留 `shock_direct_delivery_enabled` 快路径）
 - `application/morning_map/` — build / render / delivery / state / service；
   `morning_map.py` 为门面

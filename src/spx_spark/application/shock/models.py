@@ -17,6 +17,7 @@ STATE_SCHEMA_VERSION = 1
 SHOCK_KIND = "intraday_price_shock"
 RECLAIM_KIND = "intraday_price_reclaim"
 NET_PREMIUM_BEARISH_DIVERGENCE_KIND = "captured_net_premium_bearish_divergence"
+NET_PREMIUM_BULLISH_DIVERGENCE_KIND = "captured_net_premium_bullish_divergence"
 
 
 @dataclass(frozen=True)

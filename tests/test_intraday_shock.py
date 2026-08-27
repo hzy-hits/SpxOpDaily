@@ -8,10 +8,13 @@ import pytest
 
 from spx_spark.alert_model import Alert
 from spx_spark.application.shock.evaluator import live_es_sample
-from spx_spark.application.shock.machine import (
-    advance_net_premium_bearish_divergence,
+from spx_spark.application.shock.net_premium_flow import (
+    advance_captured_option_flow,
 )
-from spx_spark.application.shock.models import NET_PREMIUM_BEARISH_DIVERGENCE_KIND
+from spx_spark.application.shock.models import (
+    NET_PREMIUM_BEARISH_DIVERGENCE_KIND,
+    NET_PREMIUM_BULLISH_DIVERGENCE_KIND,
+)
 from spx_spark.intraday_shock import (
     RECLAIM_KIND,
     SHOCK_KIND,
@@ -67,11 +70,12 @@ def _captured_trade_quote(
     at: datetime,
     volume: float,
     last: float,
+    strike: float = 7500.0,
 ) -> Quote:
     instrument = InstrumentId.option(
         "SPX",
         expiry="20260710",
-        strike=7500.0,
+        strike=strike,
         right=right,
         trading_class="SPXW",
     )
@@ -93,20 +97,29 @@ def _captured_trade_quote(
 
 
 def _run_net_premium_divergence_path(
-    *, volume_step: float
+    *, volume_step: float, direction: str = "bearish"
 ) -> tuple[dict[str, object], list[Alert]]:
     state = empty_monitor_state("2026-07-10")
     start = datetime(2026, 7, 10, 13, 59, 5, tzinfo=UTC)
-    prices = [100.0] * 16 + [101.0, 103.0, 102.0, 101.0, 100.0]
+    turn = [101.0, 103.0, 102.0, 101.0, 100.0]
+    if direction == "bullish":
+        turn = [99.0, 97.0, 98.0, 99.0, 100.0]
+    prices = [100.0] * 16 + turn
     all_alerts: list[Alert] = []
     for offset, price in enumerate([100.0, *prices, 100.0]):
         at = start + timedelta(minutes=offset)
         volume = 100.0 + offset * volume_step
+        recent = offset >= 17
+        bullish_flow = recent if direction == "bullish" else not recent
         quotes = (
-            _captured_trade_quote(right="C", at=at, volume=volume, last=1.0),
-            _captured_trade_quote(right="P", at=at, volume=volume, last=1.2),
+            _captured_trade_quote(
+                right="C", at=at, volume=volume, last=1.2 if bullish_flow else 1.0
+            ),
+            _captured_trade_quote(
+                right="P", at=at, volume=volume, last=1.0 if bullish_flow else 1.2
+            ),
         )
-        state, alerts = advance_net_premium_bearish_divergence(
+        state, alerts = advance_captured_option_flow(
             state,
             sample(at, price, price + 50.0, provider=Provider.SCHWAB.value),
             quotes=quotes,
@@ -123,7 +136,7 @@ def test_captured_net_premium_bearish_divergence_is_observe_only() -> None:
     assert [alert.kind for alert in alerts] == [NET_PREMIUM_BEARISH_DIVERGENCE_KIND]
     alert = alerts[0]
     assert alert.research_only is False
-    assert alert.source_gate == "captured_net_premium_proxy_bearish_divergence_v1"
+    assert alert.source_gate == "captured_net_premium_proxy_bearish_divergence_v2"
     assert alert.audit_context is not None
     assert alert.audit_context["authority"] == "observe_only"
     assert alert.audit_context["execution_eligible"] is False
@@ -132,6 +145,33 @@ def test_captured_net_premium_bearish_divergence_is_observe_only() -> None:
     tape = state["captured_net_premium_divergence"]
     assert isinstance(tape, dict)
     assert tape["coverage"] == pytest.approx(1.0)
+    snapshot = tape["snapshot"]
+    assert snapshot["sentiment"] == "BEARISH_DIVERGENCE"
+    assert snapshot["rollups"]["5m"]["directional_net"] < 0
+    assert snapshot["session"]["directional_net"] > 0
+    strike = snapshot["strike_flow_5m"]["rows"][0]
+    assert strike["strike"] == 7500.0
+    assert strike["call_sell"] > 0
+    assert strike["put_buy"] > 0
+    assert "熊流 7500" in tape["desk_summary"]
+
+
+def test_captured_net_premium_bullish_divergence_is_observe_only() -> None:
+    state, alerts = _run_net_premium_divergence_path(
+        volume_step=1.0,
+        direction="bullish",
+    )
+
+    assert [alert.kind for alert in alerts] == [NET_PREMIUM_BULLISH_DIVERGENCE_KIND]
+    alert = alerts[0]
+    assert alert.source_gate == "captured_net_premium_proxy_bullish_divergence_v2"
+    assert alert.audit_context is not None
+    assert alert.audit_context["authority"] == "observe_only"
+    assert alert.audit_context["execution_eligible"] is False
+    assert "不是买 Call 或反手做多授权" in alert.detail
+    tape = state["captured_net_premium_divergence"]
+    assert tape["snapshot"]["sentiment"] == "BULLISH_DIVERGENCE"
+    assert "牛流 7500" in tape["desk_summary"]
 
 
 def test_captured_net_premium_divergence_fails_closed_on_low_tape_coverage() -> None:
@@ -141,6 +181,44 @@ def test_captured_net_premium_divergence_fails_closed_on_low_tape_coverage() -> 
     tape = state["captured_net_premium_divergence"]
     assert isinstance(tape, dict)
     assert float(tape["coverage"]) < 0.10
+
+
+def test_captured_flow_tracks_strike_buy_sell_and_unknown_without_bto_labels() -> None:
+    state = empty_monitor_state("2026-07-10")
+    start = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    for offset in range(2):
+        at = start + timedelta(minutes=offset)
+        quotes = (
+            _captured_trade_quote(
+                right="C", at=at, volume=100.0 + offset, last=1.2, strike=7500.0
+            ),
+            _captured_trade_quote(
+                right="P", at=at, volume=100.0 + offset, last=1.0, strike=7490.0
+            ),
+            _captured_trade_quote(
+                right="C", at=at, volume=100.0 + offset, last=1.1, strike=7510.0
+            ),
+        )
+        state, _ = advance_captured_option_flow(
+            state,
+            sample(at, 7500.0, 7550.0, provider=Provider.SCHWAB.value),
+            quotes=quotes,
+            decision_at=at,
+            session_date="2026-07-10",
+        )
+
+    tape = state["captured_net_premium_divergence"]
+    session_rows = {
+        row["strike"]: row for row in tape["snapshot"]["strike_flow_session"]["rows"]
+    }
+    assert session_rows[7500.0]["call_buy"] == pytest.approx(120.0)
+    assert session_rows[7490.0]["put_sell"] == pytest.approx(100.0)
+    assert session_rows[7510.0]["call_unknown"] == pytest.approx(110.0)
+    session = tape["snapshot"]["session"]
+    assert session["classified_size"] == pytest.approx(2.0)
+    assert session["captured_size"] - session["classified_size"] == pytest.approx(1.0)
+    assert tape["snapshot"]["session"]["directional_net"] == pytest.approx(220.0)
+    assert not {"bto", "btc", "sto", "stc"}.intersection(session_rows[7500.0])
 
 
 def test_trump_style_down_shock_then_v_reclaim_is_two_phases(tmp_path) -> None:

@@ -98,6 +98,7 @@ INTRADAY_DIRECT_PUSH_KINDS = frozenset(
         "gth_advisory_invalidated",
         "gth_bias_transition",
         "captured_net_premium_bearish_divergence",
+        "captured_net_premium_bullish_divergence",
     }
 )
 
@@ -294,6 +295,7 @@ MARKET_SIGNAL_ALERT_KINDS = frozenset(
         "intraday_price_shock",
         "intraday_price_reclaim",
         "captured_net_premium_bearish_divergence",
+        "captured_net_premium_bullish_divergence",
         "globex_trend_transition",
         "gth_bias_transition",
         "globex_trend_continuation",

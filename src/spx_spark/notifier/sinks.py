@@ -531,6 +531,10 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
         "0DTE 熊背离观察",
         frozenset({"captured_net_premium_bearish_divergence"}),
     ),
+    (
+        "0DTE 牛背离观察",
+        frozenset({"captured_net_premium_bullish_divergence"}),
+    ),
     ("GTH 方向提示", frozenset({
         "gth_bias_transition",
         "globex_trend_continuation",

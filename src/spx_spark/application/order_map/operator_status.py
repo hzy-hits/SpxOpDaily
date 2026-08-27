@@ -535,11 +535,11 @@ def _primary_path(
     decision = _mapping(payload.get("level_decision"))
     if not current_session_is_gth(payload, decision):
         flow_parts.append(
-            "ES/SPY "
-            + cross_asset_confirmation_text(
-                cross_asset.get("es_spy_direction_confirmation_15m")
-            )
+            "ES/SPY " + cross_asset_confirmation_text(cross_asset.get("es_spy_direction_confirmation_15m"))
         )
+        flow_state = _mapping(_mapping(payload.get("intraday_shock_state")).get("captured_net_premium_divergence"))
+        if summary := str(flow_state.get("desk_summary") or "").strip():
+            flow_parts.append(summary)
     flow = "流确认  " + " · ".join(flow_parts)
     return f"Evidence · {basis}\n下一触发  {trigger}\n{flow}"
 

@@ -499,6 +499,24 @@ def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
     assert sections.data_quality == "执行数据 READY · 决策坐标、结构与实时报价可用"
 
 
+def test_desk_sections_include_captured_option_flow_without_granting_authority() -> None:
+    payload = _payload()
+    payload["intraday_shock_state"] = {
+        "captured_net_premium_divergence": {
+            "desk_summary": (
+                "0DTE资金 15m C +$1.74M / P +$8.80M / Dir -$7.06M · "
+                "全日 -$9.10M · 覆盖 14% low · BEARISH_CONFIRM · 熊流 7700 / 牛流 7650"
+            )
+        }
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "Dir -$7.06M" in sections.primary_path
+    assert "BEARISH_CONFIRM" in sections.primary_path
+    assert "不等于入场授权" in sections.primary_path
+
+
 def test_missing_live_spx_labels_latched_decision_spot_as_non_actionable_reference() -> None:
     payload = _payload()
     payload["underlier"] = {"price": None, "source": None}

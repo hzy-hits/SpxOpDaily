@@ -2031,19 +2031,24 @@ def test_call_path_delivers_without_reviewer_and_records_strategy_ack(tmp_path) 
     )
 
 
-def test_net_premium_bearish_divergence_delivers_without_llm_review(tmp_path) -> None:
+@pytest.mark.parametrize("direction", ["bearish", "bullish"])
+def test_net_premium_divergence_delivers_without_llm_review(
+    tmp_path, direction: str
+) -> None:
+    chinese = "熊" if direction == "bearish" else "牛"
+    event_id = f"spx_net_premium_{direction}_divergence:20260710:1500"
     payload = make_payload()
     payload["alerts"] = [
         {
             "severity": "high",
-            "kind": "captured_net_premium_bearish_divergence",
+            "kind": f"captured_net_premium_{direction}_divergence",
             "instrument_id": "index:SPX",
-            "title": "SPX 熊背离观察：局部新高失败",
+            "title": f"SPX {chinese}背离观察：局部极值失败",
             "detail": "捕获的 0DTE Put 净权利金占优；仅观察，不是入场授权。",
             "quality": "live",
-            "source_gate": "captured_net_premium_proxy_bearish_divergence_v1",
-            "dedup_group": "spx_net_premium_bearish_divergence:20260710:1500:observe",
-            "event_id": "spx_net_premium_bearish_divergence:20260710:1500",
+            "source_gate": f"captured_net_premium_proxy_{direction}_divergence_v2",
+            "dedup_group": f"{event_id}:observe",
+            "event_id": event_id,
         }
     ]
     settings = replace(
@@ -2062,9 +2067,7 @@ def test_net_premium_bearish_divergence_delivers_without_llm_review(tmp_path) ->
     assert result.sent_count == 1
     assert [sink.sink for sink in result.sinks] == ["feishu"]
     assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
-    assert result.acknowledged_event_ids == (
-        "spx_net_premium_bearish_divergence:20260710:1500",
-    )
+    assert result.acknowledged_event_ids == (event_id,)
 
 
 def test_recent_shock_suppresses_same_direction_fixed_cycle_price_move(tmp_path) -> None:
