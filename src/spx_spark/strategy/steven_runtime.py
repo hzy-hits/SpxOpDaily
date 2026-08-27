@@ -384,6 +384,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate Steven observe-only guidance.")
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     parser.add_argument(
+        "--summary-json",
+        action="store_true",
+        help="Print one bounded operational summary instead of the full contract.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Run even when steven.enabled is false (still observe_only).",
@@ -396,7 +401,18 @@ def run(argv: list[str] | None = None) -> int:
     settings = StevenSettings.from_env()
     if not settings.enabled and not args.force:
         payload = {"enabled": False, "skipped": True}
-        if args.json:
+        if args.summary_json:
+            print(
+                json.dumps(
+                    {
+                        "task": "steven",
+                        "event": "cycle_summary",
+                        **payload,
+                    },
+                    sort_keys=True,
+                )
+            )
+        elif args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     if not settings.enabled and args.force:
@@ -404,7 +420,21 @@ def run(argv: list[str] | None = None) -> int:
     storage = StorageSettings.from_env()
     state = LatestStateStore(storage).load()
     result = evaluate_steven_cycle(state, data_root=storage.data_root, settings=settings)
-    if args.json:
+    if args.summary_json:
+        print(
+            json.dumps(
+                {
+                    "task": "steven",
+                    "event": "cycle_summary",
+                    "status": result.get("status"),
+                    "machine_state": result.get("machine_state"),
+                    "trading_date": result.get("trading_date"),
+                    "warning_count": len(result.get("warnings") or ()),
+                },
+                sort_keys=True,
+            )
+        )
+    elif args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print(

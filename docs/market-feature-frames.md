@@ -33,6 +33,8 @@ Due research outcome marks are checked once per minute (within their 90-second
 causal window), while the five-second action path continues to reload exact
 BBO. Historical spot/surface path repricing uses one NumPy path-by-time matrix
 per leg instead of Python work per timestamp.
+Core emits bounded alert and Steven cycle summaries; complete payloads remain
+in their existing projections instead of being copied into journald.
 
 ## Availability Rules
 

@@ -30,6 +30,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--at", help="ISO timestamp. Naive timestamps are treated as Asia/Shanghai."
     )
     parser.add_argument("--json", action="store_true", help="Print JSON.")
+    parser.add_argument(
+        "--summary-json",
+        action="store_true",
+        help="Print one bounded operational summary instead of the alert payload.",
+    )
     parser.add_argument("--notify", action="store_true", help="Send configured notifications.")
     parser.add_argument(
         "--no-notify", action="store_true", help="Disable notifications for this run."
@@ -102,7 +107,27 @@ def run(
             state,
             settings=app_settings.alerts,
         )
-    if args.json:
+    if args.summary_json:
+        window = payload.get("window") if isinstance(payload.get("window"), dict) else {}
+        notification = (
+            payload.get("notification")
+            if isinstance(payload.get("notification"), dict)
+            else {}
+        )
+        print(
+            json.dumps(
+                {
+                    "task": "alert_engine",
+                    "event": "cycle_summary",
+                    "as_of": payload.get("as_of"),
+                    "window": window.get("name"),
+                    "alert_count": payload.get("alert_count"),
+                    "notification_outcome": notification.get("outcome"),
+                },
+                sort_keys=True,
+            )
+        )
+    elif args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print_alerts(payload)

@@ -125,14 +125,14 @@ async def main() -> None:
                 tasks.create_task(_run_periodic(
                     "alert_engine", partial(
                         alert_engine.run,
-                        ["--json"],
+                        ["--summary-json"],
                         app_settings=app_settings,
                         storage_settings=storage,
                     ),
                     runtime.alert_interval_seconds, shutdown))
             if app_settings.alerts.steven_enabled:
                 tasks.create_task(_run_periodic(
-                    "steven", partial(steven.run, ["--json"]),
+                    "steven", partial(steven.run, ["--summary-json"]),
                     runtime.alert_interval_seconds, shutdown))
     finally:
         request_shutdown()
