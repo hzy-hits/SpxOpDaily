@@ -433,27 +433,33 @@ def _joint_combo_bid_matrix(
     }
     shocks = {name: values - values[:, :1] for name, values in coordinates.items()}
     surface_scale = _surface_scale(candidate, facts, spot=spot, legs=legs)
+    taus = np.asarray(
+        [
+            time_to_expiry_years(
+                expiry,
+                as_of=now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES),
+            )
+            for offset in range(spots.shape[1])
+        ],
+        dtype=float,
+    )[None, :]
     model = np.zeros_like(spots)
-    for offset in range(spots.shape[1]):
-        tau = time_to_expiry_years(
-            expiry, as_of=now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES)
+    for leg in legs:
+        strike = float(leg["strike"])
+        put = min(max((spot - strike) / surface_scale, 0.0), 1.0)
+        call = min(max((strike - spot) / surface_scale, 0.0), 1.0)
+        iv = np.maximum(
+            float(leg["implied_vol"])
+            + shocks["atm"]
+            + put * shocks["put_skew"]
+            + call * shocks["call_skew"]
+            + put * put * shocks["put_fly"]
+            + call * call * shocks["call_fly"],
+            1e-4,
         )
-        for leg in legs:
-            strike = float(leg["strike"])
-            put = min(max((spot - strike) / surface_scale, 0.0), 1.0)
-            call = min(max((strike - spot) / surface_scale, 0.0), 1.0)
-            iv = np.maximum(
-                float(leg["implied_vol"])
-                + shocks["atm"][:, offset]
-                + put * shocks["put_skew"][:, offset]
-                + call * shocks["call_skew"][:, offset]
-                + put * put * shocks["put_fly"][:, offset]
-                + call * call * shocks["call_fly"][:, offset],
-                1e-4,
-            )
-            model[:, offset] += float(leg["quantity"]) * _bs_price_np(
-                spots[:, offset], strike, iv, tau, str(leg["right"])
-            )
+        model += float(leg["quantity"]) * _bs_price_np(
+            spots, strike, iv, taus, str(leg["right"])
+        )
     return _to_combo_bid(model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots)
 
 
@@ -471,16 +477,25 @@ def _sticky_combo_bid_matrix(
 ) -> dict[str, np.ndarray]:
     raw = np.asarray([path.prices for path in paths], dtype=float)
     spots = spot + scale * (raw - raw[:, :1])
-    model = np.zeros_like(spots)
-    for offset in range(spots.shape[1]):
-        tau = time_to_expiry_years(
-            expiry, as_of=now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES)
-        )
-        for leg in legs:
-            iv = np.full(len(paths), float(leg["implied_vol"]), dtype=float)
-            model[:, offset] += float(leg["quantity"]) * _bs_price_np(
-                spots[:, offset], float(leg["strike"]), iv, tau, str(leg["right"])
+    taus = np.asarray(
+        [
+            time_to_expiry_years(
+                expiry,
+                as_of=now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES),
             )
+            for offset in range(spots.shape[1])
+        ],
+        dtype=float,
+    )[None, :]
+    model = np.zeros_like(spots)
+    for leg in legs:
+        model += float(leg["quantity"]) * _bs_price_np(
+            spots,
+            float(leg["strike"]),
+            np.asarray(float(leg["implied_vol"])),
+            taus,
+            str(leg["right"]),
+        )
     return _to_combo_bid(model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots)
 
 
@@ -691,20 +706,25 @@ def _model_mid(
 
 
 def _bs_price_np(
-    spot: np.ndarray, strike: float, iv: np.ndarray, tau: float, right: str
+    spot: np.ndarray,
+    strike: float,
+    iv: np.ndarray,
+    tau: float | np.ndarray,
+    right: str,
 ) -> np.ndarray:
     intrinsic = np.maximum(spot - strike, 0.0) if right == "C" else np.maximum(strike - spot, 0.0)
-    if tau <= 0.0:
-        return intrinsic
     safe, safe_iv = np.maximum(spot, 1e-12), np.maximum(iv, 1e-6)
-    root_t = math.sqrt(tau)
-    d1 = (np.log(safe / strike) + 0.5 * safe_iv * safe_iv * tau) / (safe_iv * root_t)
+    tau_values = np.asarray(tau, dtype=float)
+    root_t = np.sqrt(np.maximum(tau_values, 1e-16))
+    d1 = (
+        np.log(safe / strike) + 0.5 * safe_iv * safe_iv * tau_values
+    ) / (safe_iv * root_t)
     d2 = d1 - safe_iv * root_t
     if right == "C":
         model = safe * ndtr(d1) - strike * ndtr(d2)
     else:
         model = strike * (1.0 - ndtr(d2)) - safe * (1.0 - ndtr(d1))
-    return np.maximum(intrinsic, model)
+    return np.where(tau_values <= 0.0, intrinsic, np.maximum(intrinsic, model))
 
 
 def _surface_scale(

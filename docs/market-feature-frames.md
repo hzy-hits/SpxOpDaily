@@ -29,6 +29,10 @@ Material decision-context changes are appended to
 Operational strategy decisions remain full fidelity for selected candidates
 and semantic changes. Identical `NO_TRADE` meaning is sampled once per minute;
 `latest/strategy_decision.json` continues to expose the newest evaluation.
+Due research outcome marks are checked once per minute (within their 90-second
+causal window), while the five-second action path continues to reload exact
+BBO. Historical spot/surface path repricing uses one NumPy path-by-time matrix
+per leg instead of Python work per timestamp.
 
 ## Availability Rules
 

@@ -578,18 +578,19 @@ def _clearing_combo_bids(
         spots = open_spots[:, None] + relative
     tau0 = time_to_expiry_years(expiry, as_of=now)
     model0 = _model_mid(legs, spot=spot, tau_years=tau0)
-    model = np.zeros((len(paths), len(clocks)), dtype=float)
-    for offset, clock in enumerate(clocks):
-        tau = time_to_expiry_years(expiry, as_of=clock)
-        column = spots[:, offset]
-        for leg in legs:
-            model[:, offset] += float(leg["quantity"]) * _bs_price_np(
-                column,
-                float(leg["strike"]),
-                float(leg["implied_vol"]),
-                tau,
-                str(leg["right"]),
-            )
+    taus = np.asarray(
+        [time_to_expiry_years(expiry, as_of=clock) for clock in clocks],
+        dtype=float,
+    )[None, :]
+    model = np.zeros_like(spots)
+    for leg in legs:
+        model += float(leg["quantity"]) * _bs_price_np(
+            spots,
+            float(leg["strike"]),
+            float(leg["implied_vol"]),
+            taus,
+            str(leg["right"]),
+        )
     close_mark = np.maximum(close_seed + (model - model0), 0.0)
     bids = np.maximum(2.0 * entry_credit - close_mark, 0.0)
     return clocks, {"spots": spots, "bids": bids}
@@ -737,18 +738,22 @@ def _combo_bid_matrix(
     origins = np.asarray([path.prices[0] for path in paths], dtype=float)
     raw = np.asarray([path.prices for path in paths], dtype=float)
     spots = spot + scale * (raw - origins[:, None])
-    model = np.zeros((len(paths), horizon), dtype=float)
-    for offset in range(horizon):
-        tau = time_to_expiry_years(expiry, as_of=now + timedelta(minutes=offset))
-        column = spots[:, offset]
-        for leg in legs:
-            model[:, offset] += float(leg["quantity"]) * _bs_price_np(
-                column,
-                float(leg["strike"]),
-                float(leg["implied_vol"]),
-                tau,
-                str(leg["right"]),
-            )
+    taus = np.asarray(
+        [
+            time_to_expiry_years(expiry, as_of=now + timedelta(minutes=offset))
+            for offset in range(horizon)
+        ],
+        dtype=float,
+    )[None, :]
+    model = np.zeros_like(spots)
+    for leg in legs:
+        model += float(leg["quantity"]) * _bs_price_np(
+            spots,
+            float(leg["strike"]),
+            float(leg["implied_vol"]),
+            taus,
+            str(leg["right"]),
+        )
     close_mark = np.maximum(close_seed + (model - model0), 0.0)
     if entry_credit is not None:
         bids = np.maximum(2.0 * entry_credit - close_mark, 0.0)
@@ -758,25 +763,31 @@ def _combo_bid_matrix(
 
 
 def _bs_price_np(
-    spot: np.ndarray, strike: float, iv: float, tau: float, right: str
+    spot: np.ndarray,
+    strike: float,
+    iv: float | np.ndarray,
+    tau: float | np.ndarray,
+    right: str,
 ) -> np.ndarray:
     if right == "C":
         intrinsic = np.maximum(spot - strike, 0.0)
     else:
         intrinsic = np.maximum(strike - spot, 0.0)
-    if tau <= 0.0 or iv <= 0.0:
-        return intrinsic
     safe = np.maximum(spot, 1e-12)
-    root_t = math.sqrt(tau)
-    d1_value = (np.log(safe / strike) + 0.5 * iv * iv * tau) / (iv * root_t)
-    d2_value = d1_value - iv * root_t
+    safe_iv = np.maximum(np.asarray(iv, dtype=float), 1e-6)
+    tau_values = np.asarray(tau, dtype=float)
+    root_t = np.sqrt(np.maximum(tau_values, 1e-16))
+    d1_value = (
+        np.log(safe / strike) + 0.5 * safe_iv * safe_iv * tau_values
+    ) / (safe_iv * root_t)
+    d2_value = d1_value - safe_iv * root_t
     cdf1 = ndtr(d1_value)
     cdf2 = ndtr(d2_value)
     if right == "C":
         model = safe * cdf1 - strike * cdf2
     else:
         model = strike * (1.0 - cdf2) - safe * (1.0 - cdf1)
-    return np.maximum(intrinsic, model)
+    return np.where(tau_values <= 0.0, intrinsic, np.maximum(intrinsic, model))
 
 
 def _path_scale(

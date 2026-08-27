@@ -565,17 +565,34 @@ def run(
     # lifecycle episode from the evaluation clock or the earlier quote snapshot.
     action_snapshot_at = as_utc(resolved_action_clock())
     action_latest = LatestStateStore(storage).load(now=action_snapshot_at)
-    try:
-        strategy_outcome_observation = observe_due_strategy_outcomes(
-            action_latest,
-            now=action_snapshot_at,
-            data_root=storage.data_root,
-        )
-    except Exception as exc:
-        strategy_outcome_observation = {
-            "observed": 0,
-            "error": f"{type(exc).__name__}:{exc}",
-        }
+    outcome_minute = action_snapshot_at.replace(second=0, microsecond=0).isoformat()
+    cached_outcome_minute = (
+        state_cache.get("strategy_outcome_observation_minute")
+        if state_cache is not None
+        else None
+    )
+    cached_outcome = (
+        state_cache.get("strategy_outcome_observation")
+        if state_cache is not None
+        else None
+    )
+    if cached_outcome_minute == outcome_minute and isinstance(cached_outcome, dict):
+        strategy_outcome_observation = cached_outcome
+    else:
+        try:
+            strategy_outcome_observation = observe_due_strategy_outcomes(
+                action_latest,
+                now=action_snapshot_at,
+                data_root=storage.data_root,
+            )
+        except Exception as exc:
+            strategy_outcome_observation = {
+                "observed": 0,
+                "error": f"{type(exc).__name__}:{exc}",
+            }
+        if state_cache is not None:
+            state_cache["strategy_outcome_observation_minute"] = outcome_minute
+            state_cache["strategy_outcome_observation"] = strategy_outcome_observation
     # Freeze the authority clock only after the action snapshot and due outcomes
     # have been read.  The failover controller runs independently in this same
     # process; reusing the earlier snapshot clock can otherwise make its newly

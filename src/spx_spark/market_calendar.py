@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 
@@ -292,6 +293,7 @@ class MarketCalendar:
         return self.previous_trading_day(day)
 
     @staticmethod
+    @lru_cache(maxsize=32)
     def _holidays_around(year: int) -> frozenset[date]:
         holidays: set[date] = set()
         for nominal_year in (year - 1, year, year + 1):
