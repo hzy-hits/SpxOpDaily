@@ -218,7 +218,10 @@ def test_existing_notification_rows_survive_forward_upgrade(tmp_path: Path) -> N
         ).fetchall() == [("event", "delivered")]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone()[0] == "0002_operational_tables"
+        ).fetchone()[0] == "0003_strategy_due_index"
+        assert "ix_decisions_strategy_decision_at" in {
+            row[1] for row in connection.execute("PRAGMA index_list(decisions)")
+        }
 
 
 def test_candidate_and_legs_commit_atomically_and_conflicts_fail(tmp_path: Path) -> None:
