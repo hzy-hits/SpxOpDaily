@@ -42,6 +42,10 @@ from spx_spark.options_map import (
     write_open_interest_mirror_png,
     write_strategy_risk_png,
 )
+from spx_spark.options_map.net_premium_render import (
+    render_net_premium_flow_svg,
+    write_net_premium_flow_png,
+)
 from spx_spark.storage import LatestState
 
 
@@ -101,12 +105,8 @@ def test_open_interest_mirror_keeps_wall_rank_distinct_from_bar_value() -> None:
                 ],
                 "walls": {
                     "wall_method": "oi_gex",
-                    "put_walls": [
-                        {"strike": 7655.0, "open_interest": 500.0, "gex": -2_000_000.0}
-                    ],
-                    "call_walls": [
-                        {"strike": 7700.0, "open_interest": 2000.0, "gex": 3_000_000.0}
-                    ],
+                    "put_walls": [{"strike": 7655.0, "open_interest": 500.0, "gex": -2_000_000.0}],
+                    "call_walls": [{"strike": 7700.0, "open_interest": 2000.0, "gex": 3_000_000.0}],
                 },
             }
         ],
@@ -423,9 +423,7 @@ def test_strategy_risk_sheet_prefers_complete_iron_condor_map() -> None:
         ),
     ],
 )
-def test_strategy_risk_sheet_supports_directional_and_butterfly_payoffs(
-    candidate, label
-) -> None:
+def test_strategy_risk_sheet_supports_directional_and_butterfly_payoffs(candidate, label) -> None:
     decision = _strategy_risk_decision()
     path = decision["iron_condor_map"]["path_distribution"]
     candidate = {**candidate, "edge": {"path_distribution": path}}
@@ -460,6 +458,77 @@ def test_strategy_risk_png_uses_the_shared_atomic_writer(tmp_path) -> None:
 
     assert written == output
     assert output.read_bytes().endswith(b"strategy-risk")
+    assert output.stat().st_mode & 0o777 == 0o600
+
+
+def _net_premium_state() -> dict[str, object]:
+    return {
+        "session_date": "2026-08-28",
+        "captured_net_premium_divergence": {
+            "updated_at": "2026-08-28T14:02:00+00:00",
+            "minutes": {
+                "2026-08-28T13:30:00+00:00": {
+                    "spx": 7760.0,
+                    "totals": [0, 0, 0, 0, 0, 0, 100_000.0, -40_000.0],
+                },
+                "2026-08-28T13:31:00+00:00": {
+                    "spx": 7764.0,
+                    "totals": [0, 0, 0, 0, 0, 0, 80_000.0, -30_000.0],
+                },
+                "2026-08-28T13:32:00+00:00": {
+                    "spx": 7758.0,
+                    "totals": [0, 0, 0, 0, 0, 0, -30_000.0, -30_000.0],
+                },
+            },
+            "snapshot": {
+                "session": {
+                    "call_net": 150_000.0,
+                    "put_net": -100_000.0,
+                    "directional_net": 250_000.0,
+                    "coverage": 0.18,
+                    "inside_share": 0.31,
+                    "quality": "medium",
+                    "minutes": 3,
+                }
+            },
+            "divergence_events": [
+                {
+                    "direction": "BEARISH",
+                    "signal_at": "2026-08-28T13:31:00+00:00",
+                    "spx": 7764.0,
+                }
+            ],
+        },
+    }
+
+
+def test_net_premium_flow_sheet_has_dual_axis_quality_and_divergence() -> None:
+    svg = render_net_premium_flow_svg(_net_premium_state())
+
+    assert "SPX 0DTE Captured Premium Flow" in svg
+    assert "Directional Net Flow" in svg
+    assert "$250K" in svg
+    assert "classified/volume 18.0%" in svg
+    assert "熊背离" in svg
+    assert "not full OPRA or BTO/STC" in svg
+    assert "no standalone direction or order authority" in svg
+
+
+def test_net_premium_flow_png_uses_atomic_writer(tmp_path) -> None:
+    output = tmp_path / "flow" / "latest.png"
+
+    def convert(svg_path, png_path) -> None:
+        assert "Directional Net Flow" in svg_path.read_text(encoding="utf-8")
+        png_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"net-premium-flow")
+
+    written = write_net_premium_flow_png(
+        _net_premium_state(),
+        output,
+        converter=convert,
+    )
+
+    assert written == output
+    assert output.read_bytes().endswith(b"net-premium-flow")
     assert output.stat().st_mode & 0o777 == 0o600
 
 
@@ -653,10 +722,7 @@ def test_structure_quality_tolerates_recent_stale_but_not_hard_bad() -> None:
         received_at=now - timedelta(minutes=5),
     )
     assert structure_quality_ok(recent_stale, as_of=now) is True
-    assert (
-        signed_gex(recent_stale, sign=-1.0, underlier=7438.0, as_of=now)
-        is not None
-    )
+    assert signed_gex(recent_stale, sign=-1.0, underlier=7438.0, as_of=now) is not None
 
     # Too old: excluded.
     old_stale = dc_replace(
@@ -1014,12 +1080,8 @@ def test_strike_differential_identities_polynomial_exactness_and_portfolios() ->
     assert 2.0 * h**3 * observation["strike_d3"] == pytest.approx(
         observation["adjacent_fly_spread_points"]
     )
-    assert h**4 * observation["strike_d4"] == pytest.approx(
-        observation["fly_curvature_points"]
-    )
-    assert observation["mexican_hat_points"] == pytest.approx(
-        -(h**4) * observation["strike_d4"]
-    )
+    assert h**4 * observation["strike_d4"] == pytest.approx(observation["fly_curvature_points"])
+    assert observation["mexican_hat_points"] == pytest.approx(-(h**4) * observation["strike_d4"])
     assert observation["mexican_hat_points"] == pytest.approx(
         2.0 * h**2 * observation["peak_vs_shoulders"]
     )
@@ -1163,7 +1225,9 @@ def test_local_context_is_independent_of_global_density_and_missing_bbo() -> Non
     observation = density.strike_differential_context["references"][0]["observations"][0]
     assert observation["strike_d2"] == pytest.approx(0.04)
 
-    mid_only = tuple(replace(point, bid=None, ask=None) for point in _polynomial_curve(now, half_spread=0.01))
+    mid_only = tuple(
+        replace(point, bid=None, ask=None) for point in _polynomial_curve(now, half_spread=0.01)
+    )
     degraded = _single_observation(mid_only, now)
     assert degraded["quality"] == "degraded_missing_bbo"
     assert degraded["strike_d2"] is not None
@@ -1213,9 +1277,7 @@ def test_strike_differential_is_causal_and_compact() -> None:
         for strike in range(50, 151, 5)
     )
     future_curve = tuple(
-        replace(point, source_at=now + timedelta(seconds=1))
-        if point.strike == 100.0
-        else point
+        replace(point, source_at=now + timedelta(seconds=1)) if point.strike == 100.0 else point
         for point in curve
     )
     levels = {f"reference_{index}": 70.0 + index * 5.0 for index in range(8)}
@@ -1258,9 +1320,7 @@ def test_future_curve_point_suppresses_global_density_cross_diagnostics() -> Non
             now=now,
         )
         quotes.append(
-            replace(quote, quote_time=now + timedelta(seconds=1))
-            if strike == 150
-            else quote
+            replace(quote, quote_time=now + timedelta(seconds=1)) if strike == 150 else quote
         )
 
     density = build_rn_density(
@@ -1674,10 +1734,7 @@ def test_partial_open_interest_coverage_cannot_publish_oi_walls() -> None:
 
     assert expiry.gex_quality == "no_open_interest_gex"
     assert expiry.wall_method == "unavailable"
-    assert any(
-        "oi_contract_coverage_below_threshold" in warning
-        for warning in expiry.warnings
-    )
+    assert any("oi_contract_coverage_below_threshold" in warning for warning in expiry.warnings)
 
 
 def test_single_strike_open_interest_cannot_publish_oi_walls() -> None:
@@ -1708,10 +1765,7 @@ def test_single_strike_open_interest_cannot_publish_oi_walls() -> None:
 
     assert expiry.gex_quality == "no_open_interest_gex"
     assert expiry.wall_method != "oi_gex"
-    assert any(
-        "oi_strike_coverage_below_threshold" in warning
-        for warning in expiry.warnings
-    )
+    assert any("oi_strike_coverage_below_threshold" in warning for warning in expiry.warnings)
 
 
 def test_schwab_open_interest_publishes_oi_walls_during_rth() -> None:
@@ -1788,10 +1842,7 @@ def test_schwab_open_interest_cannot_publish_oi_walls_during_gth() -> None:
 
     assert expiry.gex_quality == "no_open_interest_gex"
     assert expiry.wall_method != "oi_gex"
-    assert any(
-        "ibkr_hot_lane_missing" in warning
-        for warning in expiry.warnings
-    )
+    assert any("ibkr_hot_lane_missing" in warning for warning in expiry.warnings)
 
 
 def test_ibkr_hot_lane_open_interest_publishes_walls_despite_schwab_wide_chain() -> None:

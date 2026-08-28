@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from spx_spark.config import StorageSettings
+from spx_spark.options_map.net_premium_render import write_net_premium_flow_png
 from spx_spark.options_map.orchestration import build_options_map
 from spx_spark.options_map.render import (
     print_options_map,
@@ -40,6 +41,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         help="Write the latest decision-owned strategy risk sheet as PNG.",
     )
+    output.add_argument(
+        "--net-premium-flow-png",
+        metavar="PATH",
+        help="Write the current captured 0DTE net-premium flow chart as PNG.",
+    )
     parser.add_argument(
         "--oi-window-points",
         type=float,
@@ -52,6 +58,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = StorageSettings.from_env()
+    if args.net_premium_flow_png:
+        state_path = Path(settings.data_root).expanduser() / "latest" / "intraday_shock_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        output = write_net_premium_flow_png(state, args.net_premium_flow_png)
+        print(output)
+        return 0
     if args.strategy_risk_svg or args.strategy_risk_png:
         decision_path = Path(settings.data_root).expanduser() / "latest" / "strategy_decision.json"
         decision = json.loads(decision_path.read_text(encoding="utf-8"))

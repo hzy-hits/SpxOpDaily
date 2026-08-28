@@ -43,17 +43,17 @@ from spx_spark.application.order_map.convexity_idea_radar import (
 from spx_spark.application.order_map.decision_consistency import (
     apply_decision_projections,
 )
-from spx_spark.application.order_map.delivery import (
-    publish_open_interest_image,
-    publish_strategy_risk_image,
-    send_order_map,
-)
+from spx_spark.application.order_map.delivery import send_order_map
 from spx_spark.application.order_map.desk_projection_export import (
     persist_desk_map_projection,
     rust_report_owner_enabled,
 )
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
 from spx_spark.application.order_map.frozen_structure import attach_frozen_option_structure
+from spx_spark.application.order_map.image_delivery import (
+    publish_desk_map_images,
+    publish_strategy_risk_image,
+)
 from spx_spark.application.order_map.hl_volume import (
     attach_hl_volume_signal,
     default_hl_volume_sample_path,
@@ -506,9 +506,7 @@ def _attach_strategy_trigger_coordinate(
     if not coordinate.usable:
         return
     source = (
-        "chain_implied"
-        if coordinate.kind.value == "chain_implied_spx"
-        else str(coordinate.source)
+        "chain_implied" if coordinate.kind.value == "chain_implied_spx" else str(coordinate.source)
     )
     spot = {
         "price": coordinate.spx_observed_value,
@@ -614,10 +612,8 @@ def run_status(
         )
     )
     rust_owner = rust_report_owner_enabled()
-    oi_image = (
-        publish_open_interest_image(storage_settings, now=now)
-        if delivery_reason is not None
-        else None
+    desk_images = (
+        publish_desk_map_images(storage_settings, now=now) if delivery_reason is not None else {}
     )
     rust_projection = persist_desk_map_projection(
         payload,
@@ -637,8 +633,6 @@ def run_status(
             "changes": changes,
             "report_slot_key": current_rth_slot.key if current_rth_slot is not None else None,
         }
-        if oi_image is not None:
-            snapshot_result["oi_image"] = oi_image
         snapshot_result["strategy_risk_image"] = strategy_risk_image
         persist_order_map_pricing_audit(
             payload,
@@ -671,8 +665,7 @@ def run_status(
             "changes": changes,
             "report_slot_key": rust_projection["source_slot"],
         }
-        if oi_image is not None:
-            mirrored_result["oi_image"] = oi_image
+        mirrored_result.update(desk_images)
         mirrored_result["strategy_risk_image"] = strategy_risk_image
         persist_order_map_pricing_audit(
             payload,
@@ -729,8 +722,7 @@ def run_status(
                 "targets_match": inspection.targets_match,
                 "event_status": inspection.event_status,
             }
-            if oi_image is not None:
-                rejected_result["oi_image"] = oi_image
+            rejected_result.update(desk_images)
             rejected_result["strategy_risk_image"] = strategy_risk_image
             persist_order_map_pricing_audit(
                 payload,
@@ -756,8 +748,7 @@ def run_status(
             "occurred_at": semantic.occurred_at.isoformat(),
             "report_slot_key": semantic.slot_key,
         }
-        if oi_image is not None:
-            duplicate_result["oi_image"] = oi_image
+        duplicate_result.update(desk_images)
         duplicate_result["strategy_risk_image"] = strategy_risk_image
         persist_order_map_pricing_audit(
             payload,
@@ -791,8 +782,7 @@ def run_status(
         changes=changes,
         delivery_reason=delivery_reason,
     )
-    if oi_image is not None:
-        result["oi_image"] = oi_image
+    result.update(desk_images)
     result["strategy_risk_image"] = strategy_risk_image
     persist_order_map_pricing_audit(
         payload,

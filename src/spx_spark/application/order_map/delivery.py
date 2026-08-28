@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from spx_spark.application.notifications.report_enqueue import (
@@ -21,6 +19,15 @@ from spx_spark.application.order_map.prompts import (
 from spx_spark.application.order_map.desk_projection_export import (
     rust_report_owner_enabled,
 )
+from spx_spark.application.order_map.image_delivery import (
+    NET_PREMIUM_FLOW_IMAGE_PUBLIC_URL,
+    OPEN_INTEREST_IMAGE_PUBLIC_URL,
+    STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL,
+    STRATEGY_RISK_IMAGE_PUBLIC_URL,
+    publish_net_premium_flow_image,
+    publish_open_interest_image,
+    publish_strategy_risk_image,
+)
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.render import render_template
 from spx_spark.application.order_map.strategy_ranker import (
@@ -34,9 +41,8 @@ from spx_spark.application.order_map.strategy_regime import (
     pin_stable_watch_phase,
     pin_watch_center,
 )
-from spx_spark.features.exposure_map import build_exposure_map
-from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.config import NotificationSettings, StorageSettings
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.notifier.llm_writer import (
     call_hypothesis_critic,
     generate_push_text,
@@ -44,37 +50,13 @@ from spx_spark.notifier.llm_writer import (
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.model import NotificationEnvelope
-from spx_spark.options_map import (
-    group_spxw_option_quotes,
-    write_open_interest_mirror_png,
-    write_strategy_risk_png,
-)
-from spx_spark.options_map.orchestration import (
-    cache_complete_open_interest_payload,
-    gth_open_interest_payload,
-)
-from spx_spark.storage import LatestStateStore
 
 
-STRATEGY_RISK_IMAGE_PUBLIC_PATH = "/strategy-risk/latest.png"
-STRATEGY_RISK_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/strategy-risk/latest.png"
-STRATEGY_RISK_GTH_IMAGE_PUBLIC_PATH = "/strategy-risk/gth-latest.png"
-STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/strategy-risk/gth-latest.png"
-OPEN_INTEREST_IMAGE_PUBLIC_PATH = "/oi/latest.png"
-OPEN_INTEREST_IMAGE_PUBLIC_URL = "https://spx.zh3nyu.com/oi/latest.png"
-
-
-def enqueue_pin_stable_watch(
-    decision: Mapping[str, Any], *, now: datetime
-) -> dict[str, Any]:
+def enqueue_pin_stable_watch(decision: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
     """Send one session-deduped LOOK/TRADE pin observation. Not a trade card."""
 
     regime = decision.get("regime") if isinstance(decision.get("regime"), dict) else {}
-    facts = (
-        decision.get("market_facts")
-        if isinstance(decision.get("market_facts"), dict)
-        else {}
-    )
+    facts = decision.get("market_facts") if isinstance(decision.get("market_facts"), dict) else {}
     session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
     center = pin_watch_center(regime)
     session_date = str(decision.get("session_date") or facts.get("session_date") or "")
@@ -161,9 +143,7 @@ def enqueue_strategy_decision(
     text = _render_strategy_candidate(decision, candidate)
     if storage_settings is not None:
         facts = (
-            decision.get("market_facts")
-            if isinstance(decision.get("market_facts"), dict)
-            else {}
+            decision.get("market_facts") if isinstance(decision.get("market_facts"), dict) else {}
         )
         session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
         strategy_risk_url = (
@@ -174,7 +154,8 @@ def enqueue_strategy_decision(
         text = (
             f"{text}\n\n## 策略图\n"
             f"[查看概率、结构与损益图]({strategy_risk_url})\n"
-            f"[查看最新 OI 墙位图]({OPEN_INTEREST_IMAGE_PUBLIC_URL})"
+            f"[查看最新 OI 墙位图]({OPEN_INTEREST_IMAGE_PUBLIC_URL})\n"
+            f"[查看 0DTE 资金流图]({NET_PREMIUM_FLOW_IMAGE_PUBLIC_URL})"
         )
     result = enqueue_notification(
         settings,
@@ -204,6 +185,7 @@ def enqueue_strategy_decision(
     }
     strategy_risk_image = None
     open_interest_image = None
+    net_premium_flow_image = None
     # The operator card must enter the outbox before optional image rendering.
     # Delivery can proceed while the stable image URLs are refreshed in place.
     if storage_settings is not None and result.accepted and result.inserted:
@@ -211,138 +193,14 @@ def enqueue_strategy_decision(
             storage_settings, decision=decision, now=now
         )
         open_interest_image = publish_open_interest_image(storage_settings, now=now)
+        net_premium_flow_image = publish_net_premium_flow_image(storage_settings, now=now)
     if strategy_risk_image is not None:
         outcome["strategy_risk_image"] = strategy_risk_image
     if open_interest_image is not None:
         outcome["oi_image"] = open_interest_image
+    if net_premium_flow_image is not None:
+        outcome["net_premium_flow_image"] = net_premium_flow_image
     return outcome
-
-
-def publish_open_interest_image(
-    storage_settings: StorageSettings,
-    *,
-    now: datetime,
-) -> dict[str, object]:
-    """Refresh the stable OI image immediately before a human-visible card."""
-
-    try:
-        output = (
-            Path(storage_settings.data_root)
-            / "published"
-            / "spxw-surface"
-            / "oi"
-            / "latest.png"
-        )
-        # The strategy image rendered immediately before this call can take
-        # several seconds.  Reloading the moving latest-state against the
-        # report's earlier decision timestamp makes newly arrived quotes look
-        # future-dated and can suppress the entire front expiry.  Let the
-        # store take a fresh evaluation clock for this fresh state read.
-        state = LatestStateStore(storage_settings).load()
-        if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now):
-            payload = gth_open_interest_payload(
-                storage_settings,
-                state=state,
-                now=now,
-            )
-            front_payload = payload["expiries"][0]
-            expiry = str(front_payload.get("expiry") or "unknown")
-            rendered_as_of = now.isoformat()
-        else:
-            grouped = group_spxw_option_quotes(state, storage_settings=storage_settings)
-            exposure = build_exposure_map(state, grouped_quotes=grouped)
-            if not exposure.expiries:
-                raise ValueError("front expiry exposure unavailable")
-            front = exposure.expiries[0]
-            if len(front.walls.put_walls) < 3 or len(front.walls.call_walls) < 3:
-                raise ValueError("top-3 put/call walls unavailable")
-            payload = exposure.to_dict()
-            cache_complete_open_interest_payload(storage_settings, payload)
-            expiry = front.expiry
-            rendered_as_of = exposure.as_of.isoformat()
-        write_open_interest_mirror_png(payload, output)
-    except Exception as exc:  # noqa: BLE001 - card delivery must remain independent
-        return {
-            "status": "failed",
-            "error": f"{type(exc).__name__}:{exc}",
-            "public_path": OPEN_INTEREST_IMAGE_PUBLIC_PATH,
-            "public_url": OPEN_INTEREST_IMAGE_PUBLIC_URL,
-        }
-    return {
-        "status": "published",
-        "as_of": rendered_as_of,
-        "expiry": expiry,
-        "public_path": OPEN_INTEREST_IMAGE_PUBLIC_PATH,
-        "public_url": OPEN_INTEREST_IMAGE_PUBLIC_URL,
-        "bytes": output.stat().st_size,
-    }
-
-
-def publish_strategy_risk_image(
-    storage_settings: StorageSettings,
-    *,
-    decision: dict[str, Any],
-    now: datetime,
-) -> dict[str, object]:
-    """Publish the latest pushed manual candidate without affecting delivery authority."""
-
-    facts = (
-        decision.get("market_facts")
-        if isinstance(decision.get("market_facts"), dict)
-        else {}
-    )
-    session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
-    gth = str(session.get("mode") or "").lower() == "gth"
-    public_path = (
-        STRATEGY_RISK_GTH_IMAGE_PUBLIC_PATH if gth else STRATEGY_RISK_IMAGE_PUBLIC_PATH
-    )
-    public_url = (
-        STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL if gth else STRATEGY_RISK_IMAGE_PUBLIC_URL
-    )
-    try:
-        output = (
-            Path(storage_settings.data_root)
-            / "published"
-            / "spxw-surface"
-            / "strategy-risk"
-            / "latest.png"
-        )
-        if not decision:
-            raise ValueError("strategy decision unavailable")
-        decision_at = _timestamp(decision.get("decision_at"))
-        facts_at = _timestamp(facts.get("decision_at"))
-        if (
-            decision_at is not None
-            and facts_at is not None
-            and abs((decision_at - facts_at).total_seconds()) > 1.0
-        ):
-            raise ValueError("strategy risk decision and market facts are not time-aligned")
-        write_strategy_risk_png(decision, output)
-        if gth:
-            session_output = output.with_name("gth-latest.png")
-            temporary = output.with_name(f".gth-latest.{os.getpid()}.tmp")
-            try:
-                temporary.unlink(missing_ok=True)
-                os.link(output, temporary)
-                os.replace(temporary, session_output)
-            finally:
-                temporary.unlink(missing_ok=True)
-    except Exception as exc:  # noqa: BLE001 - image failure must not block trade-ready delivery
-        return {
-            "status": "failed",
-            "error": f"{type(exc).__name__}:{exc}",
-            "public_path": public_path,
-            "public_url": public_url,
-        }
-    return {
-        "status": "published",
-        "as_of": str(decision.get("available_at") or now.isoformat()),
-        "decision_id": decision.get("decision_id"),
-        "strategy_type": decision.get("decision_type"),
-        "public_path": public_path,
-        "public_url": public_url,
-        "bytes": output.stat().st_size,
-    }
 
 
 def _pin_watch_title(regime: Mapping[str, Any], center: float) -> str:
@@ -363,21 +221,13 @@ def _render_pin_stable_watch(
     pin = regime.get("pin") if isinstance(regime.get("pin"), dict) else {}
     depin = _finite_number(pin.get("depin_risk"))
     limit = butterfly_max_entry_minutes(5.0, DEFAULT_STRATEGY_POLICY)
-    clock = (
-        f"距收盘 {minutes:g} 分钟"
-        if minutes is not None
-        else "距收盘暂缺"
-    )
+    clock = f"距收盘 {minutes:g} 分钟" if minutes is not None else "距收盘暂缺"
     if phase == "look":
         conclusion = f"钉住中心 {center:g} · 11–13 可看今日蝶 · 不自动下单"
         clock_line = "5 点蝶午盘窗 11:00–13:00 ET"
     elif phase == "clock_open":
         conclusion = f"钉住中心 {center:g} · 尾盘 5 点蝶时钟已开 · 不自动下单"
-        clock_line = (
-            f"5 点蝶尾盘门 ≤{limit:g} 分钟"
-            if limit is not None
-            else "5 点蝶尾盘门暂缺"
-        )
+        clock_line = f"5 点蝶尾盘门 ≤{limit:g} 分钟" if limit is not None else "5 点蝶尾盘门暂缺"
     else:
         conclusion = f"钉住中心 {center:g} · 午盘看蝶窗已过 · 不自动下单"
         clock_line = (
@@ -428,12 +278,8 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         credit = quote.get("credit")
         strikes = _iron_condor_strike_text(candidate)
         invalidation = _strike_pair(candidate.get("invalidation_spx")) or "-"
-        take_profit = (
-            float(credit) * 0.50 if isinstance(credit, int | float) else None
-        )
-        stop_buyback = (
-            float(credit) * 3.00 if isinstance(credit, int | float) else None
-        )
+        take_profit = float(credit) * 0.50 if isinstance(credit, int | float) else None
+        stop_buyback = float(credit) * 3.00 if isinstance(credit, int | float) else None
         put_short = candidate.get("put_short") or {}
         call_short = candidate.get("call_short") or {}
         put_delta = _finite_number(candidate.get("put_short_abs_delta"))
@@ -510,8 +356,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         if isinstance(width, int | float) and isinstance(debit_frac, int | float):
             debit_warning = "（偏贵）" if float(debit_frac) >= 0.40 else ""
             payoff = (
-                f" · 翼宽 {_fmt_strike(width)} 点"
-                f" · 借记占 {_percent(debit_frac)}{debit_warning}"
+                f" · 翼宽 {_fmt_strike(width)} 点 · 借记占 {_percent(debit_frac)}{debit_warning}"
             )
         lines = [
             f"【{title}】",
@@ -585,8 +430,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         if isinstance(width, int | float) and isinstance(debit_frac, int | float):
             debit_warning = "（偏贵）" if float(debit_frac) >= 0.40 else ""
             payoff = (
-                f" · 翼宽 {_fmt_strike(width)} 点"
-                f" · 借记占 {_percent(debit_frac)}{debit_warning}"
+                f" · 翼宽 {_fmt_strike(width)} 点 · 借记占 {_percent(debit_frac)}{debit_warning}"
             )
         lines = [
             f"【{title}】",
@@ -776,14 +620,16 @@ def _render_strategy_idea_memo(memo: dict[str, Any]) -> str:
     watch_levels = "、".join(_fmt_strike(level) for level in memo.get("watch_levels") or ()) or "-"
     falsification = "；".join(str(item) for item in memo.get("falsification") or ()) or "-"
     risks = "；".join(str(item) for item in memo.get("risks") or ()) or "-"
-    return "\n".join((
-        "## 研究备忘",
-        f"看法  {memo.get('thesis') or '-'}",
-        f"证伪  {falsification}",
-        f"盯盘  {watch_levels}",
-        f"风险  {risks}",
-        "以上只解释结构，不授权下单",
-    ))
+    return "\n".join(
+        (
+            "## 研究备忘",
+            f"看法  {memo.get('thesis') or '-'}",
+            f"证伪  {falsification}",
+            f"盯盘  {watch_levels}",
+            f"风险  {risks}",
+            "以上只解释结构，不授权下单",
+        )
+    )
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -903,7 +749,11 @@ def _flood_control_block(
 
 def _decision_session_mode(decision: Mapping[str, Any], candidate: Mapping[str, Any]) -> str:
     facts = decision.get("market_facts") if isinstance(decision.get("market_facts"), dict) else {}
-    session = facts.get("session") if isinstance(facts, dict) and isinstance(facts.get("session"), dict) else {}
+    session = (
+        facts.get("session")
+        if isinstance(facts, dict) and isinstance(facts.get("session"), dict)
+        else {}
+    )
     mode = str(session.get("mode") or "").strip().lower()
     if mode in {"gth", "rth"}:
         return mode
@@ -925,16 +775,16 @@ def send_order_map(
     occurred_at: datetime | None = None,
 ) -> dict[str, Any]:
     if rust_report_owner_enabled():
-        raise RuntimeError(
-            "legacy scheduled-report writer is fenced while Rust owns reports"
-        )
+        raise RuntimeError("legacy scheduled-report writer is fenced while Rust owns reports")
     now = now or datetime.now(tz=timezone.utc)
     radar = payload.get("convexity_idea_radar")
     if isinstance(radar, dict):
         critic, critic_error = call_hypothesis_critic(radar)
-        payload = {**payload, "convexity_idea_critic": critic or {
-            "status": "deterministic_fallback", "reason": critic_error or "critic_unavailable"
-        }}
+        payload = {
+            **payload,
+            "convexity_idea_critic": critic
+            or {"status": "deterministic_fallback", "reason": critic_error or "critic_unavailable"},
+        }
     template = render_template(payload)
     if extra_header:
         template = f"{extra_header}\n{template}"

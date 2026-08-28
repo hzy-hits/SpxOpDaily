@@ -34,7 +34,10 @@ _MEDIUM_COVERAGE = 0.15
 _MAX_INSIDE_SHARE = 0.50
 _MAX_QUOTE_AGE_SECONDS = 15.0
 _MAX_TRADE_LAG_SECONDS = 5.0
-_HISTORY_MINUTES = 30
+# Keep one complete RTH scalar tape for the public flow chart.  Per-strike
+# payloads are still stripped after the much shorter window below, so this
+# does not retain a full-chain history in hot state.
+_HISTORY_MINUTES = 7 * 60
 _STRIKE_HISTORY_MINUTES = 15
 _SEEN_RETENTION_MINUTES = 45
 _START_ET = time(10, 0)
@@ -119,9 +122,7 @@ def _new_aggregate(raw: object = None, *, with_strikes: bool = False) -> dict[st
     packed_totals = aggregate.pop("totals", None)
     if isinstance(packed_totals, list):
         for index, field in enumerate(_TOTAL_FIELDS):
-            aggregate[field] = (
-                _number(packed_totals[index]) if index < len(packed_totals) else 0.0
-            )
+            aggregate[field] = _number(packed_totals[index]) if index < len(packed_totals) else 0.0
     for field in _TOTAL_FIELDS:
         aggregate.setdefault(field, 0.0)
     if with_strikes:
@@ -136,11 +137,7 @@ def _trim_trailing_zeroes(values: list[float]) -> list[float]:
 
 
 def _pack_aggregate(aggregate: dict[str, object]) -> dict[str, object]:
-    packed = {
-        field: aggregate[field]
-        for field in _AGGREGATE_METADATA_FIELDS
-        if field in aggregate
-    }
+    packed = {field: aggregate[field] for field in _AGGREGATE_METADATA_FIELDS if field in aggregate}
     packed["totals"] = _trim_trailing_zeroes(
         [_number(aggregate.get(field)) for field in _TOTAL_FIELDS]
     )
@@ -543,6 +540,7 @@ def _snapshot(
     previous_5m = [row for _, row in rows[-10:-5]]
     previous_summary = _summary(_combine(previous_5m), minutes=len(previous_5m))
     current_5m = rollups["5m"]
+
     def strike_projection(strike_rows: list[dict[str, object]]) -> dict[str, object]:
         ranked = sorted(
             strike_rows,
@@ -718,9 +716,7 @@ def advance_captured_option_flow(
         if prior is None or fingerprint is None or fingerprint == previous_fingerprint:
             continue
         trade_at = as_utc(quote.trade_time) if quote.trade_time is not None else None
-        trade_lag = (
-            (received_at - trade_at).total_seconds() if trade_at is not None else math.inf
-        )
+        trade_lag = (received_at - trade_at).total_seconds() if trade_at is not None else math.inf
         if (
             trade_lag < 0
             or trade_lag > _MAX_TRADE_LAG_SECONDS
@@ -734,7 +730,9 @@ def advance_captured_option_flow(
             or quote.last_size <= 0
         ):
             continue
-        side = "buy" if quote.last >= quote.ask else "sell" if quote.last <= quote.bid else "unknown"
+        side = (
+            "buy" if quote.last >= quote.ask else "sell" if quote.last <= quote.bid else "unknown"
+        )
         premium = float(quote.last) * float(quote.last_size) * 100.0
         for target in (quote_bucket, session):
             _record_trade(
@@ -752,9 +750,7 @@ def advance_captured_option_flow(
         for key, value in minutes.items()
         if (parsed := _parse_datetime(key)) is not None and parsed >= history_cutoff
     }
-    strike_history_cutoff = _minute_start(decision_at) - timedelta(
-        minutes=_STRIKE_HISTORY_MINUTES
-    )
+    strike_history_cutoff = _minute_start(decision_at) - timedelta(minutes=_STRIKE_HISTORY_MINUTES)
     for key, value in minutes.items():
         minute_at = _parse_datetime(key)
         if minute_at is not None and minute_at < strike_history_cutoff:
@@ -849,10 +845,28 @@ def advance_captured_option_flow(
             tape["last_alert_event_id"] = alert.event_id
             tape["last_divergence"] = {
                 "direction": "BEARISH" if bearish else "BULLISH",
-                "signal_at": decision_at.isoformat(),
+                "signal_at": completed_minute.isoformat(),
                 "expires_at": (decision_at + timedelta(seconds=_COOLDOWN_SECONDS)).isoformat(),
                 "event_id": alert.event_id,
             }
+            raw_events = tape.get("divergence_events")
+            events = (
+                [dict(row) for row in raw_events if isinstance(row, dict)]
+                if isinstance(raw_events, list)
+                else []
+            )
+            events.append(
+                {
+                    "direction": "BEARISH" if bearish else "BULLISH",
+                    "signal_at": completed_minute.isoformat(),
+                    "spx": current_spx,
+                    "extreme_spx": recent_high if bearish else recent_low,
+                    "directional_net": recent_flow.get("directional_net"),
+                    "coverage": recent_flow.get("coverage"),
+                    "event_id": alert.event_id,
+                }
+            )
+            tape["divergence_events"] = events[-20:]
 
     session_summary = snapshot["session"]
     tape["snapshot"] = snapshot

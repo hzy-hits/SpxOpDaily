@@ -33,6 +33,8 @@ FEISHU_HEADER_BY_KIND = {
 
 BARK_OPS_GROUP_DEFAULT = "spx-ops"
 BARK_TRADE_GROUP_DEFAULT = "spx-spark"
+_OI_IMAGE_URL = "https://spx.zh3nyu.com/oi/latest.png"
+_FLOW_IMAGE_URL = "https://spx.zh3nyu.com/flow/latest.png"
 
 _MD_HEADING_RE = re.compile(r"^#{1,3}\s+")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -410,6 +412,8 @@ def bark_lockscreen_summary(
 ) -> str:
     """Render a decision-first Bark preview instead of slicing writer prose."""
 
+    if include_links:
+        text = _with_flow_chart_link(text)
     sections, lines = _bark_content(text, title=title)
     if not lines:
         return strip_markdown_light(text)[:max_chars]
@@ -452,8 +456,14 @@ def bark_lockscreen_summary(
                     links.append((strip_markdown_light(label), url))
     if not links:
         return summary
-    link_line = "图表  " + " · ".join(f"[{label}]({url})" for label, url in links[:2])
+    link_line = "图表  " + " · ".join(f"[{label}]({url})" for label, url in links[:3])
     return f"{summary}\n\n{link_line}"
+
+
+def _with_flow_chart_link(text: str) -> str:
+    if _OI_IMAGE_URL not in text or _FLOW_IMAGE_URL in text:
+        return text
+    return f"{text.rstrip()}\n资金流 {_FLOW_IMAGE_URL}"
 
 
 def bark_display_title(title: str) -> str:
@@ -561,9 +571,7 @@ def _unique_lines(lines: list[str]) -> list[str]:
     return unique
 
 
-def _bark_ready_lines(
-    sections: dict[str, list[str]], lines: list[str]
-) -> list[str]:
+def _bark_ready_lines(sections: dict[str, list[str]], lines: list[str]) -> list[str]:
     desk = _section(sections, "Desk View", "结论")
     execution = _section(sections, "Execution", "执行")
     risk_lines = _section(sections, "Risk", "风险")
@@ -578,7 +586,18 @@ def _bark_ready_lines(
                 line
                 for line in execution
                 if not line.startswith(
-                    ("MANUAL READY", "类型", "Provider", "NBBO", "限价", "净借记", "净贷记", "有效", "提交", "权限")
+                    (
+                        "MANUAL READY",
+                        "类型",
+                        "Provider",
+                        "NBBO",
+                        "限价",
+                        "净借记",
+                        "净贷记",
+                        "有效",
+                        "提交",
+                        "权限",
+                    )
                 )
             ),
             "",
@@ -597,9 +616,7 @@ def _bark_ready_lines(
     return [lead, _join_lines(entry, valid), risk, target]
 
 
-def _bark_terminal_lines(
-    sections: dict[str, list[str]], lines: list[str]
-) -> list[str]:
+def _bark_terminal_lines(sections: dict[str, list[str]], lines: list[str]) -> list[str]:
     desk = _section(sections, "Desk View", "结论")
     execution = _section(sections, "Execution", "执行")
     risk = _section(sections, "Risk", "风险")
@@ -630,9 +647,7 @@ def _bark_prefixed_lines(lines: list[str], prefixes: tuple[str, ...]) -> list[st
     return selected or lines[:4]
 
 
-def _bark_default_lines(
-    sections: dict[str, list[str]], lines: list[str]
-) -> list[str]:
+def _bark_default_lines(sections: dict[str, list[str]], lines: list[str]) -> list[str]:
     desk = _section(sections, "Desk View", "结论")
     execution = _section(sections, "Execution", "执行")
     risk = _section(sections, "Risk", "风险")
@@ -698,7 +713,7 @@ def build_feishu_card(
 ) -> dict[str, Any]:
     """Feishu interactive card (schema 2.0) with a single markdown body."""
     # Feishu markdown is close to commonmark; keep writer output mostly intact.
-    content = markdown.strip() or "（空推送）"
+    content = _with_flow_chart_link(markdown.strip()) or "（空推送）"
     # Soft length guard: webhook cards get awkward past ~30KB; truncate body.
     if len(content) > 28000:
         content = content[:27900].rstrip() + "\n\n…（已截断）"

@@ -517,6 +517,7 @@ def run_candidate_retry(
         "build_options_map",
         lambda state: make_options_map(make_front_expiry()),
     )
+
     def sleep(seconds: float) -> None:
         sleeps.append(seconds)
         elapsed[0] += seconds
@@ -1021,9 +1022,7 @@ def test_strategy_decision_rejects_future_fact_frames() -> None:
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["market_facts"]["quality"]["status"] == "degraded"
     assert "minute_market_frame_from_future" in decision["why_not"]["reasons"]
-    assert "option_structure_frame_from_future" in decision["market_facts"]["quality"][
-        "reasons"
-    ]
+    assert "option_structure_frame_from_future" in decision["market_facts"]["quality"]["reasons"]
     assert decision["available_at"] <= decision["decision_at"]
 
 
@@ -2234,9 +2233,14 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
     monkeypatch.setattr(order_map_module, "enqueue_order_map_status", enqueue_status)
     monkeypatch.setattr(
         order_map_module,
-        "publish_open_interest_image",
-        lambda _settings, *, now: oi_refreshes.append(now)
-        or {"status": "published"},
+        "publish_desk_map_images",
+        lambda _settings, *, now: (
+            oi_refreshes.append(now)
+            or {
+                "oi_image": {"status": "published"},
+                "net_premium_flow_image": {"status": "published"},
+            }
+        ),
     )
     monkeypatch.setattr(order_map_module, "mark_sent", lambda *args, **kwargs: None)
     monkeypatch.setattr(order_map_module, "record_push", lambda *args, **kwargs: None)
@@ -2266,7 +2270,7 @@ def test_globex_status_delivers_deterministic_operator_brief(monkeypatch, tmp_pa
 
 
 def test_open_interest_image_publishes_for_card(monkeypatch, tmp_path) -> None:
-    import spx_spark.application.order_map.delivery as delivery_module
+    import spx_spark.application.order_map.image_delivery as delivery_module
 
     now = datetime(2026, 8, 20, 16, 45, tzinfo=timezone.utc)
     state = object()
@@ -2325,10 +2329,48 @@ def test_open_interest_image_publishes_for_card(monkeypatch, tmp_path) -> None:
     assert (tmp_path / "published/spxw-surface/oi/latest.png").read_bytes() == b"png"
 
 
-def test_open_interest_image_uses_complete_rth_oi_for_gth_location(
-    monkeypatch, tmp_path
-) -> None:
-    import spx_spark.application.order_map.delivery as delivery_module
+def test_net_premium_flow_image_publishes_for_desk_map(monkeypatch, tmp_path) -> None:
+    import spx_spark.application.order_map.image_delivery as delivery_module
+
+    now = datetime(2026, 8, 28, 14, 0, tzinfo=timezone.utc)
+    state_path = tmp_path / "latest/intraday_shock_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "captured_net_premium_divergence": {
+                    "updated_at": now.isoformat(),
+                    "minutes": {},
+                    "snapshot": {},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def write_png(state, output) -> None:
+        assert "captured_net_premium_divergence" in state
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"flow-png")
+
+    monkeypatch.setattr(delivery_module, "write_net_premium_flow_png", write_png)
+    result = delivery_module.publish_net_premium_flow_image(
+        SimpleNamespace(data_root=str(tmp_path)),
+        now=now,
+    )
+
+    assert result == {
+        "status": "published",
+        "as_of": now.isoformat(),
+        "public_path": "/flow/latest.png",
+        "public_url": "https://spx.zh3nyu.com/flow/latest.png",
+        "bytes": 8,
+    }
+    assert (tmp_path / "published/spxw-surface/flow/latest.png").read_bytes() == b"flow-png"
+
+
+def test_open_interest_image_uses_complete_rth_oi_for_gth_location(monkeypatch, tmp_path) -> None:
+    import spx_spark.application.order_map.image_delivery as delivery_module
 
     now = datetime(2026, 8, 25, 2, 14, tzinfo=timezone.utc)
     cache_path = tmp_path / "published/spxw-surface/oi/last-complete.json"
@@ -2353,12 +2395,10 @@ def test_open_interest_image_uses_complete_rth_oi_for_gth_location(
                         "strikes": strikes,
                         "walls": {
                             "put_walls": [
-                                {"strike": 7650.0, "open_interest": 500.0}
-                                for _ in range(3)
+                                {"strike": 7650.0, "open_interest": 500.0} for _ in range(3)
                             ],
                             "call_walls": [
-                                {"strike": 7700.0, "open_interest": 600.0}
-                                for _ in range(3)
+                                {"strike": 7700.0, "open_interest": 600.0} for _ in range(3)
                             ],
                         },
                     }
@@ -2439,10 +2479,8 @@ def test_open_interest_image_uses_complete_rth_oi_for_gth_location(
     }
 
 
-def test_strategy_risk_image_publishes_for_trade_ready_delivery(
-    monkeypatch, tmp_path
-) -> None:
-    import spx_spark.application.order_map.delivery as delivery_module
+def test_strategy_risk_image_publishes_for_trade_ready_delivery(monkeypatch, tmp_path) -> None:
+    import spx_spark.application.order_map.image_delivery as delivery_module
 
     now = datetime(2026, 8, 21, 15, 15, tzinfo=timezone.utc)
     decision = {
@@ -2480,7 +2518,7 @@ def test_strategy_risk_image_publishes_for_trade_ready_delivery(
 
 
 def test_strategy_risk_image_publishes_stable_gth_url(monkeypatch, tmp_path) -> None:
-    import spx_spark.application.order_map.delivery as delivery_module
+    import spx_spark.application.order_map.image_delivery as delivery_module
 
     now = datetime(2026, 8, 24, 2, 45, tzinfo=timezone.utc)
     decision = {
@@ -2511,10 +2549,8 @@ def test_strategy_risk_image_publishes_stable_gth_url(monkeypatch, tmp_path) -> 
     ).read_bytes() == b"gth-risk-png"
 
 
-def test_strategy_risk_image_rejects_misaligned_market_facts(
-    monkeypatch, tmp_path
-) -> None:
-    import spx_spark.application.order_map.delivery as delivery_module
+def test_strategy_risk_image_rejects_misaligned_market_facts(monkeypatch, tmp_path) -> None:
+    import spx_spark.application.order_map.image_delivery as delivery_module
 
     now = datetime(2026, 8, 21, 20, 0, tzinfo=timezone.utc)
     decision = {
@@ -2541,18 +2577,14 @@ def test_strategy_risk_image_rejects_misaligned_market_facts(
     assert "not time-aligned" in result["error"]
 
 
-def test_rth_close_status_refreshes_image_without_notification(
-    monkeypatch, tmp_path
-) -> None:
+def test_rth_close_status_refreshes_image_without_notification(monkeypatch, tmp_path) -> None:
     import spx_spark.application.order_map.service as order_map_module
 
     now = datetime(2026, 8, 21, 20, 0, 8, tzinfo=timezone.utc)
     payload = {"strategy_decision": {"decision_id": "strategy:close"}}
     captured: dict[str, object] = {}
     monkeypatch.setattr(order_map_module, "within_status_window", lambda value: True)
-    monkeypatch.setattr(
-        order_map_module, "within_rth_close_snapshot_window", lambda value: True
-    )
+    monkeypatch.setattr(order_map_module, "within_rth_close_snapshot_window", lambda value: True)
     monkeypatch.setattr(order_map_module, "load_order_map_state", lambda path: {})
     monkeypatch.setattr(
         order_map_module,
@@ -4168,8 +4200,8 @@ def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
     monkeypatch.setattr(order_map_module, "_has_open_position_risk", lambda settings: False)
     monkeypatch.setattr(
         order_map_module,
-        "publish_open_interest_image",
-        lambda *args, **kwargs: pytest.fail("snapshot-only cycle must not redraw OI"),
+        "publish_desk_map_images",
+        lambda *args, **kwargs: pytest.fail("snapshot-only cycle must not redraw Desk Map images"),
     )
     monkeypatch.setattr(
         order_map_module,
@@ -4191,9 +4223,7 @@ def test_status_delivery_gate_suppresses_unchanged_scheduled_report(
     )
 
     assert result == 0
-    assert json.loads(capsys.readouterr().out)["reason"] == (
-        "snapshot_only_no_material_changes"
-    )
+    assert json.loads(capsys.readouterr().out)["reason"] == ("snapshot_only_no_material_changes")
     assert audits[0]["report_kind"] == "status_snapshot"
     assert audits[0]["result"]["delivery_outcome"] == "suppressed_snapshot_only"
 
@@ -4271,9 +4301,7 @@ def test_status_delivery_gate_allows_material_and_one_shot_key_windows() -> None
         )
         == "material_changes"
     )
-    previous["last_status_at"] = datetime(
-        2026, 7, 14, 6, 0, tzinfo=timezone.utc
-    ).timestamp()
+    previous["last_status_at"] = datetime(2026, 7, 14, 6, 0, tzinfo=timezone.utc).timestamp()
     assert (
         _status_delivery_reason(
             previous,
@@ -4722,18 +4750,10 @@ def test_rth_close_snapshot_window_is_bounded_and_calendar_aware() -> None:
     from spx_spark.application.order_map.state import within_rth_close_snapshot_window
 
     et = ZoneInfo("America/New_York")
-    assert within_rth_close_snapshot_window(
-        datetime(2026, 8, 21, 16, 0, 8, tzinfo=et)
-    )
-    assert not within_rth_close_snapshot_window(
-        datetime(2026, 8, 21, 15, 59, 59, tzinfo=et)
-    )
-    assert not within_rth_close_snapshot_window(
-        datetime(2026, 8, 21, 16, 2, 1, tzinfo=et)
-    )
-    assert within_rth_close_snapshot_window(
-        datetime(2026, 11, 27, 13, 0, 8, tzinfo=et)
-    )
+    assert within_rth_close_snapshot_window(datetime(2026, 8, 21, 16, 0, 8, tzinfo=et))
+    assert not within_rth_close_snapshot_window(datetime(2026, 8, 21, 15, 59, 59, tzinfo=et))
+    assert not within_rth_close_snapshot_window(datetime(2026, 8, 21, 16, 2, 1, tzinfo=et))
+    assert within_rth_close_snapshot_window(datetime(2026, 11, 27, 13, 0, 8, tzinfo=et))
 
 
 def test_minutes_to_open_after_close_targets_next_trading_session() -> None:
@@ -5117,9 +5137,13 @@ def test_unified_strategy_candidate_enqueues_once_on_trade_ready_lane(
     second = delivery_module.enqueue_strategy_decision(decision, now=now + timedelta(seconds=1))
     assert first["accepted"] is True and first["targets"] == ["feishu"]
     assert first["idea_memo"] == "omitted:trade_ready_latency_budget"
-    assert second == {"accepted": True, "inserted": False, "duplicate": True,
-                      "outcome": "outbox_already_accepted",
-                      "event_id": "strategy-opportunity:test:ready"}
+    assert second == {
+        "accepted": True,
+        "inserted": False,
+        "duplicate": True,
+        "outcome": "outbox_already_accepted",
+        "event_id": "strategy-opportunity:test:ready",
+    }
 
 
 def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
@@ -5151,6 +5175,13 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
             "public_url": "https://spx.zh3nyu.com/oi/latest.png",
         }
 
+    def publish_flow(storage_settings, *, now):
+        captured["flow_storage"] = storage_settings
+        return {
+            "status": "published",
+            "public_url": "https://spx.zh3nyu.com/flow/latest.png",
+        }
+
     def enqueue(_settings, envelope, **kwargs):
         captured["text"] = kwargs["text"]
         captured["feishu_text"] = kwargs["feishu_text"]
@@ -5165,6 +5196,11 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
 
     monkeypatch.setattr(delivery_module, "publish_strategy_risk_image", publish)
     monkeypatch.setattr(delivery_module, "publish_open_interest_image", publish_oi)
+    monkeypatch.setattr(
+        delivery_module,
+        "publish_net_premium_flow_image",
+        publish_flow,
+    )
     monkeypatch.setattr(delivery_module, "enqueue_notification", enqueue)
     storage = SimpleNamespace(data_root=str(tmp_path))
 
@@ -5174,20 +5210,18 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
         storage_settings=storage,
     )
 
-    expected_link = (
-        "[查看概率、结构与损益图]"
-        "(https://spx.zh3nyu.com/strategy-risk/latest.png)"
-    )
+    expected_link = "[查看概率、结构与损益图](https://spx.zh3nyu.com/strategy-risk/latest.png)"
     assert captured["storage"] is storage
     assert captured["decision"] == decision
     assert expected_link in str(captured["text"])
-    assert "[查看最新 OI 墙位图](https://spx.zh3nyu.com/oi/latest.png)" in str(
-        captured["text"]
-    )
+    assert "[查看最新 OI 墙位图](https://spx.zh3nyu.com/oi/latest.png)" in str(captured["text"])
+    assert "[查看 0DTE 资金流图](https://spx.zh3nyu.com/flow/latest.png)" in str(captured["text"])
     assert captured["oi_storage"] is storage
+    assert captured["flow_storage"] is storage
     assert captured["text"] == captured["feishu_text"]
     assert result["strategy_risk_image"]["status"] == "published"
     assert result["oi_image"]["status"] == "published"
+    assert result["net_premium_flow_image"]["status"] == "published"
 
 
 def _strategy_decision_payload(now: datetime) -> dict[str, object]:
@@ -5270,7 +5304,12 @@ def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> No
             "decision_at": now.isoformat(),
             "policy_version": "strategy_policy.bootstrap.v3",
             "runtime_git_sha": "deadbeef",
-            "probability_evidence": {"q": 0.52, "n_raw": 12, "n_effective": 7.0, "shrinkage_weight": 0.259259},
+            "probability_evidence": {
+                "q": 0.52,
+                "n_raw": 12,
+                "n_effective": 7.0,
+                "shrinkage_weight": 0.259259,
+            },
         },
         {
             "setup_kind": "TREND_PULLBACK",
@@ -5282,8 +5321,16 @@ def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> No
             "long": {"contract_id": "option:SPX:SPXW:20260807:7710:C"},
             "short": {"contract_id": "option:SPX:SPXW:20260807:7720:C"},
             "quote": {"bid": 2.8, "ask": 3.0},
-            "economics": {"max_loss_points": 3.0, "width_points": 10.0, "debit_fraction_of_width": 0.30},
-            "utility": {"event_probability": 0.61, "utility": 0.12, "conservative_lower_bound": 40.0},
+            "economics": {
+                "max_loss_points": 3.0,
+                "width_points": 10.0,
+                "debit_fraction_of_width": 0.30,
+            },
+            "utility": {
+                "event_probability": 0.61,
+                "utility": 0.12,
+                "conservative_lower_bound": 40.0,
+            },
             "edge": {"edge_status": "research_unvalidated", "policy_ev": 0.35, "policy_ev_n": 24},
         },
     )
@@ -5346,9 +5393,7 @@ def test_pin_stable_watch_enqueues_once_per_center_and_clock_phase(
     monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
     look = _pin_stable_decision(now, minutes_to_close=201.0, center=7785.0)
     first = delivery_module.enqueue_pin_stable_watch(look, now=now)
-    second = delivery_module.enqueue_pin_stable_watch(
-        look, now=now + timedelta(seconds=20)
-    )
+    second = delivery_module.enqueue_pin_stable_watch(look, now=now + timedelta(seconds=20))
     assert first["accepted"] is True
     assert first["inserted"] is True
     assert first["event_id"] == "pin-stable:2026-08-14:7785:look"
@@ -5566,7 +5611,9 @@ def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
 
     migrate = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
-        check=False, capture_output=True, text=True,
+        check=False,
+        capture_output=True,
+        text=True,
         env=os.environ | {"SPX_DATA_ROOT": str(tmp_path)},
     )
     assert migrate.returncode == 0, migrate.stderr
@@ -5599,18 +5646,31 @@ def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
                 "target_spx": 7730.0,
                 "invalidation_spx": 7705.0,
                 "opportunity_valid_until": (at + timedelta(minutes=5)).isoformat(),
-                "long": {"contract_id": "option:SPX:SPXW:20260807:7710:C",
-                         "strike": 7710.0, "right": "C", "provider": "schwab",
-                         "bid": 3.8, "ask": 4.0,
-                         "source_at": (at - timedelta(seconds=1)).isoformat()},
-                "short": {"contract_id": "option:SPX:SPXW:20260807:7720:C",
-                          "strike": 7720.0, "right": "C", "provider": "schwab",
-                          "bid": 1.0, "ask": 1.2,
-                          "source_at": (at - timedelta(seconds=1)).isoformat()},
+                "long": {
+                    "contract_id": "option:SPX:SPXW:20260807:7710:C",
+                    "strike": 7710.0,
+                    "right": "C",
+                    "provider": "schwab",
+                    "bid": 3.8,
+                    "ask": 4.0,
+                    "source_at": (at - timedelta(seconds=1)).isoformat(),
+                },
+                "short": {
+                    "contract_id": "option:SPX:SPXW:20260807:7720:C",
+                    "strike": 7720.0,
+                    "right": "C",
+                    "provider": "schwab",
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "source_at": (at - timedelta(seconds=1)).isoformat(),
+                },
                 "quote": {"bid": 2.6, "ask": 3.0},
                 "economics": {"max_loss_points": 3.0},
-                "utility": {"event_probability": 0.61, "utility": 0.12,
-                            "conservative_lower_bound": 40.0},
+                "utility": {
+                    "event_probability": 0.61,
+                    "utility": 0.12,
+                    "conservative_lower_bound": 40.0,
+                },
             },
         }
 
@@ -5647,7 +5707,9 @@ def test_strategy_flood_control_counts_outbox_accepted_cards_not_own_decision(
 
     try:
         # A produced-but-never-delivered selected decision consumes no quota.
-        persist_strategy_decision(decision("strategy:undelivered", "strategy-opportunity:o0", now - timedelta(minutes=1)))
+        persist_strategy_decision(
+            decision("strategy:undelivered", "strategy-opportunity:o0", now - timedelta(minutes=1))
+        )
 
         first = decision("strategy:first", "strategy-opportunity:o1", now)
         persist_strategy_decision(first)  # production order: persist before enqueue

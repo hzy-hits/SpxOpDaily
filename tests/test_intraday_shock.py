@@ -154,6 +154,17 @@ def test_captured_net_premium_bearish_divergence_is_observe_only() -> None:
     assert strike["call_sell"] > 0
     assert strike["put_buy"] > 0
     assert "熊流 7500" in tape["desk_summary"]
+    assert tape["divergence_events"] == [
+        {
+            "direction": "BEARISH",
+            "signal_at": "2026-07-10T14:18:00+00:00",
+            "spx": 102.0,
+            "extreme_spx": 103.0,
+            "directional_net": pytest.approx(-220.0),
+            "coverage": pytest.approx(1.0),
+            "event_id": "spx_net_premium_bearish_divergence:20260710:1418",
+        }
+    ]
 
 
 def test_captured_net_premium_bullish_divergence_is_observe_only() -> None:
@@ -189,15 +200,9 @@ def test_captured_flow_tracks_strike_buy_sell_and_unknown_without_bto_labels() -
     for offset in range(2):
         at = start + timedelta(minutes=offset)
         quotes = (
-            _captured_trade_quote(
-                right="C", at=at, volume=100.0 + offset, last=1.2, strike=7500.0
-            ),
-            _captured_trade_quote(
-                right="P", at=at, volume=100.0 + offset, last=1.0, strike=7490.0
-            ),
-            _captured_trade_quote(
-                right="C", at=at, volume=100.0 + offset, last=1.1, strike=7510.0
-            ),
+            _captured_trade_quote(right="C", at=at, volume=100.0 + offset, last=1.2, strike=7500.0),
+            _captured_trade_quote(right="P", at=at, volume=100.0 + offset, last=1.0, strike=7490.0),
+            _captured_trade_quote(right="C", at=at, volume=100.0 + offset, last=1.1, strike=7510.0),
         )
         state, _ = advance_captured_option_flow(
             state,
@@ -208,9 +213,7 @@ def test_captured_flow_tracks_strike_buy_sell_and_unknown_without_bto_labels() -
         )
 
     tape = state["captured_net_premium_divergence"]
-    session_rows = {
-        row["strike"]: row for row in tape["snapshot"]["strike_flow_session"]["rows"]
-    }
+    session_rows = {row["strike"]: row for row in tape["snapshot"]["strike_flow_session"]["rows"]}
     assert session_rows[7500.0]["call_buy"] == pytest.approx(120.0)
     assert session_rows[7490.0]["put_sell"] == pytest.approx(100.0)
     assert session_rows[7510.0]["call_unknown"] == pytest.approx(110.0)
@@ -219,6 +222,31 @@ def test_captured_flow_tracks_strike_buy_sell_and_unknown_without_bto_labels() -
     assert session["captured_size"] - session["classified_size"] == pytest.approx(1.0)
     assert tape["snapshot"]["session"]["directional_net"] == pytest.approx(220.0)
     assert not {"bto", "btc", "sto", "stc"}.intersection(session_rows[7500.0])
+
+
+def test_captured_flow_keeps_rth_scalar_tape_but_drops_old_strike_rows() -> None:
+    state = empty_monitor_state("2026-07-10")
+    start = datetime(2026, 7, 10, 13, 30, tzinfo=UTC)
+    for offset in range(45):
+        at = start + timedelta(minutes=offset)
+        quotes = (
+            _captured_trade_quote(right="C", at=at, volume=100.0 + offset, last=1.2),
+            _captured_trade_quote(right="P", at=at, volume=100.0 + offset, last=1.0),
+        )
+        state, _ = advance_captured_option_flow(
+            state,
+            sample(at, 7500.0 + offset, 7550.0, provider=Provider.SCHWAB.value),
+            quotes=quotes,
+            decision_at=at,
+            session_date="2026-07-10",
+        )
+
+    tape = state["captured_net_premium_divergence"]
+    keys = sorted(tape["minutes"])
+    assert len(keys) == 45
+    assert keys[0] == "2026-07-10T13:30:00+00:00"
+    assert "strikes" not in tape["minutes"][keys[0]]
+    assert "strikes" in tape["minutes"][keys[-1]]
 
 
 def test_trump_style_down_shock_then_v_reclaim_is_two_phases(tmp_path) -> None:

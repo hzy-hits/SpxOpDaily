@@ -205,8 +205,7 @@ def test_notifier_shadow_records_context_consumption(
     try:
         assert (
             connection.execute(
-                "SELECT count(*) FROM events "
-                "WHERE event_type != 'notification_delivery'"
+                "SELECT count(*) FROM events WHERE event_type != 'notification_delivery'"
             ).fetchone()[0]
             == 1
         )
@@ -214,8 +213,7 @@ def test_notifier_shadow_records_context_consumption(
         deliveries = [
             json.loads(row[0])
             for row in connection.execute(
-                "SELECT attributes_json FROM events "
-                "WHERE event_type='notification_delivery'"
+                "SELECT attributes_json FROM events WHERE event_type='notification_delivery'"
             ).fetchall()
         ]
         assert len(deliveries) >= 1
@@ -226,9 +224,7 @@ def test_notifier_shadow_records_context_consumption(
             "observe",
             "none",
         )
-        context_delivery = next(
-            row for row in deliveries if row["channel"] == "context_policy"
-        )
+        context_delivery = next(row for row in deliveries if row["channel"] == "context_policy")
         assert context_delivery["status"] == "consumed"
     finally:
         connection.close()
@@ -2032,9 +2028,7 @@ def test_call_path_delivers_without_reviewer_and_records_strategy_ack(tmp_path) 
 
 
 @pytest.mark.parametrize("direction", ["bearish", "bullish"])
-def test_net_premium_divergence_delivers_without_llm_review(
-    tmp_path, direction: str
-) -> None:
+def test_net_premium_divergence_delivers_without_llm_review(tmp_path, direction: str) -> None:
     chinese = "熊" if direction == "bearish" else "牛"
     event_id = f"spx_net_premium_{direction}_divergence:20260710:1500"
     payload = make_payload()
@@ -2537,10 +2531,7 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     assert bark_title_for_alerts([{"kind": "gth_advisory_management"}]) == "SPX GTH 机会管理"
     assert bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}]) == "SPX 0DTE Call 回收确认"
     assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构观察"
-    assert (
-        bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}])
-        == "SPX 市场提醒"
-    )
+    assert bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}]) == "SPX 市场提醒"
 
 
 def test_alert_specific_cooldown_dedupes_same_gth_bias_but_allows_flip(
@@ -2989,7 +2980,10 @@ def test_bark_lockscreen_summary_and_feishu_card() -> None:
 
 
 def test_bark_summary_prioritizes_decision_price_and_risk_without_ai_slop() -> None:
-    from spx_spark.notifier.format_push import bark_lockscreen_summary
+    from spx_spark.notifier.format_push import (
+        bark_lockscreen_summary,
+        build_feishu_card,
+    )
 
     volatility = "\n".join(
         (
@@ -3043,6 +3037,22 @@ def test_bark_summary_prioritizes_decision_price_and_risk_without_ai_slop() -> N
     )
     assert "触发  Call Wall" not in compact_detail
     assert "[策略风险图](https://spx.zh3nyu.com/strategy-risk/latest.png)" in compact_detail
+
+    desk_links = "\n".join(
+        (
+            "NO TRADE · 等待价格确认",
+            "图表  策略风险 https://spx.zh3nyu.com/strategy-risk/latest.png",
+            "OI结构 https://spx.zh3nyu.com/oi/latest.png",
+        )
+    )
+    desk_detail = bark_lockscreen_summary(
+        desk_links,
+        title="SPX Desk Map",
+        include_links=True,
+    )
+    assert "[资金流](https://spx.zh3nyu.com/flow/latest.png)" in desk_detail
+    card = build_feishu_card(desk_links, title="SPX Desk Map", kind="status")
+    assert "资金流 https://spx.zh3nyu.com/flow/latest.png" in str(card)
 
     no_trade = "\n".join(
         (
