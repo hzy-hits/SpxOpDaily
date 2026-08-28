@@ -2527,19 +2527,19 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     assert bark_title_for_alerts([{"kind": "ibkr_session_restored"}]) == "SPX 系统事件"
     assert (
         bark_title_for_alerts([{"kind": "put_skew_steepening_5m"}, {"kind": "atm_iv_jump_5m"}])
-        == "SPX 波动率信号 +1"
+        == "SPX 波动率观察 · 2 项"
     )
     assert bark_title_for_alerts([{"kind": "price_move_from_close"}]) == "SPX 价格异动"
     assert bark_title_for_alerts([{"kind": "globex_trend_transition"}]) == "SPX 价格异动"
-    assert bark_title_for_alerts([{"kind": "gth_bias_transition"}]) == "SPX GTH 方向提示"
-    assert bark_title_for_alerts([{"kind": "globex_trend_continuation"}]) == "SPX GTH 方向提示"
-    assert bark_title_for_alerts([{"kind": "gth_directional_advisory"}]) == "SPX GTH 方向提示"
+    assert bark_title_for_alerts([{"kind": "gth_bias_transition"}]) == "SPX GTH 方向观察"
+    assert bark_title_for_alerts([{"kind": "globex_trend_continuation"}]) == "SPX GTH 方向观察"
+    assert bark_title_for_alerts([{"kind": "gth_directional_advisory"}]) == "SPX GTH 方向观察"
     assert bark_title_for_alerts([{"kind": "gth_advisory_management"}]) == "SPX GTH 机会管理"
-    assert bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}]) == "SPX 0DTE | CALL RECLAIM"
-    assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构信号"
+    assert bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}]) == "SPX 0DTE Call 回收确认"
+    assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构观察"
     assert (
         bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}])
-        == "SPX Spark HIGH unknown_kind"
+        == "SPX 市场提醒"
     )
 
 
@@ -2986,6 +2986,112 @@ def test_bark_lockscreen_summary_and_feishu_card() -> None:
         )
         == "trade"
     )
+
+
+def test_bark_summary_prioritizes_decision_price_and_risk_without_ai_slop() -> None:
+    from spx_spark.notifier.format_push import bark_lockscreen_summary
+
+    volatility = "\n".join(
+        (
+            "🔴 只观察",
+            "方向  未定（仅事件背景，不是入场授权）",
+            "等待  对应关键位确认，并由执行层生成精确 SPXW 合约与新鲜报价",
+            "合约  当前没有可执行合约；原因 unevidenced_debit_not_human_authorized",
+            "事件  0DTE vs next ATM IV gap +6.35 vol pts",
+            "解释  Front-minus-next SPXW ATM IV gap is +6.35 vol points.",
+            "决策 id=strategy:074 角色=NO_TRADE policy=v54 git=deadbeef",
+        )
+    )
+    assert bark_lockscreen_summary(volatility, title="SPX 波动率信号") == "\n".join(
+        (
+            "事件  0DTE ATM IV − 次日 ATM IV：+6.35 波动率点",
+            "结论  仅观察；不判断涨跌",
+        )
+    )
+
+    ready = "\n".join(
+        (
+            "## Desk View",
+            "🟢 MANUAL READY · PUT SPREAD",
+            "触发  Call Wall 7725 拒绝确认",
+            "## Execution",
+            "买入  SPXW 08-27 7725P",
+            "卖出  SPXW 08-27 7710P",
+            "限价  净借记 ≤ 6.50",
+            "有效  剩余 300 秒；提交前重新报价",
+            "## Risk",
+            "止损  SPX 收回 7728.00",
+            "风险  每组最大损失 $650",
+            "## Targets",
+            "目标  SPX 7715.00",
+            "## 策略图",
+            "[策略风险图](https://spx.zh3nyu.com/strategy-risk/latest.png)",
+        )
+    )
+    ready_summary = bark_lockscreen_summary(ready, title="SPX PUT 候选", kind="trade_intent")
+    assert ready_summary.splitlines() == [
+        "🟢 MANUAL READY · PUT SPREAD",
+        "买入  SPXW 08-27 7725P · 卖出  SPXW 08-27 7710P",
+        "限价  净借记 ≤ 6.50 · 有效  剩余 300 秒；提交前重新报价",
+        "风险  每组最大损失 $650 · 止损  SPX 收回 7728.00 · 目标  SPX 7715.00",
+    ]
+    compact_detail = bark_lockscreen_summary(
+        ready,
+        title="SPX PUT 候选",
+        kind="trade_intent",
+        include_links=True,
+    )
+    assert "触发  Call Wall" not in compact_detail
+    assert "[策略风险图](https://spx.zh3nyu.com/strategy-risk/latest.png)" in compact_detail
+
+    no_trade = "\n".join(
+        (
+            "## Desk View",
+            "NO TRADE · 市场偏向中性",
+            "主因  跨式尚未衰减",
+            "下一步  等待价格与赔率同时通过",
+            "## Data Quality",
+            "数据  执行 READY · 研究 DEGRADED",
+        )
+    )
+    assert bark_lockscreen_summary(no_trade, title="SPX Desk Map").splitlines() == [
+        "NO TRADE · 市场偏向中性",
+        "主因  跨式尚未衰减",
+        "下一步  等待价格与赔率同时通过",
+        "数据  执行 READY · 研究 DEGRADED",
+    ]
+
+    system = "\n".join(
+        (
+            "⚠️ 系统状态",
+            "状态  IBKR session interrupted",
+            "影响  GTH exact BBO unavailable",
+            "交易  本条不是 Call/Put 信号",
+        )
+    )
+    assert bark_lockscreen_summary(system, title="SPX 系统事件").splitlines() == [
+        "状态  IBKR session interrupted",
+        "影响  GTH exact BBO unavailable",
+    ]
+
+    terminal = "\n".join(
+        (
+            "## Desk View",
+            "🔴 EXIT REVIEW · PUT SPREAD",
+            "## Execution",
+            "未成交  忽略原卡",
+            "已成交  重新报价并人工限价退出",
+            "## Risk",
+            "原因  level_source_invalidated",
+            "合约  买 7725P / 卖 7710P",
+        )
+    )
+    assert bark_lockscreen_summary(terminal, title="SPX GTH 退出检查").splitlines() == [
+        "🔴 EXIT REVIEW · PUT SPREAD",
+        "未成交  忽略原卡",
+        "已成交  重新报价并人工限价退出",
+        "原因  关键位失效 · 合约  买 7725P / 卖 7710P",
+    ]
 
 
 def test_feishu_status_card_uses_sections_and_state_color() -> None:

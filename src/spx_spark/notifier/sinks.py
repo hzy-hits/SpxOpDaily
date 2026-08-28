@@ -421,10 +421,10 @@ def deliver_trade_push(
     """
     del runner  # kept for call-site compatibility; Weixin fan-out removed
     from spx_spark.notifier.format_push import (
+        bark_display_title,
         bark_groups_for_lane,
         bark_lockscreen_summary,
         build_feishu_card,
-        strip_markdown_light,
     )
 
     sinks: list[SinkResult] = []
@@ -439,21 +439,31 @@ def deliver_trade_push(
         sinks.append(send_feishu_card(settings, card))
 
     if settings.bark_enabled and target_enabled("bark"):
+        bark_title = bark_display_title(title)
         group = bark_groups_for_lane(
             lane,
             trade_group=settings.bark_group,
             ops_group=settings.bark_ops_group,
         )
         if is_trade:
-            body = bark_lockscreen_summary(text)
-            markdown = text if settings.bark_markdown_enabled else None
+            body = bark_lockscreen_summary(text, title=bark_title, kind=kind)
+            markdown = (
+                bark_lockscreen_summary(
+                    text,
+                    title=bark_title,
+                    kind=kind,
+                    include_links=True,
+                )
+                if settings.bark_markdown_enabled
+                else None
+            )
         else:
-            body = strip_markdown_light(text)
+            body = bark_lockscreen_summary(text, title=bark_title, kind=kind)
             markdown = None
         sinks.append(
             send_bark_message(
                 settings,
-                title,
+                bark_title,
                 body,
                 group=group,
                 markdown=markdown,
@@ -466,11 +476,12 @@ def deliver_trade_push(
         and is_trade
         and target_enabled("bark_friend")
     ):
+        bark_title = bark_display_title(title)
         sinks.append(
             send_bark_friend_message(
                 settings,
-                title,
-                bark_lockscreen_summary(text),
+                bark_title,
+                bark_lockscreen_summary(text, title=bark_title, kind=kind),
             )
         )
 
@@ -526,7 +537,7 @@ def im_delivery_failed(sinks: list[SinkResult]) -> bool:
 
 
 BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("0DTE | CALL RECLAIM", frozenset({"gth_dip_reclaim_call"})),
+    ("0DTE Call 回收确认", frozenset({"gth_dip_reclaim_call"})),
     (
         "0DTE 熊背离观察",
         frozenset({"captured_net_premium_bearish_divergence"}),
@@ -535,7 +546,7 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
         "0DTE 牛背离观察",
         frozenset({"captured_net_premium_bullish_divergence"}),
     ),
-    ("GTH 方向提示", frozenset({
+    ("GTH 方向观察", frozenset({
         "gth_bias_transition",
         "globex_trend_continuation",
         "gth_directional_advisory",
@@ -553,7 +564,7 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
         "ibkr_session_restored",
         "ibkr_session_login",
     })),
-    ("波动率信号", frozenset({
+    ("波动率观察", frozenset({
         "put_skew_steepening_5m",
         "atm_iv_jump_5m",
         "iv_surface_shift_5m",
@@ -568,7 +579,7 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
         "globex_trend_transition",
         "broker_unavailable_proxy_watch",
     })),
-    ("结构信号", frozenset({
+    ("结构观察", frozenset({
         "option_gamma_regime",
         "option_wall_proximity",
         "flip_reclaim_call",
@@ -580,12 +591,13 @@ BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
 def bark_title_for_alerts(alerts: list[dict[str, object]]) -> str:
     top = alerts[0] if alerts else {}
     kind = str(top.get("kind", "")) or "alert"
-    extra = f" +{len(alerts) - 1}" if len(alerts) > 1 else ""
+    extra = f" · {len(alerts)} 项" if len(alerts) > 1 else ""
     for label, kinds in BARK_TITLE_CATEGORIES:
         if kind in kinds:
             return f"SPX {label}{extra}"
-    severity = str(top.get("severity", "")).upper() or "ALERT"
-    return f"SPX Spark {severity} {kind}{extra}"
+    severity = str(top.get("severity", "")).lower()
+    label = "紧急提醒" if severity == "critical" else "市场提醒"
+    return f"SPX {label}{extra}"
 
 
 def openclaw_delivery_error(stdout: str) -> str | None:

@@ -38,6 +38,8 @@ _MD_HEADING_RE = re.compile(r"^#{1,3}\s+")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_CODE_RE = re.compile(r"`([^`]+)`")
 _MD_BULLET_RE = re.compile(r"^[-*]\s+")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_URL_RE = re.compile(r"https?://[^\s)]+")
 _SPX_STATUS_HEADER_RE = re.compile(r"^【(SPX (?:15m|状态) · .+)】$")
 _STATUS_PLAN_RE = re.compile(r"^(计划\d+\s*·\s*\S+)\s{2}(.*)$")
 _TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
@@ -397,16 +399,249 @@ def strip_markdown_light(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def bark_lockscreen_summary(text: str, *, max_lines: int = 4, max_chars: int = 280) -> str:
-    """First few non-empty lines for the iOS notification preview."""
-    plain = strip_markdown_light(text)
-    lines = [line for line in plain.splitlines() if line.strip()]
+def bark_lockscreen_summary(
+    text: str,
+    *,
+    title: str = "",
+    kind: str = "",
+    include_links: bool = False,
+    max_lines: int = 4,
+    max_chars: int = 280,
+) -> str:
+    """Render a decision-first Bark preview instead of slicing writer prose."""
+
+    sections, lines = _bark_content(text, title=title)
     if not lines:
-        return plain[:max_chars]
-    summary = "\n".join(lines[:max_lines]).strip()
+        return strip_markdown_light(text)[:max_chars]
+    upper = text.upper()
+    if "EXIT REVIEW" in upper or "CANCEL ENTRY" in upper or "READY CANCELLED" in upper:
+        selected = _bark_terminal_lines(sections, lines)
+    elif (
+        "MANUAL READY" in upper
+        or kind == "trade_intent"
+        or ("只许限价" in text and ("净借记" in text or "净贷记" in text))
+    ):
+        selected = _bark_ready_lines(sections, lines)
+    elif "持仓" in title or "持仓事件" in text:
+        selected = _bark_prefixed_lines(lines, ("状态", "动作", "风险", "数据"))
+    elif "系统" in title or "系统状态" in text:
+        selected = _bark_prefixed_lines(lines, ("状态", "影响", "动作", "数据"))
+    elif any(token in text for token in ("NO TRADE", "只观察", "不做")):
+        selected = _bark_observation_lines(sections, lines, title=title)
+    else:
+        selected = _bark_default_lines(sections, lines)
+
+    selected = _unique_lines(selected)[:max_lines]
+    if not selected:
+        selected = lines[:max_lines]
+    summary = "\n".join(selected).strip()
     if len(summary) > max_chars:
         summary = summary[: max_chars - 1].rstrip() + "…"
-    return summary
+    if not include_links:
+        return summary
+    links: list[tuple[str, str]] = []
+    for label, url in _MD_LINK_RE.findall(text):
+        if url not in {item[1] for item in links}:
+            links.append((strip_markdown_light(label), url))
+    if not links:
+        for line in text.splitlines():
+            urls = _URL_RE.findall(line)
+            for url in urls:
+                if url not in {item[1] for item in links}:
+                    label = line.split(url, 1)[0].strip(" ：:") or "查看图表"
+                    links.append((strip_markdown_light(label), url))
+    if not links:
+        return summary
+    link_line = "图表  " + " · ".join(f"[{label}]({url})" for label, url in links[:2])
+    return f"{summary}\n\n{link_line}"
+
+
+def bark_display_title(title: str) -> str:
+    """Remove producer jargon from the Bark-only title."""
+
+    replacements = (
+        ("SPX GTH OPERATOR CANDIDATE · MANUAL ONLY", "SPX GTH 人工候选"),
+        ("SPX GTH EXIT REVIEW · MANUAL ONLY", "SPX GTH 退出检查"),
+        ("SPX GTH READY CANCELLED · MANUAL ONLY", "SPX GTH 候选已失效"),
+        (" · MANUAL ONLY", ""),
+    )
+    compact = title
+    for old, new in replacements:
+        compact = compact.replace(old, new)
+    return compact
+
+
+def _bark_content(text: str, *, title: str) -> tuple[dict[str, list[str]], list[str]]:
+    sections: dict[str, list[str]] = {"": []}
+    current = ""
+    flat: list[str] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("## "):
+            current = stripped.removeprefix("## ").strip()
+            sections.setdefault(current, [])
+            continue
+        if not stripped or (stripped.startswith("【") and stripped.endswith("】")):
+            continue
+        if stripped.startswith("# ") or _MD_LINK_RE.fullmatch(stripped):
+            continue
+        line = _clean_bark_line(strip_markdown_light(stripped))
+        if not line or line == title or _bark_noise(line):
+            continue
+        sections.setdefault(current, []).append(line)
+        flat.append(line)
+    return sections, _unique_lines(flat)
+
+
+def _clean_bark_line(line: str) -> str:
+    for phrase in (
+        "（仅事件背景，不是入场授权）",
+        "（不等于入场授权）",
+        "（仅结构背景）",
+    ):
+        line = line.replace(phrase, "")
+    replacements = (
+        ("0DTE vs next ATM IV gap ", "0DTE ATM IV − 次日 ATM IV："),
+        (" 1h surface shift ", " 平均 IV 曲面 1小时变化："),
+        (" 1h ATM IV change ", " ATM IV 1小时变化："),
+        (" ATM IV jump ", " ATM IV 5分钟变化："),
+        (" put skew steepening ", " Put 25Δ 偏斜 5分钟变化："),
+        (" put skew ratio change ", " Put 偏斜比 5分钟变化："),
+        (" surface shift ", " 平均 IV 曲面 5分钟变化："),
+        ("level_source_invalidated", "关键位失效"),
+        ("level_source_expired", "信号已过期"),
+        ("level_source_not_confirmed", "关键位确认已撤销"),
+        ("level_source_formal_signal_absent", "确认信号不再存在"),
+        ("level_source_quality_invalid", "数据质量不再合格"),
+        ("trend_transition_session_mismatch", "趋势状态已切换"),
+    )
+    for old, new in replacements:
+        line = line.replace(old, new)
+    return line.replace(" vol pts", " 波动率点").strip()
+
+
+def _bark_noise(line: str) -> bool:
+    return bool(
+        line.startswith(("决策 id=", "数据  as_of=", "策略决策 本周期不可用"))
+        or line.startswith("等待  对应关键位确认")
+        or line.startswith("合约  当前没有可执行合约")
+        or line.startswith("权限  自动下单关闭")
+        or line.startswith("交易  本条不是 Call/Put 信号")
+    )
+
+
+def _section(sections: dict[str, list[str]], *names: str) -> list[str]:
+    return [line for name in names for line in sections.get(name, ())]
+
+
+def _first(lines: list[str], *prefixes: str) -> str:
+    for prefix in prefixes:
+        for line in lines:
+            if line.startswith(prefix):
+                return line
+        for line in lines:
+            if prefix in line:
+                return line
+    return ""
+
+
+def _join_lines(*lines: str, limit: int = 132) -> str:
+    joined = " · ".join(_unique_lines([line for line in lines if line]))
+    return joined if len(joined) <= limit else joined[: limit - 1].rstrip() + "…"
+
+
+def _unique_lines(lines: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        key = re.sub(r"\s+", " ", line).strip().casefold()
+        if line and key not in seen:
+            seen.add(key)
+            unique.append(line)
+    return unique
+
+
+def _bark_ready_lines(
+    sections: dict[str, list[str]], lines: list[str]
+) -> list[str]:
+    desk = _section(sections, "Desk View", "结论")
+    execution = _section(sections, "Execution", "执行")
+    risk_lines = _section(sections, "Risk", "风险")
+    targets = _section(sections, "Targets", "目标")
+    lead = _first(desk, "MANUAL READY", "只许限价") or (desk[0] if desk else lines[0])
+    buy = _first(execution, "买入")
+    sell = _first(execution, "卖出")
+    contract = _join_lines(buy, sell) if buy else _first(execution, "四腿", "合约")
+    if not contract:
+        contract = next(
+            (
+                line
+                for line in execution
+                if not line.startswith(
+                    ("MANUAL READY", "类型", "Provider", "NBBO", "限价", "净借记", "净贷记", "有效", "提交", "权限")
+                )
+            ),
+            "",
+        )
+    if "铁鹰" in lead:
+        contract = ""
+    entry = _first(execution, "限价", "净借记", "净贷记")
+    valid = _first(execution, "有效")
+    max_loss = _first(risk_lines, "最大亏损", "风险")
+    stop = _first(risk_lines, "止损", "失效")
+    target = _first(targets, "止盈", "目标", "SPX") or (targets[0] if targets else "")
+    risk = _join_lines(max_loss, stop)
+    if contract:
+        risk = _join_lines(risk, target)
+        return [lead, contract, _join_lines(entry, valid), risk]
+    return [lead, _join_lines(entry, valid), risk, target]
+
+
+def _bark_terminal_lines(
+    sections: dict[str, list[str]], lines: list[str]
+) -> list[str]:
+    desk = _section(sections, "Desk View", "结论")
+    execution = _section(sections, "Execution", "执行")
+    risk = _section(sections, "Risk", "风险")
+    lead = _first(desk + lines, "EXIT REVIEW", "READY CANCELLED", "CANCEL ENTRY")
+    unfilled = _first(execution, "未成交")
+    filled = _first(execution, "已成交")
+    reason = _first(risk, "原因")
+    contract = _first(risk, "合约")
+    return [lead or lines[0], unfilled, filled, _join_lines(reason, contract)]
+
+
+def _bark_observation_lines(
+    sections: dict[str, list[str]], lines: list[str], *, title: str
+) -> list[str]:
+    desk = _section(sections, "Desk View", "结论")
+    event = _first(lines, "事件", "变化")
+    lead = _first(desk + lines, "NO TRADE", "不做", "只观察")
+    if "波动率" in title and event:
+        return [event, "结论  仅观察；不判断涨跌"]
+    cause = _first(desk + lines, "主因", "原因", "方向", "解释")
+    next_step = _first(lines, "下一步", "触发", "等待")
+    quality = _first(lines, "数据", "执行")
+    return [lead or event or lines[0], event or cause, next_step, quality]
+
+
+def _bark_prefixed_lines(lines: list[str], prefixes: tuple[str, ...]) -> list[str]:
+    selected = [_first(lines, prefix) for prefix in prefixes]
+    return selected or lines[:4]
+
+
+def _bark_default_lines(
+    sections: dict[str, list[str]], lines: list[str]
+) -> list[str]:
+    desk = _section(sections, "Desk View", "结论")
+    execution = _section(sections, "Execution", "执行")
+    risk = _section(sections, "Risk", "风险")
+    targets = _section(sections, "Targets", "目标", "下一步")
+    lead = desk[0] if desk else lines[0]
+    action = _first(execution, "限价", "执行", "动作", "买入", "卖出")
+    risk_line = _first(risk, "止损", "失效", "风险") or (risk[0] if risk else "")
+    target = _first(targets, "目标", "下一步") or (targets[0] if targets else "")
+    return [lead, action, risk_line, target]
 
 
 def push_lane_for_alerts(alerts: list[dict[str, object]]) -> str:
