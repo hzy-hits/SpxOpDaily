@@ -45,6 +45,7 @@ GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 GTH_ATM_PIN = "GTH_ATM_PIN"
 PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
+RTH_LEVEL_CONFIRMATION = "RTH_LEVEL_CONFIRMATION"
 CLOSE_CONVERGENCE_60M = "CLOSE_CONVERGENCE_60M"
 CLOSE_CONVERGENCE_CONTRACT_HASH = (
     "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
@@ -182,7 +183,14 @@ def _vertical_candidates(
                 if row:
                     rows.append(row)
                 continue
-            if _map(evidence.get("long")) and _map(evidence.get("short")):
+            level_confirmation = (
+                evidence.get("setup_kind") == RTH_LEVEL_CONFIRMATION
+            )
+            if (
+                not level_confirmation
+                and _map(evidence.get("long"))
+                and _map(evidence.get("short"))
+            ):
                 rows.append(
                     _vertical_candidate_from_evidence(evidence, facts, now=now, policy=policy)
                 )
@@ -280,8 +288,13 @@ def _rth_width_verticals(
         _round_to_strike(_number(_map(facts.get("spot")).get("spx"))),
     }
     rows = []
+    widths = (
+        (15.0,)
+        if evidence.get("setup_kind") == RTH_LEVEL_CONFIRMATION
+        else WIDTHS
+    )
     for long_strike in sorted(value for value in anchors if value is not None):
-        for width in WIDTHS:
+        for width in widths:
             short_strike = long_strike + width if right == "C" else long_strike - width
             if vertical_width_path_reasons(
                 long_strike=long_strike,
@@ -582,6 +595,12 @@ def _rth_evidences(
     bases: list[dict[str, Any]] = []
     reasons: list[str] = []
     setup_facts = [_map(row) for row in facts.get("rth_setups") or ()]
+    level_confirmation_setups = [
+        row
+        for row in setup_facts
+        if str(row.get("setup_kind") or "") == RTH_LEVEL_CONFIRMATION
+        and str(row.get("thesis") or "").lower() == "breakout"
+    ]
     momentum_setups = [
         row for row in setup_facts if str(row.get("setup_kind") or "") == "ES_VOLUME_MOMENTUM"
     ]
@@ -595,6 +614,19 @@ def _rth_evidences(
     if pin_blocks:
         reasons.append("directional_spread_blocked_by_pin_watch")
     clarity_blocks: list[str] = []
+    for setup in level_confirmation_setups:
+        direction = _direction(setup.get("direction"))
+        if setup.get("state") != "ENTRY_WINDOW_OPEN" or not direction or pin_blocks:
+            continue
+        bases.append(
+            {
+                **dict(setup),
+                "setup_kind": RTH_LEVEL_CONFIRMATION,
+                "setup_state": setup.get("state"),
+                "direction": direction,
+                "source": "rth_confirmed_level_decision",
+            }
+        )
     for setup in momentum_setups:
         if setup.get("state") != "ENTRY_WINDOW_OPEN":
             continue
@@ -646,7 +678,7 @@ def _rth_evidences(
     if not bases and not pin_blocks:
         if clarity_blocks:
             reasons.append(clarity_blocks[0])
-        elif not momentum_setups and not wall_hazard_setups:
+        elif not level_confirmation_setups and not momentum_setups and not wall_hazard_setups:
             reasons.append("es_volume_momentum_unavailable")
         else:
             blocked = [

@@ -21,6 +21,9 @@ _DENOISING_FORWARD_CONTRACT_HASH = (
 _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
+_RTH_LEVEL_CONFIRMATION_CONTRACT_HASH = (
+    "sha256:7d576327f9f0bf9fe23c993392efd76ec512e34e671826550ea33d38ff7f0a6c"
+)
 
 
 def build_market_fact_pack(
@@ -272,6 +275,16 @@ def build_market_fact_pack(
     )
     if wall_hazard_setup:
         rth_setups.append(wall_hazard_setup)
+    level_confirmation_setup = _rth_level_confirmation_setup(
+        trigger,
+        decision_at=decision_at,
+        session_date=trading_date,
+        policy=DEFAULT_STRATEGY_POLICY,
+    )
+    if level_confirmation_setup:
+        # A formal price confirmation owns the human path and should win
+        # candidate de-duplication over simultaneous background setups.
+        rth_setups.insert(0, level_confirmation_setup)
     failed_break_evaluable = opening_range_ready and bool(rth_bars)
     shock = _shock_fact(
         shock_state,
@@ -415,7 +428,10 @@ def build_market_fact_pack(
         "trigger": {"phase": trigger.get("phase"), "direction": trigger.get("direction"),
                     "thesis": trigger.get("thesis"), "level_kind": trigger.get("level_kind"),
                     "level": _number(trigger.get("level")),
-                    "levels": dict(_map(trigger.get("levels"))), "event_id": trigger.get("event_id")},
+                    "levels": dict(_map(trigger.get("levels"))), "event_id": trigger.get("event_id"),
+                    "formal_signal": trigger.get("formal_signal") is True,
+                    "phase_at": trigger.get("phase_at"),
+                    "expires_at": trigger.get("expires_at")},
         "session_episode": {
             "phase": episode_phase,
             "break_direction": break_direction,
@@ -1137,6 +1153,56 @@ def _hmm_fact(payload: Mapping[str, Any], decision_at: datetime) -> dict[str, An
         "max_state_probability": posterior[dominant],
         "observed_through": observed.isoformat(),
         "reason": None,
+    }
+
+
+def _rth_level_confirmation_setup(
+    trigger: Mapping[str, Any],
+    *,
+    decision_at: datetime,
+    session_date: str,
+    policy: StrategyPolicy,
+) -> dict[str, Any]:
+    """Promote one fresh formal level confirmation into the unified funnel."""
+
+    signal_at = _time(trigger.get("phase_at") or trigger.get("updated_at"))
+    valid_until = _time(trigger.get("expires_at"))
+    direction = str(trigger.get("direction") or "").lower()
+    event_id = str(trigger.get("event_id") or "")
+    thesis = str(trigger.get("thesis") or "")
+    if (
+        trigger.get("formal_signal") is not True
+        or trigger.get("level_path_confirmed") is not True
+        or trigger.get("quality_ok") is not True
+        or str(trigger.get("phase") or "") != "confirmed"
+        or str(trigger.get("session_mode") or "").lower() != "rth"
+        or direction not in {"up", "down"}
+        or thesis != "breakout"
+        or not event_id
+        or signal_at is None
+        or valid_until is None
+        or signal_at > decision_at
+        or decision_at >= valid_until
+        or not 0.0 < (valid_until - signal_at).total_seconds() <= 310.0
+    ):
+        return {}
+    return {
+        "setup_kind": "RTH_LEVEL_CONFIRMATION",
+        "setup_variant": f"{thesis.upper()}::{str(trigger.get('level_kind') or 'LEVEL').upper()}",
+        "state": "ENTRY_WINDOW_OPEN",
+        "direction": "UP" if direction == "up" else "DOWN",
+        "session_date": session_date,
+        "signal_at": signal_at.isoformat(),
+        "valid_until": valid_until.isoformat(),
+        "trigger_level": _number(trigger.get("level")),
+        "event_id": event_id,
+        "thesis": thesis,
+        "source": "rth_confirmed_level_decision",
+        "geometry_source": "confirmed_level_geometry",
+        "authorization_policy": policy.policy_version,
+        "evidence_contract_hash": _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
+        "evidence_status": "forward_unvalidated_user_override",
+        "automatic_ordering": False,
     }
 
 

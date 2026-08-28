@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -12,18 +12,9 @@ from spx_spark.application.market_features.spring_gamma_operator import (
     spring_gamma_operator_view,
 )
 from spx_spark.application.market_features.prior_rth_context import (
-    prior_session_operator_line,
     prior_session_signal_view,
 )
-from spx_spark.application.market_features.virtual_strategy_state import (
-    flush_pending_notifications,
-)
-from spx_spark.config import NotificationSettings, StorageSettings
-from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.notifier.operator_cards import (
-    option_contract_label,
-    render_operator_card,
-)
+from spx_spark.config import StorageSettings
 from spx_spark.state_io import (
     atomic_write_json_secure,
     exclusive_state_lock,
@@ -33,7 +24,6 @@ from spx_spark.state_io import (
 
 CONTRACT_VERSION = "gamma_prearm_plan.v1"
 REPRICING_MAX_AGE_SECONDS = 45.0
-DELIVERY_TTL_SECONDS = 90.0
 PREPARATION_PHASES = frozenset({"approaching", "break_pending", "reject_pending"})
 
 
@@ -199,9 +189,8 @@ def process_gamma_prearm_plan(
     prior_session: Mapping[str, object] | None = None,
     gth_position_fraction: float | None = None,
     invalidation_buffer_points: float = 3.0,
-    notification: NotificationSettings | None = None,
 ) -> dict[str, object]:
-    """Persist and deliver a Gamma preparation plan once per semantic level."""
+    """Persist a Gamma preparation plan for Desk Map/research only."""
 
     now = _utc(now)
     plan = evaluate_gamma_prearm_plan(
@@ -215,9 +204,6 @@ def process_gamma_prearm_plan(
     )
     state_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan_state.json"
     projection_path = Path(storage.data_root) / "latest" / "gamma_prearm_plan.json"
-    event_id = _notification_event_id(plan)
-    human_eligible = _human_notification_eligible(plan, now=now)
-    settings = notification or NotificationSettings.from_env()
     with exclusive_state_lock(state_path):
         state = read_json_object(state_path)
         accepted = {
@@ -230,30 +216,6 @@ def process_gamma_prearm_plan(
             for item in state.get("settled_notification_event_ids") or []
             if item
         }
-        pending = [
-            dict(item)
-            for item in state.get("pending_notifications") or []
-            if isinstance(item, Mapping)
-        ]
-        if not DEFAULT_MARKET_CALENDAR.is_rth_open(now):
-            pending = []
-        else:
-            pending = [
-                item
-                for item in pending
-                if str(item.get("event_id") or "").endswith(
-                    (":break_pending", ":reject_pending")
-                )
-            ]
-        pending_ids = {str(item.get("event_id") or "") for item in pending}
-        if (
-            event_id
-            and human_eligible
-            and event_id not in accepted
-            and event_id not in settled
-            and event_id not in pending_ids
-        ):
-            pending.append(_notification_intent(plan, event_id=event_id, now=now))
         state.update(
             {
                 "schema_version": 1,
@@ -261,24 +223,17 @@ def process_gamma_prearm_plan(
                 "last_plan": dict(plan),
                 "accepted_notification_event_ids": sorted(accepted)[-200:],
                 "settled_notification_event_ids": sorted(settled)[-200:],
-                "pending_notifications": pending,
+                # Retire any intent left by the former human pre-arm lane.
+                "pending_notifications": [],
             }
         )
         atomic_write_json_secure(state_path, state)
         atomic_write_json_secure(projection_path, plan)
-    result = {"attempted": False, "accepted": False}
-    if event_id and human_eligible:
-        result = flush_pending_notifications(
-            state_path,
-            settings=settings,
-            now=now,
-            only_event_id=event_id,
-        )
     return {
         **plan,
-        "notification_attempted": bool(result.get("attempted")),
-        "notification_accepted": bool(result.get("accepted")),
-        "notification_outcome": result.get("outcome"),
+        "notification_attempted": False,
+        "notification_accepted": False,
+        "notification_outcome": "unified_strategy_decision_owned",
     }
 
 
@@ -329,198 +284,6 @@ def _plan_path(
     }
 
 
-def _notification_intent(
-    plan: Mapping[str, object],
-    *,
-    event_id: str,
-    now: datetime,
-) -> dict[str, object]:
-    level_label = {
-        "put_wall": "Put Wall",
-        "flip_low": "Flip Low",
-        "flip_high": "Flip High",
-        "call_wall": "Call Wall",
-    }.get(str(plan.get("level_kind") or ""), "Gamma 位")
-    pending = str(plan.get("notification_stage") or "") in {
-        "break_pending",
-        "reject_pending",
-    }
-    paths = [item for item in plan.get("paths") or () if isinstance(item, Mapping)]
-    selected = paths[0] if pending and len(paths) == 1 else None
-    selected_side = str(selected.get("side") or "") if selected is not None else ""
-    decision = (
-        "LONG / CALL"
-        if selected_side == "CALL"
-        else "SHORT / PUT"
-        if selected_side == "PUT"
-        else "DIRECTION UNKNOWN"
-    )
-    headline = (
-        f"🟠 {decision} 候选 · 价格条件已出现，尚未确认"
-        if pending
-        else "🟡 结构观察 · NO TRADE · 等价格选边"
-    )
-    spot = float(plan["current_spx"])
-    level = float(plan["level"])
-    if spot > level:
-        position = f"{level_label} {level:.2f} 上方 {spot - level:.2f} 点"
-    elif spot < level:
-        position = f"{level_label} {level:.2f} 下方 {level - spot:.2f} 点"
-    else:
-        position = f"正在 {level_label} {level:.2f}"
-    desk_view = [headline]
-    if selected is not None:
-        entry_limit = _entry_price_limit(selected)
-        current_ask = _number(selected.get("decision_ask"))
-        entry_limit_label = (
-            f"≤ {entry_limit:.2f}" if entry_limit is not None else "触位时重算"
-        )
-        current_ask_label = f"{current_ask:.2f}" if current_ask is not None else "不可用"
-        chase_state = "⛔ 禁止追价" if _quote_above_reference(selected) else "⏳ 等确认后重报"
-        desk_view.append(
-            f"**💵 入场上限  {entry_limit_label} · 当前 Ask {current_ask_label}"
-            f" · {chase_state}**"
-        )
-        desk_view.append(
-            f"合约  {option_contract_label(str(selected['contract_id']))} · "
-            f"当前 Bid/Ask {_quote_range(selected)} · 触位参考 {_price_range(selected)}"
-        )
-        desk_view.append(
-            f"**📍 位置  SPX {spot:.2f} · {position}**"
-        )
-    else:
-        desk_view.append(
-            f"区域  {level_label} {level:.2f} · 当前 SPX {spot:.2f} · "
-            f"距离 {float(plan['distance_points']):.2f} 点"
-        )
-    desk_view.append(_gamma_feedback_line(plan))
-    execution: list[str] = []
-    risk = [
-        "失效  结构位变化、状态机离开本事件，或出现相反路径确认",
-        "权限  结构观察不是交易信号；自动下单关闭",
-    ]
-    targets: list[str] = []
-    if not pending:
-        desk_view.append("方向来源  尚无价格接受/拒绝确认；Gamma 不提供第一步方向")
-        for item in paths:
-            direction = "LONG" if item.get("side") == "CALL" else "SHORT"
-            desk_view.append(
-                f"{direction}条件  {item['condition']}；发生后再生成单一路径执行卡"
-            )
-        execution.append("动作  只观察结构，不展示合约；价格选出单一路径后再评估执行。")
-        targets.append("结构目标不可用；进入 READY 时再计算目标与盈亏比。")
-    elif selected is not None:
-        desk_view.append(
-            f"方向来源  {decision} 来自价格{selected['condition']}；"
-            "Gamma 只解释该路径可能被压制或放大"
-        )
-        price_range = _price_range(selected)
-        entry_limit = _entry_price_limit(selected)
-        current_ask = _number(selected.get("decision_ask"))
-        execution.append(
-            "**💵 入场价格（确认后）  "
-            f"{'限价 ≤ ' + format(entry_limit, '.2f') if entry_limit is not None else '触位时重算'}"
-            f" · 参考区间 {price_range}**"
-        )
-        execution.append(
-            f"合约  {option_contract_label(str(selected['contract_id']))} · "
-            f"当前 Bid/Ask {_quote_range(selected)} · 提交前必须重报"
-        )
-        if _quote_above_reference(selected):
-            execution.append(
-                "**⛔ 当前 Ask "
-                f"{current_ask:.2f} > 入场上限 {entry_limit:.2f} · 不得入场/追价**"
-                if current_ask is not None and entry_limit is not None
-                else "**⛔ 当前 Ask 高于入场上限 · 不得入场/追价**"
-            )
-        invalidation = _number(selected.get("invalidation_spx"))
-        target = _geometry_target(selected.get("confirmation_geometry"))
-        execution.append("触发  状态机 CONFIRMED 后才入场；重新报价通过后才允许人工提交。")
-        risk.append(
-            f"失效 SPX {'跌回' if selected_side == 'CALL' else '收回'} "
-            f"{invalidation:.2f}"
-            if invalidation is not None
-            else "SPX 失效位不可用；不得进入 READY"
-        )
-        if target is not None:
-            targets.append(f"下一有效结构目标 {target:.2f}；READY 时重算盈亏比。")
-        else:
-            targets.append("结构目标不可用；进入 READY 时再计算目标与盈亏比。")
-    desk_view.append(_prior_session_plan_line(plan))
-    if selected is not None:
-        provider = str(selected.get("quote_provider") or "不可用")
-        quote_status = (
-            "bid/ask 可用"
-            if _number(selected.get("decision_bid")) is not None
-            and _number(selected.get("decision_ask")) is not None
-            else "精确报价不可用"
-        )
-        quote_line = f"报价源  {provider} · {quote_status}"
-    else:
-        # Observation stage deliberately selects no contract; say that instead
-        # of "unavailable", which reads like a market-data outage.
-        quote_line = "报价  观察阶段未选定合约（数据正常）· 触发选边后展示报价源与 bid/ask"
-    text = render_operator_card(
-        desk_view="\n".join(desk_view),
-        execution="\n".join(execution),
-        risk="\n".join(risk),
-        targets="\n".join(targets),
-        data_quality=(
-            f"{quote_line} · 卡片 TTL {int(DELIVERY_TTL_SECONDS)} 秒\n"
-            "Gamma/OI 仅为结构代理；dealer 持仓方向未知，不用 Gamma 猜第一步方向。"
-        ),
-    )
-    expires_at = now + timedelta(seconds=DELIVERY_TTL_SECONDS)
-    return {
-        "event_id": event_id,
-        "source": "gamma_prearm_plan",
-        "kind": "gamma_level_prearm_plan",
-        "lane": "gamma_prearm_plan",
-        "occurred_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "operator_opportunity_id": str(plan.get("source_event_id") or event_id),
-        "operator_generation": _generation(plan),
-        "title": (
-            f"SPX {decision} 候选 · 等最终确认"
-            if pending
-            else "SPX 结构观察 · 等价格选边"
-        ),
-        "text": text,
-        "friend": True,
-        "feishu_text": text,
-        "enqueued_at": now.isoformat(),
-    }
-
-
-def _notification_event_id(plan: Mapping[str, object]) -> str | None:
-    if plan.get("status") != "prearm_ready":
-        return None
-    plan_id = str(plan.get("plan_id") or "")
-    source_event_id = str(plan.get("source_event_id") or "")
-    stage = str(plan.get("notification_stage") or "")
-    if not plan_id or not source_event_id or not stage:
-        return None
-    lifecycle = hashlib.sha256(source_event_id.encode()).hexdigest()[:12]
-    return f"{plan_id}:{lifecycle}:{stage}"
-
-
-def _human_notification_eligible(plan: Mapping[str, object], *, now: datetime) -> bool:
-    """Page a person only after price has picked one side during RTH.
-
-    Approaching is two-sided wait-and-see and does not change an action.
-    GTH already has a separate human path (session-advance / aged dip).
-    """
-
-    if plan.get("status") != "prearm_ready":
-        return False
-    if str(plan.get("notification_stage") or "") not in {
-        "break_pending",
-        "reject_pending",
-    }:
-        return False
-    return DEFAULT_MARKET_CALENDAR.is_rth_open(now)
-
-
 def _generation(value: Mapping[str, object]) -> int:
     generation = value.get("reentry_generation", 0)
     if isinstance(generation, int) and not isinstance(generation, bool):
@@ -537,60 +300,6 @@ def _condition(play: str) -> str:
     }[play]
 
 
-def _price_range(path: Mapping[str, object]) -> str:
-    low = _number(path.get("projected_low"))
-    high = _number(path.get("projected_high"))
-    if low is not None and high is not None:
-        return f"{low:.2f}–{high:.2f}"
-    limit = _entry_price_limit(path)
-    return f"≤ {limit:.2f}" if limit is not None else "触位时重算"
-
-
-def _quote_range(path: Mapping[str, object]) -> str:
-    bid = _number(path.get("decision_bid"))
-    ask = _number(path.get("decision_ask"))
-    if bid is not None and ask is not None:
-        return f"{bid:.2f}/{ask:.2f}"
-    return "重新报价"
-
-
-def _quote_above_reference(path: Mapping[str, object]) -> bool:
-    ask = _number(path.get("decision_ask"))
-    limit = _entry_price_limit(path)
-    return ask is not None and limit is not None and ask > limit
-
-
-def _entry_price_limit(path: Mapping[str, object]) -> float | None:
-    projected_high = _number(path.get("projected_high"))
-    if projected_high is not None:
-        return projected_high
-    return _number(path.get("limit_conservative"))
-
-
-def _gamma_feedback_line(plan: Mapping[str, object]) -> str:
-    context = plan.get("gamma_context")
-    context = context if isinstance(context, Mapping) else {}
-    state = str(context.get("state") or "unknown")
-    assumption = "Call+/Put− OI proxy；dealer sign unknown"
-    if state == "positive_gamma_pin":
-        return (
-            f"Gamma职责  代理正 Gamma（{assumption}）· 偏压制/回归；"
-            "拒绝路径优先，突破必须额外确认，不给涨跌方向"
-        )
-    if state in {"negative_gamma_acceleration", "negative_gamma_expansion", "negative_gamma"}:
-        return (
-            f"Gamma职责  代理负 Gamma（{assumption}）· 放大已确认方向；"
-            "价格接受前不选 LONG/SHORT"
-        )
-    if state == "zero_gamma_transition":
-        return f"Gamma职责  过渡区（{assumption}）· 情景敏感；价格选边前 NO TRADE"
-    return f"Gamma职责  unavailable（{assumption}）· 不参与方向"
-
-
-def _geometry_target(value: object) -> float | None:
-    return _number(value.get("target_spx")) if isinstance(value, Mapping) else None
-
-
 def _active_play(level_decision: Mapping[str, object]) -> str | None:
     thesis = str(level_decision.get("thesis") or "")
     direction = str(level_decision.get("direction") or "")
@@ -600,19 +309,6 @@ def _active_play(level_decision: Mapping[str, object]) -> str | None:
         ("fade", "up"): "level_fade_call",
         ("fade", "down"): "level_fade_put",
     }.get((thesis, direction))
-
-
-def _prior_session_plan_line(plan: Mapping[str, object]) -> str:
-    line = prior_session_operator_line(plan.get("prior_session"))
-    high_risk_sides = [
-        str(item.get("side") or "")
-        for item in plan.get("paths") or ()
-        if isinstance(item, Mapping)
-        and item.get("prior_session_chase_risk") == "high"
-    ]
-    if not high_risk_sides:
-        return line
-    return f"{line}；{'/'.join(high_risk_sides)} 同向极值追单需等待墙位接受，不能直接追"
 
 
 def _number(value: object) -> float | None:

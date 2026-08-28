@@ -39,9 +39,15 @@ _GTH_DELTA_SCAN = "GTH_DELTA_SCAN"
 _GTH_HUMAN_DEBIT_SETUPS: frozenset[str] = frozenset()
 _PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 _WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
+_RTH_LEVEL_CONFIRMATION = "RTH_LEVEL_CONFIRMATION"
 _CLOSE_CONVERGENCE_60M = "CLOSE_CONVERGENCE_60M"
 _RTH_HUMAN_DEBIT_SETUPS = frozenset(
-    {"ES_VOLUME_MOMENTUM", _PREAVERAGE15_PULLBACK, _WALL_BREAKOUT_HAZARD}
+    {
+        "ES_VOLUME_MOMENTUM",
+        _PREAVERAGE15_PULLBACK,
+        _WALL_BREAKOUT_HAZARD,
+        _RTH_LEVEL_CONFIRMATION,
+    }
 )
 _GTH_HUMAN_DEBIT_SOURCES = frozenset(
     {
@@ -53,6 +59,7 @@ _RTH_DIRECTIONAL_SPREADS = {
     "ES_VOLUME_MOMENTUM",
     _PREAVERAGE15_PULLBACK,
     _WALL_BREAKOUT_HAZARD,
+    _RTH_LEVEL_CONFIRMATION,
     "FAILED_BREAK_RECLAIM",
     "TREND_PULLBACK",
     "BREAKOUT_ACCEPTANCE",
@@ -475,7 +482,11 @@ def _rth_environment_hard_gates(
     if str(_map(facts.get("session")).get("mode") or "").lower() != "rth":
         return []
     setup = str(candidate.get("setup_kind") or "")
-    if setup in {_EVENT_SETTLEMENT_SETUP, _CLOSE_CONVERGENCE_60M}:
+    if setup in {
+        _EVENT_SETTLEMENT_SETUP,
+        _CLOSE_CONVERGENCE_60M,
+        _RTH_LEVEL_CONFIRMATION,
+    }:
         return []
     strategy_type = str(candidate.get("strategy_type") or "")
     range_structure = strategy_type == _IRON_CONDOR_TYPE or (
@@ -527,7 +538,10 @@ def _unevidenced_debit_human_gate(candidate: Mapping[str, Any]) -> dict[str, Any
     return {
         "gate": _UNEVIDENCED_DEBIT_GATE,
         "actual": candidate.get("setup_kind"),
-        "threshold": "EVENT_SETTLEMENT_GTH_CONFIRMED_PREAVERAGE15_or_WALL_HAZARD",
+        "threshold": (
+            "EVENT_SETTLEMENT_GTH_CONFIRMED_PREAVERAGE15_WALL_HAZARD_"
+            "or_RTH_LEVEL_CONFIRMATION"
+        ),
     }
 
 
@@ -681,6 +695,17 @@ def _vertical_hard_gates(
     ]
     if candidate.get("setup_kind") == _WALL_BREAKOUT_HAZARD:
         gates.extend(_wall_hazard_execution_gates(candidate, policy=policy))
+    if candidate.get("setup_kind") == _RTH_LEVEL_CONFIRMATION:
+        max_loss = _number(economics.get("max_loss_points"))
+        risk_usd = None if max_loss is None else max_loss * 100.0
+        if risk_usd is None or risk_usd > 1000.0:
+            gates.append(
+                {
+                    "gate": "rth_level_confirmation_defined_risk_above_max",
+                    "actual": risk_usd,
+                    "threshold": 1000.0,
+                }
+            )
     return _block_unevidenced_debit(candidate, gates)
 
 
@@ -1916,6 +1941,7 @@ def _gate_from_entry_reason(
     if reason == "direction_valid_but_entry_too_late":
         failed_break = setup_kind == "FAILED_BREAK_RECLAIM"
         short_cycle = setup_kind == "ES_VOLUME_MOMENTUM"
+        level_confirmation = setup_kind == _RTH_LEVEL_CONFIRMATION
         return {
             "gate": reason,
             "actual": {
@@ -1925,7 +1951,9 @@ def _gate_from_entry_reason(
             },
             "threshold": {
                 "min_target_room_ratio": (
-                    policy.failed_break_min_target_room_ratio
+                    policy.level_confirmation_min_target_room_ratio
+                    if level_confirmation
+                    else policy.failed_break_min_target_room_ratio
                     if failed_break
                     else policy.min_target_room_ratio
                 ),
@@ -1935,7 +1963,9 @@ def _gate_from_entry_reason(
                     else policy.max_debit_fraction
                 ),
                 "max_progress": (
-                    policy.es_momentum_max_progress
+                    policy.level_confirmation_max_trigger_target_progress
+                    if level_confirmation
+                    else policy.es_momentum_max_progress
                     if short_cycle
                     else policy.failed_break_max_trigger_target_progress
                     if failed_break

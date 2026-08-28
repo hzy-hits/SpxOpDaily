@@ -46,7 +46,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v53"
+    policy_version: str = "strategy_policy.bootstrap.v54"
     # Policy history and frozen thresholds: docs/strategy-signal-engine-v2.md.
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
@@ -140,6 +140,8 @@ class StrategyPolicy:
     rth_setup_hold_bars: int = 2
     max_trigger_target_progress: float = 0.60
     failed_break_max_trigger_target_progress: float = 0.50
+    level_confirmation_min_target_room_ratio: float = 1.00
+    level_confirmation_max_trigger_target_progress: float = 0.80
 
     def entry_quality_kwargs(self) -> dict[str, float]:
         names = (
@@ -150,6 +152,8 @@ class StrategyPolicy:
             "failed_break_max_trigger_target_progress",
             "max_trigger_target_progress",
             "es_momentum_max_progress",
+            "level_confirmation_min_target_room_ratio",
+            "level_confirmation_max_trigger_target_progress",
         )
         return {name: getattr(self, name) for name in names}
 

@@ -610,7 +610,7 @@ def test_transition_is_audited_without_human_delivery(tmp_path, monkeypatch) -> 
     result = run_level_decision_shadow(storage, SimpleNamespace(), now=NOW)
 
     assert result["delivery"]["delivered"] is False
-    assert result["delivery"]["delivery_gate"] == "independent_trade_ready_required"
+    assert result["delivery"]["delivery_gate"] == "unified_strategy_decision_required"
     assert result["spot_source"] == "es_basis_adjusted:46.0000"
 
 
@@ -714,209 +714,10 @@ def test_operator_override_confirms_level_but_still_requires_trade_intent(
     assert result["level_path_confirmed"] is True
     assert result["actionable"] is False
     assert result["delivery"]["delivered"] is False
-    assert result["delivery"]["delivery_gate"] == "independent_trade_ready_required"
+    assert result["delivery"]["delivery_gate"] == "unified_strategy_decision_required"
 
 
-def test_meaningful_level_path_transitions_send_idempotent_non_executable_cards(
-    tmp_path, monkeypatch
-) -> None:
-    storage = SimpleNamespace(data_root=str(tmp_path))
-    current: dict[str, LevelObservation] = {}
-    enqueued: list[tuple[object, str]] = []
-    monkeypatch.setattr(
-        shadow_service,
-        "_observation",
-        lambda *_args, **_kwargs: current["value"],
-    )
-    monkeypatch.setattr(
-        transition_delivery,
-        "NotificationSettings",
-        SimpleNamespace(
-            from_env=lambda: SimpleNamespace(
-                enabled=True,
-                feishu_enabled=True,
-                bark_enabled=False,
-                bark_friend_enabled=False,
-            )
-        ),
-    )
-
-    def fake_enqueue(_settings, envelope, **kwargs):
-        enqueued.append((envelope, kwargs["text"]))
-        return SimpleNamespace(
-            targets=("feishu",),
-            accepted=True,
-            inserted=True,
-            duplicate=False,
-            queued_for_recovery=True,
-            delivered=False,
-        )
-
-    monkeypatch.setattr(transition_delivery, "enqueue_notification", fake_enqueue)
-    policy = replace(
-        LevelDecisionPolicy(),
-        formal_signal_enabled=True,
-        notify_transitions=True,
-    )
-    result = None
-    for seconds, spot, es in (
-        (0, 107.0, 5000.0),
-        (5, 101.0, 5000.0),
-        (10, 96.0, 4999.0),
-        (31, 95.0, 4997.0),
-        (40, 99.0, 4998.0),
-        (45, 95.0, 4996.0),
-        (56, 94.0, 4994.0),
-    ):
-        at = NOW + timedelta(seconds=seconds)
-        current["value"] = LevelObservation(
-            at=at,
-            spot=spot,
-            es=es,
-            levels={"put_wall": 100.0, "call_wall": 120.0},
-            quality_ok=True,
-            session_date="2026-07-13",
-            spx_spot=spot,
-        )
-        result = run_level_decision_shadow(
-            storage,
-            None,
-            now=at,
-            policy=policy,
-            notifications_enabled=True,
-        )
-
-    assert result is not None
-    assert result["phase"] == "confirmed"
-    assert result["delivery"]["accepted"] is True
-    assert result["delivery"]["queued"] is True
-    assert result["delivery"]["delivered"] is False
-    assert len(enqueued) == 1
-    assert [envelope.kind for envelope, _text in enqueued] == [
-        "level_setup_transition",
-    ]
-    assert [envelope.event_id.rsplit(":", 1)[-1] for envelope, _text in enqueued] == [
-        "confirmed",
-    ]
-    assert enqueued[0][0].expires_at == NOW + timedelta(seconds=56, minutes=15)
-    confirmed_text = enqueued[-1][1]
-    assert "结论  不做" in confirmed_text
-    assert "状态  RETEST → CONFIRMED" in confirmed_text
-    assert "墙位路径确认；不是入场，不含合约，谈不上贵或晚做" in confirmed_text
-    assert "本条不是入场" in confirmed_text
-    assert "不得按本条挂单" in confirmed_text
-    assert "独立 MANUAL READY" not in confirmed_text
-
-
-def test_level_transition_notification_retries_after_state_commit_enqueue_crash(
-    tmp_path, monkeypatch
-) -> None:
-    storage = SimpleNamespace(data_root=str(tmp_path))
-    current: dict[str, LevelObservation] = {}
-    monkeypatch.setattr(
-        shadow_service,
-        "_observation",
-        lambda *_args, **_kwargs: current["value"],
-    )
-    monkeypatch.setattr(
-        transition_delivery,
-        "NotificationSettings",
-        SimpleNamespace(
-            from_env=lambda: SimpleNamespace(
-                enabled=True,
-                feishu_enabled=True,
-                bark_enabled=False,
-                bark_friend_enabled=False,
-            )
-        ),
-    )
-    attempts = 0
-
-    def enqueue(_settings, _envelope, **_kwargs):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise RuntimeError("simulated state-to-outbox crash")
-        return SimpleNamespace(
-            targets=("feishu",),
-            accepted=True,
-            inserted=True,
-            duplicate=False,
-            queued_for_recovery=True,
-            delivered=False,
-            outcome="pending",
-        )
-
-    monkeypatch.setattr(transition_delivery, "enqueue_notification", enqueue)
-    policy = replace(
-        LevelDecisionPolicy(),
-        formal_signal_enabled=True,
-        notify_transitions=True,
-    )
-    current["value"] = _level_observation(
-        NOW,
-        spot=70.0,
-        levels={"put_wall": 100.0, "call_wall": 120.0},
-    )
-    run_level_decision_shadow(
-        storage,
-        None,
-        now=NOW,
-        policy=policy,
-        notifications_enabled=True,
-    )
-    failed = None
-    for seconds, spot, es in (
-        (5, 101.0, 5000.0),
-        (10, 96.0, 4999.0),
-        (31, 95.0, 4997.0),
-        (40, 99.0, 4998.0),
-        (45, 95.0, 4996.0),
-        (56, 94.0, 4994.0),
-    ):
-        at = NOW + timedelta(seconds=seconds)
-        current["value"] = LevelObservation(
-            at=at,
-            spot=spot,
-            es=es,
-            levels={"put_wall": 100.0, "call_wall": 120.0},
-            quality_ok=True,
-            session_date="2026-07-13",
-            spx_spot=spot,
-        )
-        failed = run_level_decision_shadow(
-            storage,
-            None,
-            now=at,
-            policy=policy,
-            notifications_enabled=True,
-        )
-    assert failed is not None
-    state_path = tmp_path / "latest" / "level_decision_shadow_state.json"
-    after_failure = json.loads(state_path.read_text(encoding="utf-8"))
-
-    assert failed["delivery"]["reason"] == "delivery_error:RuntimeError"
-    assert len(after_failure["pending_notifications"]) == 1
-
-    recovered = run_level_decision_shadow(
-        storage,
-        None,
-        now=NOW + timedelta(seconds=57),
-        policy=policy,
-        notifications_enabled=True,
-    )
-    after_recovery = json.loads(state_path.read_text(encoding="utf-8"))
-
-    assert recovered["changed"] is False
-    assert recovered["delivery"]["accepted"] is True
-    assert attempts == 2
-    assert after_recovery["pending_notifications"] == []
-    assert after_recovery["accepted_notification_event_ids"] == [
-        failed["delivery"]["notification_event_id"]
-    ]
-
-
-def test_level_transition_notification_replays_idempotently_after_ack_crash(
+def test_level_transition_legacy_pending_is_discarded_without_enqueue(
     tmp_path, monkeypatch
 ) -> None:
     state_path = tmp_path / "latest" / "level_decision_shadow_state.json"
@@ -944,151 +745,17 @@ def test_level_transition_notification_replays_idempotently_after_ack_crash(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        transition_delivery,
-        "NotificationSettings",
-        SimpleNamespace(
-            from_env=lambda: SimpleNamespace(
-                enabled=True,
-                feishu_enabled=True,
-                bark_enabled=False,
-                bark_friend_enabled=False,
-            )
-        ),
-    )
     attempts: list[str] = []
-
-    def enqueue(_settings, envelope, **_kwargs):
-        attempts.append(envelope.event_id)
-        return SimpleNamespace(
-            targets=("feishu",),
-            accepted=True,
-            inserted=len(attempts) == 1,
-            duplicate=len(attempts) > 1,
-            queued_for_recovery=True,
-            delivered=False,
-            outcome="pending",
-        )
-
-    real_atomic_write = transition_delivery.atomic_write_json_secure
-    monkeypatch.setattr(
-        transition_delivery,
-        "atomic_write_json_secure",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("simulated outbox-to-state ack crash")
-        ),
-    )
-    with pytest.raises(RuntimeError, match="ack crash"):
-        transition_delivery.flush_pending_level_transition_notifications(
-            state_path,
-            now=NOW,
-            enqueue=enqueue,
-        )
-    assert json.loads(state_path.read_text(encoding="utf-8"))["pending_notifications"]
-
-    monkeypatch.setattr(
-        transition_delivery,
-        "atomic_write_json_secure",
-        real_atomic_write,
-    )
     recovered = transition_delivery.flush_pending_level_transition_notifications(
         state_path,
         now=NOW + timedelta(seconds=1),
-        enqueue=enqueue,
+        enqueue=lambda *_args, **_kwargs: attempts.append("called"),
     )
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
 
-    assert attempts == [event_id, event_id]
-    assert recovered["accepted"] is True
-    assert recovered["duplicate"] is True
+    assert attempts == []
+    assert recovered["reason"] == "legacy_transition_notifications_retired"
     assert persisted["pending_notifications"] == []
-    assert persisted["accepted_notification_event_ids"] == [event_id]
-
-
-def test_level_transition_quiet_window_is_suppressed_not_delivered(
-    tmp_path, monkeypatch
-) -> None:
-    storage = SimpleNamespace(data_root=str(tmp_path))
-    current: dict[str, LevelObservation] = {}
-    monkeypatch.setattr(
-        shadow_service,
-        "_observation",
-        lambda *_args, **_kwargs: current["value"],
-    )
-    monkeypatch.setattr(
-        transition_delivery,
-        "NotificationSettings",
-        SimpleNamespace(
-            from_env=lambda: SimpleNamespace(
-                enabled=True,
-                feishu_enabled=True,
-                bark_enabled=False,
-                bark_friend_enabled=False,
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        transition_delivery,
-        "enqueue_notification",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            targets=("quiet_window_policy",),
-            accepted=True,
-            inserted=False,
-            duplicate=False,
-            queued_for_recovery=False,
-            delivered=True,
-            outcome="quiet_window_suppressed",
-        ),
-    )
-    policy = replace(
-        LevelDecisionPolicy(),
-        formal_signal_enabled=True,
-        notify_transitions=True,
-    )
-    current["value"] = _level_observation(
-        NOW,
-        spot=70.0,
-        levels={"put_wall": 100.0, "call_wall": 120.0},
-    )
-    run_level_decision_shadow(
-        storage,
-        None,
-        now=NOW,
-        policy=policy,
-        notifications_enabled=True,
-    )
-    result = None
-    for seconds, spot, es in (
-        (5, 101.0, 5000.0),
-        (10, 96.0, 4999.0),
-        (31, 95.0, 4997.0),
-        (40, 99.0, 4998.0),
-        (45, 95.0, 4996.0),
-        (56, 94.0, 4994.0),
-    ):
-        at = NOW + timedelta(seconds=seconds)
-        current["value"] = LevelObservation(
-            at=at,
-            spot=spot,
-            es=es,
-            levels={"put_wall": 100.0, "call_wall": 120.0},
-            quality_ok=True,
-            session_date="2026-07-13",
-            spx_spot=spot,
-        )
-        result = run_level_decision_shadow(
-            storage,
-            None,
-            now=at,
-            policy=policy,
-            notifications_enabled=True,
-        )
-
-    assert result is not None
-    assert result["delivery"]["accepted"] is True
-    assert result["delivery"]["delivered"] is False
-    assert result["delivery"]["suppressed"] is True
-    assert result["delivery"]["outcome"] == "quiet_window_suppressed"
 
 
 def _stable_structure(
@@ -1179,21 +846,6 @@ def _write_shadow_state(
         payload["decision"] = decision
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-def _notify_settings(monkeypatch) -> None:
-    monkeypatch.setattr(
-        transition_delivery,
-        "NotificationSettings",
-        SimpleNamespace(
-            from_env=lambda: SimpleNamespace(
-                enabled=True,
-                feishu_enabled=True,
-                bark_enabled=False,
-                bark_friend_enabled=False,
-            )
-        ),
-    )
-
-
 def _terminal_transition(previous: LevelPhase, *, thesis: str) -> LevelTransition:
     return LevelTransition(
         previous_phase=previous,
@@ -1228,7 +880,6 @@ def _terminal_observation() -> LevelObservation:
 
 @pytest.mark.parametrize("previous", [LevelPhase.APPROACHING, LevelPhase.TESTING])
 def test_prearm_terminal_transition_is_audit_only(previous, monkeypatch) -> None:
-    _notify_settings(monkeypatch)
     result, intent = transition_delivery.prepare_level_transition_delivery(
         _terminal_transition(previous, thesis="none"),
         _terminal_observation(),
@@ -1239,11 +890,10 @@ def test_prearm_terminal_transition_is_audit_only(previous, monkeypatch) -> None
     )
     assert intent is None
     assert result is not None
-    assert result["reason"] == "audit_only_prearm_terminal"
+    assert result["reason"] == "unified_strategy_decision_owned"
 
 
-def test_pathful_invalidation_still_pushes_and_explains_reason(monkeypatch) -> None:
-    _notify_settings(monkeypatch)
+def test_pathful_invalidation_remains_audit_only(monkeypatch) -> None:
     result, intent = transition_delivery.prepare_level_transition_delivery(
         _terminal_transition(LevelPhase.REJECT_PENDING, thesis="fade"),
         _terminal_observation(),
@@ -1253,10 +903,6 @@ def test_pathful_invalidation_still_pushes_and_explains_reason(monkeypatch) -> N
         notifications_enabled=True,
     )
     assert result is not None
-    assert intent is not None
-    assert intent["title"] == "SPX 结构状态 · 非交易卡"
-    text = str(intent["text"])
-    assert "结论  不做" in text
-    assert "本代结构结束；不是平仓指令" in text
-    assert "Reason  structure_drift" in text
-    assert "Drift  冻结 Call Wall 7775.00 → 实时 7800.00（+25.00pt）" in text
+    assert intent is None
+    assert result["reason"] == "unified_strategy_decision_owned"
+    assert result["delivered"] is False

@@ -397,9 +397,18 @@ def vertical_entry_quality(
     progress = max(0.0, (spot - trigger) / (target - trigger)) if trigger is not None and target != trigger else 0.0
     failed_break = setup_kind == "FAILED_BREAK_RECLAIM"
     short_cycle = setup_kind == "ES_VOLUME_MOMENTUM"
-    min_ratio = thresholds["failed_break_min_target_room_ratio" if failed_break else "min_target_room_ratio"]
+    level_confirmation = setup_kind == "RTH_LEVEL_CONFIRMATION"
+    min_ratio = thresholds[
+        "level_confirmation_min_target_room_ratio"
+        if level_confirmation
+        else "failed_break_min_target_room_ratio"
+        if failed_break
+        else "min_target_room_ratio"
+    ]
     max_debit = thresholds["failed_break_max_debit_fraction" if failed_break else "max_debit_fraction"]
-    if short_cycle:
+    if level_confirmation:
+        max_progress = thresholds["level_confirmation_max_trigger_target_progress"]
+    elif short_cycle:
         max_progress = thresholds["es_momentum_max_progress"]
     elif failed_break:
         max_progress = thresholds["failed_break_max_trigger_target_progress"]
@@ -413,7 +422,7 @@ def vertical_entry_quality(
     }
     # First-impulse shorts die if VWAP distance + 15m impulse count as chase.
     # Short-cycle cards use 5m ATR exhaustion in setup facts instead.
-    impulse_chase = (not short_cycle) and (
+    impulse_chase = (not short_cycle and not level_confirmation) and (
         distance_atr > thresholds["late_chase_distance_atr"]
         and impulse_atr > thresholds["late_chase_impulse_atr"]
     )

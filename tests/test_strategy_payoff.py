@@ -714,7 +714,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v53"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v54"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1003,7 +1003,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v53"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v54"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1173,7 +1173,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v53"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v54"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1387,6 +1387,83 @@ def test_rth_wall_hazard_reaches_manual_decision_only_with_positive_execution_ev
         row.get("setup_kind") == "WALL_BREAKOUT_HAZARD"
         for row in build_market_fact_pack(below_threshold, latest, now)["rth_setups"]
     )
+
+
+def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_veto(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 7, 15, 0, 10, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["es_volume"] = {}
+    payload["level_decision"].update(
+        {
+            "formal_signal": True,
+            "level_path_confirmed": True,
+            "quality_ok": True,
+            "session_mode": "rth",
+            "phase_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+        }
+    )
+    # The confirmed price path is the direction owner. Missing volatility
+    # environment context remains advisory for this setup only.
+    payload["minute_market_frame"]["volatility"] = {}
+    payload["option_structure_frame"]["volatility"] = {}
+
+    decision = build_strategy_decision(
+        payload,
+        _vertical_chain_state(now),
+        now,
+        data_root=tmp_path,
+    )
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
+    assert decision["candidate"]["economics"]["width_points"] == 15.0
+    assert decision["candidate"]["authorization_policy"] == (
+        "strategy_policy.bootstrap.v54"
+    )
+    assert decision["regime"]["rth_environment"]["status"] != "ready"
+    assert decision["action_authority"] == "manual"
+    assert decision["automatic_ordering"] is False
+    valid_until = datetime.fromisoformat(decision["execution"]["opportunity_valid_until"])
+    assert valid_until - now == timedelta(minutes=5)
+
+
+def test_rth_confirmed_fade_remains_research_only(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 7, 15, 0, 10, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["es_volume"] = {}
+    payload["level_decision"].update(
+        {
+            "formal_signal": True,
+            "level_path_confirmed": True,
+            "quality_ok": True,
+            "session_mode": "rth",
+            "thesis": "fade",
+            "phase_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+        }
+    )
+
+    facts = build_market_fact_pack(
+        payload,
+        _vertical_chain_state(now),
+        now,
+    )
+    decision = build_strategy_decision(
+        payload,
+        _vertical_chain_state(now),
+        now,
+        data_root=tmp_path,
+    )
+
+    assert not any(
+        row.get("setup_kind") == "RTH_LEVEL_CONFIRMATION"
+        for row in facts["rth_setups"]
+    )
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["action_authority"] == "none"
 
 
 def test_selected_decision_carries_shadow_candidates_and_skips_incomplete_quotes(

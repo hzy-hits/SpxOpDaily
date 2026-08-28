@@ -9,7 +9,7 @@ def test_distribution_forecast_runs_after_trade_critical_delivery_and_action_rel
     source = inspect.getsource(service.run)
 
     delivery = source.index("_record_and_process_trade_intent(")
-    action_reload = source.index("action_latest = LatestStateStore(storage).load")
+    action_reload = source.index("action_latest = (")
     distribution = source.index("process_strategy_distribution_forecast(")
     manual_candidate = source.index("process_gth_level_manual_candidate(")
 

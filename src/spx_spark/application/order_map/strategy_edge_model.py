@@ -30,6 +30,10 @@ _WALL_HAZARD_SETUP = "WALL_BREAKOUT_HAZARD"
 _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
+_RTH_LEVEL_CONFIRMATION_SETUP = "RTH_LEVEL_CONFIRMATION"
+_RTH_LEVEL_CONFIRMATION_CONTRACT_HASH = (
+    "sha256:7d576327f9f0bf9fe23c993392efd76ec512e34e671826550ea33d38ff7f0a6c"
+)
 _CLOSE_CONVERGENCE_SETUP = "CLOSE_CONVERGENCE_60M"
 _CLOSE_CONVERGENCE_CONTRACT_HASH = (
     "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
@@ -136,9 +140,9 @@ def apply_strategy_edge_authority(
     ``data_root is None`` is reserved for pure unit/replay fixtures that do not
     model deployment state. Production model-backed lanes fail closed when the
     artifact is absent, unpromoted, stale, malformed, or out of domain. The
-    Pre-average, wall hazard, close convergence, the RTH iron condor, and the
-    user-authorized v48 GTH minute gate are explicit manual-policy exceptions
-    and are always labeled forward-unvalidated.
+    Pre-average, wall hazard, confirmed RTH levels, close convergence, the RTH
+    iron condor, and the user-authorized v48 GTH minute gate are explicit
+    manual-policy exceptions and are always labeled forward-unvalidated.
     """
 
     if not candidates:
@@ -197,6 +201,7 @@ def apply_strategy_edge_authority(
         if setup not in {
             _PREAVERAGE_SETUP,
             _WALL_HAZARD_SETUP,
+            _RTH_LEVEL_CONFIRMATION_SETUP,
             _CLOSE_CONVERGENCE_SETUP,
             _IRON_CONDOR_SETUP,
         }:
@@ -209,17 +214,22 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v53",
+                "strategy_policy.bootstrap.v54",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
+            _RTH_LEVEL_CONFIRMATION_SETUP: (
+                "strategy_policy.bootstrap.v54",
+                _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
+                "rth_level_confirmation_policy_authority_invalid",
+            ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v53",
+                "strategy_policy.bootstrap.v54",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v53",
+                "strategy_policy.bootstrap.v54",
                 _IRON_CONDOR_CONTRACT_HASH,
                 "iron_condor_policy_authority_invalid",
             ),

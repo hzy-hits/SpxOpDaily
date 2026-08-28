@@ -554,7 +554,8 @@ sector breadth >= 0.55
 
 空头反向。趋势判断只代表路径背景，不代表立即交易。v42 起 RTH 人读 Debit
 为 `EVENT_SETTLEMENT_THRESHOLD`、`ES_VOLUME_MOMENTUM`、
-`PREAVERAGE15_PULLBACK` 与 `WALL_BREAKOUT_HAZARD`。
+`PREAVERAGE15_PULLBACK`、`WALL_BREAKOUT_HAZARD`，以及 v54 明确授权的
+`RTH_LEVEL_CONFIRMATION`。
 墙位 hazard 是独立左侧 lane：以与冻结模型训练同源的因果 SPX 标准化一分钟路径尺度
 归一化 Call/Put Wall、Zero Gamma
 与剩余 EM，冻结三分类模型输出未来 15 分钟上破站稳 / 下破站稳 / 未突破概率；仅当
@@ -703,6 +704,10 @@ VWAP、路径进度或 20 分钟旧管理门；仍受宏观、PIN、Schwab exact
 `WALL_BREAKOUT_HAZARD` 不用 HMM/旧方向作触发，但仍走通用 ATR 几何、目标空间、
 最大借记和 exact-BBO 门；额外用 `p_break * target_terminal_value - net_debit > 0`
 作为保守执行 EV 硬门。
+`RTH_LEVEL_CONFIRMATION` 只接受正式 level state 的 `CONFIRMED + breakout` 价格路径，
+不再复用确认前 hazard 概率。它关闭 VWAP/15 分钟 impulse 追价项，目标/止损空间比
+最低 1.0、trigger→target 最大进度 80%，仅枚举固定 15 点 Debit Vertical，并保留通用借记、ATR 止损、PIN、宏观、
+exact-BBO 与定义风险门。
 短周期过晚：`abs(return_5m) / ATR5m > 1.5`，或 trigger→target 路程 ≥ 50%，
 或借记/空间门与上表相同。
 
@@ -1195,6 +1200,31 @@ GTH/RTH ATM 跨式中价与 ATM IV 高低点。Desk Map 固定展示当前跨式
 当前相对 GTH 高点的收缩比例以及已有的 RTH 高低。该观测只用于判断“GTH 风险预算
 是否已释放并开始收敛”的人工上下文，不增加正向分数、不绕过贷记/Delta/BBO/环境门，
 也不让 GTH 铁鹰获得人工交易授权；数据陈旧或期权帧降级时停止更新高低点。
+
+### 11.20 v54：墙位确认只保留统一两腿决策
+
+确认前 `approaching`、`break_pending`、`reject_pending` 与确认后的非交易
+level-transition 卡不再进入 Bark/飞书；它们继续保留在 projection 与审计中。
+人类通道只接受 `build_strategy_decision` 的最终结果。
+
+RTH level state 只有同时满足 `formal_signal=true`、`phase=confirmed`、`thesis=breakout`、
+官方质量可用、方向完整且原始 5 分钟有效期未过，才形成
+`RTH_LEVEL_CONFIRMATION`。该 setup：
+
+- 方向来自已确认的价格接受/拒绝，不由 Gamma/OI 或环境层决定；
+- `rth_environment` 缺失或不在 `RISK_EXPANSION` 只作说明，不再否决该路径；
+- 确认前 wall-hazard EV 不跨阶段复用；确认后重新使用当前目标、失效位和 exact 两腿报价；
+- 目标/止损空间比最低 1.0，路径进度必须小于 80%，借记不超过翼宽 45%；
+- 只允许固定 15 点宽的 Debit Vertical，不从 5/10/15/20 点中择优；
+- Schwab exact BBO age ≤15 秒、source skew ≤2 秒，定义风险 ≤$1,000；
+- 宏观事件、PIN 冲突、报价、几何与 ATR 失效门保持 fail-closed；
+- 一旦统一候选生成，给人工完整 5 分钟限价窗口，`automatic_ordering=false`。
+
+`fade` 确认继续进入 level audit/outcome 研究，但不得生成方向价差候选，也不得获得
+人工交易权限。
+
+该路径为用户明确授权的 `forward_unvalidated_user_override`，不是已验证 alpha。
+策略版本为 `strategy_policy.bootstrap.v54`。不新增服务、定时器、数据库或通知 owner。
 
 ---
 
