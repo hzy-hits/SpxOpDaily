@@ -509,6 +509,8 @@ def _rth_environment_hard_gates(
                 "threshold": "causal_vix1d_atm_straddle_breadth",
             }
         ]
+    if directional_structure:
+        return []
     expected = (
         "VOL_CONTRACTION_BALANCE_or_EXPANSION_TO_CONTRACTION"
         if range_structure
@@ -682,8 +684,17 @@ def _vertical_hard_gates(
         thresholds=policy.entry_quality_kwargs(),
     )
     candidate["entry_quality"] = entry_quality
-    if "direction_valid_but_entry_too_late" in reasons:
-        candidate["setup_state"] = "ENTRY_TOO_LATE"
+    reasons = [
+        reason
+        for reason in reasons
+        if reason != "direction_valid_but_entry_too_late"
+    ]
+    stop_atr = _number(entry_quality.get("stop_distance_atr"))
+    if (
+        stop_atr is None
+        or not policy.min_stop_atr <= stop_atr <= policy.max_stop_atr
+    ) and "stop_distance_outside_atr_band" not in reasons:
+        reasons.append("stop_distance_outside_atr_band")
     gates = [
         _gate_from_entry_reason(
             reason,
@@ -695,17 +706,6 @@ def _vertical_hard_gates(
     ]
     if candidate.get("setup_kind") == _WALL_BREAKOUT_HAZARD:
         gates.extend(_wall_hazard_execution_gates(candidate, policy=policy))
-    if candidate.get("setup_kind") == _RTH_LEVEL_CONFIRMATION:
-        max_loss = _number(economics.get("max_loss_points"))
-        risk_usd = None if max_loss is None else max_loss * 100.0
-        if risk_usd is None or risk_usd > 1000.0:
-            gates.append(
-                {
-                    "gate": "rth_level_confirmation_defined_risk_above_max",
-                    "actual": risk_usd,
-                    "threshold": 1000.0,
-                }
-            )
     return _block_unevidenced_debit(candidate, gates)
 
 

@@ -684,7 +684,7 @@ iv_jump_5m
 minutes_to_close
 ```
 
-### 8.2 LATE_CHASE 硬条件
+### 8.2 LATE_CHASE 硬条件（v54 及以前）
 
 TREND_PULLBACK / FAILED_BREAK（审计与 GTH 标签）任一满足：
 
@@ -720,6 +720,11 @@ reason = direction_valid_but_entry_too_late
 ```
 
 禁止通过“提高置信度”绕过 Late Chase。
+
+v55 起，以上复合指标继续写入 `entry_quality` 供执行者判断价格是否昂贵、路径是否已走远，
+但不再作为已授权 RTH Directional Debit Vertical 的 hard gate。独立的 ATR 止损距离、
+目标/行权价路径、宏观事件、PIN、exact BBO 和 setup 专属证据门仍然有效；
+GTH 与历史 replay 合同不因本条自动获得授权。
 
 ---
 
@@ -1226,6 +1231,32 @@ RTH level state 只有同时满足 `formal_signal=true`、`phase=confirmed`、`t
 该路径为用户明确授权的 `forward_unvalidated_user_override`，不是已验证 alpha。
 策略版本为 `strategy_policy.bootstrap.v54`。不新增服务、定时器、数据库或通知 owner。
 
+### 11.21 v55：RTH 方向确认不再二次等待波动扩张
+
+价格证据已经形成且属于已授权 RTH Directional Debit Vertical 时：
+
+- `rth_environment` 保留结构选择和风险说明职责，但 `MIXED_UNCONFIRMED`、
+  `VOL_CONTRACTION_BALANCE` 或 `EXPANSION_TO_CONTRACTION` 不再以
+  `rth_directional_environment_not_expanding` 否决方向价差；
+- `direction_valid_but_entry_too_late` 从 hard gate 降为 `entry_quality` 数值说明；
+- 核心环境输入缺失仍以 `rth_environment_inputs_unavailable` 失效关闭；
+- 独立 ATR 止损门和每组最大定义风险 `$1,000` 保留；宏观事件、PIN、目标/行权价路径、
+  exact BBO、报价新鲜度、`WALL_BREAKOUT_HAZARD` 的正执行 EV 等门保持不变；
+- Iron Condor 与 Butterfly 的环境合同不变，自动下单仍关闭。
+
+该放宽是用户明确授权的 `forward_unvalidated_user_override`，不等同于已验证 alpha。
+策略版本为 `strategy_policy.bootstrap.v55`；不新增服务、定时器、数据库或通知 owner。
+
+### 11.22 v56：RTH 方向价差不设绝对美元风险 hard gate
+
+已授权 RTH Directional Debit Vertical 继续要求合法的定义风险结构，并在候选卡显示
+`max_loss_points` 与美元最大亏损；但不再以 `$1,000` 或其他绝对美元金额拒绝候选。
+张数和账户风险预算由人工执行者决定，`automatic_ordering=false` 不变。
+
+本条不改变 Iron Condor、Butterfly 和 GTH 人工候选各自已有的风险合同，也不绕过
+宏观、PIN、ATR、目标/行权价路径、exact BBO、报价新鲜度或 setup 专属证据门。
+策略版本为 `strategy_policy.bootstrap.v56`。
+
 ---
 
 ## 12. 正式 NoTrade
@@ -1234,7 +1265,7 @@ NoTrade 必须是候选集合中的真实策略：`Score_NoTrade = 0`。
 
 以下均应输出 NoTrade：
 
-- 方向明确但 Late Chase；
+- 未获授权的 GTH/研究路径出现 Late Chase；
 - Regime 为 Transition；
 - Event Risk；
 - Exact quotes 不完整；

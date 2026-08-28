@@ -714,7 +714,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v54"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v56"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1003,7 +1003,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v54"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v56"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1173,7 +1173,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v54"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v56"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1421,7 +1421,7 @@ def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_v
     assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
     assert decision["candidate"]["economics"]["width_points"] == 15.0
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v54"
+        "strategy_policy.bootstrap.v56"
     )
     assert decision["regime"]["rth_environment"]["status"] != "ready"
     assert decision["action_authority"] == "manual"
@@ -3763,7 +3763,7 @@ def test_policy_ev_annotation_marks_missing_table_as_unavailable(tmp_path: Path)
     assert rank.passed[0]["edge"]["policy_ev_reason"] == "table_unavailable"
 
 
-def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
+def test_rth_composite_late_advisory_does_not_hide_independent_stop_gate() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     late = deepcopy(payload)
@@ -3782,7 +3782,55 @@ def test_late_chase_near_misses_and_geometry_source_are_populated() -> None:
     assert decision["candidates_considered"]
     assert decision["why_not"]["nearest_candidates"]
     assert decision["why_not"]["nearest_candidate"] == decision["why_not"]["nearest_candidates"][0]
-    assert "direction_valid_but_entry_too_late" in decision["why_not"]["reasons"]
+    assert "direction_valid_but_entry_too_late" not in decision["why_not"]["reasons"]
+    assert "stop_distance_outside_atr_band" in decision["why_not"]["reasons"]
+
+
+def test_rth_directional_candidate_ignores_mixed_environment_and_debit_timing_gate() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["minute_market_frame"]["volatility"]["vix1d_return_15m_pct"] = -0.01
+    payload["option_structure_frame"]["structure"]["gamma_state"] = (
+        "zero_gamma_transition"
+    )
+    payload["option_structure_frame"]["volatility"] = {
+        "atm_iv_change_5m": -0.003,
+        "atm_iv_change_15m": -0.004,
+        "atm_straddle_decay_15m": 0.03,
+    }
+    long_leg = payload["call_skew_spread_shadow"]["candidate"]["long"]
+    long_leg.update({"bid": 5.6, "ask": 5.8})
+
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["regime"]["rth_environment"]["state"] == "MIXED_UNCONFIRMED"
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["economics"]["debit_fraction_of_width"] == pytest.approx(
+        0.48
+    )
+    assert decision["candidate"]["economics"]["max_loss_points"] == pytest.approx(4.8)
+    assert decision["action_authority"] == "manual"
+    assert decision["automatic_ordering"] is False
+
+    over_risk = deepcopy(payload)
+    over_risk_long = over_risk["call_skew_spread_shadow"]["candidate"]["long"]
+    over_risk_short = over_risk["call_skew_spread_shadow"]["candidate"]["short"]
+    over_risk_long.update({"bid": 12.8, "ask": 13.0})
+    over_risk_short.update(
+        {
+            "contract_id": "option:SPX:SPXW:20260807:7730:C",
+            "strike": 7730.0,
+            "bid": 2.0,
+            "ask": 2.2,
+        }
+    )
+    over_risk_decision = build_strategy_decision(over_risk, _state(now), now)
+    assert over_risk_decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert over_risk_decision["candidate"]["economics"]["max_loss_points"] == pytest.approx(
+        11.0
+    )
+    assert over_risk_decision["action_authority"] == "manual"
+    assert over_risk_decision["automatic_ordering"] is False
 
 
 def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cannot() -> None:
