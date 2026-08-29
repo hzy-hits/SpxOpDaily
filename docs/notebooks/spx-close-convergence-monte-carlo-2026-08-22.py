@@ -106,14 +106,18 @@ def _json_safe(value: object) -> object:
     return value
 
 
-def _available_session_dates() -> list[date]:
+def _available_session_dates(
+    *,
+    start_date: date = START_DATE,
+    end_date: date = END_DATE,
+) -> list[date]:
     available: list[date] = []
     for provider_path in QUOTE_ROOT.glob("date=2026-*/provider=schwab"):
         try:
             value = date.fromisoformat(provider_path.parent.name.removeprefix("date="))
         except ValueError:
             continue
-        if START_DATE <= value <= END_DATE and DEFAULT_MARKET_CALENDAR.session(value) is not None:
+        if start_date <= value <= end_date and DEFAULT_MARKET_CALENDAR.session(value) is not None:
             available.append(value)
     return sorted(set(available))
 
@@ -217,9 +221,13 @@ def load_session_path(session_date: date) -> SessionPath | None:
     )
 
 
-def load_sessions() -> list[SessionPath]:
+def load_sessions(
+    *,
+    start_date: date = START_DATE,
+    end_date: date = END_DATE,
+) -> list[SessionPath]:
     sessions: list[SessionPath] = []
-    for session_date in _available_session_dates():
+    for session_date in _available_session_dates(start_date=start_date, end_date=end_date):
         path = load_session_path(session_date)
         if path is None:
             continue
@@ -293,7 +301,11 @@ def _sample_features(path: SessionPath, index: int, horizon: int) -> tuple[list[
     return values, tuple(names)
 
 
-def build_samples(sessions: Sequence[SessionPath]) -> SampleSet:
+def build_samples(
+    sessions: Sequence[SessionPath],
+    *,
+    horizons_minutes: Sequence[int] = HORIZONS_MINUTES,
+) -> SampleSet:
     features: list[list[float]] = []
     feature_names: tuple[str, ...] | None = None
     session_dates: list[date] = []
@@ -306,7 +318,7 @@ def build_samples(sessions: Sequence[SessionPath]) -> SampleSet:
     for path in sessions:
         if not np.isfinite(path.spx[-1]):
             continue
-        for horizon in HORIZONS_MINUTES:
+        for horizon in horizons_minutes:
             decision_time = path.epoch_seconds[-1] - horizon * 60
             matches = np.flatnonzero(path.epoch_seconds == decision_time)
             if len(matches) != 1:
