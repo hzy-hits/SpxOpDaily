@@ -47,7 +47,7 @@ def test_v44_close_convergence_manual_authority_is_explicitly_unvalidated(
 ) -> None:
     candidate = {
         "setup_kind": "CLOSE_CONVERGENCE_60M",
-        "authorization_policy": "strategy_policy.bootstrap.v56",
+        "authorization_policy": "strategy_policy.bootstrap.v57",
         "evidence_contract_hash": (
             "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
         ),

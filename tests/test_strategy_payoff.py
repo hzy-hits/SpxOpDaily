@@ -714,7 +714,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v56"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v57"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1003,7 +1003,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v56"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v57"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1173,7 +1173,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v56"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v57"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1208,6 +1208,40 @@ def test_expired_pin_state_does_not_block_independent_rth_direction() -> None:
     assert decision["regime"]["terminal_state"] != "PIN_STABLE"
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+
+
+def test_rth_momentum_uses_manual_fallback_only_when_model_artifact_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    monkeypatch.setattr(
+        strategy_select,
+        "apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    decision = build_strategy_decision(
+        _decision_payload(now),
+        _state(now),
+        now,
+        data_root=tmp_path,
+    )
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+    assert decision["candidate"]["authorization_policy"] == (
+        "strategy_policy.bootstrap.v57"
+    )
+    assert decision["candidate"]["edge"]["strategy_edge"]["fallback_reason"] == (
+        "strategy_edge_model_artifact_missing"
+    )
+    assert decision["action_authority"] == "manual"
+    assert decision["automatic_ordering"] is False
 
 
 def test_rth_preaverage_signal_reaches_manual_decision_with_frozen_contract(
@@ -1421,7 +1455,7 @@ def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_v
     assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
     assert decision["candidate"]["economics"]["width_points"] == 15.0
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v56"
+        "strategy_policy.bootstrap.v57"
     )
     assert decision["regime"]["rth_environment"]["status"] != "ready"
     assert decision["action_authority"] == "manual"

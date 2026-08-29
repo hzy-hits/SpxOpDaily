@@ -314,16 +314,44 @@ def advance_level_decision(
                 state["breakout_retest_seen_at"] = now.isoformat()
                 state["breakout_retest_seen_spot"] = spot
             return _transition(state, phase, LevelPhase.RETEST, now, "returned_for_retest")
-        # A breakout must prove both a real inside-to-outside crossing and a
-        # subsequent retest before it may become actionable.  A move first
-        # observed outside the level, or uninterrupted continuation after
-        # acceptance, is not enough evidence for a breakout READY.
         if thesis is LevelThesis.BREAKOUT:
+            if desired_move < settings.confirm_move_points:
+                state.pop("confirm_started_at", None)
+                return _update_extreme(
+                    state,
+                    phase,
+                    observation,
+                    "sustained_breakout_not_resolved",
+                )
+            started = _optional_datetime(state.get("confirm_started_at"))
+            if started is None:
+                state["confirm_started_at"] = now.isoformat()
+                return _update_extreme(
+                    state,
+                    phase,
+                    observation,
+                    "sustained_breakout_hold_started",
+                )
+            if (
+                (now - started).total_seconds() >= settings.confirm_hold_seconds
+                and _es_confirms(state, observation, desired_direction, settings)
+            ):
+                state["breakout_confirmation_mode"] = "sustained"
+                state["breakout_sustained_seen_at"] = now.isoformat()
+                return _confirmed_transition(
+                    state,
+                    phase,
+                    observation,
+                    now=now,
+                    desired_direction=desired_direction,
+                    settings=settings,
+                    reason="sustained_breakout_confirmed",
+                )
             return _update_extreme(
                 state,
                 phase,
                 observation,
-                "waiting_for_mandatory_breakout_retest",
+                "sustained_breakout_confirmation_hold",
             )
         # A rejection/fade already starts from the tested level and may still
         # confirm on sustained follow-through when no second touch occurs.
@@ -354,6 +382,8 @@ def advance_level_decision(
         if (now - started).total_seconds() >= settings.confirm_hold_seconds and _es_confirms(
             state, observation, desired_direction, settings
         ):
+            if thesis is LevelThesis.BREAKOUT:
+                state["breakout_confirmation_mode"] = "retest"
             return _confirmed_transition(
                 state,
                 phase,
@@ -636,10 +666,15 @@ def _breakout_evidence_issue(
         "breakout_extension_seen_at"
     ) is None:
         return "breakout_extension_evidence_missing"
-    if phase in {LevelPhase.RETEST, LevelPhase.CONFIRMED} and state.get(
-        "breakout_retest_seen_at"
-    ) is None:
+    confirmation_mode = str(state.get("breakout_confirmation_mode") or "retest")
+    if phase is LevelPhase.RETEST and state.get("breakout_retest_seen_at") is None:
         return "breakout_retest_evidence_missing"
+    if phase is LevelPhase.CONFIRMED:
+        if confirmation_mode == "sustained":
+            if state.get("breakout_sustained_seen_at") is None:
+                return "breakout_sustained_evidence_missing"
+        elif state.get("breakout_retest_seen_at") is None:
+            return "breakout_retest_evidence_missing"
     return None
 
 

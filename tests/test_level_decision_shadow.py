@@ -712,6 +712,7 @@ def test_operator_override_confirms_level_but_still_requires_trade_intent(
     assert result["phase"] == "confirmed"
     assert result["formal_signal"] is True
     assert result["level_path_confirmed"] is True
+    assert result["breakout_confirmation_mode"] == "retest"
     assert result["actionable"] is False
     assert result["delivery"]["delivered"] is False
     assert result["delivery"]["delivery_gate"] == "unified_strategy_decision_required"

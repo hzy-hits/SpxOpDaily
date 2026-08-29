@@ -579,17 +579,11 @@ def _snapshot(
     return snapshot
 
 
-def _volatility_15m(
-    rows: list[tuple[datetime, dict[str, object]]],
-) -> dict[str, object]:
+def _volatility_15m(rows: list[tuple[datetime, dict[str, object]]]) -> dict[str, object]:
     """Compare exact causal ATM observations 15 minutes apart."""
 
-    unavailable: dict[str, object] = {
-        "quality": "unavailable",
-        "atm_iv_change": None,
-        "atm_straddle_decay": None,
-        "contracted": False,
-    }
+    unavailable: dict[str, object] = {"quality": "unavailable", "atm_iv_change": None,
+                                      "atm_straddle_decay": None, "contracted": False}
     if not rows:
         return unavailable
     current_at, current = rows[-1]
@@ -601,17 +595,10 @@ def _volatility_15m(
     prior_iv = _optional_number(prior.get("atm_iv"))
     current_straddle = _optional_number(current.get("atm_straddle"))
     prior_straddle = _optional_number(prior.get("atm_straddle"))
-    if (
-        current_iv is None
-        or prior_iv is None
-        or current_straddle is None
-        or prior_straddle is None
-        or current_iv <= 0
-        or prior_iv <= 0
-        or current_straddle <= 0
-        or prior_straddle <= 0
-    ):
+    values = (current_iv, prior_iv, current_straddle, prior_straddle)
+    if any(value is None or value <= 0 for value in values):
         return unavailable
+    assert all(value is not None for value in values)
     iv_change = current_iv - prior_iv
     straddle_decay = (prior_straddle - current_straddle) / prior_straddle
     return {
@@ -656,9 +643,8 @@ def _divergence_alert(
     bearish = kind == NET_PREMIUM_BEARISH_DIVERGENCE_KIND
     direction = "bearish" if bearish else "bullish"
     signal_time_et = as_utc(signal_minute).astimezone(_ET).time()
-    late_contraction = (
-        signal_time_et >= _LATE_MANAGEMENT_START_ET
-        and volatility.get("contracted") is True
+    late_contraction = signal_time_et >= _LATE_MANAGEMENT_START_ET and (
+        volatility.get("contracted") is True
     )
     stamp = as_utc(signal_minute).strftime("%H%M")
     event_id = f"spx_net_premium_{direction}_divergence:{session_date.replace('-', '')}:{stamp}"

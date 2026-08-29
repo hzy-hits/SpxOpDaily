@@ -106,17 +106,43 @@ def test_es_confirmation_is_latched_when_thesis_starts_after_a_long_approach() -
     assert accepted.reason == "direction_accepted"
 
 
-def test_accepted_one_way_breakout_waits_for_mandatory_retest() -> None:
+def test_accepted_one_way_breakout_confirms_after_sustained_hold() -> None:
     armed = advance(None, 0, spot=107.0, es=5000.0)
     testing = advance(armed.state, 5, spot=101.0, es=5000.0)
     pending = advance(testing.state, 10, spot=96.0, es=4999.0)
     accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
 
     continued = advance(accepted.state, 42, spot=94.0, es=4995.0)
+    confirmed = advance(continued.state, 53, spot=93.0, es=4993.0)
 
     assert continued.current_phase is LevelPhase.ACCEPTED
-    assert continued.reason == "waiting_for_mandatory_breakout_retest"
-    assert "direction" not in continued.state
+    assert continued.reason == "sustained_breakout_hold_started"
+    assert confirmed.current_phase is LevelPhase.CONFIRMED
+    assert confirmed.reason == "sustained_breakout_confirmed"
+    assert confirmed.state["direction"] == "down"
+    assert confirmed.state["breakout_confirmation_mode"] == "sustained"
+
+
+def test_sustained_breakout_can_rearm_after_a_full_pullback() -> None:
+    armed = advance(None, 0, spot=107.0, es=5000.0)
+    testing = advance(armed.state, 5, spot=101.0, es=5000.0)
+    pending = advance(testing.state, 10, spot=96.0, es=4999.0)
+    accepted = advance(pending.state, 31, spot=95.0, es=4997.0)
+    holding = advance(accepted.state, 42, spot=94.0, es=4995.0)
+    confirmed = advance(holding.state, 53, spot=93.0, es=4993.0)
+
+    expired = advance(confirmed.state, 354, spot=80.0, es=4980.0)
+    cleared = advance(expired.state, 385, spot=80.0, es=4980.0)
+    pullback = advance(cleared.state, 390, spot=101.0, es=5001.0)
+    resumed = advance(pullback.state, 395, spot=96.0, es=4999.0)
+
+    assert expired.current_phase is LevelPhase.EXPIRED
+    assert cleared.current_phase is LevelPhase.FAR
+    assert pullback.current_phase is LevelPhase.TESTING
+    assert pullback.state["reentry_generation"] == 1
+    assert pullback.state["event_id"] != armed.state["event_id"]
+    assert resumed.current_phase is LevelPhase.BREAK_PENDING
+    assert resumed.state["thesis"] == LevelThesis.BREAKOUT.value
 
 
 def test_outside_armed_upper_level_cannot_reproduce_7730_ready_incident() -> None:

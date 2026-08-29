@@ -16,11 +16,11 @@ from spx_spark.application.order_map.strategy_edge_model import (
 NOW = datetime(2026, 8, 18, 15, 0, tzinfo=timezone.utc)
 
 
-def _candidate() -> dict[str, object]:
+def _candidate(*, setup_kind: str = "MODEL_VERTICAL") -> dict[str, object]:
     return {
         "candidate_id": "put-7700-7695",
         "strategy_type": "PUT_DEBIT_VERTICAL",
-        "setup_kind": "ES_VOLUME_MOMENTUM",
+        "setup_kind": setup_kind,
         "direction": "DOWN",
         "target_spx": 7695.0,
         "invalidation_spx": 7712.0,
@@ -184,6 +184,37 @@ def test_missing_or_unpromoted_artifact_fails_closed(tmp_path: Path) -> None:
     )
     assert unpromoted.passed == []
     assert "strategy_edge_model_not_promoted" in unpromoted.rejected[0][
+        "rejection_reasons"
+    ]
+
+
+def test_missing_artifact_allows_authorized_es_momentum_fallback(tmp_path: Path) -> None:
+    candidate = _candidate(setup_kind="ES_VOLUME_MOMENTUM")
+    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v57"}
+
+    result = apply_strategy_edge_authority(
+        [candidate], _facts(), regime, data_root=tmp_path, now=NOW
+    )
+
+    assert result.rejected == []
+    assert result.passed[0]["edge"]["edge_status"] == (
+        "explicit_manual_policy_unvalidated"
+    )
+    assert result.passed[0]["edge"]["strategy_edge"]["fallback_reason"] == (
+        "strategy_edge_model_artifact_missing"
+    )
+
+
+def test_es_momentum_fallback_requires_frozen_policy_contract(tmp_path: Path) -> None:
+    candidate = _candidate(setup_kind="ES_VOLUME_MOMENTUM")
+    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v56"}
+
+    result = apply_strategy_edge_authority(
+        [candidate], _facts(), regime, data_root=tmp_path, now=NOW
+    )
+
+    assert result.passed == []
+    assert "es_volume_momentum_policy_authority_invalid" in result.rejected[0][
         "rejection_reasons"
     ]
 

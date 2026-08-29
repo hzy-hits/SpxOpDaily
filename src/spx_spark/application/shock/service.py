@@ -172,12 +172,8 @@ def run(
                     reason="option_structure_build_error",
                 )
             front_expiry = next(
-                (
-                    expiry
-                    for expiry in options_map.expiries
-                    if expiry.expiry.replace("-", "") == session_date.replace("-", "")
-                ),
-                None,
+                (expiry for expiry in options_map.expiries
+                 if expiry.expiry.replace("-", "") == session_date.replace("-", "")), None
             ) if options_map is not None else None
             state_path = Path(settings.state_path)
             notify_settings = replace(
@@ -202,9 +198,7 @@ def run(
                     decision_at=latest.as_of,
                     session_date=session_date,
                     atm_iv=front_expiry.atm_iv if front_expiry is not None else None,
-                    atm_straddle=(
-                        front_expiry.atm_straddle_mid if front_expiry is not None else None
-                    ),
+                    atm_straddle=front_expiry.atm_straddle_mid if front_expiry else None,
                 )
                 monitor_state, path_decision, strategy_signals = project_level_decision_machine(
                     monitor_state,
@@ -338,24 +332,18 @@ def run(
                         )
                         atomic_write_json_secure(state_path, latest_monitor_state)
 
-            # Notify first, then atomically refresh the fixed chart linked by
-            # divergence alerts so image rendering never delays the warning.
+            # Refresh the linked chart after notifying so rendering never delays the warning.
             if divergence_alerts:
                 try:
-                    flow_path = (
-                        Path(storage_settings.data_root) / "published/spxw-surface/flow/latest.png"
+                    flow_path = Path(storage_settings.data_root) / (
+                        "published/spxw-surface/flow/latest.png"
                     )
                     flow_output = write_net_premium_flow_png(monitor_state, flow_path)
                     payload["net_premium_flow_image"] = {
-                        "status": "published",
-                        "bytes": flow_output.stat().st_size,
-                    }
+                        "status": "published", "bytes": flow_output.stat().st_size}
                 except Exception as exc:  # noqa: BLE001 - alert already delivered
                     payload["net_premium_flow_image"] = {
-                        "status": "failed",
-                        "error": f"{type(exc).__name__}:{exc}",
-                    }
-
+                        "status": "failed", "error": f"{type(exc).__name__}:{exc}"}
             # Research persistence is deliberately after notification and its
             # durable delivery acknowledgement. It may spool, but cannot add
             # latency to the user-visible alert.

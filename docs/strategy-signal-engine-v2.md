@@ -1257,6 +1257,28 @@ RTH level state 只有同时满足 `formal_signal=true`、`phase=confirmed`、`t
 宏观、PIN、ATR、目标/行权价路径、exact BBO、报价新鲜度或 setup 专属证据门。
 策略版本为 `strategy_policy.bootstrap.v56`。
 
+### 11.23 v57：动量缺失模型回退与持续突破确认
+
+`ES_VOLUME_MOMENTUM` 已通过因果 ES 放量、1m/5m 同向、PIN、ATR、目标空间、
+行权价路径及 exact BBO hard gate 后，若生产目录仅缺少可选的
+`strategy_edge_model.v1.json`，不得再以该文件缺失作为唯一否决原因；候选进入
+5 分钟人工窗口并明确标记 `forward_unvalidated_user_override`。若模型文件存在，
+其 promoted、domain 与正 edge 结果仍拥有模型门禁；无效、陈旧或未推广模型不走回退。
+
+正式 RTH breakout 仍必须先证明 inside-to-outside crossing、至少 20 秒方向接受和
+ES 同向。接受后允许两条因果确认路径：
+
+- 回踩冻结水平并再次同向离开，持续至少 10 秒；
+- 不回踩但突破扩展持续至少 10 秒。
+
+两者均进入原有 `RTH_LEVEL_CONFIRMATION`，固定 15 点 Debit Vertical、5 分钟人工
+窗口，且继续要求宏观、PIN、ATR、目标空间、借记、exact BBO 与报价新鲜度门。
+确认到期且价格完整离开原水平后，现有 rearm generation 允许下一次完整回踩、
+重新穿越和确认形成新的机会；不得从单个陈旧事件重复发卡。`fade` 仍只作研究，
+`automatic_ordering=false` 不变。
+
+策略版本为 `strategy_policy.bootstrap.v57`；不新增服务、定时器、数据库、队列或通知 owner。
+
 ---
 
 ## 12. 正式 NoTrade

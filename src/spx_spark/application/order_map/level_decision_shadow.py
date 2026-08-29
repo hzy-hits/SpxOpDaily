@@ -664,6 +664,7 @@ def _public_state(
         ),
         "phase": phase,
         "thesis": thesis,
+        "breakout_confirmation_mode": state.get("breakout_confirmation_mode"),
         "direction": direction,
         "event_id": state.get("event_id"),
         # This lifecycle generation must cross the public projection boundary.

@@ -33,6 +33,7 @@ def build_transition_record(
         "previous_phase": transition.previous_phase.value,
         "current_phase": transition.current_phase.value,
         "thesis": state.get("thesis"),
+        "breakout_confirmation_mode": state.get("breakout_confirmation_mode"),
         "direction": state.get("direction"),
         "level_kind": state.get("level_kind"),
         "level": state.get("level"),

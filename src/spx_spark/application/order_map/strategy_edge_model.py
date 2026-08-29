@@ -30,9 +30,14 @@ _WALL_HAZARD_SETUP = "WALL_BREAKOUT_HAZARD"
 _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
+_ES_VOLUME_MOMENTUM_SETUP = "ES_VOLUME_MOMENTUM"
+_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v57"
+_ES_VOLUME_MOMENTUM_CONTRACT_HASH = (
+    "sha256:1b9b4fedbd4b931f83932abe382cbb319352a3631fe8d8c789ecd221cac49d86"
+)
 _RTH_LEVEL_CONFIRMATION_SETUP = "RTH_LEVEL_CONFIRMATION"
 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH = (
-    "sha256:7d576327f9f0bf9fe23c993392efd76ec512e34e671826550ea33d38ff7f0a6c"
+    "sha256:95e1ec1d82c0b7b4dc2678e4e6d1248c5471ed91f8ae64d99eaa2a06dfa16b5b"
 )
 _CLOSE_CONVERGENCE_SETUP = "CLOSE_CONVERGENCE_60M"
 _CLOSE_CONVERGENCE_CONTRACT_HASH = (
@@ -142,7 +147,10 @@ def apply_strategy_edge_authority(
     artifact is absent, unpromoted, stale, malformed, or out of domain. The
     Pre-average, wall hazard, confirmed RTH levels, close convergence, the RTH
     iron condor, and the user-authorized v48 GTH minute gate are explicit
-    manual-policy exceptions and are always labeled forward-unvalidated.
+    manual-policy exceptions and are always labeled forward-unvalidated. A
+    causally aligned RTH ES-volume candidate may use the same explicit label
+    only when the optional promoted-model artifact is absent; a present model
+    still owns positive/negative edge authority.
     """
 
     if not candidates:
@@ -156,6 +164,7 @@ def apply_strategy_edge_authority(
     scored: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     model_candidates: list[Mapping[str, Any]] = []
+    momentum_fallback_candidates: list[Mapping[str, Any]] = []
     for candidate in candidates:
         setup = candidate.get("setup_kind")
         if _is_gth_minute_gate_candidate(candidate):
@@ -205,6 +214,13 @@ def apply_strategy_edge_authority(
             _CLOSE_CONVERGENCE_SETUP,
             _IRON_CONDOR_SETUP,
         }:
+            if setup == _ES_VOLUME_MOMENTUM_SETUP:
+                if regime.get("policy_version") != _ES_VOLUME_MOMENTUM_POLICY:
+                    rejected.append(
+                        _reject(candidate, "es_volume_momentum_policy_authority_invalid")
+                    )
+                    continue
+                momentum_fallback_candidates.append(candidate)
             model_candidates.append(candidate)
             continue
         authority_contracts = {
@@ -214,22 +230,22 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v56",
+                "strategy_policy.bootstrap.v57",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _RTH_LEVEL_CONFIRMATION_SETUP: (
-                "strategy_policy.bootstrap.v56",
+                "strategy_policy.bootstrap.v57",
                 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
                 "rth_level_confirmation_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v56",
+                "strategy_policy.bootstrap.v57",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v56",
+                "strategy_policy.bootstrap.v57",
                 _IRON_CONDOR_CONTRACT_HASH,
                 "iron_condor_policy_authority_invalid",
             ),
@@ -260,6 +276,32 @@ def apply_strategy_edge_authority(
 
     artifact, artifact_reason = load_strategy_edge_artifact(data_root)
     if artifact is None:
+        if artifact_reason == "strategy_edge_model_artifact_missing":
+            momentum_ids = {id(candidate) for candidate in momentum_fallback_candidates}
+            for candidate in momentum_fallback_candidates:
+                authorized = {
+                    **dict(candidate),
+                    "authorization_policy": _ES_VOLUME_MOMENTUM_POLICY,
+                    "evidence_contract_hash": _ES_VOLUME_MOMENTUM_CONTRACT_HASH,
+                    "evidence_status": "forward_unvalidated_user_override",
+                    "automatic_ordering": False,
+                }
+                scored.append(
+                    _attach_model_payload(
+                        authorized,
+                        {
+                            "status": "explicit_policy_authority_unvalidated",
+                            "policy_version": _ES_VOLUME_MOMENTUM_POLICY,
+                            "evidence_contract_hash": _ES_VOLUME_MOMENTUM_CONTRACT_HASH,
+                            "evidence_status": "forward_unvalidated_user_override",
+                            "fallback_reason": artifact_reason,
+                            "gate_kind": "causal_es_volume_momentum",
+                        },
+                    )
+                )
+            model_candidates = [
+                candidate for candidate in model_candidates if id(candidate) not in momentum_ids
+            ]
         rejected.extend(
             _reject(
                 candidate,
