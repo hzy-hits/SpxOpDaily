@@ -88,6 +88,7 @@ from spx_spark.notifier import notify_payload
 from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.options_map import build_options_map
+from spx_spark.options_map.net_premium_render import write_net_premium_flow_png
 from spx_spark.settings import AppSettings, DEFAULT_ALERT_SETTINGS, current_app_settings
 from spx_spark.state_io import (
     atomic_write_json_secure,
@@ -170,6 +171,14 @@ def run(
                     observed_at=sample.at,
                     reason="option_structure_build_error",
                 )
+            front_expiry = next(
+                (
+                    expiry
+                    for expiry in options_map.expiries
+                    if expiry.expiry.replace("-", "") == session_date.replace("-", "")
+                ),
+                None,
+            ) if options_map is not None else None
             state_path = Path(settings.state_path)
             notify_settings = replace(
                 NotificationSettings.from_env(),
@@ -192,6 +201,10 @@ def run(
                     quotes=latest.quotes,
                     decision_at=latest.as_of,
                     session_date=session_date,
+                    atm_iv=front_expiry.atm_iv if front_expiry is not None else None,
+                    atm_straddle=(
+                        front_expiry.atm_straddle_mid if front_expiry is not None else None
+                    ),
                 )
                 monitor_state, path_decision, strategy_signals = project_level_decision_machine(
                     monitor_state,
@@ -226,9 +239,7 @@ def run(
 
             if alerts and DEFAULT_ALERT_SETTINGS.steven_alert_context_enabled:
                 try:
-                    steven_state = load_steven_state_for_alerts(
-                        storage_settings.data_root
-                    )
+                    steven_state = load_steven_state_for_alerts(storage_settings.data_root)
                     alerts = annotate_alerts_with_steven_context(
                         alerts,
                         steven_state,
@@ -326,6 +337,24 @@ def run(
                             delivered=True,
                         )
                         atomic_write_json_secure(state_path, latest_monitor_state)
+
+            # Notify first, then atomically refresh the fixed chart linked by
+            # divergence alerts so image rendering never delays the warning.
+            if divergence_alerts:
+                try:
+                    flow_path = (
+                        Path(storage_settings.data_root) / "published/spxw-surface/flow/latest.png"
+                    )
+                    flow_output = write_net_premium_flow_png(monitor_state, flow_path)
+                    payload["net_premium_flow_image"] = {
+                        "status": "published",
+                        "bytes": flow_output.stat().st_size,
+                    }
+                except Exception as exc:  # noqa: BLE001 - alert already delivered
+                    payload["net_premium_flow_image"] = {
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}:{exc}",
+                    }
 
             # Research persistence is deliberately after notification and its
             # durable delivery acknowledgement. It may spool, but cannot add

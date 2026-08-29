@@ -2030,6 +2030,7 @@ def test_call_path_delivers_without_reviewer_and_records_strategy_ack(tmp_path) 
 @pytest.mark.parametrize("direction", ["bearish", "bullish"])
 def test_net_premium_divergence_delivers_without_llm_review(tmp_path, direction: str) -> None:
     chinese = "熊" if direction == "bearish" else "牛"
+    position = "Call/多头" if direction == "bearish" else "Put/空头"
     event_id = f"spx_net_premium_{direction}_divergence:20260710:1500"
     payload = make_payload()
     payload["alerts"] = [
@@ -2037,10 +2038,10 @@ def test_net_premium_divergence_delivers_without_llm_review(tmp_path, direction:
             "severity": "high",
             "kind": f"captured_net_premium_{direction}_divergence",
             "instrument_id": "index:SPX",
-            "title": f"SPX {chinese}背离观察：局部极值失败",
-            "detail": "捕获的 0DTE Put 净权利金占优；仅观察，不是入场授权。",
+            "title": f"SPX {chinese}背离离场提醒：局部极值失败",
+            "detail": f"捕获的 0DTE 净权利金发生背离；持有 {position}方向仓应离场。",
             "quality": "live",
-            "source_gate": f"captured_net_premium_proxy_{direction}_divergence_v2",
+            "source_gate": f"captured_net_premium_proxy_{direction}_divergence_v4",
             "dedup_group": f"{event_id}:observe",
             "event_id": event_id,
         }
@@ -2062,6 +2063,32 @@ def test_net_premium_divergence_delivers_without_llm_review(tmp_path, direction:
     assert [sink.sink for sink in result.sinks] == ["feishu"]
     assert not any(sink.sink == "deepseek_reviewer" for sink in result.sinks)
     assert result.acknowledged_event_ids == (event_id,)
+
+    from spx_spark.notifier.prompts import format_alert_message
+
+    rendered = format_alert_message(payload, payload["alerts"])
+    assert rendered.startswith("🟠 资金流背离 · 离场提醒")
+    assert f"持有 {position}方向仓应离场" in rendered
+    assert "无对应持仓不操作，不自动反手" in rendered
+
+
+def test_late_contracted_divergence_formats_as_reduce_only() -> None:
+    from spx_spark.notifier.prompts import format_alert_message
+
+    payload = make_payload()
+    payload["alerts"] = [
+        {
+            "kind": "captured_net_premium_bearish_divergence",
+            "title": "SPX 熊背离止盈/减仓提醒",
+            "detail": "13:30 ET 后 IV 与跨式收敛；多头盈利仓只止盈或减仓。",
+            "audit_context": {"authority": "take_profit_reduce_only"},
+        }
+    ]
+
+    rendered = format_alert_message(payload, payload["alerts"])
+
+    assert rendered.startswith("🟠 资金流背离 · 止盈/减仓")
+    assert "不反手、不生成新方向交易" in rendered
 
 
 def test_recent_shock_suppresses_same_direction_fixed_cycle_price_move(tmp_path) -> None:
@@ -2530,6 +2557,12 @@ def test_bark_title_maps_kinds_to_chinese_categories() -> None:
     assert bark_title_for_alerts([{"kind": "gth_directional_advisory"}]) == "SPX GTH 方向观察"
     assert bark_title_for_alerts([{"kind": "gth_advisory_management"}]) == "SPX GTH 机会管理"
     assert bark_title_for_alerts([{"kind": "gth_dip_reclaim_call"}]) == "SPX 0DTE Call 回收确认"
+    assert bark_title_for_alerts([{"kind": "captured_net_premium_bearish_divergence"}]) == (
+        "SPX 0DTE 熊背离仓位管理"
+    )
+    assert bark_title_for_alerts([{"kind": "captured_net_premium_bullish_divergence"}]) == (
+        "SPX 0DTE 牛背离仓位管理"
+    )
     assert bark_title_for_alerts([{"kind": "option_wall_proximity"}]) == "SPX 结构观察"
     assert bark_title_for_alerts([{"kind": "unknown_kind", "severity": "high"}]) == "SPX 市场提醒"
 

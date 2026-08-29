@@ -539,11 +539,11 @@ def im_delivery_failed(sinks: list[SinkResult]) -> bool:
 BARK_TITLE_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
     ("0DTE Call 回收确认", frozenset({"gth_dip_reclaim_call"})),
     (
-        "0DTE 熊背离观察",
+        "0DTE 熊背离仓位管理",
         frozenset({"captured_net_premium_bearish_divergence"}),
     ),
     (
-        "0DTE 牛背离观察",
+        "0DTE 牛背离仓位管理",
         frozenset({"captured_net_premium_bullish_divergence"}),
     ),
     ("GTH 方向观察", frozenset({

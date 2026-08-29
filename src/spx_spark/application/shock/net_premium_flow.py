@@ -25,7 +25,8 @@ from spx_spark.marketdata import (
 
 _ET = ZoneInfo("America/New_York")
 _FLOW_STATE_KEY = "captured_net_premium_divergence"
-_POLICY_VERSION = "captured_option_flow.v2"
+_POLICY_VERSION = "captured_option_flow.v4"
+_FLOW_IMAGE_URL = "https://spx.zh3nyu.com/flow/latest.png"
 _LOOKBACK_MINUTES = 15
 _CONFIRM_MINUTES = 5
 _COOLDOWN_SECONDS = 15 * 60
@@ -41,6 +42,7 @@ _HISTORY_MINUTES = 7 * 60
 _STRIKE_HISTORY_MINUTES = 15
 _SEEN_RETENTION_MINUTES = 45
 _START_ET = time(10, 0)
+_LATE_MANAGEMENT_START_ET = time(13, 30)
 _END_ET = time(15, 30)
 _IMBALANCE_THRESHOLD = 0.05
 _ROLLING_WINDOWS = (1, 5, 15, 30)
@@ -74,6 +76,8 @@ _STRIKE_STATE_FIELDS = (
 )
 _AGGREGATE_METADATA_FIELDS = (
     "spx",
+    "atm_iv",
+    "atm_straddle",
     "started_at",
     "updated_at",
     "minute_count",
@@ -86,6 +90,10 @@ def _minute_start(value: datetime) -> datetime:
 
 def _number(value: object) -> float:
     return float(value) if isinstance(value, int | float) and math.isfinite(value) else 0.0
+
+
+def _optional_number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and math.isfinite(value) else None
 
 
 def _strike_number(value: object) -> float:
@@ -565,9 +573,56 @@ def _snapshot(
         "strike_flow_5m": strike_projection(strike_5m),
         "strike_flow_15m": strike_projection(strike_15m),
         "strike_flow_session": strike_projection(strike_session),
+        "volatility_15m": _volatility_15m(rows),
     }
     snapshot["desk_summary"] = _desk_summary(snapshot)
     return snapshot
+
+
+def _volatility_15m(
+    rows: list[tuple[datetime, dict[str, object]]],
+) -> dict[str, object]:
+    """Compare exact causal ATM observations 15 minutes apart."""
+
+    unavailable: dict[str, object] = {
+        "quality": "unavailable",
+        "atm_iv_change": None,
+        "atm_straddle_decay": None,
+        "contracted": False,
+    }
+    if not rows:
+        return unavailable
+    current_at, current = rows[-1]
+    target_at = current_at - timedelta(minutes=15)
+    prior = next((row for at, row in rows if at == target_at), None)
+    if prior is None:
+        return unavailable
+    current_iv = _optional_number(current.get("atm_iv"))
+    prior_iv = _optional_number(prior.get("atm_iv"))
+    current_straddle = _optional_number(current.get("atm_straddle"))
+    prior_straddle = _optional_number(prior.get("atm_straddle"))
+    if (
+        current_iv is None
+        or prior_iv is None
+        or current_straddle is None
+        or prior_straddle is None
+        or current_iv <= 0
+        or prior_iv <= 0
+        or current_straddle <= 0
+        or prior_straddle <= 0
+    ):
+        return unavailable
+    iv_change = current_iv - prior_iv
+    straddle_decay = (prior_straddle - current_straddle) / prior_straddle
+    return {
+        "quality": "ready",
+        "observed_at": current_at.isoformat(),
+        "atm_iv": current_iv,
+        "atm_iv_change": iv_change,
+        "atm_straddle": current_straddle,
+        "atm_straddle_decay": straddle_decay,
+        "contracted": iv_change < 0 and straddle_decay > 0,
+    }
 
 
 def _retain_active_divergence(
@@ -592,21 +647,51 @@ def _divergence_alert(
     signal_minute: datetime,
     current_spx: float,
     extreme: float,
+    pretrend_points: float,
+    rejection_points: float,
     recent: dict[str, object],
     session: dict[str, object],
+    volatility: dict[str, object],
 ) -> Alert:
     bearish = kind == NET_PREMIUM_BEARISH_DIVERGENCE_KIND
     direction = "bearish" if bearish else "bullish"
+    signal_time_et = as_utc(signal_minute).astimezone(_ET).time()
+    late_contraction = (
+        signal_time_et >= _LATE_MANAGEMENT_START_ET
+        and volatility.get("contracted") is True
+    )
     stamp = as_utc(signal_minute).strftime("%H%M")
     event_id = f"spx_net_premium_{direction}_divergence:{session_date.replace('-', '')}:{stamp}"
     label = "熊背离" if bearish else "牛背离"
-    title = f"SPX {label}观察：局部{'新高' if bearish else '新低'}失败，方向净权利金转{'空' if bearish else '多'}"
+    management_label = "止盈/减仓提醒" if late_contraction else "离场提醒"
+    title = f"SPX {label}{management_label}：局部{'新高' if bearish else '新低'}失败，方向净权利金转{'空' if bearish else '多'}"
     path = (
         f"SPX 近 5 分钟冲出 {extreme:.1f} 后回落至 {current_spx:.1f}"
         if bearish
         else f"SPX 近 5 分钟下探 {extreme:.1f} 后回升至 {current_spx:.1f}"
     )
-    action = "不是做空或 Put 入场授权" if bearish else "不是买 Call 或反手做多授权"
+    if late_contraction:
+        action = (
+            "持有 Call/多头盈利仓只止盈或减仓；不追 Put、不反手、不生成新方向交易"
+            if bearish
+            else "持有 Put/空头盈利仓只止盈或减仓；不追 Call、不反手、不生成新方向交易"
+        )
+        authority = "take_profit_reduce_only"
+        position_action = "take_profit_or_reduce_long" if bearish else "take_profit_or_reduce_short"
+    else:
+        action = (
+            "持有 Call/多头方向仓应离场；无对应持仓不追 Put、不反手"
+            if bearish
+            else "持有 Put/空头方向仓应离场；无对应持仓不追 Call、不反手"
+        )
+        authority = "conditional_exit_alert"
+        position_action = "exit_long_direction" if bearish else "exit_short_direction"
+    volatility_detail = ""
+    if late_contraction:
+        volatility_detail = (
+            f"13:30 ET 后 ATM IV 15m {_number(volatility.get('atm_iv_change')):+.2%}、"
+            f"跨式衰减 {_number(volatility.get('atm_straddle_decay')):.1%}；"
+        )
     return Alert(
         severity="high",
         kind=kind,
@@ -618,23 +703,36 @@ def _divergence_alert(
             f"Put 净权利金 {_format_dollars(recent.get('put_net'))}、"
             f"方向净值 {_format_dollars(recent.get('directional_net'))}，"
             f"可分类成交量覆盖约 {_number(recent.get('coverage')):.1%}。"
-            f"这是前向未验证的{label}观察，{action}；等待价格结构确认。"
+            f"此前同向推进 {pretrend_points:.1f} 点，本次拒绝 {rejection_points:.1f} 点。"
+            f"{volatility_detail}"
+            f"这是{label}条件式人工离场提醒：{action}。"
+            f"资金流图 {_FLOW_IMAGE_URL}"
         ),
         provider=Provider.SCHWAB.value,
         quality=MarketDataQuality.LIVE.value,
         value=current_spx,
         threshold=extreme,
         research_only=False,
-        source_gate=f"captured_net_premium_proxy_{direction}_divergence_v2",
+        source_gate=f"captured_net_premium_proxy_{direction}_divergence_v4",
         dedup_group=f"{event_id}:observe",
         event_id=event_id,
         source_at=as_utc(decision_at).isoformat(),
         cooldown_seconds=float(_COOLDOWN_SECONDS),
         audit_context={
             "policy_version": _POLICY_VERSION,
-            "authority": "observe_only",
+            "authority": authority,
             "execution_eligible": False,
             "automatic_ordering": False,
+            "new_entry_eligible": False,
+            "reverse_eligible": False,
+            "direction": direction,
+            "position_action": position_action,
+            "pre_divergence_trend": "up" if bearish else "down",
+            "pretrend_points": pretrend_points,
+            "rejection_points": rejection_points,
+            "late_contraction": late_contraction,
+            "atm_iv_change_15m": volatility.get("atm_iv_change"),
+            "atm_straddle_decay_15m": volatility.get("atm_straddle_decay"),
             "signal_minute": as_utc(signal_minute).isoformat(),
             "call_net_premium_dollars": recent.get("call_net"),
             "put_net_premium_dollars": recent.get("put_net"),
@@ -655,8 +753,10 @@ def advance_captured_option_flow(
     quotes: tuple[Quote, ...],
     decision_at: datetime,
     session_date: str,
+    atm_iv: float | None = None,
+    atm_straddle: float | None = None,
 ) -> tuple[dict[str, object], list[Alert]]:
-    """Advance causal per-strike flow facts and emit observe-only divergences."""
+    """Advance causal flow facts and emit position-management divergences."""
 
     state = dict(state)
     decision_at = as_utc(decision_at)
@@ -678,6 +778,10 @@ def advance_captured_option_flow(
 
     current_bucket = _bucket(minutes, sample.at)
     current_bucket["spx"] = float(sample.spx)
+    if atm_iv is not None and math.isfinite(atm_iv) and atm_iv > 0:
+        current_bucket["atm_iv"] = float(atm_iv)
+    if atm_straddle is not None and math.isfinite(atm_straddle) and atm_straddle > 0:
+        current_bucket["atm_straddle"] = float(atm_straddle)
 
     for quote in _fresh_schwab_zero_dte_options(
         quotes, decision_at=decision_at, session_date=session_date
@@ -786,16 +890,11 @@ def advance_captured_option_flow(
     required = _LOOKBACK_MINUTES + _CONFIRM_MINUTES
     window = rows[-required:]
     signal_time_et = completed_minute.astimezone(_ET).time()
-    last_alert_at = _parse_datetime(tape.get("last_alert_at"))
-    cooldown_active = (
-        last_alert_at is not None
-        and (decision_at - last_alert_at).total_seconds() < _COOLDOWN_SECONDS
-    )
     contiguous = len(window) == required and all(
         (window[index][0] - window[index - 1][0]).total_seconds() == 60
         for index in range(1, len(window))
     )
-    if contiguous and _START_ET <= signal_time_et <= _END_ET and not cooldown_active:
+    if contiguous and _START_ET <= signal_time_et <= _END_ET:
         prior, recent = window[:_LOOKBACK_MINUTES], window[_LOOKBACK_MINUTES:]
         previous_flow = _summary(_combine([row for _, row in prior[-5:]]), minutes=5)
         recent_rows = [row for _, row in recent]
@@ -821,7 +920,19 @@ def advance_captured_option_flow(
             and _number(recent_flow.get("directional_net")) > 0
             and recent_imbalance > previous_imbalance
         )
-        if bearish or bullish:
+        direction_key = "BEARISH" if bearish else "BULLISH" if bullish else ""
+        raw_alert_times = tape.get("last_alert_at_by_direction")
+        alert_times = dict(raw_alert_times) if isinstance(raw_alert_times, dict) else {}
+        last_alert_at = _parse_datetime(alert_times.get(direction_key))
+        last_divergence = tape.get("last_divergence")
+        if last_alert_at is None and isinstance(last_divergence, dict):
+            if str(last_divergence.get("direction") or "") == direction_key:
+                last_alert_at = _parse_datetime(tape.get("last_alert_at"))
+        cooldown_active = (
+            last_alert_at is not None
+            and (decision_at - last_alert_at).total_seconds() < _COOLDOWN_SECONDS
+        )
+        if (bearish or bullish) and not cooldown_active:
             kind = (
                 NET_PREMIUM_BEARISH_DIVERGENCE_KIND
                 if bearish
@@ -830,18 +941,32 @@ def advance_captured_option_flow(
             snapshot["sentiment"] = "BEARISH_DIVERGENCE" if bearish else "BULLISH_DIVERGENCE"
             snapshot["divergence"] = "BEARISH" if bearish else "BULLISH"
             snapshot["desk_summary"] = _desk_summary(snapshot)
+            extreme = recent_high if bearish else recent_low
+            prior_origin = _number(prior[0][1].get("spx"))
+            pretrend_points = max(
+                (extreme - prior_origin) if bearish else (prior_origin - extreme),
+                0.0,
+            )
+            rejection_points = abs(current_spx - extreme)
+            raw_volatility = snapshot.get("volatility_15m")
+            volatility = dict(raw_volatility) if isinstance(raw_volatility, dict) else {}
             alert = _divergence_alert(
                 kind=kind,
                 session_date=session_date,
                 decision_at=decision_at,
                 signal_minute=completed_minute,
                 current_spx=current_spx,
-                extreme=recent_high if bearish else recent_low,
+                extreme=extreme,
+                pretrend_points=pretrend_points,
+                rejection_points=rejection_points,
                 recent=recent_flow,
                 session=snapshot["session"],
+                volatility=volatility,
             )
             alerts.append(alert)
             tape["last_alert_at"] = decision_at.isoformat()
+            alert_times[direction_key] = decision_at.isoformat()
+            tape["last_alert_at_by_direction"] = alert_times
             tape["last_alert_event_id"] = alert.event_id
             tape["last_divergence"] = {
                 "direction": "BEARISH" if bearish else "BULLISH",
@@ -860,7 +985,14 @@ def advance_captured_option_flow(
                     "direction": "BEARISH" if bearish else "BULLISH",
                     "signal_at": completed_minute.isoformat(),
                     "spx": current_spx,
-                    "extreme_spx": recent_high if bearish else recent_low,
+                    "extreme_spx": extreme,
+                    "pretrend_points": pretrend_points,
+                    "rejection_points": rejection_points,
+                    "management_mode": alert.audit_context.get("authority")
+                    if alert.audit_context
+                    else None,
+                    "atm_iv_change_15m": volatility.get("atm_iv_change"),
+                    "atm_straddle_decay_15m": volatility.get("atm_straddle_decay"),
                     "directional_net": recent_flow.get("directional_net"),
                     "coverage": recent_flow.get("coverage"),
                     "event_id": alert.event_id,

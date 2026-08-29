@@ -97,10 +97,25 @@ def _captured_trade_quote(
 
 
 def _run_net_premium_divergence_path(
-    *, volume_step: float, direction: str = "bearish"
+    *,
+    volume_step: float,
+    direction: str = "bearish",
+    prior_direction: str | None = None,
+    start: datetime | None = None,
+    contracting_volatility: bool = False,
 ) -> tuple[dict[str, object], list[Alert]]:
     state = empty_monitor_state("2026-07-10")
-    start = datetime(2026, 7, 10, 13, 59, 5, tzinfo=UTC)
+    start = start or datetime(2026, 7, 10, 13, 59, 5, tzinfo=UTC)
+    if prior_direction is not None:
+        prior_at = datetime(2026, 7, 10, 14, 17, tzinfo=UTC)
+        state["captured_net_premium_divergence"] = {
+            "last_alert_at": prior_at.isoformat(),
+            "last_divergence": {
+                "direction": prior_direction,
+                "signal_at": prior_at.isoformat(),
+                "expires_at": (prior_at + timedelta(minutes=15)).isoformat(),
+            },
+        }
     turn = [101.0, 103.0, 102.0, 101.0, 100.0]
     if direction == "bullish":
         turn = [99.0, 97.0, 98.0, 99.0, 100.0]
@@ -125,23 +140,32 @@ def _run_net_premium_divergence_path(
             quotes=quotes,
             decision_at=at,
             session_date="2026-07-10",
+            atm_iv=0.20 - offset * 0.001 if contracting_volatility else None,
+            atm_straddle=30.0 - offset * 0.25 if contracting_volatility else None,
         )
         all_alerts.extend(alerts)
     return state, all_alerts
 
 
-def test_captured_net_premium_bearish_divergence_is_observe_only() -> None:
+def test_captured_net_premium_bearish_divergence_is_conditional_exit_alert() -> None:
     state, alerts = _run_net_premium_divergence_path(volume_step=1.0)
 
     assert [alert.kind for alert in alerts] == [NET_PREMIUM_BEARISH_DIVERGENCE_KIND]
     alert = alerts[0]
     assert alert.research_only is False
-    assert alert.source_gate == "captured_net_premium_proxy_bearish_divergence_v2"
+    assert alert.source_gate == "captured_net_premium_proxy_bearish_divergence_v4"
     assert alert.audit_context is not None
-    assert alert.audit_context["authority"] == "observe_only"
+    assert alert.audit_context["authority"] == "conditional_exit_alert"
     assert alert.audit_context["execution_eligible"] is False
     assert alert.audit_context["automatic_ordering"] is False
-    assert "不是做空或 Put 入场授权" in alert.detail
+    assert alert.audit_context["new_entry_eligible"] is False
+    assert alert.audit_context["reverse_eligible"] is False
+    assert alert.audit_context["position_action"] == "exit_long_direction"
+    assert alert.audit_context["pre_divergence_trend"] == "up"
+    assert alert.audit_context["pretrend_points"] == pytest.approx(3.0)
+    assert alert.audit_context["rejection_points"] == pytest.approx(1.0)
+    assert "持有 Call/多头方向仓应离场" in alert.detail
+    assert "https://spx.zh3nyu.com/flow/latest.png" in alert.detail
     tape = state["captured_net_premium_divergence"]
     assert isinstance(tape, dict)
     assert tape["coverage"] == pytest.approx(1.0)
@@ -154,20 +178,15 @@ def test_captured_net_premium_bearish_divergence_is_observe_only() -> None:
     assert strike["call_sell"] > 0
     assert strike["put_buy"] > 0
     assert "熊流 7500" in tape["desk_summary"]
-    assert tape["divergence_events"] == [
-        {
-            "direction": "BEARISH",
-            "signal_at": "2026-07-10T14:18:00+00:00",
-            "spx": 102.0,
-            "extreme_spx": 103.0,
-            "directional_net": pytest.approx(-220.0),
-            "coverage": pytest.approx(1.0),
-            "event_id": "spx_net_premium_bearish_divergence:20260710:1418",
-        }
-    ]
+    events = tape["divergence_events"]
+    assert len(events) == 1
+    assert events[0]["direction"] == "BEARISH"
+    assert events[0]["signal_at"] == "2026-07-10T14:18:00+00:00"
+    assert events[0]["directional_net"] == pytest.approx(-220.0)
+    assert events[0]["management_mode"] == "conditional_exit_alert"
 
 
-def test_captured_net_premium_bullish_divergence_is_observe_only() -> None:
+def test_captured_net_premium_bullish_divergence_is_conditional_exit_alert() -> None:
     state, alerts = _run_net_premium_divergence_path(
         volume_step=1.0,
         direction="bullish",
@@ -175,14 +194,49 @@ def test_captured_net_premium_bullish_divergence_is_observe_only() -> None:
 
     assert [alert.kind for alert in alerts] == [NET_PREMIUM_BULLISH_DIVERGENCE_KIND]
     alert = alerts[0]
-    assert alert.source_gate == "captured_net_premium_proxy_bullish_divergence_v2"
+    assert alert.source_gate == "captured_net_premium_proxy_bullish_divergence_v4"
     assert alert.audit_context is not None
-    assert alert.audit_context["authority"] == "observe_only"
+    assert alert.audit_context["authority"] == "conditional_exit_alert"
     assert alert.audit_context["execution_eligible"] is False
-    assert "不是买 Call 或反手做多授权" in alert.detail
+    assert alert.audit_context["position_action"] == "exit_short_direction"
+    assert "持有 Put/空头方向仓应离场" in alert.detail
     tape = state["captured_net_premium_divergence"]
     assert tape["snapshot"]["sentiment"] == "BULLISH_DIVERGENCE"
     assert "牛流 7500" in tape["desk_summary"]
+
+
+def test_late_contracted_divergence_only_takes_profit_or_reduces() -> None:
+    state, alerts = _run_net_premium_divergence_path(
+        volume_step=1.0,
+        start=datetime(2026, 7, 10, 17, 29, 5, tzinfo=UTC),
+        contracting_volatility=True,
+    )
+
+    assert [alert.kind for alert in alerts] == [NET_PREMIUM_BEARISH_DIVERGENCE_KIND]
+    alert = alerts[0]
+    assert alert.audit_context is not None
+    assert alert.audit_context["authority"] == "take_profit_reduce_only"
+    assert alert.audit_context["position_action"] == "take_profit_or_reduce_long"
+    assert alert.audit_context["late_contraction"] is True
+    assert alert.audit_context["atm_iv_change_15m"] < 0
+    assert alert.audit_context["atm_straddle_decay_15m"] > 0
+    assert alert.audit_context["new_entry_eligible"] is False
+    assert alert.audit_context["reverse_eligible"] is False
+    assert "只止盈或减仓" in alert.detail
+    assert "不生成新方向交易" in alert.detail
+    tape = state["captured_net_premium_divergence"]
+    assert tape["snapshot"]["volatility_15m"]["contracted"] is True
+    assert tape["divergence_events"][0]["management_mode"] == "take_profit_reduce_only"
+
+
+def test_opposite_flow_divergence_bypasses_other_direction_cooldown() -> None:
+    _, alerts = _run_net_premium_divergence_path(
+        volume_step=1.0,
+        direction="bearish",
+        prior_direction="BULLISH",
+    )
+
+    assert [alert.kind for alert in alerts] == [NET_PREMIUM_BEARISH_DIVERGENCE_KIND]
 
 
 def test_captured_net_premium_divergence_fails_closed_on_low_tape_coverage() -> None:

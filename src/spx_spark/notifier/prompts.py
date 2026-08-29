@@ -56,6 +56,17 @@ def format_alert_message(payload: dict[str, object], alerts: list[dict[str, obje
         return _format_position_alert(payload, alerts, window_name, priority)
 
     kinds = {str(alert.get("kind") or "") for alert in alerts}
+    divergence_kinds = {
+        "captured_net_premium_bearish_divergence",
+        "captured_net_premium_bullish_divergence",
+    }
+    if kinds and kinds <= divergence_kinds:
+        return _format_divergence_exit_alert(
+            payload,
+            alerts,
+            window_name,
+            priority,
+        )
     management_only = bool(kinds) and kinds <= {"gth_advisory_management"}
     decision = payload.get("strategy_decision")
     if not isinstance(decision, dict):
@@ -201,6 +212,35 @@ def _format_position_alert(
         lines.append(f"状态  {alert.get('title')}")
         if alert.get("detail"):
             lines.append(f"动作  {alert.get('detail')}")
+    lines.append(f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}")
+    return "\n".join(lines)
+
+
+def _format_divergence_exit_alert(
+    payload: dict[str, object],
+    alerts: list[dict[str, object]],
+    window_name: str,
+    priority: str,
+) -> str:
+    contexts = [
+        alert.get("audit_context")
+        for alert in alerts
+        if isinstance(alert.get("audit_context"), dict)
+    ]
+    reduce_only = any(
+        context.get("authority") == "take_profit_reduce_only"
+        for context in contexts
+    )
+    lines = ["🟠 资金流背离 · 止盈/减仓" if reduce_only else "🟠 资金流背离 · 离场提醒"]
+    for alert in alerts[:2]:
+        lines.append(f"事件  {alert.get('title')}")
+        if alert.get("detail"):
+            lines.append(f"动作  {alert.get('detail')}")
+    lines.append(
+        "纪律  13:30 ET 后 IV/跨式收敛只止盈或减仓；不反手、不生成新方向交易"
+        if reduce_only
+        else "纪律  仅退出与背离前趋势同向的仓位；无对应持仓不操作，不自动反手"
+    )
     lines.append(f"数据  as_of={payload.get('as_of')} · window={window_name} · priority={priority}")
     return "\n".join(lines)
 
