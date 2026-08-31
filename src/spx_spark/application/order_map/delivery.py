@@ -451,11 +451,27 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "## 目标",
             f"SPX {target}{payoff}",
         ]
+    ict_line = _ict_liquidity_line(candidate)
+    if ict_line:
+        lines.extend(("", "## ICT过滤", ict_line))
+    environment = (
+        (decision.get("regime") or {}).get("rth_environment") or {}
+        if isinstance(decision.get("regime"), dict)
+        else {}
+    )
+    breadth_advisory = (
+        isinstance(environment, dict)
+        and environment.get("status") == "degraded"
+        and set(environment.get("missing") or ()) == {"breadth_above_vwap"}
+    )
+    data_line = "不下自动单 · 人工限价"
+    if breadth_advisory:
+        data_line += " · 市场广度缺失，仅作提醒，不阻断本方向候选"
     lines.extend(
         (
             "",
             "## 数据",
-            "不下自动单 · 人工限价",
+            data_line,
         )
     )
     del decision
@@ -516,6 +532,24 @@ def _setup_cn(setup: object) -> str:
         "CLOSE_CONVERGENCE_60M": "尾盘收敛蝶",
         "CONFIRMATION_TARGET_PIN": "目标钉住",
     }.get(str(setup or ""), "结构扫描")
+
+
+def _ict_liquidity_line(candidate: Mapping[str, Any]) -> str | None:
+    context = candidate.get("ict_liquidity")
+    if not isinstance(context, Mapping) or context.get("status") != "active":
+        return None
+    levels = "/".join(str(value) for value in context.get("level_names") or ()) or "客观水平"
+    stage = {
+        "SWEEP_RECLAIMED": "扫位并收回，等待MSS",
+        "MSS_CONFIRMED": "MSS已确认，位移不足",
+        "MSS_DISPLACEMENT_CONFIRMED": "MSS与位移确认",
+    }.get(str(context.get("stage") or ""), "因果事件已记录")
+    alignment = {
+        "CONFIRMS": "与候选同向",
+        "CONFLICTS": "与候选冲突，排序降权",
+        "OBSERVE_ONLY": "只观察，不改变授权",
+    }.get(str(candidate.get("ict_alignment") or ""), "只观察，不改变授权")
+    return f"{levels} · {stage} · {alignment}"
 
 
 def _direction_cn(direction: object) -> str:

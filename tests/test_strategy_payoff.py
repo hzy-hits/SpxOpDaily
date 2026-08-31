@@ -110,6 +110,18 @@ def test_rth_environment_separates_expansion_balance_and_missing_data() -> None:
     assert contraction["state"] == "VOL_CONTRACTION_BALANCE"
     assert contraction["range_structures_allowed"] is True
 
+    breadth_missing = deepcopy(facts)
+    del breadth_missing["path"]["breadth_above_vwap"]
+    advisory = assess_rth_environment(
+        breadth_missing,
+        path_state="TREND",
+        terminal_state="NONE",
+    )
+    assert advisory["status"] == "degraded"
+    assert advisory["missing"] == ["breadth_above_vwap"]
+    assert advisory["directional_structures_allowed"] is True
+    assert advisory["range_structures_allowed"] is False
+
     del balanced["volatility"]["atm_iv_change_15m"]
     missing = assess_rth_environment(
         balanced,
@@ -714,7 +726,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v57"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v59"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1003,7 +1015,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v57"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v59"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1173,7 +1185,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v57"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v59"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1182,6 +1194,26 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert decision["execution"]["action"] == "MANUAL_LIMIT"
     assert decision["shadow_candidates"] == []
     assert decision["shadow_candidates_skipped"] == []
+
+    breadth_missing = deepcopy(payload)
+    del breadth_missing["minute_market_frame"]["diagnostics"]["rth_market_state"][
+        "input_lineage"
+    ]["values"]["breadth_above_vwap"]
+    advisory = build_strategy_decision(breadth_missing, _state(now), now)
+    assert advisory["decision_type"] == "CALL_DEBIT_VERTICAL", advisory["why_not"]
+    assert advisory["regime"]["rth_environment"]["status"] == "degraded"
+    assert advisory["regime"]["rth_environment"]["missing"] == [
+        "breadth_above_vwap"
+    ]
+    assert advisory["action_authority"] == "manual"
+
+    core_missing = deepcopy(payload)
+    del core_missing["option_structure_frame"]["volatility"]["atm_iv_change_15m"]
+    blocked = build_strategy_decision(core_missing, _state(now), now)
+    assert blocked["decision_type"] == "NO_TRADE"
+    assert blocked["why_not"]["primary_blocker"] == (
+        "rth_environment_inputs_unavailable"
+    )
 
     late = deepcopy(payload)
     late["minute_market_frame"]["es"]["return_5m_points"] = 16.0
@@ -1192,6 +1224,62 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     assert rejected["shadow_candidates"] == []
     assert rejected["shadow_candidates_skipped"] == []
     assert "es_volume_momentum_too_late" in rejected["why_not"]["reasons"]
+
+
+def test_ict_liquidity_conflict_only_downranks_existing_directional_candidate() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    _attach_bearish_ict_confirmation(payload, now)
+
+    facts = build_market_fact_pack(payload, _state(now), now)
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
+    assert decision["automatic_ordering"] is False
+    ict = facts["ict_liquidity"]
+    assert ict["status"] == "active"
+    assert ict["stage"] == "MSS_DISPLACEMENT_CONFIRMED"
+    assert ict["direction"] == "DOWN"
+    assert ict["level_names"] == ["ONH"]
+    candidate = decision["candidate"]
+    assert candidate["ict_alignment"] == "CONFLICTS"
+    assert candidate["ict_decision_modifier"] == pytest.approx(-0.05)
+    assert candidate["selection_score"] == pytest.approx(
+        candidate["selection_score_pre_ict"] - 0.05
+    )
+
+
+def test_ict_liquidity_does_not_create_standalone_trade() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    _attach_bearish_ict_confirmation(payload, now)
+    payload.pop("es_volume")
+    payload.pop("call_skew_spread_shadow")
+    payload["level_decision"] = {"phase": "far"}
+
+    facts = build_market_fact_pack(payload, _state(now), now)
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert facts["ict_liquidity"]["stage"] == "MSS_DISPLACEMENT_CONFIRMED"
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["candidate"] is None
+
+
+def test_ict_liquidity_ignores_confirmation_bars_not_yet_available() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    _attach_bearish_ict_confirmation(payload, now)
+    rows = payload["minute_market_frame"]["es"]["recent_1m_ohlc"]
+    rows[-2]["available_at"] = (now + timedelta(minutes=1)).isoformat()
+    rows[-1]["available_at"] = (now + timedelta(minutes=2)).isoformat()
+
+    facts = build_market_fact_pack(payload, _state(now), now)
+    decision = build_strategy_decision(payload, _state(now), now)
+
+    assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert facts["ict_liquidity"]["stage"] == "SWEEP_RECLAIMED"
+    assert decision["candidate"]["ict_alignment"] == "OBSERVE_ONLY"
+    assert decision["candidate"]["ict_decision_modifier"] == 0.0
 
 
 def test_expired_pin_state_does_not_block_independent_rth_direction() -> None:
@@ -1235,7 +1323,7 @@ def test_rth_momentum_uses_manual_fallback_only_when_model_artifact_is_missing(
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v57"
+        "strategy_policy.bootstrap.v59"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["fallback_reason"] == (
         "strategy_edge_model_artifact_missing"
@@ -1314,11 +1402,12 @@ def test_rth_preaverage_signal_reaches_manual_decision_with_frozen_contract(
     pathless["minute_market_frame"]["diagnostics"] = {}
     decoupled = build_strategy_decision(pathless, latest, now, data_root=tmp_path)
     assert decoupled["market_facts"]["capabilities"]["path"]["ready"] is False
-    assert decoupled["decision_type"] == "NO_TRADE"
-    assert decoupled["candidate"] is None
-    assert decoupled["why_not"]["primary_blocker"] == (
-        "rth_environment_inputs_unavailable"
-    )
+    assert decoupled["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert decoupled["candidate"]["setup_kind"] == "PREAVERAGE15_PULLBACK"
+    assert decoupled["regime"]["rth_environment"]["status"] == "degraded"
+    assert decoupled["regime"]["rth_environment"]["missing"] == [
+        "breadth_above_vwap"
+    ]
 
     future_document = deepcopy(payload)
     future_document["experimental_research_signals"]["generated_at"] = (
@@ -1455,7 +1544,7 @@ def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_v
     assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
     assert decision["candidate"]["economics"]["width_points"] == 15.0
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v57"
+        "strategy_policy.bootstrap.v59"
     )
     assert decision["regime"]["rth_environment"]["status"] != "ready"
     assert decision["action_authority"] == "manual"
@@ -4550,6 +4639,62 @@ def _decision_payload(now: datetime) -> dict[str, object]:
         "strategy_distribution_forecast": _probability_forecast(now, "terminal_above"),
         "candidates": [],
     }
+
+
+def _attach_bearish_ict_confirmation(payload: dict[str, object], now: datetime) -> None:
+    market = payload["minute_market_frame"]
+    assert isinstance(market, dict)
+    market["session_ranges"] = {
+        "overnight": {"high": 7735.0, "low": 7700.0, "sample_count": 100}
+    }
+    es = market["es"]
+    assert isinstance(es, dict)
+    rows = []
+    for offset in range(10):
+        bar_start = now - timedelta(minutes=13 - offset)
+        rows.append(
+            {
+                "bar_start": bar_start.isoformat(),
+                "available_at": (bar_start + timedelta(minutes=1)).isoformat(),
+                "open": 7732.0,
+                "high": 7733.0,
+                "low": 7731.0,
+                "close": 7732.0,
+                "observations": 12,
+            }
+        )
+    rows.extend(
+        (
+            {
+                "bar_start": (now - timedelta(minutes=3)).isoformat(),
+                "available_at": (now - timedelta(minutes=2)).isoformat(),
+                "open": 7733.0,
+                "high": 7736.0,
+                "low": 7732.5,
+                "close": 7734.0,
+                "observations": 12,
+            },
+            {
+                "bar_start": (now - timedelta(minutes=2)).isoformat(),
+                "available_at": (now - timedelta(minutes=1)).isoformat(),
+                "open": 7734.0,
+                "high": 7734.5,
+                "low": 7730.0,
+                "close": 7730.5,
+                "observations": 12,
+            },
+            {
+                "bar_start": (now - timedelta(minutes=1)).isoformat(),
+                "available_at": now.isoformat(),
+                "open": 7730.5,
+                "high": 7731.0,
+                "low": 7730.0,
+                "close": 7730.5,
+                "observations": 12,
+            },
+        )
+    )
+    es["recent_1m_ohlc"] = rows
 
 
 def _gth_candidate(now: datetime, path_kind: str) -> dict[str, object]:

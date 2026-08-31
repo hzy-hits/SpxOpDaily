@@ -19,6 +19,7 @@ from spx_spark.analytics.options.strategy_payoff import (
 from spx_spark.application.market_features.physical_followthrough import (
     estimate_physical_terminal_range,
 )
+from spx_spark.application.order_map.ict_liquidity import apply_ict_liquidity_modifier
 from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
     butterfly_entry_clock_open,
@@ -67,7 +68,6 @@ _RTH_DIRECTIONAL_SPREADS = {
 _GTH_ATM_PIN = "GTH_ATM_PIN"
 _IRON_CONDOR_TYPE = "IRON_CONDOR"
 _EVENT_SETTLEMENT_MAX_DEBIT_FRACTION = 0.50
-
 
 @dataclass(frozen=True, slots=True)
 class RankResult:
@@ -287,6 +287,7 @@ def rank_candidates(
             policy=policy,
             now=now,
         )
+        candidate = apply_ict_liquidity_modifier(candidate, facts)
         scored, utility_gates = _score_candidate(
             candidate,
             facts,
@@ -489,12 +490,8 @@ def _rth_environment_hard_gates(
     }:
         return []
     strategy_type = str(candidate.get("strategy_type") or "")
-    range_structure = strategy_type == _IRON_CONDOR_TYPE or (
-        strategy_type.endswith("_BUTTERFLY") and setup == "STABLE_PIN"
-    )
-    directional_structure = (
-        strategy_type.endswith("_DEBIT_VERTICAL") and setup in _RTH_DIRECTIONAL_SPREADS
-    )
+    range_structure = strategy_type == _IRON_CONDOR_TYPE or (strategy_type.endswith("_BUTTERFLY") and setup == "STABLE_PIN")
+    directional_structure = strategy_type.endswith("_DEBIT_VERTICAL") and setup in _RTH_DIRECTIONAL_SPREADS
     if not range_structure and not directional_structure:
         return []
     environment = _map(regime.get("rth_environment"))
@@ -502,10 +499,13 @@ def _rth_environment_hard_gates(
     if state == "EVENT_RISK":
         return []
     if environment.get("status") != "ready":
+        missing = {str(item) for item in environment.get("missing") or ()}
+        if directional_structure and environment.get("status") == "degraded" and missing == {"breadth_above_vwap"}:
+            return []
         return [
             {
                 "gate": "rth_environment_inputs_unavailable",
-                "actual": list(environment.get("missing") or ()),
+                "actual": sorted(missing),
                 "threshold": "causal_vix1d_atm_straddle_breadth",
             }
         ]

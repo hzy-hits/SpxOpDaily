@@ -612,6 +612,16 @@ def test_minute_frame_calculates_path_volume_cross_asset_and_volatility() -> Non
     assert frame.es["return_60m_points"] == pytest.approx(60.0)
     assert frame.es["return_180m_points"] == pytest.approx(180.0)
     assert frame.es["trend_efficiency_60m"] == pytest.approx(1.0)
+    assert len(frame.es["recent_1m_ohlc"]) == 60
+    assert frame.es["recent_1m_ohlc"][-1] == {
+        "bar_start": (now - timedelta(minutes=1)).isoformat(),
+        "available_at": now.isoformat(),
+        "open": pytest.approx(7679.0),
+        "high": pytest.approx(7679.0),
+        "low": pytest.approx(7679.0),
+        "close": pytest.approx(7679.0),
+        "observations": 1,
+    }
     assert frame.volume["volume_delta_5m"] == pytest.approx(500.0)
     assert frame.volume["pace_5m_per_minute"] == pytest.approx(100.0)
     assert frame.volume["session_vwap"] is not None

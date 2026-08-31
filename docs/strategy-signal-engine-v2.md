@@ -1279,6 +1279,33 @@ ES 同向。接受后允许两条因果确认路径：
 
 策略版本为 `strategy_policy.bootstrap.v57`；不新增服务、定时器、数据库、队列或通知 owner。
 
+### 11.24 v58：ICT 流动性事件仅作 RTH 方向价差过滤
+
+RTH 复用现有 ES 采样，在完整一分钟结束后因果识别 ONH/ONL 与 OR15H/OR15L 的
+Sweep/Reclaim、五根 K 结构突破代理（MSS）及同向 Displacement。阈值冻结为：最小
+穿越 `max(0.5pt, 0.1×ATR1m)`、最大延伸 `1.0×ATR1m`、三分钟内收回、五分钟内 MSS、
+MSS buffer `0.25pt`、位移实体 `≥0.8×ATR1m`；15:00 ET 后不再形成新事件。
+
+该事件不新增 setup、不产生或翻转方向、不绕过 hard gate，也不单独创建 Trade Ready。
+只有 `MSS_DISPLACEMENT_CONFIRMED` 才参与现有 RTH Debit Vertical 排序：同向修正为零，
+反向最多降权 `0.05`；缺失、过期或只有 Sweep/MSS 时对旧决策零影响。FVG 不进入生产
+门禁。候选卡只增加一行简短 ICT 过滤说明，全部 exact BBO、宏观、PIN、ATR、几何、
+人工窗口与 `automatic_ordering=false` 合同保持不变。
+
+本路径来自 2026-08-31 的 32-session 因果研究，仍标记为过滤用途，不声明独立 alpha。
+策略版本为 `strategy_policy.bootstrap.v58`；不新增服务、定时器、数据库、队列或通知 owner。
+
+### 11.25 v59：市场广度缺失降级为方向候选提示
+
+RTH 已授权 Directional Debit Vertical 在 VIX1D、ATM IV 与 ATM 跨式输入均可用、仅
+`breadth_above_vwap` 缺失时，不再由 `rth_environment_inputs_unavailable` 拒绝。环境状态
+保留为 degraded，并在 Desk Map 与人工卡明确提示“市场广度缺失”；该提示没有方向权限，
+也不会提高候选分数。
+
+此例外只适用于已有独立因果触发的 RTH 方向 Debit Vertical。铁鹰、STABLE_PIN 蝶式以及
+任何其他核心环境输入缺失继续失效关闭；宏观、PIN、ATR、目标空间、setup 证据、exact BBO
+和人工-only 合同不变。策略版本为 `strategy_policy.bootstrap.v59`。
+
 ---
 
 ## 12. 正式 NoTrade

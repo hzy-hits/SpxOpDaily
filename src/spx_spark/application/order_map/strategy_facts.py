@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from spx_spark.application.order_map.ict_liquidity import attach_ict_liquidity_filters, build_ict_liquidity_fact, spx_bars
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     StrategyPolicy,
@@ -24,13 +25,12 @@ _WALL_HAZARD_CONTRACT_HASH = (
 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH = (
     "sha256:95e1ec1d82c0b7b4dc2678e4e6d1248c5471ed91f8ae64d99eaa2a06dfa16b5b"
 )
-
-
 def build_market_fact_pack(
     payload: Mapping[str, Any], latest: LatestState, now: datetime
 ) -> dict[str, Any]:
     decision_at, lineage = _utc(now), []
     market = _frame(payload, "minute_market_frame", decision_at, lineage)
+    session_ranges = _map(market.get("session_ranges"))
     option = _frame(payload, "option_structure_frame", decision_at, lineage)
     coordinate = _map(payload.get("trigger_coordinate"))
     underlier = _map(payload.get("spot")) or _map(payload.get("underlier"))
@@ -226,7 +226,16 @@ def build_market_fact_pack(
     )
     opening_high = _spx_level(opening.get("orh"), basis)
     opening_low = _spx_level(opening.get("orl"), basis)
-    rth_bars = _spx_bars(diagnostics.get("rth_bar_path"), basis)
+    rth_bars = spx_bars(diagnostics.get("rth_bar_path"), basis)
+    ict_liquidity = build_ict_liquidity_fact(
+        es.get("recent_1m_ohlc"),
+        session_ranges=session_ranges,
+        opening_high=opening_high,
+        opening_low=opening_low,
+        basis=basis,
+        session_date=trading_date,
+        decision_at=decision_at,
+    )
     rth_bar_vwaps = {
         str(key): adjusted
         for key, value in _map(diagnostics.get("rth_bar_vwaps")).items()
@@ -285,6 +294,7 @@ def build_market_fact_pack(
         # A formal price confirmation owns the human path and should win
         # candidate de-duplication over simultaneous background setups.
         rth_setups.insert(0, level_confirmation_setup)
+    rth_setups = attach_ict_liquidity_filters(rth_setups, ict_liquidity=ict_liquidity)
     failed_break_evaluable = opening_range_ready and bool(rth_bars)
     shock = _shock_fact(
         shock_state,
@@ -443,6 +453,7 @@ def build_market_fact_pack(
             "phase_at": episode.get("phase_at"),
         },
         "rth_setups": rth_setups,
+        "ict_liquidity": ict_liquidity,
         "es_volume": es_volume,
         "pin_latch": _pin_latch_fact(payload, session_date=trading_date or None),
         "shock": shock,
@@ -912,18 +923,6 @@ def _pullback_validation(
     if direction == "UP":
         return bool(next_edge >= reject_edge and close >= zone)
     return bool(next_edge <= reject_edge and close <= zone)
-
-
-def _spx_bars(value: object, basis: float | None) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or basis is None:
-        return []
-    rows = []
-    for raw in value:
-        bar = _map(raw)
-        converted = {key: _spx_level(bar.get(key), basis) for key in ("open", "high", "low", "close")}
-        if None not in converted.values():
-            rows.append({"bar_start": bar.get("bar_start"), **converted})
-    return sorted(rows, key=lambda row: str(row.get("bar_start") or ""))
 
 
 def _spx_level(value: object, basis: float | None) -> float | None:

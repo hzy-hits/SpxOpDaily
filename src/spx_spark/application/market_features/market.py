@@ -394,6 +394,11 @@ def build_minute_market_frame(
         for point in es_points
         if point[0] >= now - timedelta(minutes=60)
     }
+    recent_1m_ohlc = _complete_minute_ohlc(
+        es_points,
+        now=now,
+        minutes=60,
+    )
     ranges = {
         "overnight": _range_payload(overnight_points, price),
         "asia": _segment_range(session_samples, "asia", price),
@@ -429,6 +434,7 @@ def build_minute_market_frame(
         "trend_efficiency_30m": trend_efficiency(es_points, now=now, minutes=30),
         "trend_efficiency_180m": trend_efficiency(es_points, now=now, minutes=180),
         "pin_path_1m": list(pin_buckets.values()),
+        "recent_1m_ohlc": recent_1m_ohlc,
         **swing_structure(es_points, now=now),
         "overnight_range_points": overnight_range,
         "overnight_expected_move_used": expected_move_used,
@@ -904,6 +910,40 @@ def _range_payload(
         "distance_from_low_points": price - low if price is not None and low is not None else None,
         "sample_count": len(points),
     }
+
+
+def _complete_minute_ohlc(
+    points: list[tuple[datetime, float, dict[str, Any]]],
+    *,
+    now: datetime,
+    minutes: int,
+) -> list[dict[str, Any]]:
+    """Return only completed one-minute ES bars available by ``now``."""
+
+    end = as_utc(now).replace(second=0, microsecond=0)
+    start = end - timedelta(minutes=minutes)
+    buckets: dict[datetime, list[tuple[datetime, float]]] = {}
+    for observed_at, price, _quote in points:
+        if not start <= observed_at < end:
+            continue
+        minute = observed_at.replace(second=0, microsecond=0)
+        buckets.setdefault(minute, []).append((observed_at, price))
+    rows = []
+    for minute in sorted(buckets):
+        observations = sorted(buckets[minute], key=lambda item: item[0])
+        prices = [item[1] for item in observations]
+        rows.append(
+            {
+                "bar_start": minute.isoformat(),
+                "available_at": (minute + timedelta(minutes=1)).isoformat(),
+                "open": round(prices[0], 4),
+                "high": round(max(prices), 4),
+                "low": round(min(prices), 4),
+                "close": round(prices[-1], 4),
+                "observations": len(prices),
+            }
+        )
+    return rows
 
 
 def _segment_range(

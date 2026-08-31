@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-
 from spx_spark.analytics.options.strategy_payoff import (
     CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
     DEFAULT_MANAGEMENT_POLICY,
@@ -46,7 +45,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v57"
+    policy_version: str = "strategy_policy.bootstrap.v59"
     # Policy history and frozen thresholds: docs/strategy-signal-engine-v2.md.
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
@@ -416,14 +415,15 @@ def assess_rth_environment(
     }
     missing = [key for key, value in core.items() if value is None]
     if missing:
+        breadth_only = missing == ["breadth_above_vwap"]
         return {
             "state": "INSUFFICIENT_DATA",
-            "status": "unavailable",
+            "status": "degraded" if breadth_only else "unavailable",
             "direction_authority": "none",
             "range_structures_allowed": False,
-            "directional_structures_allowed": False,
+            "directional_structures_allowed": breadth_only,
             "missing": missing,
-            "reasons": ["rth_environment_core_inputs_unavailable"],
+            "reasons": ["rth_breadth_unavailable_directional_advisory" if breadth_only else "rth_environment_core_inputs_unavailable"],
         }
 
     gamma_state = str(structure.get("gamma_state") or "unknown")

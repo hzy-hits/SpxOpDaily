@@ -227,14 +227,21 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
     environment = _mapping(_mapping(decision.get("regime")).get("rth_environment"))
     environment_state = str(environment.get("state") or "")
     if environment_state and environment_state != "NOT_APPLICABLE":
-        label = {
-            "EVENT_RISK": "事件风险，普通入场关闭",
-            "RISK_EXPANSION": "风险扩张，只考虑已有触发的方向结构",
-            "EXPANSION_TO_CONTRACTION": "波动扩张失败并转为收敛，可评估平衡铁鹰",
-            "VOL_CONTRACTION_BALANCE": "波动收缩且平衡，可评估区间结构",
-            "MIXED_UNCONFIRMED": "混合未确认，暂不授权新结构",
-            "INSUFFICIENT_DATA": "核心输入不足，失效关闭",
-        }.get(environment_state, environment_state)
+        breadth_only = set(environment.get("missing") or ()) == {
+            "breadth_above_vwap"
+        }
+        label = (
+            "市场广度缺失，仅作提醒；方向候选可继续，区间结构关闭"
+            if breadth_only and environment.get("status") == "degraded"
+            else {
+                "EVENT_RISK": "事件风险，普通入场关闭",
+                "RISK_EXPANSION": "风险扩张，只考虑已有触发的方向结构",
+                "EXPANSION_TO_CONTRACTION": "波动扩张失败并转为收敛，可评估平衡铁鹰",
+                "VOL_CONTRACTION_BALANCE": "波动收缩且平衡，可评估区间结构",
+                "MIXED_UNCONFIRMED": "混合未确认，暂不授权新结构",
+                "INSUFFICIENT_DATA": "核心输入不足，失效关闭",
+            }.get(environment_state, environment_state)
+        )
         lines.insert(0, f"RTH环境  {label}；宏观只作过滤，不产生方向")
     return tuple(lines)
 

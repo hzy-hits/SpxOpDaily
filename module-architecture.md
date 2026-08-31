@@ -99,6 +99,7 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 - `application/notifications/` — outbox producer/consumer、deliver、settlement
 - `application/order_map/` — models / pricing / spot / candidates / machines /
   operator status / transition / render / delivery / service；其中
+  `ict_liquidity.py` 负责因果 Sweep/Reclaim、MSS/Displacement 与非正向候选过滤；
   `surface_path_distribution` 负责 Debit 与 Iron Condor 共用的因果五坐标曲面路径回放；
   `order_map.py` 为门面
 - `application/shock/` — models / machine / net_premium_flow / evaluator / delivery / service；

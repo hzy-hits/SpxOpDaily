@@ -27,6 +27,7 @@ from spx_spark.application.market_features.physical_close_convergence import (
     CLOSE_CONVERGENCE_MODEL_VERSION,
 )
 from spx_spark.application.market_features.session_quote_selection import provider_quote
+from spx_spark.application.order_map.ict_liquidity import ict_filter_payload
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     StrategyPolicy,
@@ -47,9 +48,7 @@ PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
 RTH_LEVEL_CONFIRMATION = "RTH_LEVEL_CONFIRMATION"
 CLOSE_CONVERGENCE_60M = "CLOSE_CONVERGENCE_60M"
-CLOSE_CONVERGENCE_CONTRACT_HASH = (
-    "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
-)
+CLOSE_CONVERGENCE_CONTRACT_HASH = "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
     "strategy_event_expired",
@@ -539,6 +538,7 @@ def _vertical_candidate_from_evidence(
                 "hazard_oos",
             )
         },
+        **ict_filter_payload(evidence),
         "right": right,
         "opportunity_id": f"strategy-opportunity:{_hash(identity)[:24]}",
         "long": dict(long),
@@ -601,9 +601,7 @@ def _rth_evidences(
         if str(row.get("setup_kind") or "") == RTH_LEVEL_CONFIRMATION
         and str(row.get("thesis") or "").lower() == "breakout"
     ]
-    momentum_setups = [
-        row for row in setup_facts if str(row.get("setup_kind") or "") == "ES_VOLUME_MOMENTUM"
-    ]
+    momentum_setups = [row for row in setup_facts if str(row.get("setup_kind") or "") == "ES_VOLUME_MOMENTUM"]
     preaverage_setups = [
         row for row in setup_facts if str(row.get("setup_kind") or "") == PREAVERAGE15_PULLBACK
     ]
@@ -647,6 +645,7 @@ def _rth_evidences(
                 "direction": direction,
                 "trigger_level": _number(setup.get("trigger_level")),
                 "source": setup.get("source") or "es_volume_momentum",
+                **ict_filter_payload(setup),
             }
         )
     for setup in preaverage_setups:

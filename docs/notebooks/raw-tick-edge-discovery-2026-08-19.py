@@ -60,6 +60,9 @@ VALIDATION_SESSIONS = 8
 SEALED_TEST_SESSIONS = 6
 MIN_TRAIN_SESSIONS = 10
 RNG_SEED = 20260819
+RESEARCH_END_DATE = date.fromisoformat(
+    os.environ.get("SPX_SPARK_RESEARCH_END_DATE", "2026-08-18")
+)
 
 
 def finite(value: object) -> float | None:
@@ -401,7 +404,11 @@ def build_session_grid(
 
 
 print("Loading causal five-second quote-update buckets by session …")
-all_dates = [value for value in available_dates() if date(2026, 7, 13) <= value <= date(2026, 8, 18)]
+all_dates = [
+    value
+    for value in available_dates()
+    if date(2026, 7, 13) <= value <= RESEARCH_END_DATE
+]
 daily_cache: dict[date, list[dict[str, Any]]] = {}
 source_sql = daily_bucket_sql(tuple(dict.fromkeys((*RTH.instruments, *GTH.instruments))))
 for ordinal, session_date in enumerate(all_dates, start=1):
