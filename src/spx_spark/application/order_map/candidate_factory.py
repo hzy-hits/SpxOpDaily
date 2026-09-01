@@ -28,10 +28,9 @@ from spx_spark.application.market_features.physical_close_convergence import (
 )
 from spx_spark.application.market_features.session_quote_selection import provider_quote
 from spx_spark.application.order_map.ict_liquidity import ict_filter_payload
+from spx_spark.application.order_map.volume_machine import es_momentum_clarity_block
 from spx_spark.application.order_map.strategy_regime import (
-    DEFAULT_STRATEGY_POLICY,
     StrategyPolicy,
-    hmm_owns_trend_direction,
     pin_blocks_directional_spreads,
     pin_look_trade_widths,
     pin_trade_center,
@@ -48,6 +47,7 @@ PREAVERAGE15_PULLBACK = "PREAVERAGE15_PULLBACK"
 WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
 RTH_LEVEL_CONFIRMATION = "RTH_LEVEL_CONFIRMATION"
 CLOSE_CONVERGENCE_60M = "CLOSE_CONVERGENCE_60M"
+EUROPE_TREND_TRANSITION = "EUROPE_TREND_TRANSITION"
 CLOSE_CONVERGENCE_CONTRACT_HASH = "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
@@ -523,6 +523,8 @@ def _vertical_candidate_from_evidence(
                 "target_spx",
                 "invalidation_spx",
                 "source",
+                "source_kind",
+                "source_segment",
                 "geometry_source",
                 "signal_at",
                 "evidence_contract_hash",
@@ -552,34 +554,6 @@ def _vertical_candidate_from_evidence(
         "automatic_ordering": False,
         "manual_action_only": True,
     }
-
-
-def _momentum_clarity_block(
-    direction: str,
-    regime: Mapping[str, Any],
-    facts: Mapping[str, Any],
-    policy: StrategyPolicy = DEFAULT_STRATEGY_POLICY,
-) -> str | None:
-    """Block unclear first prints, weak same-way adds, and unconfirmed flips."""
-
-    committed = str(facts.get("session_committed_direction") or "").upper()
-    hmm_trend = hmm_owns_trend_direction(regime)
-    if committed in {"UP", "DOWN"} and committed != direction:
-        if hmm_trend != direction:
-            return "es_volume_momentum_flip_needs_hmm_trend"
-    if committed in {"UP", "DOWN"} and committed == direction:
-        path = _map(facts.get("path"))
-        ret5 = _number(path.get("return_5m_points"))
-        atr = _number(path.get("atr_5m"))
-        if hmm_trend != direction:
-            return "es_volume_momentum_add_needs_new_impulse"
-        if ret5 is None or atr is None or atr <= 0:
-            return "es_volume_momentum_add_needs_new_impulse"
-        if abs(ret5) / atr < policy.es_momentum_add_min_return_5m_atr:
-            return "es_volume_momentum_add_needs_new_impulse"
-    if hmm_trend is not None and hmm_trend != direction:
-        return "es_volume_momentum_hmm_opposes"
-    return None
 
 
 def _rth_evidences(
@@ -633,7 +607,7 @@ def _rth_evidences(
             continue
         if pin_blocks:
             continue
-        clarity = _momentum_clarity_block(direction, regime, facts, policy)
+        clarity = es_momentum_clarity_block(direction, regime, facts, policy)
         if clarity:
             clarity_blocks.append(clarity)
             continue
@@ -691,7 +665,9 @@ def _rth_evidences(
                 for code in (
                     "es_volume_not_elevated",
                     "es_volume_momentum_direction_flat",
+                    "es_volume_momentum_break_reclaimed",
                     "es_volume_momentum_not_aligned",
+                    "es_volume_momentum_opposes_15m_without_fresh_break",
                     "es_volume_momentum_too_weak",
                     "es_volume_momentum_unevaluable",
                     "es_volume_unavailable",
@@ -787,7 +763,12 @@ def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
                 reasons.extend(evidence_reasons)
             continue
         path_kind = str(evidence.get("path_kind") or "")
-        if path_kind.startswith("trend_transition_"):
+        europe_trend_transition = bool(
+            path_kind.startswith("trend_transition_")
+            and str(evidence.get("source_kind") or "") == "gth_es_trend_transition"
+            and str(evidence.get("source_segment") or "") == "europe"
+        )
+        if path_kind.startswith("trend_transition_") and not europe_trend_transition:
             reasons.append("trend_background_cannot_authorize_entry")
             continue
         direction = _direction(evidence.get("direction"))
@@ -801,7 +782,9 @@ def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
             continue
         snapshot = _map(evidence.get("exact_spread_snapshot"))
         setup = (
-            "FAILED_BREAK_RECLAIM"
+            EUROPE_TREND_TRANSITION
+            if europe_trend_transition
+            else "FAILED_BREAK_RECLAIM"
             if any(token in path_kind for token in ("rejection", "reclaim", "dip"))
             else "TREND_PULLBACK"
         )
@@ -817,8 +800,11 @@ def _gth_evidence(facts: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list
             "source": source,
             "geometry_source": source,
             "source_block_reasons": evidence_reasons,
+            "source_kind": evidence.get("source_kind"),
+            "source_segment": evidence.get("source_segment"),
             "edge_authority": evidence.get("edge_authority"),
             "edge_authority_reason": evidence.get("edge_authority_reason"),
+            **ict_filter_payload(evidence),
         }, []
     return None, list(dict.fromkeys(reasons))
 

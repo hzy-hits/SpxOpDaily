@@ -31,6 +31,7 @@ from spx_spark.application.market_features.gth_level_manual_candidate import (
     process_gth_level_manual_candidate,
 )
 from spx_spark.application.market_features.gth_trend_entry_source import (
+    current_gth_asia_range_breakout,
     current_gth_trend_advance,
 )
 from spx_spark.application.market_features.play_outcome_stats import PlayOutcomeStats
@@ -2004,6 +2005,69 @@ def test_static_gth_trend_regime_does_not_create_a_manual_card(
     assert candidate["block_reasons"] == ["gth_level_not_confirmed_or_near"]
 
 
+def test_europe_asia_low_failed_retest_is_causal_manual_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 9, 1, 8, 7, tzinfo=UTC)
+    market_frame = _europe_asia_low_breakout_frame(now)
+    source, reasons = current_gth_asia_range_breakout(
+        market_frame,
+        now=now,
+        ttl_seconds=300.0,
+    )
+
+    assert reasons == []
+    assert source is not None
+    assert source["direction"] == "down"
+    assert source["level_kind"] == "asia_low"
+    assert source["acceptance_at"] == "2026-09-01T08:03:00+00:00"
+    assert source["retest_at"] == "2026-09-01T08:05:00+00:00"
+    assert source["at"] == "2026-09-01T08:07:00+00:00"
+
+    before_continuation = {
+        **market_frame,
+        "es": {
+            **market_frame["es"],
+            "recent_1m_ohlc": market_frame["es"]["recent_1m_ohlc"][:-1],
+        },
+    }
+    assert current_gth_asia_range_breakout(
+        before_continuation,
+        now=now - timedelta(minutes=1),
+        ttl_seconds=300.0,
+    ) == (None, [])
+
+    _patch_ready_market(
+        monkeypatch,
+        now=now,
+        parity_price=7672.0,
+        es_price=7682.0,
+        spread_bid=3.5,
+        spread_mid=3.75,
+        spread_ask=4.0,
+    )
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state={},
+        market_frame=market_frame,
+        macro_event={"entry_allowed": True},
+        now=now,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "manual_ready", candidate["block_reasons"]
+    assert candidate["source_kind"] == "gth_asia_range_failed_retest"
+    assert candidate["path_kind"] == "asia_low_breakdown_put"
+    assert candidate["position_type"] == "put_debit_spread"
+    assert candidate["trigger_level"] == pytest.approx(7680.125)
+    assert candidate["invalidation_spx"] == pytest.approx(7683.125)
+    assert candidate["ict_liquidity"]["stage"] == "BREAKOUT_RETEST_CONFIRMED"
+    assert candidate["automatic_ordering"] is False
+
+
 def test_fresh_trend_transition_takes_priority_over_fresh_confirmed_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2025,6 +2089,42 @@ def test_fresh_trend_transition_takes_priority_over_fresh_confirmed_level(
     assert candidate["source_kind"] == "gth_es_trend_transition"
     assert candidate["source_signal_id"] != level["event_id"]
     assert candidate["path_kind"] == "trend_transition_call"
+
+
+def test_europe_trend_transition_preserves_segment_for_unified_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 9, 1, 7, 38, tzinfo=UTC)
+    _patch_ready_market(
+        monkeypatch,
+        now=now,
+        parity_price=7458.0,
+        es_price=7488.0,
+        edge_authority=False,
+    )
+
+    candidate = evaluate_gth_level_manual_candidate(
+        object(),
+        {},
+        trend_state=_trend_transition_state(
+            now,
+            direction="up",
+            session_id="2026-09-01:gth",
+            price=7488.0,
+        ),
+        macro_event={"entry_allowed": True},
+        now=now,
+        policy=MarketFeatureSettings(),
+        new_entries_allowed=True,
+        new_entries_block_reason="allowed",
+    )
+
+    assert candidate["status"] == "selector_candidate", candidate["block_reasons"]
+    assert candidate["source_kind"] == "gth_es_trend_transition"
+    assert candidate["source_segment"] == "europe"
+    assert candidate["selector_evidence_eligible"] is True
+    assert candidate["manual_action_eligible"] is False
+    assert candidate["automatic_ordering"] is False
 
 
 def test_expired_transition_falls_back_to_fresh_confirmed_level(
@@ -3606,6 +3706,46 @@ def _trend_transition_state(
             "metrics": {},
             "operator_action": "observe_only",
             "automatic_ordering": False,
+        },
+    }
+
+
+def _europe_asia_low_breakout_frame(now: datetime) -> dict[str, object]:
+    closes = (
+        (datetime(2026, 9, 1, 7, 40, tzinfo=UTC), 7691.875),
+        (datetime(2026, 9, 1, 7, 45, tzinfo=UTC), 7688.875),
+        (datetime(2026, 9, 1, 7, 47, tzinfo=UTC), 7690.875),
+        (datetime(2026, 9, 1, 7, 59, tzinfo=UTC), 7690.375),
+        (datetime(2026, 9, 1, 8, 0, tzinfo=UTC), 7689.625),
+        (datetime(2026, 9, 1, 8, 2, tzinfo=UTC), 7689.25),
+        (datetime(2026, 9, 1, 8, 3, tzinfo=UTC), 7688.125),
+        (datetime(2026, 9, 1, 8, 4, tzinfo=UTC), 7689.375),
+        (datetime(2026, 9, 1, 8, 6, tzinfo=UTC), 7681.875),
+    )
+    return {
+        "session_id": "2026-09-01",
+        "diagnostics": {"segment": "europe"},
+        "session_ranges": {
+            "asia": {
+                "high": 7707.875,
+                "low": 7690.125,
+                "sample_count": 467,
+            }
+        },
+        "es": {
+            "provider": "ibkr",
+            "price": 7681.875,
+            "recent_1m_ohlc": [
+                {
+                    "available_at": (at + timedelta(minutes=1)).isoformat(),
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                }
+                for at, close in closes
+                if at + timedelta(minutes=1) <= now
+            ],
         },
     }
 

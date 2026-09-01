@@ -961,9 +961,7 @@ def _shock_fact(
         else None
     )
     spx_bps, es_bps = _number(event.get("shock_spx_bps")), _number(event.get("shock_es_bps"))
-    cross_asset = (
-        spx_bps * es_bps > 0 if spx_bps is not None and es_bps is not None else None
-    )
+    cross_asset = spx_bps * es_bps > 0 if spx_bps is not None and es_bps is not None else None
     return {
         "state": shock_state,
         "started_at": event.get("anchor_at"),
@@ -991,15 +989,14 @@ def _gth_fact(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "status": evidence.get("status"),
         "evaluated_at": evidence.get("evaluated_at"),
         "source_kind": evidence.get("source_kind"),
+        "source_segment": evidence.get("source_segment"),
         "direction": evidence.get("direction"),
         "path_kind": evidence.get("path_kind"),
         "candidate_scope": evidence.get("candidate_scope"),
         "execution_mode": evidence.get("execution_mode"),
         "manual_action_eligible": evidence.get("manual_action_eligible") is True,
         "selector_evidence_eligible": evidence.get("selector_evidence_eligible") is True,
-        "operator_notification_eligible": (
-            evidence.get("operator_notification_eligible") is True
-        ),
+        "operator_notification_eligible": evidence.get("operator_notification_eligible") is True,
         "execution_eligible": evidence.get("execution_eligible") is True,
         "edge_authority": evidence.get("edge_authority"),
         "edge_authority_required": evidence.get("edge_authority_required"),
@@ -1015,6 +1012,9 @@ def _gth_fact(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "valid_until": evidence.get("valid_until"),
         "exit_at": evidence.get("exit_at"),
         "exact_spread_snapshot": evidence.get("exact_spread_snapshot"),
+        "ict_liquidity": evidence.get("ict_liquidity"),
+        "ict_alignment": evidence.get("ict_alignment"),
+        "ict_decision_modifier": evidence.get("ict_decision_modifier"),
     }
 
 

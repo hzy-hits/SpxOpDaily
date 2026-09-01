@@ -1,4 +1,4 @@
-"""Causal source validation for one-shot GTH trend-transition entries."""
+"""Causal source validation for GTH structural and trend entries."""
 
 from __future__ import annotations
 
@@ -15,9 +15,20 @@ from spx_spark.settings.market_features import MarketFeatureSettings
 from spx_spark.strategy_contract import policy_version
 
 
-ES_TREND_SOURCE_MODES = frozenset({"trend", "trend_advance"})
+ASIA_RANGE_SOURCE_MODE = "asia_range_breakout"
+ES_TREND_SOURCE_MODES = frozenset(
+    {"trend", "trend_advance", ASIA_RANGE_SOURCE_MODE}
+)
 ADVANCE_SOURCE_KIND = "gth_es_trend_advance"
 TRANSITION_SOURCE_KIND = "gth_es_trend_transition"
+ASIA_RANGE_SOURCE_KIND = "gth_asia_range_failed_retest"
+_ASIA_RANGE_MIN_SAMPLES = 30
+_ASIA_BREAK_MIN_POINTS = 0.50
+_ASIA_BREAK_MAX_OBSERVATION_GAP_SECONDS = 180.0
+_ASIA_RETEST_TOLERANCE_POINTS = 1.50
+_ASIA_RETEST_DEADLINE_SECONDS = 600.0
+_ASIA_CONTINUATION_MIN_POINTS = 2.0
+_ASIA_CONTINUATION_DEADLINE_SECONDS = 300.0
 
 
 def is_es_trend_source(source_mode: str) -> bool:
@@ -28,15 +39,33 @@ def resolve_gth_manual_source(
     level_decision: Mapping[str, object],
     trend_state: Mapping[str, object],
     *,
+    market_frame: Mapping[str, object] | None = None,
     now: datetime,
     ttl_seconds: float,
     max_source_lag_seconds: float,
 ) -> tuple[str, Mapping[str, object], str, str | None, int, list[str], str | None]:
-    """Prefer a fresh NEUTRAL session-advance, then a valid transition, then the confirmed-level path.
+    """Prefer a causal Asia-range failed retest before trend-only background.
 
     Continuation m1 is observe-only: it is a late 10-point chase after a
     regime flip and must not share the advance authorizing path.
     """
+
+    asia_event, asia_reasons = current_gth_asia_range_breakout(
+        market_frame,
+        now=now,
+        ttl_seconds=ttl_seconds,
+    )
+    if asia_event is not None and not asia_reasons:
+        event_id = str(asia_event["source_event_id"])
+        return (
+            ASIA_RANGE_SOURCE_MODE,
+            asia_event,
+            event_id,
+            ASIA_RANGE_SOURCE_KIND,
+            0,
+            [],
+            None,
+        )
 
     advance_event, advance_reasons = current_gth_trend_advance(
         trend_state,
@@ -142,6 +171,12 @@ def manual_source_path_fields(
     level_decision: Mapping[str, object],
     source: Mapping[str, object],
 ) -> tuple[str, str, str]:
+    if source_mode == ASIA_RANGE_SOURCE_MODE:
+        return (
+            "breakout",
+            str(source.get("direction") or ""),
+            str(source.get("level_kind") or ""),
+        )
     if is_es_trend_source(source_mode):
         return "breakout", str(source.get("direction") or ""), "trend"
     return (
@@ -152,6 +187,24 @@ def manual_source_path_fields(
 
 
 def source_policy_fields(source_mode: str) -> dict[str, str]:
+    if source_mode == ASIA_RANGE_SOURCE_MODE:
+        return {
+            "directional_source": "gth_asia_range_failed_retest.v1",
+            "asia_break_acceptance": "two_outside_observations_required",
+            "asia_break_retest": "outside_retest_then_continuation_required",
+            "asia_range_min_samples": str(_ASIA_RANGE_MIN_SAMPLES),
+            "asia_break_min_points": str(_ASIA_BREAK_MIN_POINTS),
+            "asia_break_max_observation_gap_seconds": str(
+                _ASIA_BREAK_MAX_OBSERVATION_GAP_SECONDS
+            ),
+            "asia_retest_tolerance_points": str(_ASIA_RETEST_TOLERANCE_POINTS),
+            "asia_retest_deadline_seconds": str(_ASIA_RETEST_DEADLINE_SECONDS),
+            "asia_continuation_min_points": str(_ASIA_CONTINUATION_MIN_POINTS),
+            "asia_continuation_deadline_seconds": str(
+                _ASIA_CONTINUATION_DEADLINE_SECONDS
+            ),
+            "source_priority": "asia_range_then_advance_then_transition_then_level",
+        }
     if source_mode == "trend_advance":
         return {
             "directional_source": "confirmed_gth_trend_advance.v1",
@@ -168,6 +221,197 @@ def source_policy_fields(source_mode: str) -> dict[str, str]:
         "breakout_extension": "outside_retest_zone_before_return_required",
         "breakout_retest": "required",
     }
+
+
+def current_gth_asia_range_breakout(
+    market_frame: Mapping[str, object] | None,
+    *,
+    now: datetime,
+    ttl_seconds: float,
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Return a causal Europe-session break, failed retest, and continuation.
+
+    The Asia range is frozen at the Europe open. A mere first print outside the
+    range is insufficient: two outside observations, a retest that remains on
+    the breakout side, and a fresh continuation are all required.
+    """
+
+    if not isinstance(market_frame, Mapping):
+        return None, []
+    expected_session = DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()
+    if str(market_frame.get("session_id") or "") != expected_session:
+        return None, []
+    diagnostics = market_frame.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    if str(diagnostics.get("segment") or "") != "europe":
+        return None, []
+    es = market_frame.get("es")
+    ranges = market_frame.get("session_ranges")
+    es = es if isinstance(es, Mapping) else {}
+    ranges = ranges if isinstance(ranges, Mapping) else {}
+    asia = ranges.get("asia")
+    asia = asia if isinstance(asia, Mapping) else {}
+    provider = str(es.get("provider") or "").lower()
+    if provider not in {Provider.IBKR.value, Provider.SCHWAB.value}:
+        return None, []
+    high = _number(asia.get("high"))
+    low = _number(asia.get("low"))
+    sample_count = asia.get("sample_count")
+    if (
+        high is None
+        or low is None
+        or high <= low
+        or not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count < _ASIA_RANGE_MIN_SAMPLES
+    ):
+        return None, []
+    bars = _causal_es_minute_bars(es.get("recent_1m_ohlc"), now=now)
+    if len(bars) < 4:
+        return None, []
+    events = [
+        event
+        for direction, level_kind, level in (
+            ("down", "asia_low", low),
+            ("up", "asia_high", high),
+        )
+        if (
+            event := _asia_failed_retest_event(
+                bars,
+                direction=direction,
+                level_kind=level_kind,
+                level=level,
+                session_id=expected_session,
+                provider=provider,
+            )
+        )
+    ]
+    if not events:
+        return None, []
+    source = max(events, key=lambda row: _time(row.get("at")) or now)
+    signal_at = _time(source.get("at"))
+    if signal_at is None:
+        return None, []
+    age = (now - signal_at).total_seconds()
+    if age < -1.0:
+        return None, ["asia_range_breakout_in_future"]
+    if age > ttl_seconds:
+        return source, ["source_signal_expired"]
+    return source, []
+
+
+def _causal_es_minute_bars(value: object, *, now: datetime) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            continue
+        available_at = _time(raw.get("available_at"))
+        close = _number(raw.get("close"))
+        if available_at is None or available_at > now or close is None:
+            continue
+        rows.append({"available_at": available_at, "close": close})
+    return sorted(rows, key=lambda row: row["available_at"])
+
+
+def _asia_failed_retest_event(
+    bars: list[dict[str, object]],
+    *,
+    direction: str,
+    level_kind: str,
+    level: float,
+    session_id: str,
+    provider: str,
+) -> dict[str, object] | None:
+    sign = -1.0 if direction == "down" else 1.0
+    inside_seen = False
+    outside_run: list[dict[str, object]] = []
+    accepted: dict[str, object] | None = None
+    retest: dict[str, object] | None = None
+    for bar in bars:
+        at = bar["available_at"]
+        close = float(bar["close"])
+        directional_distance = sign * (close - level)
+        inside = directional_distance <= 0.0
+        outside = directional_distance >= _ASIA_BREAK_MIN_POINTS
+        if accepted is None:
+            if inside:
+                inside_seen = True
+                outside_run = []
+                continue
+            if not inside_seen or not outside:
+                outside_run = []
+                continue
+            if outside_run:
+                previous_at = outside_run[-1]["available_at"]
+                if (
+                    isinstance(previous_at, datetime)
+                    and isinstance(at, datetime)
+                    and (at - previous_at).total_seconds()
+                    > _ASIA_BREAK_MAX_OBSERVATION_GAP_SECONDS
+                ):
+                    outside_run = []
+            outside_run.append(bar)
+            if len(outside_run) >= 2:
+                accepted = bar
+            continue
+        accepted_at = accepted["available_at"]
+        if not isinstance(at, datetime) or not isinstance(accepted_at, datetime):
+            continue
+        if inside:
+            accepted = None
+            retest = None
+            outside_run = []
+            inside_seen = True
+            continue
+        if retest is None:
+            if (at - accepted_at).total_seconds() > _ASIA_RETEST_DEADLINE_SECONDS:
+                accepted = None
+                outside_run = [bar] if outside else []
+                continue
+            if directional_distance <= _ASIA_RETEST_TOLERANCE_POINTS:
+                retest = bar
+            continue
+        retest_at = retest["available_at"]
+        if not isinstance(retest_at, datetime):
+            continue
+        if (at - retest_at).total_seconds() > _ASIA_CONTINUATION_DEADLINE_SECONDS:
+            accepted = None
+            retest = None
+            outside_run = [bar] if outside else []
+            continue
+        retest_close = float(retest["close"])
+        continuation = sign * (close - retest_close)
+        if (
+            continuation < _ASIA_BREAK_MIN_POINTS
+            or directional_distance < _ASIA_CONTINUATION_MIN_POINTS
+        ):
+            continue
+        event_id = (
+            f"gth-asia-range:{session_id}:{level_kind}:"
+            f"{at.strftime('%Y%m%dT%H%M%SZ')}"
+        )
+        return {
+            "schema_version": 1,
+            "event_id": event_id,
+            "source_event_id": event_id,
+            "session_id": session_id,
+            "event_type": "asia_range_failed_retest",
+            "segment": "europe",
+            "direction": direction,
+            "level_kind": level_kind,
+            "level": level,
+            "price": close,
+            "acceptance_at": accepted_at.isoformat(),
+            "retest_at": retest_at.isoformat(),
+            "at": at.isoformat(),
+            "source_at": at.isoformat(),
+            "provider": provider,
+            "operator_action": "observe_only",
+            "automatic_ordering": False,
+        }
+    return None
 
 
 def build_candidate_policy_version(
@@ -337,7 +581,11 @@ def trend_anchor_geometry(
     invalidation_buffer_points: float,
     target_distance_points: float,
 ) -> dict[str, float] | None:
-    anchor_es = _number(source.get("price"))
+    anchor_es = (
+        _number(source.get("level"))
+        if source.get("event_type") == "asia_range_failed_retest"
+        else _number(source.get("price"))
+    )
     current_es = _number(es_reference.get("price"))
     current_parity = _number(parity.get("price"))
     direction = str(source.get("direction") or "")
@@ -358,6 +606,7 @@ def trend_anchor_geometry(
         target_spx = anchor_spx - target_distance_points
     return {
         "anchor_es": anchor_es,
+        "signal_es": _number(source.get("price")) or anchor_es,
         "anchor_spx": anchor_spx,
         "basis_points": basis_points,
         "invalidation_spx": invalidation_spx,
@@ -434,7 +683,9 @@ def confirmation_baseline(
         ),
         "es": float(trend_geometry["anchor_es"]) if trend_geometry is not None else None,
         "semantics": (
-            "causal_trend_transition_coordinate"
+            "causal_asia_range_failed_retest_coordinate"
+            if source.get("event_type") == "asia_range_failed_retest"
+            else "causal_trend_transition_coordinate"
             if trend_geometry is not None
             else "state_machine_confirmation_coordinate"
         ),
@@ -451,7 +702,11 @@ def candidate_trigger_coordinate(
         raw = level_decision.get("trigger_coordinate")
         return dict(raw) if isinstance(raw, Mapping) else {}
     return {
-        "kind": "chain_implied_spx_from_es_transition_anchor",
+        "kind": (
+            "chain_implied_spx_from_es_asia_range"
+            if source.get("event_type") == "asia_range_failed_retest"
+            else "chain_implied_spx_from_es_transition_anchor"
+        ),
         "instrument_id": "synthetic:SPXW_PARITY",
         "observed_value": trigger_level,
         "target_value": trigger_level,

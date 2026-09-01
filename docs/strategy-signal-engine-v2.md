@@ -1306,6 +1306,23 @@ RTH 已授权 Directional Debit Vertical 在 VIX1D、ATM IV 与 ATM 跨式输入
 任何其他核心环境输入缺失继续失效关闭；宏观、PIN、ATR、目标空间、setup 证据、exact BBO
 和人工-only 合同不变。策略版本为 `strategy_policy.bootstrap.v59`。
 
+### 11.26 v60：短周期动量冲突、路径尾部与 Pin 通知收敛
+
+`ES_VOLUME_MOMENTUM` 继续要求 ES 放量及 1m/5m 同向，但不再把陈旧破位上下文当成
+当前方向确认。若本周期刚发生 `break_reclaim`，该脚动量只保留观察；若当前方向与
+15m 冲动相反且反向幅度达到 `0.5×ATR5m`，必须存在 15 分钟内、同方向的新破位才能
+进入人工候选。90 分钟 break watch 仍可服务结构观察，但不再提供交易授权。
+
+赢家附加历史路径后，仅对 `ES_VOLUME_MOMENTUM` 增加一个窄的 fail-closed 尾部门：
+至少 20 个独立 session，risk objective 选择 `NO_TRADE`、亏损概率不低于 75%，且
+P90 净 PnL 仍不高于零时，拒绝人工方向卡。其他 setup 和样本不足/不可用的路径结果
+不受此门影响。
+
+Pin Desk View 仍可展示形成中的中心，但主动 `pin_stable_watch` 通知只允许
+`PIN_STABLE + center_confirmation_ready`，即同一中轴至少 3 个决策快照并持续 10 分钟。
+人工交易卡末尾固定展示 ICT 流动性参考；ICT 继续只有非正向过滤权，不改变授权。
+策略版本为 `strategy_policy.bootstrap.v61`；不新增服务、定时器、数据库、队列或通知 owner。
+
 ---
 
 ## 12. 正式 NoTrade
@@ -1926,3 +1943,28 @@ first-touch/time-stop 推广模型而永久停在观察层；生产决策改由�
 
 `GTH_WIDTH_SCAN`、`GTH_DELTA_SCAN` 与纯 trend-transition 背景不进入该门。该门标记
 `forward_unvalidated_user_override`，不会伪装成已经验证的统计 edge。
+
+2026-09-01 的增量结构源只在 Europe segment 读取已经冻结的 Asia High/Low：必须先有
+至少两个位于区间外的已完成 ES 分钟观测（相邻可用观测间隔不超过 3 分钟），随后在
+10 分钟内从区间外回测至边界 1.5 点内且不能收回区间，再在 5 分钟内重新向突破方向
+延续至少 2 点。事件从最后一次延续观测可用时开始计算 5 分钟 TTL，并继续经过上述
+1m/5m、IBKR exact BBO、借记、风险、方向锁和通知门。首次刺穿、没有回踩、回踩收回
+Asia range 或未来分钟尚未 available 的路径只作观察；该源仍是人工-only，不能自动下单。
+
+---
+
+## 28. v61 Europe 已确认趋势切换
+
+Europe segment 的已确认 ES trend-transition 可进入现有 GTH 分钟级人工门，不再无条件
+归类为不可交易的趋势背景。授权从趋势状态机完成两次因果确认时开始，不把事后识别的
+趋势腿高低点冒充为实时信号：
+
+- 仅接受 `source_kind=gth_es_trend_transition` 且 `source_segment=europe`；
+- Asia、US premarket 和无分段来源的纯 trend-transition 继续不可授权；
+- 仍要求 5 分钟 TTL、当前 1m 同向、5m 反向幅度不超过 `0.5×ATR5m`；
+- 仍要求 IBKR exact BBO、借记/翼宽不超过 45%、定义风险不超过 $1,000；
+- 使用 `EUROPE_TREND_TRANSITION` setup，标记 `forward_unvalidated_user_override`；
+- 只生成现有统一 `strategy_decision` 人工卡，`automatic_ordering=false`。
+
+Asia High/Low 的后续突破—回踩失败—延续仍是独立结构确认，可用于后续再评估，不能
+反向改写 Europe trend-transition 的确认时间。

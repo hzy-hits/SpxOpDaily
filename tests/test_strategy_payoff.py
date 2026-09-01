@@ -726,7 +726,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v59"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v61"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1015,7 +1015,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v59"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v61"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1185,7 +1185,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v59"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v61"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1323,7 +1323,7 @@ def test_rth_momentum_uses_manual_fallback_only_when_model_artifact_is_missing(
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v59"
+        "strategy_policy.bootstrap.v61"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["fallback_reason"] == (
         "strategy_edge_model_artifact_missing"
@@ -1544,7 +1544,7 @@ def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_v
     assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
     assert decision["candidate"]["economics"]["width_points"] == 15.0
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v59"
+        "strategy_policy.bootstrap.v61"
     )
     assert decision["regime"]["rth_environment"]["status"] != "ready"
     assert decision["action_authority"] == "manual"
@@ -2964,6 +2964,135 @@ def test_es_volume_and_1m_5m_disagree_does_not_authorize() -> None:
     assert decision["why_not"]["primary_blocker"] == "es_volume_momentum_not_aligned"
 
 
+def test_es_volume_momentum_opposing_15m_requires_fresh_matching_break() -> None:
+    now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["level_decision"] = {"phase": "far"}
+    payload["es_volume"] = _es_volume_signal(direction="up", pace_ratio=2.1)
+    payload["minute_market_frame"]["es"].update(
+        {
+            "return_1m_points": 1.2,
+            "return_5m_points": 3.0,
+            "return_15m_points": -6.0,
+        }
+    )
+
+    blocked = build_strategy_decision(
+        payload,
+        _state(now),
+        now,
+    )
+
+    assert blocked["decision_type"] == "NO_TRADE"
+    assert blocked["why_not"]["primary_blocker"] == (
+        "es_volume_momentum_opposes_15m_without_fresh_break"
+    )
+
+    payload["es_volume"]["break_watch"] = {
+        "broken_side": "above",
+        "broken_at": (now - timedelta(minutes=79)).isoformat(),
+    }
+    stale = build_strategy_decision(payload, _state(now), now)
+    assert stale["decision_type"] == "NO_TRADE"
+    assert stale["why_not"]["primary_blocker"] == (
+        "es_volume_momentum_opposes_15m_without_fresh_break"
+    )
+
+    payload["es_volume"]["break_watch"] = {
+        "broken_side": "above",
+        "broken_at": (now - timedelta(minutes=5)).isoformat(),
+    }
+    allowed = build_strategy_decision(
+        payload,
+        _state(now),
+        now,
+    )
+    assert allowed["decision_type"] == "CALL_DEBIT_VERTICAL", allowed["why_not"]
+
+
+def test_es_volume_momentum_break_reclaim_does_not_authorize() -> None:
+    now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["level_decision"] = {"phase": "far"}
+    payload["es_volume"] = {
+        **_es_volume_signal(direction="up", pace_ratio=2.1),
+        "break_outcome": "reclaimed",
+        "sequence": "break_reclaim",
+    }
+    payload["minute_market_frame"]["es"].update(
+        {
+            "return_1m_points": 1.2,
+            "return_5m_points": 3.0,
+            "return_15m_points": 4.0,
+        }
+    )
+
+    decision = build_strategy_decision(
+        payload,
+        _state(now),
+        now,
+    )
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == (
+        "es_volume_momentum_break_reclaimed"
+    )
+
+
+def test_es_volume_momentum_adverse_path_tail_vetoes_manual_card(
+    monkeypatch,
+) -> None:
+    from spx_spark.application.order_map import strategy_select as select_module
+
+    now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["level_decision"] = {"phase": "far"}
+    payload["es_volume"] = _es_volume_signal(direction="up", pace_ratio=2.1)
+    payload["minute_market_frame"]["es"].update(
+        {
+            "return_1m_points": 1.2,
+            "return_5m_points": 3.0,
+            "return_15m_points": 4.0,
+        }
+    )
+
+    def attach_adverse_path(_facts, passed, iron_condor_map, **_kwargs):
+        winner = dict(passed[0])
+        winner["edge"] = {
+            **dict(winner.get("edge") or {}),
+            "path_distribution": {
+                "status": "estimated_uncalibrated",
+                "p90_net_pnl": -68.0,
+                "risk_objective": {
+                    "status": "available",
+                    "n_sessions": 24,
+                    "loss_probability": 1.0,
+                    "shadow_choice": "NO_TRADE",
+                },
+            },
+        }
+        return winner, [], dict(iron_condor_map)
+
+    monkeypatch.setattr(
+        select_module,
+        "_attach_winner_path_distributions",
+        attach_adverse_path,
+    )
+    decision = select_module.build_strategy_decision(
+        payload,
+        _state(now),
+        now,
+    )
+
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["why_not"]["primary_blocker"] == (
+        "path_distribution_adverse_tail_veto"
+    )
+    assert decision["why_not"]["nearest_candidate"]["setup_kind"] == (
+        "ES_VOLUME_MOMENTUM"
+    )
+
+
 def test_es_volume_momentum_first_card_survives_hmm_balanced() -> None:
     now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
     payload = _decision_payload(now)
@@ -3981,7 +4110,7 @@ def test_gth_level_path_can_authorize_manual_candidate_but_trend_background_cann
     assert advanced["candidate"]["setup_kind"] == "TREND_PULLBACK"
 
 
-def test_gth_selector_evidence_uses_v48_minute_authority(
+def test_gth_selector_evidence_uses_current_minute_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from spx_spark.application.order_map import strategy_select
@@ -4027,12 +4156,131 @@ def test_gth_selector_evidence_uses_v48_minute_authority(
         "first_touch_time_stop_net_pnl_authority_unavailable"
     ]
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v48"
+        "strategy_policy.bootstrap.v61"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["gate_kind"] == (
         "gth_minute_confirmation"
     )
     assert decision["automatic_ordering"] is False
+
+    asia_payload = deepcopy(payload)
+    asia_payload["gth_level_manual_candidate"] = {
+        **asia_payload["gth_level_manual_candidate"],
+        "source_kind": "gth_asia_range_failed_retest",
+        "path_kind": "asia_high_breakout_call",
+        "ict_liquidity": {
+            "status": "active",
+            "stage": "BREAKOUT_RETEST_CONFIRMED",
+            "direction": "UP",
+            "level_names": ["ASIA_H"],
+            "level": 7705.0,
+            "action_authority": "gth_structural_source",
+            "automatic_ordering": False,
+        },
+        "ict_alignment": "CONFIRMS",
+        "ict_decision_modifier": 0.0,
+    }
+    asia_decision = build_strategy_decision(
+        asia_payload,
+        _state(now),
+        now,
+        data_root=tmp_path,
+    )
+
+    assert asia_decision["decision_type"] == "CALL_DEBIT_VERTICAL"
+    assert asia_decision["candidate"]["setup_kind"] == "TREND_PULLBACK"
+    assert asia_decision["candidate"]["ict_alignment"] == "CONFIRMS"
+    assert asia_decision["candidate"]["ict_liquidity"]["level_names"] == ["ASIA_H"]
+    assert asia_decision["automatic_ordering"] is False
+
+
+def test_europe_confirmed_trend_transition_uses_gth_minute_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.order_map.strategy_edge_model import (
+        apply_strategy_edge_authority,
+    )
+
+    monkeypatch.setattr(
+        strategy_select,
+        "apply_strategy_edge_authority",
+        apply_strategy_edge_authority,
+    )
+    now = datetime(2026, 9, 1, 7, 38, 28, tzinfo=timezone.utc)
+    observed = now - timedelta(seconds=1)
+    payload = _decision_payload(now)
+    payload["trading_date"] = "2026-09-01"
+    payload["underlier"] = {"price": 7683.15, "source": "synthetic:SPXW_PARITY"}
+    payload["minute_market_frame"]["es"].update(
+        {
+            "price": 7695.625,
+            "return_1m_points": -1.25,
+            "return_5m_points": -4.75,
+            "return_15m_points": -8.125,
+        }
+    )
+    payload["gth_level_manual_candidate"] = {
+        **_gth_candidate(now, "trend_transition_put"),
+        "status": "selector_candidate",
+        "candidate_scope": "research_watch",
+        "execution_mode": "observe_only",
+        "direction": "down",
+        "manual_action_eligible": False,
+        "selector_evidence_eligible": True,
+        "operator_notification_eligible": False,
+        "source_kind": "gth_es_trend_transition",
+        "source_segment": "europe",
+        "trigger_level": 7683.15,
+        "current_parity_spx": 7683.15,
+        "target_spx": 7659.9,
+        "invalidation_spx": 7687.9,
+        "long_contract_id": "option:SPX:SPXW:20260901:7685:P",
+        "short_contract_id": "option:SPX:SPXW:20260901:7660:P",
+        "edge_authority": "none",
+        "edge_authority_reason": "first_touch_time_stop_net_pnl_authority_unavailable",
+        "block_reasons": ["first_touch_time_stop_net_pnl_authority_unavailable"],
+        "exact_spread_snapshot": {
+            "long": {
+                "provider": "ibkr",
+                "bid": 11.0,
+                "ask": 12.0,
+                "source_at": observed.isoformat(),
+            },
+            "short": {
+                "provider": "ibkr",
+                "bid": 3.2,
+                "ask": 3.4,
+                "source_at": observed.isoformat(),
+            },
+        },
+    }
+    payload.pop("call_skew_spread_shadow")
+
+    decision = build_strategy_decision(payload, _state(now), now, data_root=tmp_path)
+
+    assert decision["decision_type"] == "PUT_DEBIT_VERTICAL", decision["why_not"]
+    candidate = decision["candidate"]
+    assert candidate["setup_kind"] == "EUROPE_TREND_TRANSITION"
+    assert candidate["source_kind"] == "gth_es_trend_transition"
+    assert candidate["source_segment"] == "europe"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v61"
+    assert candidate["evidence_status"] == "forward_unvalidated_user_override"
+    assert candidate["edge"]["strategy_edge"]["gate_kind"] == (
+        "gth_minute_confirmation"
+    )
+    assert decision["automatic_ordering"] is False
+
+    asia_payload = deepcopy(payload)
+    asia_payload["gth_level_manual_candidate"]["source_segment"] = "asia"
+    rejected = build_strategy_decision(
+        asia_payload,
+        _state(now),
+        now,
+        data_root=tmp_path,
+    )
+    assert rejected["decision_type"] == "NO_TRADE"
+    assert "trend_background_cannot_authorize_entry" in rejected["why_not"]["reasons"]
 
 
 def test_fresh_dip_reclaim_evidence_overrides_trend_only_background(
@@ -4193,6 +4441,16 @@ def test_historical_gth_record_uses_same_stop_atr_and_trend_gates() -> None:
     trend_only = classify_gth_vertical_record(record, atr_5m=20.0)
     assert trend_only["new_action"] == "NO_TRADE"
     assert trend_only["new_reason"] == "trend_background_cannot_authorize_entry"
+
+    record.update(
+        {
+            "source_kind": "gth_es_trend_transition",
+            "source_segment": "europe",
+        }
+    )
+    europe_transition = classify_gth_vertical_record(record, atr_5m=20.0)
+    assert europe_transition["new_action"] == "TRADE", europe_transition
+    assert europe_transition["new_reason"] == "vertical_entry_quality_passed"
 
 
 def _ranker_pin_facts(facts: dict[str, object]) -> dict[str, object]:

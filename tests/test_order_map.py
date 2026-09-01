@@ -5216,6 +5216,10 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
     assert expected_link in str(captured["text"])
     assert "[查看最新 OI 墙位图](https://spx.zh3nyu.com/oi/latest.png)" in str(captured["text"])
     assert "[查看 0DTE 资金流图](https://spx.zh3nyu.com/flow/latest.png)" in str(captured["text"])
+    assert str(captured["text"]).endswith(
+        "## 决策参考\nICT：ONL 7674.5 · 偏多 · MSS已确认，位移不足 · "
+        "只观察，不改变授权。"
+    )
     assert captured["oi_storage"] is storage
     assert captured["flow_storage"] is storage
     assert captured["text"] == captured["feishu_text"]
@@ -5231,6 +5235,16 @@ def _strategy_decision_payload(now: datetime) -> dict[str, object]:
         "runtime_git_sha": "8d1b213a",
         "decision_at": now.isoformat(),
         "action_authority": "manual",
+        "market_facts": {
+            "ict_liquidity": {
+                "status": "active",
+                "stage": "MSS_CONFIRMED",
+                "direction": "UP",
+                "level": 7674.5,
+                "level_names": ["ONL"],
+                "action_authority": "filter_only",
+            }
+        },
         "probability_evidence": {
             "q": 0.52,
             "n_raw": 12,
@@ -5266,6 +5280,7 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     settings = make_settings(str(tmp_path / "strategy.json"))
     decision = _strategy_decision_payload(now)
+    decision.pop("market_facts")
     base_text = delivery_module._render_strategy_candidate(decision, decision["candidate"])
     captured: dict[str, object] = {}
 
@@ -5290,7 +5305,10 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
 
     assert result["accepted"] is True
     assert result["idea_memo"] == "omitted:trade_ready_latency_budget"
-    assert captured["text"] == base_text
+    assert str(captured["text"]).startswith(base_text)
+    assert str(captured["text"]).endswith(
+        "## 决策参考\nICT：当前无有效 Sweep/MSS/位移事件；不改变本卡授权。"
+    )
     assert captured["text"] == captured["feishu_text"]
 
 
@@ -5417,7 +5435,9 @@ def test_pin_stable_watch_enqueues_once_per_center_and_clock_phase(
     assert opened["event_id"] == "pin-stable:2026-08-14:7785:clock_open"
 
 
-def test_pin_look_watch_enqueues_without_trade_pin(tmp_path: Path, monkeypatch) -> None:
+def test_pin_look_watch_is_not_pushed_before_center_confirmation(
+    tmp_path: Path, monkeypatch
+) -> None:
     from spx_spark.application.order_map import delivery as delivery_module
 
     now = datetime(2026, 8, 14, 18, 38, tzinfo=timezone.utc)
@@ -5427,9 +5447,10 @@ def test_pin_look_watch_enqueues_without_trade_pin(tmp_path: Path, monkeypatch) 
     look["regime"]["terminal_state"] = "NONE"
     look["regime"]["pin"]["grade"] = "look"
     first = delivery_module.enqueue_pin_stable_watch(look, now=now)
-    assert first["accepted"] is True
-    assert first["inserted"] is True
-    assert first["event_id"] == "pin-stable:2026-08-14:7785:look"
+    assert first == {
+        "accepted": False,
+        "outcome": "pin_stable_watch_not_applicable",
+    }
 
 
 def test_pin_stable_watch_skips_gth_and_non_stable(tmp_path: Path, monkeypatch) -> None:
@@ -5447,6 +5468,12 @@ def test_pin_stable_watch_skips_gth_and_non_stable(tmp_path: Path, monkeypatch) 
     migrating = _pin_stable_decision(now, minutes_to_close=66.0, center=7785.0)
     migrating["regime"]["terminal_state"] = "PIN_MIGRATING"
     assert delivery_module.enqueue_pin_stable_watch(migrating, now=now) == {
+        "accepted": False,
+        "outcome": "pin_stable_watch_not_applicable",
+    }
+    unconfirmed = _pin_stable_decision(now, minutes_to_close=66.0, center=7785.0)
+    unconfirmed["regime"]["pin"]["center_confirmation_ready"] = False
+    assert delivery_module.enqueue_pin_stable_watch(unconfirmed, now=now) == {
         "accepted": False,
         "outcome": "pin_stable_watch_not_applicable",
     }

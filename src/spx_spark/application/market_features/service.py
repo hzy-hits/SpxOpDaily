@@ -751,7 +751,7 @@ def run(
         storage,
         action_latest,
         raw_level_decision,
-        trend_state=trend,
+        trend_state=trend, market_frame=market_frame.to_dict(),
         spring_gamma=spring_gamma_snapshot,
         macro_event=action_macro_event,
         now=action_now,

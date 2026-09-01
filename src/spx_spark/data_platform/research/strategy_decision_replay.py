@@ -40,7 +40,16 @@ def classify_gth_vertical_record(
     quote_times = [_time(_map(snapshot.get(side)).get("source_at")) for side in ("long", "short")]
     available_at = max((item for item in quote_times if item), default=decision_at)
     path_kind = str(record.get("path_kind") or "")
-    reasons = ["trend_background_cannot_authorize_entry"] if path_kind.startswith("trend_transition_") else []
+    europe_transition = bool(
+        path_kind.startswith("trend_transition_")
+        and str(record.get("source_kind") or "") == "gth_es_trend_transition"
+        and str(record.get("source_segment") or "") == "europe"
+    )
+    reasons = (
+        ["trend_background_cannot_authorize_entry"]
+        if path_kind.startswith("trend_transition_") and not europe_transition
+        else []
+    )
     values = {name: _number(record.get(name)) for name in (
         "current_parity_spx", "target_spx", "invalidation_spx", "trigger_level",
         "spread_width_points", "decision_ask",
@@ -55,9 +64,13 @@ def classify_gth_vertical_record(
         if width <= 0 or not 0 < ask < width:
             reasons.append("vertical_contract_geometry_invalid")
         else:
-            setup = "FAILED_BREAK_RECLAIM" if any(
-                token in path_kind for token in ("rejection", "reclaim", "dip")
-            ) else "TREND_PULLBACK"
+            setup = (
+                "EUROPE_TREND_TRANSITION"
+                if europe_transition
+                else "FAILED_BREAK_RECLAIM"
+                if any(token in path_kind for token in ("rejection", "reclaim", "dip"))
+                else "TREND_PULLBACK"
+            )
             quality, gate_reasons = vertical_entry_quality(
                 spot=float(values["current_parity_spx"]),
                 atr=float(atr_5m),

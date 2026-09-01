@@ -18,6 +18,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+
 
 SCHEMA_VERSION = "strategy_edge_model.v1"
 FEATURE_VERSION = "strategy_edge_features.v1"
@@ -31,9 +33,9 @@ _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
 _ES_VOLUME_MOMENTUM_SETUP = "ES_VOLUME_MOMENTUM"
-_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v59"
+_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v61"
 _ES_VOLUME_MOMENTUM_CONTRACT_HASH = (
-    "sha256:1b9b4fedbd4b931f83932abe382cbb319352a3631fe8d8c789ecd221cac49d86"
+    "sha256:c04e0745bd5836e317a3dcc3d5e70344182e2262cdadcb58592111627e0786f4"
 )
 _RTH_LEVEL_CONFIRMATION_SETUP = "RTH_LEVEL_CONFIRMATION"
 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH = (
@@ -47,14 +49,16 @@ _IRON_CONDOR_SETUP = "IRON_CONDOR_DELTA"
 _IRON_CONDOR_CONTRACT_HASH = (
     "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
 )
-_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v48"
+_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v61"
 _GTH_MINUTE_GATE_CONTRACT_HASH = (
-    "sha256:72e0036694a079ed8e6a18b930662a12979d827db3ca27ab2b95a76bfd60884f"
+    "sha256:a37c9ec4ae262c425965238229d80f4fa3c0e30d6ac8d35c09195a54fd88d9e0"
 )
 _GTH_MINUTE_GATE_SOURCES = frozenset(
     {"gth_level_manual_candidate", "gth_dip_reclaim_evidence"}
 )
-_GTH_MINUTE_GATE_SETUPS = frozenset({"FAILED_BREAK_RECLAIM", "TREND_PULLBACK"})
+_GTH_MINUTE_GATE_SETUPS = frozenset(
+    {"EUROPE_TREND_TRANSITION", "FAILED_BREAK_RECLAIM", "TREND_PULLBACK"}
+)
 _GTH_MINUTE_MAX_OPPOSING_5M_ATR = 0.50
 _GTH_MINUTE_MAX_DEBIT_FRACTION = 0.45
 _GTH_MINUTE_MAX_RISK_USD = 1000.0
@@ -130,6 +134,50 @@ _DEFAULT_THRESHOLDS = {
 class EdgeAuthorityResult:
     passed: list[dict[str, Any]]
     rejected: list[dict[str, Any]]
+
+
+def reject_adverse_es_momentum_path(
+    candidate: Mapping[str, Any],
+    *,
+    policy: StrategyPolicy,
+) -> dict[str, Any] | None:
+    """Return a rejected winner only when a mature replay is uniformly adverse."""
+
+    if str(candidate.get("setup_kind") or "") != _ES_VOLUME_MOMENTUM_SETUP:
+        return None
+    distribution = _map(_map(candidate.get("edge")).get("path_distribution"))
+    objective = _map(distribution.get("risk_objective"))
+    n_sessions = _number(objective.get("n_sessions"))
+    p90 = _number(distribution.get("p90_net_pnl"))
+    loss_probability = _number(objective.get("loss_probability"))
+    if not (
+        objective.get("status") == "available"
+        and objective.get("shadow_choice") == "NO_TRADE"
+        and n_sessions is not None
+        and n_sessions >= policy.es_momentum_path_veto_min_sessions
+        and p90 is not None
+        and p90 <= policy.es_momentum_path_veto_max_p90_net_pnl
+        and loss_probability is not None
+        and loss_probability >= policy.es_momentum_path_veto_min_loss_probability
+    ):
+        return None
+    reason = "path_distribution_adverse_tail_veto"
+    gate = {
+        "gate": reason,
+        "actual": {"p90_net_pnl": p90, "risk_objective": dict(objective)},
+        "threshold": {
+            "max_p90_net_pnl": policy.es_momentum_path_veto_max_p90_net_pnl,
+            "min_loss_probability": policy.es_momentum_path_veto_min_loss_probability,
+            "min_sessions": policy.es_momentum_path_veto_min_sessions,
+        },
+    }
+    return {
+        **dict(candidate),
+        "failed_gates": [*list(candidate.get("failed_gates") or ()), gate],
+        "rejection_reasons": list(
+            dict.fromkeys([*list(candidate.get("rejection_reasons") or ()), reason])
+        ),
+    }
 
 
 def apply_strategy_edge_authority(
@@ -230,22 +278,22 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v59",
+                "strategy_policy.bootstrap.v61",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _RTH_LEVEL_CONFIRMATION_SETUP: (
-                "strategy_policy.bootstrap.v59",
+                "strategy_policy.bootstrap.v61",
                 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
                 "rth_level_confirmation_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v59",
+                "strategy_policy.bootstrap.v61",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v59",
+                "strategy_policy.bootstrap.v61",
                 _IRON_CONDOR_CONTRACT_HASH,
                 "iron_condor_policy_authority_invalid",
             ),
@@ -350,6 +398,11 @@ def _gth_minute_gate_reasons(
 
     if str(_map(facts.get("session")).get("mode") or "").lower() != "gth":
         return ["gth_minute_gate_session_mismatch"]
+    if str(candidate.get("setup_kind") or "") == "EUROPE_TREND_TRANSITION" and (
+        str(candidate.get("source_kind") or "") != "gth_es_trend_transition"
+        or str(candidate.get("source_segment") or "") != "europe"
+    ):
+        return ["gth_europe_trend_transition_lineage_invalid"]
     direction = str(candidate.get("direction") or "").upper()
     sign = 1.0 if direction == "UP" else -1.0 if direction == "DOWN" else 0.0
     if sign == 0.0:
@@ -649,7 +702,9 @@ def candidate_edge_features(
         "setup_momentum": float(setup == "ES_VOLUME_MOMENTUM"),
         "setup_gth_scan": float(setup in {"GTH_WIDTH_SCAN", "GTH_DELTA_SCAN"}),
         "setup_failed_break": float(setup == "FAILED_BREAK_RECLAIM"),
-        "setup_pullback": float(setup == "TREND_PULLBACK"),
+        "setup_pullback": float(
+            setup in {"EUROPE_TREND_TRANSITION", "TREND_PULLBACK"}
+        ),
         "setup_event_settlement": float(setup == "EVENT_SETTLEMENT_THRESHOLD"),
         "setup_stable_pin": float(setup == "STABLE_PIN"),
     }

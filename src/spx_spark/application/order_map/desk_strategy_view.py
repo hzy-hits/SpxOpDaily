@@ -337,10 +337,17 @@ def humanize_strategy_reason(reason: str) -> str:
         "es_volume_momentum_unavailable": "ES 量比或动量不足，不能授权短周期方向",
         "es_volume_not_elevated": "ES 量比未放量，短周期方向不成立",
         "es_volume_momentum_direction_flat": "ES 放量但价格方向是平的",
+        "es_volume_momentum_break_reclaimed": "刚发生破位收回，当前不追同一脚动量",
         "es_volume_momentum_not_aligned": "ES 量比方向与 1 分钟/5 分钟动量不一致",
+        "es_volume_momentum_opposes_15m_without_fresh_break": (
+            "短周期动量逆着 15 分钟冲动，且没有 15 分钟内同向新破位"
+        ),
         "es_volume_momentum_too_weak": "ES 1 分钟/5 分钟动量太弱，还不是短周期启动",
         "es_volume_momentum_unevaluable": "ES 1 分钟/5 分钟动量缺失，不能评估短周期",
         "es_volume_momentum_too_late": "这一脚 5 分钟已经走完，不再追短周期",
+        "path_distribution_adverse_tail_veto": (
+            "历史同钟路径连 P90 仍亏且亏损概率过高，不发人工方向卡"
+        ),
         "es_volume_momentum_hmm_opposes": "现金 HMM 已是反向 TREND，短周期方向不清晰",
         "es_volume_momentum_flip_needs_hmm_trend": "翻向需要现金 HMM 同向 TREND",
         "es_volume_momentum_add_needs_new_impulse": "同向加仓需要新的 TREND 冲动，不能只靠冷却后再推",

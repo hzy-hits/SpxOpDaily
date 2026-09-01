@@ -26,10 +26,12 @@ from spx_spark.application.market_features.gth_manual_candidate import (
     _gth_bbo_contract_snapshot,
     _gth_end,
 )
+from spx_spark.application.market_features.market import session_segment
 from spx_spark.application.market_features.gth_candidate_lifecycle import (
     classify_source_lifecycle,
 )
 from spx_spark.application.market_features.gth_trend_entry_source import (
+    ASIA_RANGE_SOURCE_MODE,
     build_candidate_policy_version,
     candidate_geometry_context,
     candidate_trigger_coordinate,
@@ -100,6 +102,7 @@ def evaluate_gth_level_manual_candidate(
     level_decision: Mapping[str, object],
     *,
     trend_state: Mapping[str, object] | None = None,
+    market_frame: Mapping[str, object] | None = None,
     spring_gamma: Mapping[str, object] | None = None,
     macro_event: Mapping[str, object],
     now: datetime,
@@ -125,9 +128,14 @@ def evaluate_gth_level_manual_candidate(
     ) = resolve_gth_manual_source(
         level_decision,
         trend_state,
+        market_frame=market_frame,
         now=now,
         ttl_seconds=policy.gth_manual_candidate_ttl_seconds,
         max_source_lag_seconds=policy.gth_manual_candidate_quote_max_age_seconds,
+    )
+    source_at = _time(source.get("at"))
+    source_segment = (
+        session_segment(source_at, policy=policy) if source_at is not None else None
     )
     candidate_policy_version = build_candidate_policy_version(
         source_mode,
@@ -150,6 +158,7 @@ def evaluate_gth_level_manual_candidate(
         "source_event_id": source.get("source_event_id") if is_es_trend_source(source_mode) else source_id,
         "reentry_generation": generation,
         "source_kind": source_kind,
+        "source_segment": source_segment,
         "evaluated_at": now.isoformat(),
         "status": "observing",
         "candidate_scope": "manual_live",
@@ -263,11 +272,13 @@ def evaluate_gth_level_manual_candidate(
     if (
         thesis == "breakout"
         and direction == "down"
-        and level_kind in {"flip_low", "put_wall", "trend"}
+        and level_kind in {"flip_low", "put_wall", "trend", "asia_low"}
     ):
         right, position_type = "P", "put_debit_spread"
         path_kind = (
-            "trend_advance_put"
+            "asia_low_breakdown_put"
+            if source_mode == ASIA_RANGE_SOURCE_MODE
+            else "trend_advance_put"
             if source_mode == "trend_advance"
             else "trend_transition_put"
             if source_mode == "trend"
@@ -281,11 +292,13 @@ def evaluate_gth_level_manual_candidate(
     elif (
         thesis == "breakout"
         and direction == "up"
-        and level_kind in {"flip_high", "call_wall", "trend"}
+        and level_kind in {"flip_high", "call_wall", "trend", "asia_high"}
     ):
         right, position_type = "C", "call_debit_spread"
         path_kind = (
-            "trend_advance_call"
+            "asia_high_breakout_call"
+            if source_mode == ASIA_RANGE_SOURCE_MODE
+            else "trend_advance_call"
             if source_mode == "trend_advance"
             else "trend_transition_call"
             if source_mode == "trend"
@@ -390,7 +403,13 @@ def evaluate_gth_level_manual_candidate(
             + policy.trade_invalidation_buffer_points
         )
         width = long_strike - short_strike
-        target_wall_kind = "put_wall" if structural_target is not None else "time_stop"
+        target_wall_kind = (
+            "asia_range_projection"
+            if source_mode == ASIA_RANGE_SOURCE_MODE
+            else "put_wall"
+            if structural_target is not None
+            else "time_stop"
+        )
     else:
         structural_target = (
             (
@@ -428,7 +447,9 @@ def evaluate_gth_level_manual_candidate(
         )
         width = short_strike - long_strike
         target_wall_kind = (
-            "flip_low"
+            "asia_range_projection"
+            if source_mode == ASIA_RANGE_SOURCE_MODE
+            else "flip_low"
             if path_kind == "lower_rejection_call" and level_kind == "put_wall"
             else "call_wall"
             if structural_target is not None
@@ -670,6 +691,24 @@ def evaluate_gth_level_manual_candidate(
         "exit_at": exit_at.isoformat(),
         "exact_spread_snapshot": snapshot,
         "spring_gamma": spring_gamma_view,
+        "ict_liquidity": (
+            {
+                "status": "active",
+                "stage": "BREAKOUT_RETEST_CONFIRMED",
+                "direction": direction.upper(),
+                "level_names": ["ASIA_L" if direction == "down" else "ASIA_H"],
+                "level": trigger_level,
+                "signal_at": source.get("at"),
+                "valid_until": valid_until.isoformat(),
+                "action_authority": "gth_structural_source",
+                "automatic_ordering": False,
+                "reason": "asia_range_break_acceptance_failed_retest_continuation",
+            }
+            if source_mode == ASIA_RANGE_SOURCE_MODE
+            else None
+        ),
+        "ict_alignment": "CONFIRMS" if source_mode == ASIA_RANGE_SOURCE_MODE else None,
+        "ict_decision_modifier": 0.0,
         "prior_session": prior_session_view,
         "block_reasons": ([] if operator_ready else [selector_block_reason]),
         "signal_absence_reason": None if operator_ready else edge_authority_reason,
@@ -687,6 +726,7 @@ def process_gth_level_manual_candidate(
     level_decision: Mapping[str, object],
     *,
     trend_state: Mapping[str, object] | None = None,
+    market_frame: Mapping[str, object] | None = None,
     spring_gamma: Mapping[str, object] | None = None,
     macro_event: Mapping[str, object],
     now: datetime,
@@ -703,6 +743,7 @@ def process_gth_level_manual_candidate(
         latest,
         level_decision,
         trend_state=trend_state,
+        market_frame=market_frame,
         spring_gamma=spring_gamma,
         macro_event=macro_event,
         now=now,

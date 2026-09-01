@@ -14,7 +14,6 @@ from spx_spark.analytics.options.strategy_payoff import (
     ManagementPolicy,
 )
 
-# Forward mark horizons for strategy_outcomes (v3). Frozen code constant.
 MARK_HORIZONS_MINUTES: tuple[int, ...] = (1, 2, 3, 4, 5, 7, 10, 15, 20)
 
 __all__ = (
@@ -45,7 +44,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v59"
+    policy_version: str = "strategy_policy.bootstrap.v61"
     # Policy history and frozen thresholds: docs/strategy-signal-engine-v2.md.
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
@@ -91,8 +90,13 @@ class StrategyPolicy:
     es_momentum_min_return_1m: float = 0.35
     es_momentum_min_return_5m: float = 1.0
     es_momentum_max_return_5m_atr: float = 1.50
+    es_momentum_opposite_15m_min_atr: float = 0.50
+    es_momentum_fresh_break_max_age_seconds: float = 900.0
     es_momentum_max_progress: float = 0.50
     es_momentum_add_min_return_5m_atr: float = 0.50
+    es_momentum_path_veto_min_sessions: int = 20
+    es_momentum_path_veto_min_loss_probability: float = 0.75
+    es_momentum_path_veto_max_p90_net_pnl: float = 0.0
     wall_hazard_min_side_probability: float = 0.17
     wall_hazard_min_execution_ev_points: float = 0.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
@@ -124,9 +128,6 @@ class StrategyPolicy:
     butterfly_five_wide_look_max_minutes: float = 300.0
     butterfly_five_wide_look_min_minutes: float = 180.0
     butterfly_unresolved_wall_em_multiple: float = 1.5
-    # v5: debit vertical short strike may not pass the target, and width may
-    # not exceed remaining 0DTE expected move. Missing EM fails closed.
-    # V3-3a flood control (activated with policy_version bump to bootstrap.v2).
     candidate_cooldown_seconds: float = 900.0
     max_cards_per_direction_per_session: int = 2
     # GTH hysteresis from the start of the current direction streak, not a
@@ -135,7 +136,6 @@ class StrategyPolicy:
     # RTH same-direction hold after an accepted human card. Flip after this
     # window still needs cash HMM TREND the new way (see v32).
     rth_winner_stick_seconds: float = 900.0
-    # Confirmation bar plus this many subsequent 5m bars remain ENTRY_WINDOW_OPEN.
     rth_setup_hold_bars: int = 2
     max_trigger_target_progress: float = 0.60
     failed_break_max_trigger_target_progress: float = 0.50

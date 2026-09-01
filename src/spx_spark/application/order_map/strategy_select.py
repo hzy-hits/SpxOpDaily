@@ -37,6 +37,7 @@ from spx_spark.application.order_map.path_distribution import (
 )
 from spx_spark.application.order_map.strategy_edge_model import (
     apply_strategy_edge_authority,
+    reject_adverse_es_momentum_path,
 )
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
 from spx_spark.application.order_map.strategy_regime import (
@@ -202,29 +203,41 @@ def build_strategy_decision(
                     probability_settings=probability_settings,
                     now=_utc(now),
                 )
-                shadow_candidates, shadow_candidates_skipped = _shadow_candidates(
-                    shadows
+                path_rejected = reject_adverse_es_momentum_path(
+                    winner,
+                    policy=DEFAULT_STRATEGY_POLICY,
                 )
-                funnel = _rejection_funnel(
-                    facts,
-                    rows,
-                    rank,
-                    reasons=[],
-                    generation_reasons=generation_reasons,
-                    manual_candidate=True,
-                )
-                return _with_iron_condor_map(
-                    _candidate_decision(
+                if path_rejected:
+                    rank = RankResult(
+                        passed=[],
+                        near_misses=[path_rejected, *rank.near_misses][:3],
+                        gate_audit=rank.gate_audit,
+                    )
+                    stick_reason = None
+                else:
+                    shadow_candidates, shadow_candidates_skipped = _shadow_candidates(
+                        shadows
+                    )
+                    funnel = _rejection_funnel(
                         facts,
-                        {**regime, "entry_state": "GOOD_LOCATION"},
-                        winner,
-                        candidates_considered=_candidate_summaries(rank),
-                        shadow_candidates=shadow_candidates,
-                        shadow_candidates_skipped=shadow_candidates_skipped,
-                        rejection_funnel=funnel,
-                    ),
-                    iron_condor_map,
-                )
+                        rows,
+                        rank,
+                        reasons=[],
+                        generation_reasons=generation_reasons,
+                        manual_candidate=True,
+                    )
+                    return _with_iron_condor_map(
+                        _candidate_decision(
+                            facts,
+                            {**regime, "entry_state": "GOOD_LOCATION"},
+                            winner,
+                            candidates_considered=_candidate_summaries(rank),
+                            shadow_candidates=shadow_candidates,
+                            shadow_candidates_skipped=shadow_candidates_skipped,
+                            rejection_funnel=funnel,
+                        ),
+                        iron_condor_map,
+                    )
             reasons = [stick_reason] if stick_reason else _rank_reasons(rank)
         else:
             event_reason = event_settlement_generation_reason(
@@ -528,7 +541,9 @@ def _rejection_funnel(
         "es_volume_momentum_unavailable",
         "es_volume_not_elevated",
         "es_volume_momentum_direction_flat",
+        "es_volume_momentum_break_reclaimed",
         "es_volume_momentum_not_aligned",
+        "es_volume_momentum_opposes_15m_without_fresh_break",
         "es_volume_momentum_too_weak",
         "es_volume_momentum_unevaluable",
         "es_volume_momentum_too_late",

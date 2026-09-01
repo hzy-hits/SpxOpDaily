@@ -39,7 +39,7 @@ from spx_spark.application.order_map.strategy_regime import (
     butterfly_max_entry_minutes,
     pin_stable_next_step_text,
     pin_stable_watch_phase,
-    pin_watch_center,
+    pin_trade_center,
 )
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
@@ -58,7 +58,7 @@ def enqueue_pin_stable_watch(decision: Mapping[str, Any], *, now: datetime) -> d
     regime = decision.get("regime") if isinstance(decision.get("regime"), dict) else {}
     facts = decision.get("market_facts") if isinstance(decision.get("market_facts"), dict) else {}
     session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
-    center = pin_watch_center(regime)
+    center = pin_trade_center(regime)
     session_date = str(decision.get("session_date") or facts.get("session_date") or "")
     if (
         center is None
@@ -157,6 +157,7 @@ def enqueue_strategy_decision(
             f"[查看最新 OI 墙位图]({OPEN_INTEREST_IMAGE_PUBLIC_URL})\n"
             f"[查看 0DTE 资金流图]({NET_PREMIUM_FLOW_IMAGE_PUBLIC_URL})"
         )
+    text = f"{text}\n\n## 决策参考\n{_ict_liquidity_line(decision, candidate)}"
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -451,9 +452,6 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "## 目标",
             f"SPX {target}{payoff}",
         ]
-    ict_line = _ict_liquidity_line(candidate)
-    if ict_line:
-        lines.extend(("", "## ICT过滤", ict_line))
     environment = (
         (decision.get("regime") or {}).get("rth_environment") or {}
         if isinstance(decision.get("regime"), dict)
@@ -526,6 +524,7 @@ def _setup_cn(setup: object) -> str:
         "GTH_ATM_PIN": "夜盘钉住",
         "IRON_CONDOR_DELTA": "铁鹰",
         "EVENT_SETTLEMENT_THRESHOLD": "事件结算观点",
+        "EUROPE_TREND_TRANSITION": "欧盘趋势切换",
         "TREND_PULLBACK": "趋势回踩",
         "ES_VOLUME_MOMENTUM": "ES量比动量",
         "STABLE_PIN": "稳定钉住",
@@ -534,22 +533,36 @@ def _setup_cn(setup: object) -> str:
     }.get(str(setup or ""), "结构扫描")
 
 
-def _ict_liquidity_line(candidate: Mapping[str, Any]) -> str | None:
+def _ict_liquidity_line(
+    decision: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> str:
     context = candidate.get("ict_liquidity")
-    if not isinstance(context, Mapping) or context.get("status") != "active":
-        return None
+    if not isinstance(context, Mapping):
+        facts = decision.get("market_facts")
+        context = facts.get("ict_liquidity") if isinstance(facts, Mapping) else None
+    if not isinstance(context, Mapping):
+        return "ICT：当前无有效 Sweep/MSS/位移事件；不改变本卡授权。"
+
     levels = "/".join(str(value) for value in context.get("level_names") or ()) or "客观水平"
+    level = _finite_number(context.get("level"))
+    level_text = f" {level:.1f}" if level is not None else ""
+    direction = {"UP": "偏多", "DOWN": "偏空"}.get(
+        str(context.get("direction") or "").upper(), "方向未定"
+    )
     stage = {
-        "SWEEP_RECLAIMED": "扫位并收回，等待MSS",
+        "SWEEP_RECLAIMED": "扫位并收回，尚无MSS",
         "MSS_CONFIRMED": "MSS已确认，位移不足",
-        "MSS_DISPLACEMENT_CONFIRMED": "MSS与位移确认",
+        "MSS_DISPLACEMENT_CONFIRMED": "MSS与位移已确认",
+        "BREAKOUT_RETEST_CONFIRMED": "突破接受、回踩失败并再次延续",
     }.get(str(context.get("stage") or ""), "因果事件已记录")
+    if context.get("status") != "active":
+        return f"ICT：最近 {levels}{level_text} {direction}事件已过期；当前不参与决策。"
     alignment = {
         "CONFIRMS": "与候选同向",
         "CONFLICTS": "与候选冲突，排序降权",
         "OBSERVE_ONLY": "只观察，不改变授权",
     }.get(str(candidate.get("ict_alignment") or ""), "只观察，不改变授权")
-    return f"{levels} · {stage} · {alignment}"
+    return f"ICT：{levels}{level_text} · {direction} · {stage} · {alignment}。"
 
 
 def _direction_cn(direction: object) -> str:

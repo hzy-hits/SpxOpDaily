@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.strategy_regime import (
+    StrategyPolicy,
+    hmm_owns_trend_direction,
+)
 from spx_spark.config import NY_TZ, StorageSettings
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
 
@@ -405,6 +410,88 @@ def update_break_watch(
                 outcome = "pending"
 
     return watch, outcome
+
+
+def _es_momentum_context_block(
+    signal: dict[str, Any] | Mapping[str, Any],
+    *,
+    direction: str,
+    return_15m: float | None,
+    atr: float | None,
+    now: datetime | None,
+    opposite_min_atr: float,
+    fresh_break_max_age_seconds: float,
+) -> str | None:
+    """Return the causal context conflict for an otherwise aligned ES impulse."""
+
+    if str(signal.get("sequence") or "") == "break_reclaim":
+        return "es_volume_momentum_break_reclaimed"
+    if return_15m is None or atr is None or atr <= 0:
+        return None
+    want = 1 if direction == "UP" else -1
+    sign_15m = 0 if return_15m == 0 else (1 if return_15m > 0 else -1)
+    if sign_15m != -want or abs(return_15m) / atr < opposite_min_atr:
+        return None
+    watch = signal.get("break_watch")
+    watch = watch if isinstance(watch, dict) else {}
+    expected_side = "above" if direction == "UP" else "below"
+    parsed = _aware_time(watch.get("broken_at"))
+    if now is not None and now.tzinfo is not None and parsed is not None:
+        age = (now.astimezone(timezone.utc) - parsed).total_seconds()
+        if watch.get("broken_side") == expected_side and 0 <= age <= fresh_break_max_age_seconds:
+            return None
+    return "es_volume_momentum_opposes_15m_without_fresh_break"
+
+
+def es_momentum_clarity_block(
+    direction: str,
+    regime: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    policy: StrategyPolicy,
+) -> str | None:
+    """Block stale/conflicting first prints, weak adds, and unconfirmed flips."""
+
+    path_value = facts.get("path")
+    path = path_value if isinstance(path_value, Mapping) else {}
+    context = _es_momentum_context_block(
+        facts.get("es_volume") if isinstance(facts.get("es_volume"), Mapping) else {},
+        direction=direction,
+        return_15m=finite_float(path.get("impulse_15m_points")),
+        atr=finite_float(path.get("atr_5m")),
+        now=_aware_time(facts.get("decision_at")),
+        opposite_min_atr=policy.es_momentum_opposite_15m_min_atr,
+        fresh_break_max_age_seconds=policy.es_momentum_fresh_break_max_age_seconds,
+    )
+    if context:
+        return context
+    committed = str(facts.get("session_committed_direction") or "").upper()
+    hmm_trend = hmm_owns_trend_direction(regime)
+    if committed in {"UP", "DOWN"} and committed != direction and hmm_trend != direction:
+        return "es_volume_momentum_flip_needs_hmm_trend"
+    if committed in {"UP", "DOWN"} and committed == direction:
+        ret5 = finite_float(path.get("return_5m_points"))
+        atr = finite_float(path.get("atr_5m"))
+        if (
+            hmm_trend != direction
+            or ret5 is None
+            or atr is None
+            or atr <= 0
+            or abs(ret5) / atr < policy.es_momentum_add_min_return_5m_atr
+        ):
+            return "es_volume_momentum_add_needs_new_impulse"
+    if hmm_trend is not None and hmm_trend != direction:
+        return "es_volume_momentum_hmm_opposes"
+    return None
+
+
+def _aware_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
 
 
 def es_volume_signal(

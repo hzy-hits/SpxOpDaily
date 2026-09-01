@@ -190,7 +190,7 @@ def test_missing_or_unpromoted_artifact_fails_closed(tmp_path: Path) -> None:
 
 def test_missing_artifact_allows_authorized_es_momentum_fallback(tmp_path: Path) -> None:
     candidate = _candidate(setup_kind="ES_VOLUME_MOMENTUM")
-    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v59"}
+    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v61"}
 
     result = apply_strategy_edge_authority(
         [candidate], _facts(), regime, data_root=tmp_path, now=NOW
