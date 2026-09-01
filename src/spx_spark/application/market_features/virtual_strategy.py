@@ -59,7 +59,7 @@ from spx_spark.application.market_features.virtual_strategy_state import (
 )
 from spx_spark.config import NotificationSettings, StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
-from spx_spark.notifier.dispatcher import enqueue_notification
+from spx_spark.notifier.dispatcher import enqueue_linked_notification, enqueue_notification
 from spx_spark.notifier.model import (
     CommandRunner,
     ExternalDeliveryReceipt,
@@ -95,6 +95,7 @@ def _flush_pending_notifications(
         now=now,
         only_event_id=only_event_id,
         enqueue=enqueue_notification,
+        enqueue_linked=enqueue_linked_notification,
     )
 
 
@@ -505,36 +506,46 @@ def process_virtual_strategy(
             ),
             **shadow_costs,
         }
-        text = _render_exit(closed)
-        notification_event_id = f"{closed['episode_id']}:{exit_reason}"
+        entry_notification_event_id = str(closed.get("external_delivery_event_id") or "").strip()
+        closed["human_notification_eligible"] = bool(entry_notification_event_id)
+        closed["human_notification_block_reason"] = (
+            None if entry_notification_event_id else "entry_notification_event_unavailable"
+        )
+        notification_event_id = f"{closed['episode_id']}:{exit_reason}" if entry_notification_event_id else None
         pending_notifications = [
             dict(item)
             for item in state.get("pending_notifications") or []
             if isinstance(item, Mapping)
-            and str(item.get("event_id") or "") != notification_event_id
+            and (
+                notification_event_id is None
+                or str(item.get("event_id") or "") != notification_event_id
+            )
         ]
-        pending_notifications.append(
-            {
-                "event_id": notification_event_id,
-                "source": "virtual_strategy",
-                "kind": "virtual_strategy_exit",
-                "lane": "strategy_lifecycle",
-                "occurred_at": now.isoformat(),
-                "expires_at": (now + timedelta(minutes=15)).isoformat(),
-                "operator_opportunity_id": operator_opportunity_id(
-                    closed,
-                    "operator_opportunity_id",
-                    "source_signal_id",
-                    fallback=closed["episode_id"],
-                ),
-                "operator_generation": operator_generation(closed),
-                "title": "SPX VIRTUAL STRATEGY EXIT",
-                "text": text,
-                "friend": True,
-                "feishu_text": text,
-                "enqueued_at": now.isoformat(),
-            }
-        )
+        if notification_event_id is not None:
+            text = _render_exit(closed)
+            pending_notifications.append(
+                {
+                    "event_id": notification_event_id,
+                    "causation_event_id": entry_notification_event_id,
+                    "source": "virtual_strategy",
+                    "kind": "virtual_strategy_exit",
+                    "lane": "strategy_lifecycle",
+                    "occurred_at": now.isoformat(),
+                    "expires_at": (now + timedelta(minutes=15)).isoformat(),
+                    "operator_opportunity_id": operator_opportunity_id(
+                        closed,
+                        "operator_opportunity_id",
+                        "source_signal_id",
+                        fallback=closed["episode_id"],
+                    ),
+                    "operator_generation": operator_generation(closed),
+                    "title": "SPX VIRTUAL STRATEGY EXIT",
+                    "text": text,
+                    "friend": True,
+                    "feishu_text": text,
+                    "enqueued_at": now.isoformat(),
+                }
+            )
         state.update(
             {
                 "schema_version": 2,
@@ -549,6 +560,18 @@ def process_virtual_strategy(
         )
         atomic_write_json_secure(state_path, state)
         _append_audit(storage, now, {"event": "virtual_closed", **closed})
+
+    if notification_event_id is None:
+        return {
+            "status": "closed",
+            "episode_id": closed.get("episode_id"),
+            "exit_reason": exit_reason,
+            "exit_action": action,
+            "notification_attempted": False,
+            "notification_accepted": False,
+            "notification_outcome": "audit_only_unlinked_shadow_entry",
+            "new_entries_allowed": new_entries_allowed,
+        }
 
     notification_result = _flush_pending_notifications(
         state_path,

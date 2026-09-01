@@ -89,6 +89,8 @@ def _write_active_episode(
                     "time_stop_at": time_stop_at.isoformat(),
                     "valid_until": time_stop_at.isoformat(),
                     "entry_mid": 10.0,
+                    "entry_ask": 10.1,
+                    "external_delivery_event_id": f"ready:{episode_id}",
                     "invalidation_spx": 7547.0,
                     "target_spx": 7575.0,
                     "mfe_fraction": 0.0,
@@ -415,6 +417,7 @@ def test_persisted_legacy_rth_episode_is_closed_at_1300_et(
 
     assert result["status"] == "closed"
     assert result["exit_reason"] == "time_stop"
+    assert result["notification_outcome"] == "audit_only_unlinked_shadow_entry"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["active"] is None
     assert state["last_closed"]["closed_at"] == now.isoformat()
@@ -442,6 +445,8 @@ def test_closed_episode_notification_recovers_after_enqueue_crash(
                     "direction": "up",
                     "contract_id": "option:SPX:SPXW:20260715:7550:C",
                     "entry_mid": 10.0,
+                    "entry_ask": 10.1,
+                    "external_delivery_event_id": "ready:notification-recovery",
                     "opened_at": (now - timedelta(minutes=10)).isoformat(),
                     "time_stop_at": now.isoformat(),
                     "valid_until": now.isoformat(),
@@ -468,6 +473,7 @@ def test_closed_episode_notification_recovers_after_enqueue_crash(
         )
 
     monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    monkeypatch.setattr(virtual_strategy, "enqueue_linked_notification", enqueue)
     monkeypatch.setattr(
         virtual_strategy,
         "_active_snapshot",
@@ -494,6 +500,11 @@ def test_closed_episode_notification_recovers_after_enqueue_crash(
     assert [item["event_id"] for item in after_crash["pending_notifications"]] == [
         "episode:notification-recovery:time_stop"
     ]
+    assert after_crash["pending_notifications"][0]["causation_event_id"] == (
+        "ready:notification-recovery"
+    )
+    assert "10.10" in after_crash["pending_notifications"][0]["text"]
+    assert "10.00" not in after_crash["pending_notifications"][0]["text"]
 
     observing = process_virtual_strategy(now=now + timedelta(seconds=1), **common)
     recovered = json.loads(state_path.read_text(encoding="utf-8"))
@@ -512,6 +523,7 @@ def test_virtual_notification_quiet_window_is_suppressed_not_delivered(tmp_path)
                 "pending_notifications": [
                     {
                         "event_id": event_id,
+                        "causation_event_id": "ready:quiet-window",
                         "source": "virtual_strategy",
                         "kind": "virtual_strategy_exit",
                         "lane": "strategy_lifecycle",
@@ -541,6 +553,15 @@ def test_virtual_notification_quiet_window_is_suppressed_not_delivered(tmp_path)
             outcome="quiet_window_suppressed",
             targets=("quiet_window_policy",),
         ),
+        enqueue_linked=lambda *_args, **_kwargs: SimpleNamespace(
+            accepted=True,
+            inserted=False,
+            duplicate=False,
+            delivered=True,
+            queued_for_recovery=False,
+            outcome="quiet_window_suppressed",
+            targets=("quiet_window_policy",),
+        ),
     )
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
 
@@ -550,6 +571,43 @@ def test_virtual_notification_quiet_window_is_suppressed_not_delivered(tmp_path)
     assert result["outcome"] == "quiet_window_suppressed"
     assert persisted["pending_notifications"] == []
     assert persisted["accepted_notification_event_ids"] == [event_id]
+
+
+def test_unlinked_pending_virtual_exit_is_settled_without_delivery(tmp_path) -> None:
+    state_path = tmp_path / "latest" / "virtual_strategy_state.json"
+    state_path.parent.mkdir(parents=True)
+    event_id = "episode:unlinked:time_stop"
+    state_path.write_text(
+        json.dumps(
+            {
+                "pending_notifications": [
+                    {
+                        "event_id": event_id,
+                        "source": "virtual_strategy",
+                        "kind": "virtual_strategy_exit",
+                        "lane": "strategy_lifecycle",
+                        "occurred_at": NOW.isoformat(),
+                        "text": "must remain audit-only",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    attempted: list[str] = []
+
+    result = virtual_strategy_state.flush_pending_notifications(
+        state_path,
+        settings=SimpleNamespace(),
+        now=NOW,
+        enqueue=lambda *_args, **_kwargs: attempted.append("enqueue"),
+    )
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert result["outcome"] == "audit_only_unlinked_shadow_entry"
+    assert attempted == []
+    assert persisted["pending_notifications"] == []
+    assert persisted["settled_notification_event_ids"] == [event_id]
 
 
 def test_underlier_gap_is_degraded_then_recovery_closes_once(
@@ -575,6 +633,7 @@ def test_underlier_gap_is_degraded_then_recovery_closes_once(
         return _accepted_notification_result()
 
     monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    monkeypatch.setattr(virtual_strategy, "enqueue_linked_notification", enqueue)
     common = {
         "storage": SimpleNamespace(data_root=str(tmp_path)),
         "trade_intent": {},
@@ -664,6 +723,7 @@ def test_terminal_without_bid_locks_reason_until_bid_recovers(
         return _accepted_notification_result()
 
     monkeypatch.setattr(virtual_strategy, "enqueue_notification", enqueue)
+    monkeypatch.setattr(virtual_strategy, "enqueue_linked_notification", enqueue)
     common = {
         "storage": SimpleNamespace(data_root=str(tmp_path)),
         "trade_intent": {},

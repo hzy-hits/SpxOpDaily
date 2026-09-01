@@ -102,11 +102,25 @@ def flush_pending_notifications(
         ]
     accepted_ids: set[str] = set()
     expired_ids: set[str] = set()
+    audit_only_ids: set[str] = set()
     last_result: dict[str, object] = {"attempted": False, "accepted": False}
     for item in pending:
         event_id = str(item.get("event_id") or "")
         occurred_at = _time(item.get("occurred_at"))
         if not event_id or occurred_at is None:
+            continue
+        if (
+            item.get("source") == "virtual_strategy"
+            and item.get("kind") == "virtual_strategy_exit"
+            and not str(item.get("causation_event_id") or "").strip()
+        ):
+            audit_only_ids.add(event_id)
+            last_result = {
+                "attempted": False,
+                "accepted": False,
+                "event_id": event_id,
+                "outcome": "audit_only_unlinked_shadow_entry",
+            }
             continue
         expires_at = _time(item.get("expires_at"))
         if expires_at is not None and expires_at <= now:
@@ -171,7 +185,7 @@ def flush_pending_notifications(
         )
         if result.accepted:
             accepted_ids.add(event_id)
-    settled_ids = accepted_ids | expired_ids
+    settled_ids = accepted_ids | expired_ids | audit_only_ids
     if settled_ids:
         with exclusive_state_lock(state_path):
             state = read_json_object(state_path)
@@ -193,7 +207,7 @@ def flush_pending_notifications(
                 for item in state.get("settled_notification_event_ids") or []
                 if item
             }
-            settled.update(expired_ids)
+            settled.update(expired_ids | audit_only_ids)
             state["settled_notification_event_ids"] = sorted(settled)[-200:]
             atomic_write_json_secure(state_path, state)
     return last_result

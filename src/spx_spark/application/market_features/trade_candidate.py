@@ -387,7 +387,7 @@ def virtual_entry_intent(
     *,
     delivery_projection: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Return the quote-reached source with its immutable delivery identity."""
+    """Return a quote-reached source only after its entry card is durable."""
 
     if candidate.get("phase") != CandidatePhase.QUOTE_REACHED_ENTRY.value:
         return {}
@@ -397,8 +397,12 @@ def virtual_entry_intent(
     if candidate.get("shadow_mode") is True or live_trade_intent_authority_issues(source):
         return {}
     projected = delivery_projection if isinstance(delivery_projection, Mapping) else {}
-    if projected and projected.get("intent_id") != source.get("intent_id"):
-        projected = {}
+    if (
+        projected.get("intent_id") != source.get("intent_id")
+        or projected.get("notification_status") != "outbox_accepted"
+        or not str(projected.get("notification_event_id") or "").strip()
+    ):
+        return {}
     return {
         **dict(source),
         "status": "trade_ready",

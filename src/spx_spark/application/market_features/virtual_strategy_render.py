@@ -19,10 +19,18 @@ def render_virtual_strategy_exit(closed: Mapping[str, object]) -> str:
     if closed.get("position_type") == "call_debit_spread":
         contracts = f"{closed.get('long_contract_id')} / 卖 {closed.get('short_contract_id')}"
     exit_bid = _number(closed.get("exit_bid"))
+    entry_ask = _number(closed.get("shadow_entry_ask"))
+    if entry_ask is None:
+        entry_ask = _number(closed.get("entry_ask"))
+    entry_text = (
+        f"影子入场 ask {_fmt(entry_ask)}"
+        if entry_ask is not None
+        else "影子入场 ask 不可用"
+    )
     exit_price = (
-        f"虚拟入场  {_fmt(closed.get('entry_mid'))} · 可执行退出 bid {_fmt(exit_bid)}"
+        f"{entry_text} · 可执行退出 bid {_fmt(exit_bid)}"
         if exit_bid is not None
-        else f"虚拟入场  {_fmt(closed.get('entry_mid'))} · 无可执行退出报价；不计算退出收益"
+        else f"{entry_text} · 无可执行退出报价；不计算退出收益"
     )
     snapshot = closed.get("exit_snapshot")
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}

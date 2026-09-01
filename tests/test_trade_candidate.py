@@ -91,10 +91,7 @@ def test_displayed_call_ask_reaching_limit_is_quote_observation_not_fill(tmp_pat
     assert terminal["phase"] == "quote_reached_entry"
     assert terminal["broker_order_state"] == "not_connected"
     assert terminal["entry_observation"]["entry_condition"] == ("displayed_ask_at_or_below_limit")
-    adapted = virtual_entry_intent(terminal)
-    assert adapted["source_intent_id"] == "intent:test-call"
-    assert adapted["intent_id"] == "intent:test-call|level:test-call"
-    assert adapted["execution_assumption"] == "displayed_quote_only_no_broker_fill"
+    assert virtual_entry_intent(terminal) == {}
 
 
 def test_displayed_call_ask_without_quote_clock_remains_armed(tmp_path) -> None:
@@ -127,7 +124,7 @@ def test_displayed_call_ask_without_quote_clock_remains_armed(tmp_path) -> None:
     )
 
 
-def test_approved_call_terminal_can_be_adapted_for_virtual_entry() -> None:
+def test_visible_call_terminal_can_be_adapted_for_virtual_entry() -> None:
     source = {
         **_intent(),
         "intent_id": "intent:test-call",
@@ -145,7 +142,14 @@ def test_approved_call_terminal_can_be_adapted_for_virtual_entry() -> None:
         },
     }
 
-    adapted = virtual_entry_intent(terminal)
+    adapted = virtual_entry_intent(
+        terminal,
+        delivery_projection={
+            **source,
+            "notification_event_id": "trade-ready:visible-call",
+            "notification_status": "outbox_accepted",
+        },
+    )
 
     assert adapted["source_intent_id"] == "intent:test-call"
     assert adapted["intent_id"] == "intent:test-call|level:test-call"
@@ -210,7 +214,7 @@ def test_virtual_entry_rejects_delivery_identity_from_another_intent() -> None:
         },
     )
 
-    assert adapted["notification_event_id"] is None
+    assert adapted == {}
 
 
 def test_put_shadow_terminal_cannot_be_promoted_by_virtual_entry_adapter() -> None:
