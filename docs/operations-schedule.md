@@ -257,10 +257,12 @@ run has completed without provider-wide errors or request exhaustion.
   threshold no longer creates a score jump; WATCH / ARMED / TRIGGER remains a
   deliberately discrete state machine.
 - Notifications lead with stable Core Pool membership, Changes, and stored Top
-  Opportunities. A complete daily scan may rerank Core members by the same
-  52-week dislocation priority; RTH and partial scans preserve membership and
-  ordering. These lifecycle states remain research workflow controls, not an
-  order signal.
+  Opportunities. The Core Pool section always renders every retained member,
+  including paused members with the current pause reason, even when no strict
+  candidate remains for the Top Opportunities table. A complete daily scan may
+  rerank Core members by the same 52-week dislocation priority; RTH and partial
+  scans preserve membership and ordering. These lifecycle states remain research
+  workflow controls, not an order signal.
 - RSI recovery affects `FinalScore` only. `WATCH / ARMED / TRIGGER` is determined
   from positive 5-day sector relative strength and close above MA10: either one
   makes a symbol `ARMED`, while both make it `TRIGGER`. Growth quality, convexity,

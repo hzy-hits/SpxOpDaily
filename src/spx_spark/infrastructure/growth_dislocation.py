@@ -1049,46 +1049,46 @@ def _candidate_row(
 
 def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
     mode = str(document.get("mode") or "rth")
-    title = (
-        "Growth Dislocation LEAPS · 日报"
-        if mode == "daily"
-        else "Growth Dislocation LEAPS · 状态更新"
-    )
+    title = "Growth Dislocation LEAPS · 日报" if mode == "daily" else "Growth Dislocation LEAPS · 状态更新"
     counts = _mapping(document.get("counts"))
     changes = _mapping(document.get("core_changes"))
-    added = _change_label(changes.get("added"))
-    exited = _change_label(changes.get("exited"))
+    added, exited = _change_label(changes.get("added")), _change_label(changes.get("exited"))
     lines = [
-        f"# {title}",
-        "",
-        "## Core Pool",
-        "",
+        f"# {title}\n\n## Core Pool\n",
         f"- 状态 **{document.get('core_pool_status', 'BOOTSTRAP_PENDING')}**；"
-        f"成员 **{counts.get('core_pool', 0)}**；"
-        f"Active **{counts.get('core_active', 0)}**；"
+        f"成员 **{counts.get('core_pool', 0)}**；Active **{counts.get('core_active', 0)}**；"
         f"Paused **{counts.get('core_paused', 0)}**；"
         f"Entry Pending **{counts.get('core_entry_pending', 0)}**",
         f"- Changes：新增 {added}；退出 {exited}",
         f"- {changes.get('message', 'Membership state unavailable')}",
         "",
-        "## Scanner 状态",
-        "",
-        (
-            f"- 严格候选 **{counts.get('strict_candidates', 0)}**；"
-            f"未完成数据行（正文隐藏） **{counts.get('warming_rows', 0)}**；"
-            f"本轮详细刷新 **{counts.get('detailed_this_run', 0)} / {counts.get('hard_survivors', 0)}**"
-        ),
+        "| Symbol | Core Status | Today State | Reason | 52W位置 | IVP 52W | Market Cap |",
+        "|---|---:|---:|---|---:|---:|---:|",
+    ]
+    core_pool = document.get("core_pool", [])
+    core_rows = [
+        "| {symbol} | {core_status} | {today_state} | {reason} | {location} | {ivp_52w} | {market_cap} |".format(
+            symbol=row.get("symbol", "-"), core_status=str(row.get("core_status") or "CORE_PAUSED").removeprefix("CORE_"),
+            today_state=row.get("today_state", row.get("state", "-")), reason=row.get("pause_reason") or row.get("exit_reason") or "—",
+            location=_pct(row.get("price_location_52w")), ivp_52w=_pct(row.get("ivp_52w")),
+            market_cap=_market_cap(row.get("market_cap")),
+        )
+        for row in (core_pool if isinstance(core_pool, list) else []) if isinstance(row, Mapping)
+    ]
+    lines.extend(core_rows or ["| — | — | — | Core Pool 尚无成员 | — | — | — |"])
+    lines += [
+        "\n## Scanner 状态\n",
+        f"- 严格候选 **{counts.get('strict_candidates', 0)}**；"
+        f"未完成数据行（正文隐藏） **{counts.get('warming_rows', 0)}**；"
+        f"本轮详细刷新 **{counts.get('detailed_this_run', 0)} / {counts.get('hard_survivors', 0)}**",
         f"- Schwab 请求 **{document.get('requests_used')} / {document.get('request_budget')}**；"
         f"Data Quality **{_mapping(document.get('data_quality')).get('status', 'unknown')}**",
         "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
-        "",
-        "## Top Opportunities（52W低位 + IVP 52W）",
-        "",
+        "\n## Top Opportunities（52W低位 + IVP 52W）\n",
         "| Symbol | Today State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | IV | IV/RV20 | OI | 时间价值/股价 | Spread |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
-    top = document.get("core_top_opportunities", [])
-    if isinstance(top, list) and top:
+    if isinstance(top := document.get("core_top_opportunities", []), list) and top:
         for row in top:
             if not isinstance(row, Mapping):
                 continue
@@ -1114,7 +1114,7 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
             )
     else:
         lines.append(
-            "| — | WATCH | — | — | — | — | — | Core Pool 尚无可展示候选 | — | — | — | — | — | — | — | — |"
+            "| — | WATCH | — | — | — | — | — | 当前无 Active 严格候选；Core Pool 成员见上表 | — | — | — | — | — | — | — | — |"
         )
     return title, "\n".join(lines)
 

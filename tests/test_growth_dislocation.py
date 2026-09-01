@@ -758,6 +758,32 @@ def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Pa
     assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 
 
+def test_daily_summary_keeps_paused_core_members_visible(tmp_path: Path) -> None:
+    client = FakeSchwabClient(NOW)
+    daily = NOW.replace(hour=20, minute=0)
+    common = {
+        "now": daily,
+        "mode": "daily",
+        "client": client,
+        "policy": _policy(),
+        "universe": _universe(),
+        "data_root": tmp_path,
+        "iv_percentile_fetcher": _ivp_fetcher,
+    }
+    scan_once(**common)  # type: ignore[arg-type]
+    client.chain_iv_percent = 61.0
+
+    paused = scan_once(**common)  # type: ignore[arg-type]
+
+    assert paused.document["counts"]["strict_candidates"] == 0
+    assert paused.document["counts"]["core_pool"] == 1
+    assert paused.document["counts"]["core_paused"] == 1
+    assert paused.document["core_top_opportunities"] == []
+    _title, text = render_notification(paused.document)
+    assert "| TEST | PAUSED | PAUSED | target_leaps_hard_filter |" in text
+    assert "当前无 Active 严格候选；Core Pool 成员见上表" in text
+
+
 def test_request_budget_fails_closed_to_partial_warming_table(tmp_path: Path) -> None:
     outcome = scan_once(
         now=NOW,
