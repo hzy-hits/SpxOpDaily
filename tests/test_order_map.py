@@ -5216,7 +5216,10 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
     assert expected_link in str(captured["text"])
     assert "[查看最新 OI 墙位图](https://spx.zh3nyu.com/oi/latest.png)" in str(captured["text"])
     assert "[查看 0DTE 资金流图](https://spx.zh3nyu.com/flow/latest.png)" in str(captured["text"])
-    assert "## 决策参考\nGamma：代理正 Gamma +0.21" in str(captured["text"])
+    assert (
+        "## 决策参考\n盘型：趋势回踩 · 向上 · VWAP 7705；"
+        "只作回踩确认参考，不单独授权\nGamma：代理正 Gamma +0.21"
+    ) in str(captured["text"])
     assert "建议等待新破位或重新接受" in str(captured["text"])
     assert str(captured["text"]).endswith(
         "ICT：ONL 7674.5 · 偏多 · MSS已确认，位移不足 · 只观察，不改变授权。"
@@ -5237,6 +5240,15 @@ def _strategy_decision_payload(now: datetime) -> dict[str, object]:
         "decision_at": now.isoformat(),
         "action_authority": "manual",
         "market_facts": {
+            "price_action_playbook": {
+                "pattern": "TREND_PULLBACK",
+                "status": "confirmed",
+                "direction": "UP",
+                "level": 7705.0,
+                "location": "VWAP",
+                "action_role": "CONFIRMATION_REFERENCE",
+                "authority": "none",
+            },
             "structure": {
                 "gamma_state": "positive_gamma_pin",
                 "net_gamma_ratio": 0.21,
@@ -5311,7 +5323,10 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
     assert result["accepted"] is True
     assert result["idea_memo"] == "omitted:trade_ready_latency_budget"
     assert str(captured["text"]).startswith(base_text)
-    assert "## 决策参考\nGamma：代理数据不可用" in str(captured["text"])
+    assert (
+        "## 决策参考\n盘型：尚未形成；继续等待关键位确认\n"
+        "Gamma：代理数据不可用"
+    ) in str(captured["text"])
     assert str(captured["text"]).endswith(
         "ICT：当前无有效 Sweep/MSS/位移事件；不改变本卡授权。"
     )
@@ -5543,6 +5558,7 @@ def test_desk_view_renders_pin_stable_observation() -> None:
     text = strategy_decision_desk_view({"strategy_decision": decision})
     assert text is not None
     assert "观察 · 稳定钉住 7785" in text
+    assert "盘型  横盘压缩" in text
     assert "11–13 仅评已确认中轴的 10–50 点蝶" in text
     assert "距收盘过早，窄翼蝶式尚未授权" not in text
 

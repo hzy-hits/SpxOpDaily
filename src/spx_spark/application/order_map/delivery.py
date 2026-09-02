@@ -28,6 +28,7 @@ from spx_spark.application.order_map.image_delivery import (
     publish_open_interest_image,
     publish_strategy_risk_image,
 )
+from spx_spark.application.order_map.guidance import price_action_playbook_text
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.render import render_template
 from spx_spark.application.order_map.strategy_ranker import (
@@ -159,6 +160,7 @@ def enqueue_strategy_decision(
         )
     text = (
         f"{text}\n\n## 决策参考\n"
+        f"盘型：{price_action_playbook_text(decision)}\n"
         f"{_gamma_proxy_line(decision)}\n"
         f"{_ict_liquidity_line(decision, candidate)}"
     )

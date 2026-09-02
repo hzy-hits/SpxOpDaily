@@ -56,6 +56,207 @@ class DecisionGuidance:
         return asdict(self)
 
 
+def build_price_action_playbook(
+    facts: Mapping[str, Any], regime: Mapping[str, Any]
+) -> dict[str, object]:
+    """Project the existing causal facts into one bounded RTH playbook state."""
+
+    if str(_mapping(facts.get("session")).get("mode") or "").lower() != "rth":
+        return {
+            "pattern": "NONE",
+            "status": "unavailable",
+            "direction": None,
+            "action_role": "OBSERVE",
+            "reason": "rth_playbook_not_applicable",
+        }
+    setups = [row for row in facts.get("rth_setups") or () if isinstance(row, Mapping)]
+    true_break = _active_playbook_setup(setups, "RTH_LEVEL_CONFIRMATION", thesis="breakout")
+    if true_break:
+        return _setup_playbook(
+            "TRUE_BREAK",
+            true_break,
+            action_role="EXISTING_DIRECTIONAL_GATE",
+            authority="existing_setup_only",
+        )
+
+    trigger = _mapping(facts.get("trigger"))
+    if (
+        trigger.get("formal_signal") is True
+        and str(trigger.get("phase") or "").lower() == "confirmed"
+        and str(trigger.get("thesis") or "").lower() == "fade"
+    ):
+        return {
+            "pattern": "RANGE_EDGE_REJECTION",
+            "status": "confirmed",
+            "direction": str(trigger.get("direction") or "").upper() or None,
+            "level": _number(trigger.get("level")),
+            "location": str(trigger.get("level_kind") or "LEVEL").upper(),
+            "source": "rth_confirmed_level_decision",
+            "action_role": "EXIT_OR_RANGE_CONTEXT",
+            "authority": "none",
+            "reason": "confirmed_fade_observe_only",
+        }
+
+    failed_break = _active_playbook_setup(setups, "FAILED_BREAK_RECLAIM")
+    if failed_break:
+        return _setup_playbook(
+            "FAILED_BREAK",
+            failed_break,
+            action_role="EXIT_OR_NO_CHASE",
+            authority="none",
+        )
+    trend_pullback = _active_playbook_setup(setups, "TREND_PULLBACK")
+    if trend_pullback:
+        return _setup_playbook(
+            "TREND_PULLBACK",
+            trend_pullback,
+            action_role="CONFIRMATION_REFERENCE",
+            authority="none",
+        )
+
+    environment = _mapping(regime.get("rth_environment")) or _mapping(facts.get("rth_environment"))
+    contraction = (
+        str(environment.get("state") or "")
+        in {
+            "VOL_CONTRACTION_BALANCE",
+            "EXPANSION_TO_CONTRACTION",
+        }
+        or str(regime.get("terminal_state") or "") == "PIN_STABLE"
+    )
+    if contraction:
+        positive_gamma = (
+            str(_mapping(facts.get("structure")).get("gamma_state") or "") == "positive_gamma_pin"
+        )
+        return {
+            "pattern": "COMPRESSION",
+            "status": "context",
+            "direction": None,
+            "level": None,
+            "location": "BALANCE",
+            "source": "rth_environment",
+            "action_role": (
+                "RANGE_STRUCTURE_CONTEXT" if positive_gamma else "ARM_BREAKOUT_BOTH_SIDES"
+            ),
+            "authority": "none",
+            "reason": (
+                "vol_contraction_positive_gamma"
+                if positive_gamma
+                else "vol_contraction_wait_for_expansion"
+            ),
+        }
+    return {
+        "pattern": "NONE",
+        "status": "none",
+        "direction": None,
+        "action_role": "OBSERVE",
+        "authority": "none",
+        "reason": "no_confirmed_price_action_pattern",
+    }
+
+
+def price_action_playbook_text(decision: Mapping[str, Any]) -> str:
+    """Render one concise playbook line without granting new trade authority."""
+
+    facts = _mapping(decision.get("market_facts"))
+    playbook = _mapping(facts.get("price_action_playbook"))
+    if not playbook:
+        playbook = build_price_action_playbook(facts, _mapping(decision.get("regime")))
+    if (
+        playbook.get("reason") == "rth_playbook_not_applicable"
+        and str(_mapping(facts.get("session")).get("mode") or "").lower() == "gth"
+    ):
+        return "GTH 沿现有水平/欧盘确认门禁；本盘型不额外授权"
+    pattern = str(playbook.get("pattern") or "NONE")
+    label = {
+        "TRUE_BREAK": "真突破",
+        "FAILED_BREAK": "假突破收回",
+        "TREND_PULLBACK": "趋势回踩",
+        "RANGE_EDGE_REJECTION": "区间边缘拒绝",
+        "COMPRESSION": "横盘压缩",
+    }.get(pattern, "尚未形成")
+    direction = {"UP": "向上", "DOWN": "向下"}.get(str(playbook.get("direction") or "").upper())
+    level = _number(playbook.get("level"))
+    location = _playbook_location_cn(str(playbook.get("location") or ""))
+    coordinates = " · ".join(
+        value
+        for value in (direction, f"{location} {level:g}" if level is not None else location)
+        if value
+    )
+    action = {
+        "EXISTING_DIRECTIONAL_GATE": "沿既有方向价差门禁评估",
+        "EXIT_OR_NO_CHASE": "用于退出/不追，不自动反手",
+        "CONFIRMATION_REFERENCE": "只作回踩确认参考，不单独授权",
+        "EXIT_OR_RANGE_CONTEXT": "只作减仓/区间结构参考，不单独反手",
+        "RANGE_STRUCTURE_CONTEXT": "正 Gamma 代理下筛选区间结构，仍须赔率门",
+        "ARM_BREAKOUT_BOTH_SIDES": "等待放量选边，不能仅因安静卖波动",
+    }.get(str(playbook.get("action_role") or ""), "继续等待关键位确认")
+    pending = " · 待下一根确认" if playbook.get("status") == "pending" else ""
+    return f"{label}{f' · {coordinates}' if coordinates else ''}{pending}；{action}"
+
+
+def _active_playbook_setup(
+    setups: list[Mapping[str, Any]], setup_kind: str, *, thesis: str | None = None
+) -> Mapping[str, Any]:
+    for state in ("ENTRY_WINDOW_OPEN", "SETUP_DETECTED"):
+        for row in setups:
+            if (
+                str(row.get("setup_kind") or "") == setup_kind
+                and str(row.get("state") or "") == state
+                and (thesis is None or str(row.get("thesis") or "").lower() == thesis)
+            ):
+                return row
+    return {}
+
+
+def _setup_playbook(
+    pattern: str,
+    setup: Mapping[str, Any],
+    *,
+    action_role: str,
+    authority: str,
+) -> dict[str, object]:
+    variant = str(setup.get("setup_variant") or "")
+    location = (
+        variant.split("::", 1)[1]
+        if "::" in variant
+        else variant.removesuffix("_PULLBACK")
+        if variant.endswith("_PULLBACK")
+        else "OPENING_RANGE"
+        if variant == "OR_FAILED_BREAK"
+        else "SESSION_EXTREME"
+        if variant == "SESSION_EPISODE"
+        else variant or "LEVEL"
+    )
+    return {
+        "pattern": pattern,
+        "status": ("confirmed" if setup.get("state") == "ENTRY_WINDOW_OPEN" else "pending"),
+        "direction": str(setup.get("direction") or "").upper() or None,
+        "level": _number(setup.get("trigger_level")),
+        "location": location,
+        "source": setup.get("source"),
+        "setup_state": setup.get("state"),
+        "action_role": action_role,
+        "authority": authority,
+        "reason": setup.get("reason"),
+    }
+
+
+def _playbook_location_cn(value: str) -> str:
+    return {
+        "CALL_WALL": "Call Wall",
+        "PUT_WALL": "Put Wall",
+        "FLIP_HIGH": "Flip 上沿",
+        "FLIP_LOW": "Flip 下沿",
+        "VWAP": "VWAP",
+        "ACCEPTED_ORH": "ORH",
+        "ACCEPTED_ORL": "ORL",
+        "OPENING_RANGE": "Opening Range",
+        "SESSION_EXTREME": "趋势腿极值",
+        "BALANCE": "平衡区",
+        "LEVEL": "关键位",
+    }.get(value.upper(), value.replace("_", " ").strip())
+
+
 def build_decision_guidance(payload: Mapping[str, Any]) -> DecisionGuidance:
     """Compress market bias and execution gates into one operator-facing brief."""
 

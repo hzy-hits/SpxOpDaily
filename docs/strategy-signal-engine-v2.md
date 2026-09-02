@@ -612,7 +612,14 @@ TRADE（PIN_STABLE）：现有硬栈，进入仍要 2 次 excursion-return
 ```
 
 LOOK 只发观察卡，不过 `butterfly_requires_pin_stable`，不能成为蝶式交易候选。
-TRADE 还要求同一中轴至少连续 3 个决策快照、持续 10 分钟；10 点内的挑战中轴只有在评分领先至少 0.05 时才可替换已有中轴。确认完成前只显示位置，不生成交易卡。
+TRADE 还要求同一中轴至少 3 个决策快照、持续 10 分钟；同一中轴短暂退回
+`NONE + look` 时保留首次观测时间与快照计数，但该拍本身仍不是 `PIN_STABLE`，不得生成交易卡。
+`PIN_MIGRATING`、`UNCERTAIN`、`NONE + none`、跨 session 或中轴切换会重置确认。
+10 点内的挑战中轴只有在评分领先至少 0.05 时才可替换已有中轴。确认完成前只显示位置，不生成交易卡。
+
+中轴只能从当日期权链的 5 点行权价网格中选择；连续值 Zero Gamma 只是 CenterScore 的结构参考，
+不是可直接交易的蝶身。例如 Zero Gamma 为 7666 时，系统比较 7665、7670 等合法行权价的完整得分，
+不会生成不存在的 7666 蝶式。
 
 11:00–13:00 TRADE 只枚举已确认的第一中轴，按中轴质量盒子评 10/15/20/50 点蝶；质量已堆在 [K−W, K+W] 内（分数 ≥ 0.50）的梯子档才上架。宽度由统一 selection score 选择，不再强制最窄帐篷。人读蝶式被接受后，中轴、翼宽和 Call/Put 腿组合在现有 15 分钟 winner window 内整体锁定；当 STABLE_PIN 消失时，中性锁自动失效，不阻挡新的独立方向证据。
 
@@ -1998,3 +2005,26 @@ Asia High/Low 的后续突破—回踩失败—延续仍是独立结构确认，
 
 策略版本为 `strategy_policy.bootstrap.v62`。自动下单保持关闭；不新增服务、定时器、
 数据库、队列或通知 owner。
+
+---
+
+## 30. GEX × VWAP × Price Action 盘型投影（不改变授权）
+
+参考《期权墙 · 买方篇》的 GVP 思路，把已有因果事实压成一个人读盘型，而不是再造一套
+方向模型。投影只使用当前 `market_fact_pack`、正式 level state、RTH setup、VWAP、
+`rth_environment` 与 OI-GEX 代理，并随 `strategy_decision` 一起审计：
+
+- `TRUE_BREAK`：仅来自现有 `RTH_LEVEL_CONFIRMATION` 的正式 breakout；继续沿原有固定
+  15 点 Directional Vertical 门禁，不新增权限；
+- `FAILED_BREAK`：来自已存在的 OR/session reclaim；只提示退出或禁止追单，不自动反手；
+- `TREND_PULLBACK`：来自已存在的 VWAP/已接受 OR 回踩拒绝；只作确认参考，RTH 不因该
+  标签单独获得交易授权；
+- `RANGE_EDGE_REJECTION`：来自正式 confirmed fade；只作减仓或区间结构参考，不生成
+  反向 Directional Vertical；
+- `COMPRESSION`：来自已有波动收缩平衡或 `PIN_STABLE`。正 Gamma 代理只允许继续筛选
+  区间结构；负 Gamma/过渡区只提示等待放量选边。压缩本身不能授权卖波动。
+
+Desk View 与人工候选卡各展示一行盘型；Gamma、墙位和 ICT 的既有边界不变。OI 墙仍是
+结构代理，当前逐 strike 资金流不冒充书中的 Volume GEX，也不推断真实 dealer 持仓。
+该投影没有新增阈值、setup 权限、服务、存储或通知 lane，因此策略版本仍为
+`strategy_policy.bootstrap.v62`，`automatic_ordering=false` 不变。

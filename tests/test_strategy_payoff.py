@@ -425,6 +425,32 @@ def test_pin_center_requires_three_snapshots_and_ten_minutes() -> None:
     assert pin_trade_center(confirmed) == 7710.0
 
 
+def test_pin_center_confirmation_can_bridge_same_center_look_state() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    base = _frozen_pin_facts("2026-08-06")
+    regime = assess_regime(
+        {
+            **base,
+            "decision_at": now,
+            "session_date": "2026-08-06",
+            "pin_latch": {
+                "terminal_state": "NONE",
+                "center": 7710.0,
+                "q_mode": 7710.0,
+                "session_date": "2026-08-06",
+                "center_confirmation_count": 2,
+                "center_first_seen_at": (now - timedelta(minutes=11)).isoformat(),
+            },
+        }
+    )
+
+    assert regime["terminal_state"] == "PIN_STABLE"
+    assert regime["pin"]["center_confirmation_count"] == 3
+    assert regime["pin"]["center_confirmation_age_seconds"] == 660.0
+    assert regime["pin"]["center_confirmation_ready"] is True
+    assert pin_trade_center(regime) == 7710.0
+
+
 def test_pin_center_holds_a_nearby_challenger_without_score_margin() -> None:
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     base = _frozen_pin_facts("2026-08-06")
@@ -614,6 +640,68 @@ def test_fact_pack_latches_previous_same_session_pin() -> None:
         "q_mode": 7710.0,
         "session_date": "2026-08-06",
     }
+
+
+def test_fact_pack_preserves_same_center_dwell_through_pin_look() -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    first_seen_at = (now - timedelta(minutes=11)).isoformat()
+    payload["previous_strategy_decision"] = {
+        "decision_at": (now - timedelta(seconds=5)).isoformat(),
+        "session_date": "2026-08-06",
+        "regime": {
+            "terminal_state": "NONE",
+            "pin": {
+                "grade": "look",
+                "center": 7710.0,
+                "top_centers": [{"center": 7710.0}],
+                "q_mode": 7710.0,
+                "center_confirmation_count": 2,
+                "center_first_seen_at": first_seen_at,
+            },
+        },
+    }
+
+    facts = build_market_fact_pack(payload, _pin_state(now), now)
+
+    assert facts["pin_latch"] == {
+        "terminal_state": "NONE",
+        "center": 7710.0,
+        "session_date": "2026-08-06",
+        "decision_at": (now - timedelta(seconds=5)).isoformat(),
+        "q_mode": 7710.0,
+        "center_confirmation_count": 2,
+        "center_first_seen_at": first_seen_at,
+    }
+
+
+@pytest.mark.parametrize(
+    ("terminal_state", "grade"),
+    (("PIN_MIGRATING", "migrating"), ("NONE", "none"), ("UNCERTAIN", "look")),
+)
+def test_fact_pack_resets_pin_dwell_outside_same_center_look(
+    terminal_state: str, grade: str
+) -> None:
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    payload = _pin_payload(now)
+    payload["previous_strategy_decision"] = {
+        "decision_at": (now - timedelta(seconds=5)).isoformat(),
+        "session_date": "2026-08-06",
+        "regime": {
+            "terminal_state": terminal_state,
+            "pin": {
+                "grade": grade,
+                "center": 7710.0,
+                "top_centers": [{"center": 7710.0}],
+                "center_confirmation_count": 2,
+                "center_first_seen_at": (now - timedelta(minutes=11)).isoformat(),
+            },
+        },
+    }
+
+    facts = build_market_fact_pack(payload, _pin_state(now), now)
+
+    assert facts["pin_latch"] == {}
 
 
 def test_pin_stable_may_assess_from_1100_et() -> None:
@@ -1585,6 +1673,10 @@ def test_rth_confirmed_fade_remains_research_only(tmp_path: Path) -> None:
         row.get("setup_kind") == "RTH_LEVEL_CONFIRMATION"
         for row in facts["rth_setups"]
     )
+    assert decision["market_facts"]["price_action_playbook"]["pattern"] == (
+        "RANGE_EDGE_REJECTION"
+    )
+    assert decision["market_facts"]["price_action_playbook"]["authority"] == "none"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
 
@@ -2222,6 +2314,7 @@ def test_vwap_trend_pullback_opens_call_vertical_before_prior_high_break() -> No
     assert decision["candidate"]["setup_variant"] == "ES_PACE_1M5M"
     assert decision["candidate"]["setup_state"] == "ENTRY_WINDOW_OPEN"
     assert decision["rejection_funnel"]["entry_window_open"] == 1
+    assert decision["market_facts"]["price_action_playbook"]["pattern"] == "TREND_PULLBACK"
 
 
 def test_pending_5m_confirmation_is_the_desk_primary_blocker() -> None:

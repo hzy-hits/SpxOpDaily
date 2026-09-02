@@ -7,6 +7,8 @@ import pytest
 from spx_spark.application.order_map.guidance import (
     GuidanceAction,
     build_decision_guidance,
+    build_price_action_playbook,
+    price_action_playbook_text,
 )
 from spx_spark.application.order_map.prompts import (
     render_feishu_delivery_text,
@@ -74,6 +76,100 @@ def test_guidance_turns_regime_into_directional_wait_conditions() -> None:
     assert guidance.action_text == "当前不进场；等待价格进入关键位测试"
     assert "SPX 7560 下方保持" in guidance.trigger_text
     assert "SPX 收回 7565" in guidance.invalidation_text
+
+
+def test_price_action_playbook_projects_five_patterns_without_new_authority() -> None:
+    base = {"session": {"mode": "rth"}, "structure": {}}
+    true_break = build_price_action_playbook(
+        {
+            **base,
+            "rth_setups": [
+                {
+                    "setup_kind": "RTH_LEVEL_CONFIRMATION",
+                    "setup_variant": "BREAKOUT::CALL_WALL",
+                    "state": "ENTRY_WINDOW_OPEN",
+                    "thesis": "breakout",
+                    "direction": "UP",
+                    "trigger_level": 7725.0,
+                }
+            ],
+        },
+        {},
+    )
+    failed_break = build_price_action_playbook(
+        {
+            **base,
+            "rth_setups": [
+                {
+                    "setup_kind": "FAILED_BREAK_RECLAIM",
+                    "setup_variant": "OR_FAILED_BREAK",
+                    "state": "ENTRY_WINDOW_OPEN",
+                    "direction": "DOWN",
+                    "trigger_level": 7720.0,
+                }
+            ],
+        },
+        {},
+    )
+    pullback = build_price_action_playbook(
+        {
+            **base,
+            "rth_setups": [
+                {
+                    "setup_kind": "TREND_PULLBACK",
+                    "setup_variant": "VWAP_PULLBACK",
+                    "state": "SETUP_DETECTED",
+                    "direction": "UP",
+                    "trigger_level": 7705.0,
+                }
+            ],
+        },
+        {},
+    )
+    range_edge = build_price_action_playbook(
+        {
+            **base,
+            "rth_setups": [],
+            "trigger": {
+                "formal_signal": True,
+                "phase": "confirmed",
+                "thesis": "fade",
+                "direction": "down",
+                "level_kind": "call_wall",
+                "level": 7730.0,
+            },
+        },
+        {},
+    )
+    compression = build_price_action_playbook(
+        {**base, "structure": {"gamma_state": "zero_gamma_transition"}},
+        {"rth_environment": {"state": "VOL_CONTRACTION_BALANCE"}},
+    )
+
+    assert [
+        true_break["pattern"],
+        failed_break["pattern"],
+        pullback["pattern"],
+        range_edge["pattern"],
+        compression["pattern"],
+    ] == [
+        "TRUE_BREAK",
+        "FAILED_BREAK",
+        "TREND_PULLBACK",
+        "RANGE_EDGE_REJECTION",
+        "COMPRESSION",
+    ]
+    assert true_break["authority"] == "existing_setup_only"
+    assert failed_break["action_role"] == "EXIT_OR_NO_CHASE"
+    assert pullback["authority"] == "none"
+    assert range_edge["authority"] == "none"
+    assert compression["action_role"] == "ARM_BREAKOUT_BOTH_SIDES"
+    assert "不自动反手" in price_action_playbook_text(
+        {"market_facts": {"price_action_playbook": failed_break}}
+    )
+    assert price_action_playbook_text({"market_facts": {"session": {"mode": "gth"}}}) == (
+        "GTH 沿现有水平/欧盘确认门禁；本盘型不额外授权"
+    )
 
 
 def test_desk_map_shows_gth_atm_straddle_and_iv_extrema() -> None:

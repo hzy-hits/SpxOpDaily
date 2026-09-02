@@ -10,7 +10,7 @@ from spx_spark.application.order_map.ict_liquidity import attach_ict_liquidity_f
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
     StrategyPolicy,
-    pin_stable_center,
+    pin_watch_center,
 )
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.storage import LatestState
@@ -1074,23 +1074,22 @@ def _with_setup_window(
 
 def _pin_latch_fact(payload: Mapping[str, Any], *, session_date: str | None) -> dict[str, Any]:
     previous = _map(payload.get("previous_strategy_decision"))
-    if not previous or not session_date:
-        return {}
-    if str(previous.get("session_date") or "") != session_date:
+    if not previous or not session_date or str(previous.get("session_date") or "") != session_date:
         return {}
     regime = _map(previous.get("regime"))
-    center = pin_stable_center(regime)
-    if regime.get("terminal_state") != "PIN_STABLE" or center is None:
+    pin = _map(regime.get("pin"))
+    terminal_state = str(regime.get("terminal_state") or "")
+    if terminal_state not in {"PIN_STABLE", "NONE"} or (
+        terminal_state == "NONE" and str(pin.get("grade") or "") != "look"
+    ):
         return {}
-    latch = {
-        "terminal_state": "PIN_STABLE",
-        "center": center,
-        "session_date": session_date,
-    }
+    center = pin_watch_center(regime)
+    if center is None:
+        return {}
+    latch = {"terminal_state": terminal_state, "center": center, "session_date": session_date}
     previous_decision_at = previous.get("decision_at")
     if isinstance(previous_decision_at, str) and _time(previous_decision_at) is not None:
         latch["decision_at"] = previous_decision_at
-    pin = _map(regime.get("pin"))
     q_mode = _number(pin.get("q_mode"))
     if q_mode is not None:
         latch["q_mode"] = q_mode

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.guidance import price_action_playbook_text
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.state import current_session_is_gth
 from spx_spark.application.order_map.strategy_regime import (
@@ -116,6 +117,7 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
         (
             f"结论  {conclusion}",
             f"主因  {primary}",
+            f"盘型  {price_action_playbook_text(decision)}",
             f"最近候选  {nearest_line}",
             f"下一步  {reauthorize}",
         )

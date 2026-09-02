@@ -23,6 +23,7 @@ from spx_spark.application.order_map.event_settlement_vertical import (
     enumerate_event_settlement_candidates,
     event_settlement_generation_reason,
 )
+from spx_spark.application.order_map.guidance import build_price_action_playbook
 from spx_spark.application.order_map.iron_condor import (
     IRON_CONDOR_TYPE,
     HUMAN_SESSION_STATE_KEY,
@@ -87,6 +88,7 @@ def build_strategy_decision(
         if isinstance(regime.get("rth_environment"), Mapping)
         else {}
     )
+    facts["price_action_playbook"] = build_price_action_playbook(facts, regime)
     committed = _rth_committed_direction(
         facts,
         payload=payload,
