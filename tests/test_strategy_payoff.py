@@ -726,7 +726,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v61"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v62"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1015,7 +1015,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v61"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v62"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1185,7 +1185,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v61"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v62"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1323,7 +1323,7 @@ def test_rth_momentum_uses_manual_fallback_only_when_model_artifact_is_missing(
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v61"
+        "strategy_policy.bootstrap.v62"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["fallback_reason"] == (
         "strategy_edge_model_artifact_missing"
@@ -1544,7 +1544,7 @@ def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_v
     assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
     assert decision["candidate"]["economics"]["width_points"] == 15.0
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v61"
+        "strategy_policy.bootstrap.v62"
     )
     assert decision["regime"]["rth_environment"]["status"] != "ready"
     assert decision["action_authority"] == "manual"
@@ -2928,7 +2928,7 @@ def test_es_volume_momentum_authorizes_put_without_trend_or_pullback() -> None:
     assert decision["candidate"]["direction"] == "DOWN"
 
 
-def test_es_volume_momentum_ignores_vwap_impulse_late_chase() -> None:
+def test_es_volume_momentum_allows_first_impulse_below_extended_threshold() -> None:
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload["minute_market_frame"]["es"]["vwap_distance_points"] = 12.0
@@ -2938,6 +2938,28 @@ def test_es_volume_momentum_ignores_vwap_impulse_late_chase() -> None:
 
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
+
+
+def test_es_volume_momentum_extended_move_requires_fresh_matching_break() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    payload["minute_market_frame"]["es"]["vwap_distance_points"] = 25.0
+    payload["minute_market_frame"]["es"]["return_15m_points"] = 25.0
+
+    blocked = build_strategy_decision(payload, _state(now), now)
+
+    assert blocked["decision_type"] == "NO_TRADE"
+    assert blocked["why_not"]["primary_blocker"] == (
+        "es_volume_momentum_extended_without_fresh_break"
+    )
+
+    payload["es_volume"]["break_watch"] = {
+        "broken_side": "above",
+        "broken_at": (now - timedelta(minutes=5)).isoformat(),
+    }
+    allowed = build_strategy_decision(payload, _state(now), now)
+
+    assert allowed["decision_type"] == "CALL_DEBIT_VERTICAL", allowed["why_not"]
 
 
 def test_quiet_es_volume_does_not_authorize_rth_vertical() -> None:
@@ -3039,8 +3061,9 @@ def test_es_volume_momentum_break_reclaim_does_not_authorize() -> None:
     )
 
 
-def test_es_volume_momentum_adverse_path_tail_vetoes_manual_card(
+def test_forward_unvalidated_adverse_path_vetoes_manual_card(
     monkeypatch,
+    tmp_path,
 ) -> None:
     from spx_spark.application.order_map import strategy_select as select_module
 
@@ -3058,6 +3081,7 @@ def test_es_volume_momentum_adverse_path_tail_vetoes_manual_card(
 
     def attach_adverse_path(_facts, passed, iron_condor_map, **_kwargs):
         winner = dict(passed[0])
+        winner["evidence_status"] = "forward_unvalidated_user_override"
         winner["edge"] = {
             **dict(winner.get("edge") or {}),
             "path_distribution": {
@@ -3066,6 +3090,7 @@ def test_es_volume_momentum_adverse_path_tail_vetoes_manual_card(
                 "risk_objective": {
                     "status": "available",
                     "n_sessions": 24,
+                    "objective_dollars": -112.0,
                     "loss_probability": 1.0,
                     "shadow_choice": "NO_TRADE",
                 },
@@ -3082,11 +3107,12 @@ def test_es_volume_momentum_adverse_path_tail_vetoes_manual_card(
         payload,
         _state(now),
         now,
+        data_root=tmp_path,
     )
 
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["why_not"]["primary_blocker"] == (
-        "path_distribution_adverse_tail_veto"
+        "forward_path_distribution_veto"
     )
     assert decision["why_not"]["nearest_candidate"]["setup_kind"] == (
         "ES_VOLUME_MOMENTUM"
@@ -4156,7 +4182,7 @@ def test_gth_selector_evidence_uses_current_minute_authority(
         "first_touch_time_stop_net_pnl_authority_unavailable"
     ]
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v61"
+        "strategy_policy.bootstrap.v62"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["gate_kind"] == (
         "gth_minute_confirmation"
@@ -4264,7 +4290,7 @@ def test_europe_confirmed_trend_transition_uses_gth_minute_authority(
     assert candidate["setup_kind"] == "EUROPE_TREND_TRANSITION"
     assert candidate["source_kind"] == "gth_es_trend_transition"
     assert candidate["source_segment"] == "europe"
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v61"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v62"
     assert candidate["evidence_status"] == "forward_unvalidated_user_override"
     assert candidate["edge"]["strategy_edge"]["gate_kind"] == (
         "gth_minute_confirmation"

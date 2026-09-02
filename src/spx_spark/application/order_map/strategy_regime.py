@@ -44,8 +44,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v61"
-    # Policy history and frozen thresholds: docs/strategy-signal-engine-v2.md.
+    policy_version: str = "strategy_policy.bootstrap.v62"
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
     trend_max_vwap_crosses: float = 2.0
@@ -92,11 +91,14 @@ class StrategyPolicy:
     es_momentum_max_return_5m_atr: float = 1.50
     es_momentum_opposite_15m_min_atr: float = 0.50
     es_momentum_fresh_break_max_age_seconds: float = 900.0
+    es_momentum_extended_distance_atr: float = 2.0
+    es_momentum_extended_impulse_atr: float = 2.0
     es_momentum_max_progress: float = 0.50
     es_momentum_add_min_return_5m_atr: float = 0.50
-    es_momentum_path_veto_min_sessions: int = 20
-    es_momentum_path_veto_min_loss_probability: float = 0.75
-    es_momentum_path_veto_max_p90_net_pnl: float = 0.0
+    forward_path_veto_min_sessions: int = 20
+    forward_path_veto_min_loss_probability: float = 0.70
+    forward_path_veto_max_objective_dollars: float = 0.0
+    forward_path_veto_max_p90_net_pnl: float = 0.0
     wall_hazard_min_side_probability: float = 0.17
     wall_hazard_min_execution_ev_points: float = 0.0
     pin_thresholds: tuple[float, ...] = (0.25, 2.5, 5.0, 5.0, 8.0, 0.35, 0.55)
@@ -130,11 +132,9 @@ class StrategyPolicy:
     butterfly_unresolved_wall_em_multiple: float = 1.5
     candidate_cooldown_seconds: float = 900.0
     max_cards_per_direction_per_session: int = 2
-    # GTH hysteresis from the start of the current direction streak, not a
-    # sliding window: reprinting the same winner must not refresh the lock.
+    # GTH streak hysteresis; reprinting the same winner must not refresh the lock.
     gth_winner_stick_seconds: float = 1800.0
-    # RTH same-direction hold after an accepted human card. Flip after this
-    # window still needs cash HMM TREND the new way (see v32).
+    # RTH accepted-card hold; a later flip still needs cash HMM TREND (v32).
     rth_winner_stick_seconds: float = 900.0
     rth_setup_hold_bars: int = 2
     max_trigger_target_progress: float = 0.60

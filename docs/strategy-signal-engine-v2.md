@@ -1968,3 +1968,33 @@ Europe segment 的已确认 ES trend-transition 可进入现有 GTH 分钟级人
 
 Asia High/Low 的后续突破—回踩失败—延续仍是独立结构确认，可用于后续再评估，不能
 反向改写 Europe trend-transition 的确认时间。
+
+---
+
+## 29. v62 前向未验证路径否决与动量防追价
+
+生产不再把成熟的负路径证据仅作为卡片说明。候选已经通过原 hard gate、人工授权和
+排序后，先为唯一赢家计算同钟历史路径；仅当候选标记
+`forward_unvalidated_user_override`、risk objective 可用且至少覆盖 20 个独立 session
+时，以下任一条件直接改为 `NO_TRADE`：
+
+- P90 净 PnL 不高于零；
+- risk objective 低于零且路径亏损概率不低于 70%。
+
+样本不足或路径不可用不会伪装成负证据；promoted model 候选继续服从其自身模型门。
+该门适用于前向未验证的 Debit Vertical 与 Butterfly 赢家，不再只覆盖
+`ES_VOLUME_MOMENTUM`。
+
+`ES_VOLUME_MOMENTUM` 另增加窄的末端防追价条件：候选方向上的 VWAP 距离和 15 分钟
+冲动同时超过 `2×ATR5m` 时，必须存在 15 分钟内同方向的新破位；否则只保留观察，
+不生成手工交易卡。低于该双阈值的第一脚仍按原 1m/5m、放量和几何合同评估；正式
+回踩结构继续由各自 setup 负责。
+
+人工候选卡固定展示当时可见的 OI-GEX Gamma 代理：代理正 Gamma 提醒趋势可能被
+压回并建议等待新破位或重新接受；代理负 Gamma 只说明已确认方向可能被放大；过渡
+区只说明反馈可能切换。该说明不获得方向、确认、否决或正向加分权限，Gamma 缺失
+也不得阻断候选。`dealer_position_sign=unknown` 不变，不把代理表述为真实 dealer
+持仓。
+
+策略版本为 `strategy_policy.bootstrap.v62`。自动下单保持关闭；不新增服务、定时器、
+数据库、队列或通知 owner。

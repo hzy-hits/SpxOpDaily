@@ -342,11 +342,14 @@ def humanize_strategy_reason(reason: str) -> str:
         "es_volume_momentum_opposes_15m_without_fresh_break": (
             "短周期动量逆着 15 分钟冲动，且没有 15 分钟内同向新破位"
         ),
+        "es_volume_momentum_extended_without_fresh_break": (
+            "价格与 15 分钟冲动均已同向超过 2 ATR，且没有 15 分钟内新破位，不再追价"
+        ),
         "es_volume_momentum_too_weak": "ES 1 分钟/5 分钟动量太弱，还不是短周期启动",
         "es_volume_momentum_unevaluable": "ES 1 分钟/5 分钟动量缺失，不能评估短周期",
         "es_volume_momentum_too_late": "这一脚 5 分钟已经走完，不再追短周期",
-        "path_distribution_adverse_tail_veto": (
-            "历史同钟路径连 P90 仍亏且亏损概率过高，不发人工方向卡"
+        "forward_path_distribution_veto": (
+            "成熟同钟路径显示 P90 不赚钱，或负目标且亏损概率过高，不发人工卡"
         ),
         "es_volume_momentum_hmm_opposes": "现金 HMM 已是反向 TREND，短周期方向不清晰",
         "es_volume_momentum_flip_needs_hmm_trend": "翻向需要现金 HMM 同向 TREND",

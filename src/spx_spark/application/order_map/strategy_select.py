@@ -37,7 +37,7 @@ from spx_spark.application.order_map.path_distribution import (
 )
 from spx_spark.application.order_map.strategy_edge_model import (
     apply_strategy_edge_authority,
-    reject_adverse_es_momentum_path,
+    reject_adverse_forward_path,
 )
 from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
 from spx_spark.application.order_map.strategy_regime import (
@@ -203,7 +203,7 @@ def build_strategy_decision(
                     probability_settings=probability_settings,
                     now=_utc(now),
                 )
-                path_rejected = reject_adverse_es_momentum_path(
+                path_rejected = reject_adverse_forward_path(
                     winner,
                     policy=DEFAULT_STRATEGY_POLICY,
                 )
@@ -493,6 +493,7 @@ def _entry_state(
     if reason_set & {
         "direction_valid_but_entry_too_late",
         "es_volume_momentum_too_late",
+        "es_volume_momentum_extended_without_fresh_break",
     }:
         return "LATE_CHASE"
     if rows and not rank.passed:
@@ -544,6 +545,7 @@ def _rejection_funnel(
         "es_volume_momentum_break_reclaimed",
         "es_volume_momentum_not_aligned",
         "es_volume_momentum_opposes_15m_without_fresh_break",
+        "es_volume_momentum_extended_without_fresh_break",
         "es_volume_momentum_too_weak",
         "es_volume_momentum_unevaluable",
         "es_volume_momentum_too_late",

@@ -47,7 +47,7 @@ def test_v44_close_convergence_manual_authority_is_explicitly_unvalidated(
 ) -> None:
     candidate = {
         "setup_kind": "CLOSE_CONVERGENCE_60M",
-        "authorization_policy": "strategy_policy.bootstrap.v61",
+        "authorization_policy": "strategy_policy.bootstrap.v62",
         "evidence_contract_hash": (
             "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
         ),
@@ -109,7 +109,7 @@ def test_v48_gth_confirmed_source_uses_minute_gate_without_model(tmp_path: Path)
 
     assert result.rejected == []
     candidate = result.passed[0]
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v61"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v62"
     assert candidate["edge"]["edge_status"] == "explicit_manual_policy_unvalidated"
     assert candidate["edge"]["strategy_edge"]["gate_kind"] == "gth_minute_confirmation"
 

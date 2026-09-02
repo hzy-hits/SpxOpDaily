@@ -10,7 +10,9 @@ from spx_spark.application.order_map.strategy_edge_model import (
     SCHEMA_VERSION,
     apply_strategy_edge_authority,
     candidate_edge_features,
+    reject_adverse_forward_path,
 )
+from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 
 
 NOW = datetime(2026, 8, 18, 15, 0, tzinfo=timezone.utc)
@@ -190,7 +192,7 @@ def test_missing_or_unpromoted_artifact_fails_closed(tmp_path: Path) -> None:
 
 def test_missing_artifact_allows_authorized_es_momentum_fallback(tmp_path: Path) -> None:
     candidate = _candidate(setup_kind="ES_VOLUME_MOMENTUM")
-    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v61"}
+    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v62"}
 
     result = apply_strategy_edge_authority(
         [candidate], _facts(), regime, data_root=tmp_path, now=NOW
@@ -203,6 +205,59 @@ def test_missing_artifact_allows_authorized_es_momentum_fallback(tmp_path: Path)
     assert result.passed[0]["edge"]["strategy_edge"]["fallback_reason"] == (
         "strategy_edge_model_artifact_missing"
     )
+
+
+def test_forward_path_vetoes_negative_objective_with_high_loss_probability() -> None:
+    candidate = {
+        **_candidate(setup_kind="ES_VOLUME_MOMENTUM"),
+        "evidence_status": "forward_unvalidated_user_override",
+        "edge": {
+            "path_distribution": {
+                "p90_net_pnl": 39.89,
+                "risk_objective": {
+                    "status": "available",
+                    "n_sessions": 25,
+                    "objective_dollars": -238.81,
+                    "loss_probability": 0.76,
+                    "shadow_choice": "NO_TRADE",
+                },
+            }
+        },
+    }
+
+    rejected = reject_adverse_forward_path(candidate, policy=StrategyPolicy())
+
+    assert rejected is not None
+    assert rejected["rejection_reasons"] == ["forward_path_distribution_veto"]
+    assert rejected["failed_gates"][0]["actual"]["triggered_rules"] == [
+        "negative_objective_high_loss"
+    ]
+
+
+def test_forward_path_vetoes_nonpositive_p90_for_any_unvalidated_setup() -> None:
+    candidate = {
+        **_candidate(setup_kind="CLOSE_CONVERGENCE_60M"),
+        "evidence_status": "forward_unvalidated_user_override",
+        "edge": {
+            "path_distribution": {
+                "p90_net_pnl": -36.10,
+                "risk_objective": {
+                    "status": "available",
+                    "n_sessions": 26,
+                    "objective_dollars": -439.44,
+                    "loss_probability": 0.59,
+                    "shadow_choice": "NO_TRADE",
+                },
+            }
+        },
+    }
+
+    rejected = reject_adverse_forward_path(candidate, policy=StrategyPolicy())
+
+    assert rejected is not None
+    assert rejected["failed_gates"][0]["actual"]["triggered_rules"] == [
+        "p90_nonpositive"
+    ]
 
 
 def test_es_momentum_fallback_requires_frozen_policy_contract(tmp_path: Path) -> None:

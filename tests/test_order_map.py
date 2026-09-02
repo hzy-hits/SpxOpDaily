@@ -5216,9 +5216,10 @@ def test_trade_ready_card_generates_risk_image_and_attaches_public_link(
     assert expected_link in str(captured["text"])
     assert "[查看最新 OI 墙位图](https://spx.zh3nyu.com/oi/latest.png)" in str(captured["text"])
     assert "[查看 0DTE 资金流图](https://spx.zh3nyu.com/flow/latest.png)" in str(captured["text"])
+    assert "## 决策参考\nGamma：代理正 Gamma +0.21" in str(captured["text"])
+    assert "建议等待新破位或重新接受" in str(captured["text"])
     assert str(captured["text"]).endswith(
-        "## 决策参考\nICT：ONL 7674.5 · 偏多 · MSS已确认，位移不足 · "
-        "只观察，不改变授权。"
+        "ICT：ONL 7674.5 · 偏多 · MSS已确认，位移不足 · 只观察，不改变授权。"
     )
     assert captured["oi_storage"] is storage
     assert captured["flow_storage"] is storage
@@ -5236,6 +5237,10 @@ def _strategy_decision_payload(now: datetime) -> dict[str, object]:
         "decision_at": now.isoformat(),
         "action_authority": "manual",
         "market_facts": {
+            "structure": {
+                "gamma_state": "positive_gamma_pin",
+                "net_gamma_ratio": 0.21,
+            },
             "ict_liquidity": {
                 "status": "active",
                 "stage": "MSS_CONFIRMED",
@@ -5306,8 +5311,9 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
     assert result["accepted"] is True
     assert result["idea_memo"] == "omitted:trade_ready_latency_budget"
     assert str(captured["text"]).startswith(base_text)
+    assert "## 决策参考\nGamma：代理数据不可用" in str(captured["text"])
     assert str(captured["text"]).endswith(
-        "## 决策参考\nICT：当前无有效 Sweep/MSS/位移事件；不改变本卡授权。"
+        "ICT：当前无有效 Sweep/MSS/位移事件；不改变本卡授权。"
     )
     assert captured["text"] == captured["feishu_text"]
 

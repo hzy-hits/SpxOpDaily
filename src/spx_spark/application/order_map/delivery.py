@@ -157,7 +157,11 @@ def enqueue_strategy_decision(
             f"[查看最新 OI 墙位图]({OPEN_INTEREST_IMAGE_PUBLIC_URL})\n"
             f"[查看 0DTE 资金流图]({NET_PREMIUM_FLOW_IMAGE_PUBLIC_URL})"
         )
-    text = f"{text}\n\n## 决策参考\n{_ict_liquidity_line(decision, candidate)}"
+    text = (
+        f"{text}\n\n## 决策参考\n"
+        f"{_gamma_proxy_line(decision)}\n"
+        f"{_ict_liquidity_line(decision, candidate)}"
+    )
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -563,6 +567,33 @@ def _ict_liquidity_line(
         "OBSERVE_ONLY": "只观察，不改变授权",
     }.get(str(candidate.get("ict_alignment") or ""), "只观察，不改变授权")
     return f"ICT：{levels}{level_text} · {direction} · {stage} · {alignment}。"
+
+
+def _gamma_proxy_line(decision: Mapping[str, Any]) -> str:
+    facts = decision.get("market_facts")
+    structure = facts.get("structure") if isinstance(facts, Mapping) else None
+    if not isinstance(structure, Mapping):
+        return "Gamma：代理数据不可用；不阻断候选，也不改变本卡授权。"
+
+    state = str(structure.get("gamma_state") or "unknown")
+    ratio = _finite_number(structure.get("net_gamma_ratio"))
+    ratio_text = f" {ratio:+.2f}" if ratio is not None else ""
+    if state == "positive_gamma_pin":
+        return (
+            f"Gamma：代理正 Gamma{ratio_text} · 追趋势容易被压回；"
+            "建议等待新破位或重新接受，只作风险提示，不改变本卡授权。"
+        )
+    if state in {"negative_gamma_acceleration", "negative_gamma_expansion"}:
+        return (
+            f"Gamma：代理负 Gamma{ratio_text} · 可能放大已经确认的方向；"
+            "不提供第一步方向，也不提高本卡授权。"
+        )
+    if state in {"zero_gamma_transition", "mixed_gamma"}:
+        return (
+            f"Gamma：过渡区{ratio_text} · 反馈容易切换；"
+            "只作风险提示，不提供方向，也不改变本卡授权。"
+        )
+    return "Gamma：代理状态不可用；不阻断候选，也不改变本卡授权。"
 
 
 def _direction_cn(direction: object) -> str:

@@ -412,6 +412,25 @@ def update_break_watch(
     return watch, outcome
 
 
+def _has_fresh_matching_break(
+    signal: Mapping[str, Any],
+    *,
+    direction: str,
+    now: datetime | None,
+    max_age_seconds: float,
+) -> bool:
+    if now is None or now.tzinfo is None:
+        return False
+    watch = signal.get("break_watch")
+    watch = watch if isinstance(watch, dict) else {}
+    expected_side = "above" if direction == "UP" else "below"
+    parsed = _aware_time(watch.get("broken_at"))
+    if parsed is None or watch.get("broken_side") != expected_side:
+        return False
+    age = (now.astimezone(timezone.utc) - parsed).total_seconds()
+    return 0 <= age <= max_age_seconds
+
+
 def _es_momentum_context_block(
     signal: dict[str, Any] | Mapping[str, Any],
     *,
@@ -432,14 +451,13 @@ def _es_momentum_context_block(
     sign_15m = 0 if return_15m == 0 else (1 if return_15m > 0 else -1)
     if sign_15m != -want or abs(return_15m) / atr < opposite_min_atr:
         return None
-    watch = signal.get("break_watch")
-    watch = watch if isinstance(watch, dict) else {}
-    expected_side = "above" if direction == "UP" else "below"
-    parsed = _aware_time(watch.get("broken_at"))
-    if now is not None and now.tzinfo is not None and parsed is not None:
-        age = (now.astimezone(timezone.utc) - parsed).total_seconds()
-        if watch.get("broken_side") == expected_side and 0 <= age <= fresh_break_max_age_seconds:
-            return None
+    if _has_fresh_matching_break(
+        signal,
+        direction=direction,
+        now=now,
+        max_age_seconds=fresh_break_max_age_seconds,
+    ):
+        return None
     return "es_volume_momentum_opposes_15m_without_fresh_break"
 
 
@@ -453,17 +471,38 @@ def es_momentum_clarity_block(
 
     path_value = facts.get("path")
     path = path_value if isinstance(path_value, Mapping) else {}
+    signal = facts.get("es_volume") if isinstance(facts.get("es_volume"), Mapping) else {}
+    decision_at = _aware_time(facts.get("decision_at"))
+    return_15m = finite_float(path.get("impulse_15m_points"))
+    atr = finite_float(path.get("atr_5m"))
     context = _es_momentum_context_block(
-        facts.get("es_volume") if isinstance(facts.get("es_volume"), Mapping) else {},
+        signal,
         direction=direction,
-        return_15m=finite_float(path.get("impulse_15m_points")),
-        atr=finite_float(path.get("atr_5m")),
-        now=_aware_time(facts.get("decision_at")),
+        return_15m=return_15m,
+        atr=atr,
+        now=decision_at,
         opposite_min_atr=policy.es_momentum_opposite_15m_min_atr,
         fresh_break_max_age_seconds=policy.es_momentum_fresh_break_max_age_seconds,
     )
     if context:
         return context
+    distance_to_vwap = finite_float(path.get("distance_to_vwap_points"))
+    want = 1 if direction == "UP" else -1
+    extended_same_way = (
+        atr is not None
+        and atr > 0
+        and return_15m is not None
+        and distance_to_vwap is not None
+        and want * return_15m / atr > policy.es_momentum_extended_impulse_atr
+        and want * distance_to_vwap / atr > policy.es_momentum_extended_distance_atr
+    )
+    if extended_same_way and not _has_fresh_matching_break(
+        signal,
+        direction=direction,
+        now=decision_at,
+        max_age_seconds=policy.es_momentum_fresh_break_max_age_seconds,
+    ):
+        return "es_volume_momentum_extended_without_fresh_break"
     committed = str(facts.get("session_committed_direction") or "").upper()
     hmm_trend = hmm_owns_trend_direction(regime)
     if committed in {"UP", "DOWN"} and committed != direction and hmm_trend != direction:

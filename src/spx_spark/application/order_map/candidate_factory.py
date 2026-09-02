@@ -668,6 +668,7 @@ def _rth_evidences(
                     "es_volume_momentum_break_reclaimed",
                     "es_volume_momentum_not_aligned",
                     "es_volume_momentum_opposes_15m_without_fresh_break",
+                    "es_volume_momentum_extended_without_fresh_break",
                     "es_volume_momentum_too_weak",
                     "es_volume_momentum_unevaluable",
                     "es_volume_unavailable",

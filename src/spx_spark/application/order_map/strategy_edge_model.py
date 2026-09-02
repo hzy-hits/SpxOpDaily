@@ -33,9 +33,9 @@ _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
 _ES_VOLUME_MOMENTUM_SETUP = "ES_VOLUME_MOMENTUM"
-_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v61"
+_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v62"
 _ES_VOLUME_MOMENTUM_CONTRACT_HASH = (
-    "sha256:c04e0745bd5836e317a3dcc3d5e70344182e2262cdadcb58592111627e0786f4"
+    "sha256:878fb878a4fdc83b6bb5309804a5e91a0c11a9674006cab2132614645bb0799c"
 )
 _RTH_LEVEL_CONFIRMATION_SETUP = "RTH_LEVEL_CONFIRMATION"
 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH = (
@@ -49,7 +49,7 @@ _IRON_CONDOR_SETUP = "IRON_CONDOR_DELTA"
 _IRON_CONDOR_CONTRACT_HASH = (
     "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
 )
-_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v61"
+_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v62"
 _GTH_MINUTE_GATE_CONTRACT_HASH = (
     "sha256:a37c9ec4ae262c425965238229d80f4fa3c0e30d6ac8d35c09195a54fd88d9e0"
 )
@@ -136,39 +136,59 @@ class EdgeAuthorityResult:
     rejected: list[dict[str, Any]]
 
 
-def reject_adverse_es_momentum_path(
+def reject_adverse_forward_path(
     candidate: Mapping[str, Any],
     *,
     policy: StrategyPolicy,
 ) -> dict[str, Any] | None:
-    """Return a rejected winner only when a mature replay is uniformly adverse."""
+    """Reject a forward-unvalidated winner when mature replay evidence is adverse."""
 
-    if str(candidate.get("setup_kind") or "") != _ES_VOLUME_MOMENTUM_SETUP:
+    if candidate.get("evidence_status") != "forward_unvalidated_user_override":
         return None
     distribution = _map(_map(candidate.get("edge")).get("path_distribution"))
     objective = _map(distribution.get("risk_objective"))
     n_sessions = _number(objective.get("n_sessions"))
     p90 = _number(distribution.get("p90_net_pnl"))
     loss_probability = _number(objective.get("loss_probability"))
-    if not (
+    objective_dollars = _number(objective.get("objective_dollars"))
+    mature = (
         objective.get("status") == "available"
         and objective.get("shadow_choice") == "NO_TRADE"
         and n_sessions is not None
-        and n_sessions >= policy.es_momentum_path_veto_min_sessions
+        and n_sessions >= policy.forward_path_veto_min_sessions
+    )
+    p90_veto = (
+        mature
         and p90 is not None
-        and p90 <= policy.es_momentum_path_veto_max_p90_net_pnl
+        and p90 <= policy.forward_path_veto_max_p90_net_pnl
+    )
+    high_loss_veto = (
+        mature
+        and objective_dollars is not None
+        and objective_dollars < policy.forward_path_veto_max_objective_dollars
         and loss_probability is not None
-        and loss_probability >= policy.es_momentum_path_veto_min_loss_probability
-    ):
+        and loss_probability >= policy.forward_path_veto_min_loss_probability
+    )
+    if not (p90_veto or high_loss_veto):
         return None
-    reason = "path_distribution_adverse_tail_veto"
+    reason = "forward_path_distribution_veto"
     gate = {
         "gate": reason,
-        "actual": {"p90_net_pnl": p90, "risk_objective": dict(objective)},
+        "actual": {
+            "p90_net_pnl": p90,
+            "objective_dollars": objective_dollars,
+            "loss_probability": loss_probability,
+            "risk_objective": dict(objective),
+            "triggered_rules": [
+                *(["p90_nonpositive"] if p90_veto else []),
+                *(["negative_objective_high_loss"] if high_loss_veto else []),
+            ],
+        },
         "threshold": {
-            "max_p90_net_pnl": policy.es_momentum_path_veto_max_p90_net_pnl,
-            "min_loss_probability": policy.es_momentum_path_veto_min_loss_probability,
-            "min_sessions": policy.es_momentum_path_veto_min_sessions,
+            "max_p90_net_pnl": policy.forward_path_veto_max_p90_net_pnl,
+            "max_objective_dollars": policy.forward_path_veto_max_objective_dollars,
+            "min_loss_probability": policy.forward_path_veto_min_loss_probability,
+            "min_sessions": policy.forward_path_veto_min_sessions,
         },
     }
     return {
@@ -278,22 +298,22 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v61",
+                "strategy_policy.bootstrap.v62",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _RTH_LEVEL_CONFIRMATION_SETUP: (
-                "strategy_policy.bootstrap.v61",
+                "strategy_policy.bootstrap.v62",
                 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
                 "rth_level_confirmation_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v61",
+                "strategy_policy.bootstrap.v62",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v61",
+                "strategy_policy.bootstrap.v62",
                 _IRON_CONDOR_CONTRACT_HASH,
                 "iron_condor_policy_authority_invalid",
             ),
