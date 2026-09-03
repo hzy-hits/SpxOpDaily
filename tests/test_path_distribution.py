@@ -10,6 +10,7 @@ from spx_spark.application.market_features.physical_followthrough import (
     load_physical_spot_paths,
 )
 from spx_spark.application.order_map.path_distribution import (
+    attach_iron_condor_path_distribution,
     estimate_iron_condor_clearing_distribution,
     estimate_path_distribution,
     load_joint_surface_paths,
@@ -221,7 +222,7 @@ def test_winner_path_distribution_is_ordered_and_does_not_change_score(tmp_path:
     assert "invalidation_not_protective" not in distribution["reason_codes"]
     text = path_distribution_desk_text(distribution)
     assert text is not None
-    assert text.startswith("持有至15:45ET 路径 P10/P50/P90 $")
+    assert text.startswith("最迟15:45ET 路径 P10/P50/P90 $")
 
 
 def test_joint_surface_replay_is_primary_and_keeps_sticky_baseline(tmp_path: Path) -> None:
@@ -350,12 +351,12 @@ def _write_open_to_clear(root: Path, day: str, *, open_px: float, clear_px: floa
     _write_session(root, day, start_et=time(9, 30), prices=prices)
 
 
-def _iron_condor() -> dict[str, object]:
+def _iron_condor(*, session_mode: str | None = None) -> dict[str, object]:
     put_long = _leg(7680.0, "P", 1.1, 1.3)
     put_short = _leg(7690.0, "P", 1.6, 1.8)
     call_short = _leg(7810.0, "C", 1.6, 1.8)
     call_long = _leg(7820.0, "C", 1.1, 1.3)
-    return {
+    candidate: dict[str, object] = {
         "strategy_type": "IRON_CONDOR",
         "setup_kind": "IRON_CONDOR_DELTA",
         "legs": [put_long, put_short, call_short, call_long],
@@ -369,6 +370,9 @@ def _iron_condor() -> dict[str, object]:
         },
         "invalidation_spx": [7690.0, 7810.0],
     }
+    if session_mode is not None:
+        candidate["session_mode"] = session_mode
+    return candidate
 
 
 def test_gth_iron_condor_clearing_paths_are_one_overnight_session(tmp_path: Path) -> None:
@@ -427,7 +431,8 @@ def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) ->
     assert distribution["risk_objective"]["automatic_ordering"] is False
     text = path_distribution_desk_text(distribution)
     assert text is not None
-    assert text.startswith("持有至12:30ET 路径 P10/P50/P90 $")
+    assert text.startswith("GTH旧研究·次日12:30ET前 路径 P10/P50/P90 $")
+    assert text.endswith("样本不足，仅研究")
 
 
 def test_gth_iron_condor_uses_joint_surface_path_and_sticky_comparison(
@@ -451,3 +456,68 @@ def test_gth_iron_condor_uses_joint_surface_path_and_sticky_comparison(
     assert distribution["surface_cadence_seconds"] == 300
     assert distribution["sticky_iv_baseline"]["method"] == "sticky_iv_same_spot_paths.v1"
     assert distribution["hard_exit_et"] == "12:30"
+
+
+def test_rth_iron_condor_map_uses_tp50_sl200_hold1545_policy(tmp_path: Path) -> None:
+    _write_session(
+        tmp_path,
+        "2026-08-04",
+        start_et=time(9, 30),
+        prices=_full_rth_prices(7750.0, 0.01),
+    )
+    _write_session(
+        tmp_path,
+        "2026-08-05",
+        start_et=time(9, 30),
+        prices=_full_rth_prices(7750.0, -0.01),
+    )
+    structure = {**_iron_condor(session_mode="rth"), "status": "ready"}
+
+    result = attach_iron_condor_path_distribution(
+        structure,
+        _facts(now=RTH_NOW),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=RTH_NOW,
+    )
+
+    distribution = result["path_distribution"]
+    assert distribution["method"] == "physical_path_management_policy.v3"
+    assert distribution["management_policy_version"] == (
+        "management_policy.iron_condor.tp50_sl200_hold1545.v2"
+    )
+    assert distribution["hard_exit_et"] == "15:45"
+    assert distribution["premium_stop_rate"] == 0.0
+    assert "stop_loss_rate" in distribution
+    text = path_distribution_desk_text(distribution)
+    assert text is not None
+    assert text.startswith("RTH 0.5C止盈/3C止损·最迟15:45ET 路径 P10/P50/P90 $")
+
+
+def test_rth_iron_condor_joint_surface_replay_keeps_credit_policy(tmp_path: Path) -> None:
+    _write_surface_session(tmp_path, "2026-08-04", start_et=time(10, 30), count=64)
+    _write_surface_session(
+        tmp_path,
+        "2026-08-05",
+        start_et=time(10, 30),
+        count=64,
+        atm_step=-0.0001,
+    )
+    structure = {**_iron_condor(session_mode="rth"), "status": "ready"}
+
+    result = attach_iron_condor_path_distribution(
+        structure,
+        _facts(now=RTH_NOW),
+        data_root=tmp_path,
+        probability_settings=StrategyDistributionSettings(),
+        now=RTH_NOW,
+    )
+
+    distribution = result["path_distribution"]
+    assert distribution["method"] == "joint_spot_surface_management_policy.v1"
+    assert distribution["management_policy_version"] == (
+        "management_policy.iron_condor.tp50_sl200_hold1545.v2"
+    )
+    assert distribution["hard_exit_et"] == "15:45"
+    assert distribution["premium_stop_rate"] == 0.0
+    assert "stop_loss_rate" in distribution

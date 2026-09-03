@@ -1319,7 +1319,7 @@ def nearest_abs_delta_strike(
             abs_delta = abs(delta)
             if abs_delta < floor:
                 continue
-            if ceiling is not None and abs_delta > ceiling:
+            if ceiling is not None and abs_delta - ceiling > 1e-9:
                 continue
             distance = abs(abs_delta - target_abs_delta)
             if best_distance is None or distance < best_distance:

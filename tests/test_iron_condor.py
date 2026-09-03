@@ -101,6 +101,7 @@ def _rth_state(
     now: datetime = RTH_NOW,
     *,
     short_quote_bonus: float = 0.75,
+    research_short_quote_bonus: float = 0.0,
 ) -> LatestState:
     rows = []
     for quote in _quotes(now, with_greeks=True):
@@ -109,14 +110,25 @@ def _rth_state(
             (right == "P" and quote.instrument.strike == 7690.0)
             or (right == "C" and quote.instrument.strike == 7810.0)
         )
+        research_short = (
+            (right == "P" and quote.instrument.strike == 7685.0)
+            or (right == "C" and quote.instrument.strike == 7815.0)
+        )
+        bonus = (
+            short_quote_bonus
+            if rich_short
+            else research_short_quote_bonus
+            if research_short
+            else 0.0
+        )
         rows.append(
             replace(
                 quote,
                 provider=Provider.SCHWAB,
                 received_at=now,
                 quote_time=now,
-                bid=(quote.bid or 0.0) + (short_quote_bonus if rich_short else 0.0),
-                ask=(quote.ask or 0.0) + (short_quote_bonus if rich_short else 0.0),
+                bid=(quote.bid or 0.0) + bonus,
+                ask=(quote.ask or 0.0) + bonus,
             )
         )
     quotes = tuple(rows)
@@ -265,6 +277,7 @@ def test_gth_always_computes_ten_wide_5_20_delta_iron_condor_from_one_minute_quo
     )
 
     assert structure["status"] == "ready"
+    assert structure["session_mode"] == "gth"
     assert structure["short_abs_delta"] == 0.10
     assert structure["spot_inside_shorts"] is True
     assert structure["wing_width"] == 10.0
@@ -275,6 +288,13 @@ def test_gth_always_computes_ten_wide_5_20_delta_iron_condor_from_one_minute_quo
     assert structure["surface_decision_modifier"] <= 0.0
     assert structure["surface_attribution"]["authority"] == "structure_risk_only"
     assert [row["short_abs_delta"] for row in structure["variants"]] == [0.10, 0.15, 0.20]
+    observation = structure["research_observations"][0]
+    assert observation["version"] == "iron_condor_17_5d_fixed10_credit20_23_shadow.v1"
+    assert observation["decision_effect"] == "record_only"
+    assert observation["manual_authority_eligible"] is False
+    assert observation["target_short_abs_delta"] == 0.175
+    assert observation["wing_width"] == 10.0
+    assert observation["automatic_ordering"] is False
     assert abs(structure["put_short"]["delta"]) <= 0.20
     assert abs(structure["call_short"]["delta"]) <= 0.20
     assert rows
@@ -427,6 +447,7 @@ def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
     )
 
     assert rows[0]["manual_authority_eligible"] is True
+    assert rows[0]["session_mode"] == "rth"
     assert rows[0]["put_short_abs_delta"] == 0.20
     assert rows[0]["call_short_abs_delta"] == 0.20
     assert rows[0]["put_short_distance_points"] == 60.0
@@ -462,6 +483,26 @@ def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
         policy=StrategyPolicy(),
     )
     assert later[0]["manual_authority_eligible"] is False
+
+
+def test_rth_17_5_delta_observation_is_qualified_but_never_authorized() -> None:
+    structure = build_iron_condor_map(
+        _payload(),
+        _rth_facts(),
+        _rth_state(research_short_quote_bonus=0.6),
+        now=RTH_NOW,
+        policy=StrategyPolicy(),
+    )
+
+    observation = structure["research_observations"][0]
+    assert observation["status"] == "qualified"
+    assert observation["strikes"] == [7675.0, 7685.0, 7815.0, 7825.0]
+    assert observation["put_short_abs_delta"] == 0.175
+    assert observation["call_short_abs_delta"] == 0.175
+    assert observation["minimum_side_credit_share"] == 0.5
+    assert observation["manual_authority_eligible"] is False
+    assert observation["automatic_ordering"] is False
+    assert 0.175 not in [row["short_abs_delta"] for row in structure["variants"]]
 
 
 def test_rth_iron_condor_gamma_risk_uses_signed_four_leg_gamma() -> None:

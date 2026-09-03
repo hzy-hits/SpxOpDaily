@@ -68,16 +68,23 @@ def path_distribution_desk_text(distribution: Mapping[str, Any] | None) -> str |
         return None
     n_paths = distribution.get("n_paths")
     sample = f" n={int(n_paths)}" if isinstance(n_paths, int | float) else ""
-    method = distribution.get("method")
-    prefix = (
-        "持有至12:30ET "
-        if method in {PHYSICAL_CLEARING_METHOD, JOINT_SURFACE_CLEARING_METHOD}
-        else "持有至15:45ET "
-        if method in {PHYSICAL_METHOD, JOINT_SURFACE_METHOD}
-        else ""
-    )
+    policy = str(distribution.get("management_policy_version") or "")
+    if policy == "management_policy.iron_condor.tp50_sl200_hold1545.v2":
+        prefix = "RTH 0.5C止盈/3C止损·最迟15:45ET "
+    elif policy == "management_policy.iron_condor.clear_1230.v1":
+        prefix = "GTH旧研究·次日12:30ET前 "
+    else:
+        method = distribution.get("method")
+        prefix = (
+            "最迟12:30ET "
+            if method in {PHYSICAL_CLEARING_METHOD, JOINT_SURFACE_CLEARING_METHOD}
+            else "最迟15:45ET "
+            if method in {PHYSICAL_METHOD, JOINT_SURFACE_METHOD}
+            else ""
+        )
     p10, p50, p90 = (float(value) for value in values)
-    return f"{prefix}路径 P10/P50/P90 ${p10:.0f}/${p50:.0f}/${p90:.0f}{sample}"
+    warning = " · 样本不足，仅研究" if distribution.get("status") == "insufficient_sample" else ""
+    return f"{prefix}路径 P10/P50/P90 ${p10:.0f}/${p50:.0f}/${p90:.0f}{sample}{warning}"
 
 
 def load_joint_surface_paths(
@@ -296,6 +303,7 @@ def estimate_joint_debit_distribution(
         return None
     scale, scale_reason = _path_scale(paths, facts=facts, horizon_minutes=horizon_minutes)
     model0 = _model_mid(priced_legs, spot=spot, expiry=expiry, now=now)
+    entry_credit = entry if policy.entry_side == "credit" else None
     joint = _joint_combo_bid_matrix(
         paths,
         legs=priced_legs,
@@ -307,7 +315,7 @@ def estimate_joint_debit_distribution(
         scale=scale,
         model0=model0,
         close_seed=close_seed,
-        entry_credit=None,
+        entry_credit=entry_credit,
     )
     sticky = _sticky_combo_bid_matrix(
         paths,
@@ -318,9 +326,11 @@ def estimate_joint_debit_distribution(
         scale=scale,
         model0=model0,
         close_seed=close_seed,
-        entry_credit=None,
+        entry_credit=entry_credit,
     )
-    invalidation, invalidation_reason = _invalidation_touch(candidate, credit=False, spot=spot)
+    invalidation, invalidation_reason = _invalidation_touch(
+        candidate, credit=entry_credit is not None, spot=spot
+    )
     simulation = _simulate(
         joint,
         paths=paths,
@@ -619,7 +629,14 @@ def _simulate(
 ) -> dict[str, Any]:
     pnls: list[float] = []
     holds: list[float] = []
-    counters = {"invalidation": 0, "tp": 0, "premium_stop": 0, "hard_close": 0, "time_stop": 0}
+    counters = {
+        "invalidation": 0,
+        "tp": 0,
+        "premium_stop": 0,
+        "stop_loss": 0,
+        "hard_close": 0,
+        "time_stop": 0,
+    }
     for index, _path in enumerate(paths):
         projected = tuple(float(value) for value in combo["spots"][index])
         if invalidation is not None and invalidation(projected):
@@ -704,6 +721,7 @@ def _distribution(
         ),
         "tp_before_stop_rate": round(counters["tp"] / count, 4),
         "premium_stop_rate": round(counters["premium_stop"] / count, 4),
+        "stop_loss_rate": round(counters["stop_loss"] / count, 4),
         "hard_close_rate": round(counters["hard_close"] / count, 4),
         "time_stop_rate": round(counters["time_stop"] / count, 4),
         "median_hold_minutes": round(median(simulation["holds"]), 3) if simulation["holds"] else None,

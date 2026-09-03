@@ -56,6 +56,11 @@ GAMMA_RISK_VERSION = "iron_condor_gamma_risk.v1"
 GAMMA_RISK_LOW_GCR10 = 0.10
 GAMMA_RISK_NORMAL_GCR10 = 0.20
 GAMMA_RISK_HOT_GCR10 = 0.30
+RESEARCH_SHORT_DELTA = 0.175
+RESEARCH_MIN_CREDIT_FRACTION = 0.20
+RESEARCH_MAX_CREDIT_FRACTION = 0.23
+RESEARCH_MIN_SIDE_CREDIT_SHARE = 0.25
+RESEARCH_EVIDENCE_VERSION = "iron_condor_17_5d_fixed10_credit20_23_shadow.v1"
 HUMAN_EVIDENCE_CONTRACT_HASH = (
     "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
 )
@@ -126,6 +131,10 @@ def build_iron_condor_map(
         reverse=True,
     )
     primary = dict(ranked_variants[0])
+    session_mode = (
+        "gth" if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now) else "rth"
+    )
+    primary["session_mode"] = session_mode
     primary["variants"] = [
         {
             "short_abs_delta": row.get("short_abs_delta"),
@@ -138,6 +147,85 @@ def build_iron_condor_map(
         }
         for row in ranked_variants
     ]
+    research = (
+        _structure_for_short_delta(
+            latest,
+            expiry,
+            spot=spot,
+            short_abs_delta=RESEARCH_SHORT_DELTA,
+            now=now,
+            session_policy=session_policy,
+            providers=providers,
+        )
+        if session_mode == "rth"
+        else None
+    )
+    observation: dict[str, Any] = {
+        "version": RESEARCH_EVIDENCE_VERSION,
+        "decision_effect": "record_only",
+        "manual_authority_eligible": False,
+        "automatic_ordering": False,
+        "target_short_abs_delta": RESEARCH_SHORT_DELTA,
+        "wing_width": WING_WIDTH,
+        "credit_fraction_band": [
+            RESEARCH_MIN_CREDIT_FRACTION,
+            RESEARCH_MAX_CREDIT_FRACTION,
+        ],
+    }
+    if research is None:
+        observation.update(
+            status="unavailable",
+            reason=(
+                "iron_condor_research_quotes_unavailable"
+                if session_mode == "rth"
+                else "iron_condor_research_rth_only"
+            ),
+        )
+    else:
+        research_quote = _map(research.get("quote"))
+        research_economics = _map(research.get("economics"))
+        put_long, put_short, call_short, call_long = (
+            _map(research.get(name))
+            for name in ("put_long", "put_short", "call_short", "call_long")
+        )
+        research_credit = _number(research_quote.get("credit"))
+        research_credit_fraction = _number(
+            research_economics.get("credit_fraction_of_width")
+        )
+        side_credits = (
+            (_number(put_short.get("bid")) or 0.0)
+            - (_number(put_long.get("ask")) or 0.0),
+            (_number(call_short.get("bid")) or 0.0)
+            - (_number(call_long.get("ask")) or 0.0),
+        )
+        research_side_share = (
+            min(side_credits) / research_credit
+            if research_credit is not None and research_credit > 0
+            else None
+        )
+        qualified = bool(
+            research_credit_fraction is not None
+            and RESEARCH_MIN_CREDIT_FRACTION
+            <= research_credit_fraction
+            <= RESEARCH_MAX_CREDIT_FRACTION
+            and research_side_share is not None
+            and research_side_share >= RESEARCH_MIN_SIDE_CREDIT_SHARE
+        )
+        observation.update(
+            status="qualified" if qualified else "outside_observation_band",
+            put_short_abs_delta=round(abs(_number(put_short.get("delta")) or 0.0), 8),
+            call_short_abs_delta=round(abs(_number(call_short.get("delta")) or 0.0), 8),
+            wing_width=research.get("wing_width"),
+            strikes=list(research.get("strikes") or ()),
+            quote=dict(research_quote),
+            economics=dict(research_economics),
+            minimum_side_credit_share=(
+                round(research_side_share, 8)
+                if research_side_share is not None
+                else None
+            ),
+        )
+    primary["research_observations"] = [observation]
     return primary
 
 

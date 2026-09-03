@@ -10,6 +10,7 @@ does not veto, re-rank, or authorize orders.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -102,21 +103,27 @@ def attach_iron_condor_path_distribution(
     paths: tuple[PhysicalSpotPath, ...] | None = None,
     clock_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Hang the 12:30 ET clearing-window distribution on the iron-condor map."""
+    """Attach the session-specific iron-condor management distribution."""
 
-    del policy, paths, clock_mode
-    result = dict(structure)
     if str(structure.get("status") or "") != "ready":
-        result["path_distribution"] = _unavailable("iron_condor_not_ready")
-        return result
-    result["path_distribution"] = estimate_iron_condor_clearing_distribution(
-        _iron_condor_as_candidate(structure),
-        facts,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=now,
+        return {**dict(structure), "path_distribution": _unavailable("iron_condor_not_ready")}
+    candidate = _iron_condor_as_candidate(structure)
+    candidate["session_mode"] = candidate.get("session_mode") or _map(facts.get("session")).get(
+        "mode"
     )
-    return result
+    kwargs: dict[str, Any] = {
+        "data_root": data_root,
+        "probability_settings": probability_settings,
+        "now": now,
+    }
+    if str(candidate.get("session_mode") or "").lower() == "rth":
+        kwargs.update(policy=policy, paths=paths, clock_mode=clock_mode)
+        distribution = estimate_path_distribution(candidate, facts, **kwargs)
+    else:
+        distribution = estimate_iron_condor_clearing_distribution(
+            candidate, facts, **kwargs
+        )
+    return {**dict(structure), "path_distribution": distribution}
 
 
 def load_decision_spot_paths(
@@ -174,9 +181,10 @@ def estimate_path_distribution(
     del policy
     started = perf_counter()
     strategy_type = str(candidate.get("strategy_type") or "")
-    if strategy_type == IRON_CONDOR_TYPE:
+    iron_condor = strategy_type == IRON_CONDOR_TYPE
+    if iron_condor and str(candidate.get("session_mode") or "").lower() != "rth":
         return _unavailable("iron_condor_uses_clearing_overlay")
-    if strategy_type not in SUPPORTED_DEBITS:
+    if not iron_condor and strategy_type not in SUPPORTED_DEBITS:
         return _unavailable("unsupported_strategy_type")
 
     spot = _number(_map(facts.get("spot")).get("spx"))
@@ -209,7 +217,7 @@ def estimate_path_distribution(
         session_date=session_date,
     )
     requested_horizon = int((horizon_end - now_utc).total_seconds() // 60)
-    close_seed = _number(quote.get("bid"))
+    close_seed = _number(quote.get("ask") if iron_condor else quote.get("bid"))
     if close_seed is None:
         return _unavailable("path_mark_seed_unavailable")
     joint = estimate_joint_debit_distribution(
@@ -260,17 +268,17 @@ def estimate_path_distribution(
         scale=scale,
         model0=model0,
         close_seed=close_seed,
-        entry_credit=None,
+        entry_credit=entry if iron_condor else None,
     )
     invalidation, invalidation_reason = _invalidation_touch(
-        candidate, credit=False, spot=spot
+        candidate, credit=iron_condor, spot=spot
     )
 
     pnls: list[float] = []
     hold_minutes: list[float] = []
     hit_invalidation = 0
     tp_before_stop = 0
-    premium_stops = 0
+    exit_reasons: Counter[str] = Counter()
     for index in range(len(paths)):
         projected = tuple(float(value) for value in combo_bids["spots"][index])
         if invalidation is not None and invalidation(projected):
@@ -291,8 +299,7 @@ def estimate_path_distribution(
             hold_minutes.append((label.exit_at - now_utc).total_seconds() / 60.0)
         if label.tp_before_stop:
             tp_before_stop += 1
-        if label.exit_reason == "premium_stop":
-            premium_stops += 1
+        exit_reasons[label.exit_reason] += 1
 
     count = len(pnls)
     p10, p50, p90 = _percentiles(pnls, (10.0, 50.0, 90.0))
@@ -318,11 +325,7 @@ def estimate_path_distribution(
         reasons.append(invalidation_reason)
     if status == "insufficient_sample":
         reasons.append("physical_sample_below_minimum")
-    hit_rate = (
-        None
-        if invalidation is None
-        else round(hit_invalidation / count, 4)
-    )
+    hit_rate = None if invalidation is None else round(hit_invalidation / count, 4)
     objective = _risk_objective(
         pnls,
         candidate=candidate,
@@ -343,7 +346,10 @@ def estimate_path_distribution(
         "risk_objective": objective,
         "hit_invalidation_rate": hit_rate,
         "tp_before_stop_rate": round(tp_before_stop / count, 4),
-        "premium_stop_rate": round(premium_stops / count, 4),
+        "premium_stop_rate": round(exit_reasons["premium_stop"] / count, 4),
+        "stop_loss_rate": round(exit_reasons["stop_loss"] / count, 4),
+        "hard_close_rate": round(exit_reasons["hard_close"] / count, 4),
+        "time_stop_rate": round(exit_reasons["time_stop"] / count, 4),
         "median_hold_minutes": round(median(hold_minutes), 3) if hold_minutes else None,
         "n_paths": count,
         "n_sessions": len(sessions),
@@ -451,9 +457,7 @@ def estimate_iron_condor_clearing_distribution(
     hold_minutes: list[float] = []
     hit_invalidation = 0
     tp_before_stop = 0
-    premium_stops = 0
-    hard_closes = 0
-    time_stops = 0
+    exit_reasons: Counter[str] = Counter()
     for index in range(len(paths)):
         projected = tuple(float(value) for value in combo_bids["spots"][index])
         if invalidation is not None and invalidation(projected):
@@ -475,12 +479,7 @@ def estimate_iron_condor_clearing_distribution(
             hold_minutes.append((label.exit_at - now_utc).total_seconds() / 60.0)
         if label.tp_before_stop:
             tp_before_stop += 1
-        if label.exit_reason == "premium_stop":
-            premium_stops += 1
-        elif label.exit_reason == "hard_close":
-            hard_closes += 1
-        elif label.exit_reason == "time_stop":
-            time_stops += 1
+        exit_reasons[label.exit_reason] += 1
 
     count = len(pnls)
     p10, p50, p90 = _percentiles(pnls, (10.0, 50.0, 90.0))
@@ -523,9 +522,9 @@ def estimate_iron_condor_clearing_distribution(
         "risk_objective": objective,
         "hit_invalidation_rate": hit_rate,
         "tp_before_stop_rate": round(tp_before_stop / count, 4),
-        "premium_stop_rate": round(premium_stops / count, 4),
-        "hard_close_rate": round(hard_closes / count, 4),
-        "time_stop_rate": round(time_stops / count, 4),
+        "premium_stop_rate": round(exit_reasons["premium_stop"] / count, 4),
+        "hard_close_rate": round(exit_reasons["hard_close"] / count, 4),
+        "time_stop_rate": round(exit_reasons["time_stop"] / count, 4),
         "median_hold_minutes": round(median(hold_minutes), 3) if hold_minutes else None,
         "n_paths": count,
         "n_sessions": len(sessions),
@@ -635,6 +634,7 @@ def _iron_condor_as_candidate(structure: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "strategy_type": IRON_CONDOR_TYPE,
         "setup_kind": structure.get("setup_kind"),
+        "session_mode": structure.get("session_mode"),
         "quote": dict(_map(structure.get("quote"))),
         "economics": dict(_map(structure.get("economics"))),
         "legs": [dict(_map(item)) for item in structure.get("legs") or ()],
