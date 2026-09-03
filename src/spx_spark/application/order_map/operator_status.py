@@ -21,6 +21,7 @@ from spx_spark.application.order_map.render import (
 )
 from spx_spark.application.order_map.state import _session_phase_of, current_session_is_gth
 from spx_spark.application.order_map.desk_strategy_view import (
+    compact_gth_no_trade_sections,
     cross_asset_confirmation_text,
     expected_move_text,
     humanize_strategy_reason,
@@ -29,6 +30,7 @@ from spx_spark.application.order_map.desk_strategy_view import (
     opening_range_state_text,
     phase_label,
     quality_reason_text,
+    render_compact_gth_brief,
     stage_label,
     strategy_candidate_is_watchable,
     strategy_decision_desk_view,
@@ -98,6 +100,8 @@ def render_operator_status_brief(
     """Render one compact desk map without giving research shadows authority."""
 
     sections = build_desk_message_sections(payload, now_utc)
+    if compact := render_compact_gth_brief(payload, sections):
+        return compact
     lines = [
         sections.title,
         f"Desk View  {sections.desk_view}",
@@ -131,24 +135,18 @@ def build_desk_message_sections(
     if surface_line := _strategy_surface_shape_line(payload):
         desk_view = f"{desk_view}\n{surface_line}"
 
-    return DeskMessageSections(
-        title=(
-            f"【SPX Desk Map · {beijing.strftime('%H:%M')} · "
-            f"0DTE {expiry_text} · {session.get('name_cn')}】"
-        ),
+    sections = DeskMessageSections(
+        title=f"【SPX Desk Map · {beijing:%H:%M} · 0DTE {expiry_text} · {session.get('name_cn')}】",
         desk_view=desk_view,
         location=_location_line(payload, projection).removeprefix("Location  "),
         structure=_structure_line(payload, now=now_utc).removeprefix("Structure  "),
         primary_path=_primary_path(payload, guidance, projection),
-        alternative_path=(
-            f"Evidence · {guidance.invalidation_text}"
-            if projection.direction in {"up", "down"}
-            else "Evidence · 尚无已授权入场方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算"
-        ),
+        alternative_path=f"Evidence · {guidance.invalidation_text}" if projection.direction in {"up", "down"} else "Evidence · 尚无已授权入场方向；当前不存在交易失效位，任一实时结构形成接受/拒绝后重算",
         targets=_targets_line(payload, projection).removeprefix("Targets  "),
         execution=_execution_line(payload, projection, guidance).removeprefix("Execution  "),
         data_quality=_data_quality_line(payload, projection).removeprefix("Data Quality  "),
     )
+    return compact_gth_no_trade_sections(payload, sections, quality_reasons=projection.quality_reasons)
 
 
 def _strategy_surface_shape_line(payload: Mapping[str, Any]) -> str | None:
@@ -1212,3 +1210,4 @@ def _closed_direction(value: object) -> str:
 def _closed_thesis(value: object) -> str:
     thesis = str(value or "none").lower()
     return thesis if thesis in {"breakout", "fade"} else "none"
+    render_compact_gth_brief,

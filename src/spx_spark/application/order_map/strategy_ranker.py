@@ -20,6 +20,7 @@ from spx_spark.application.market_features.physical_followthrough import (
     estimate_physical_terminal_range,
 )
 from spx_spark.application.order_map.ict_liquidity import apply_ict_liquidity_modifier
+from spx_spark.application.order_map.gth_iron_condor import GTH_EVIDENCE_CONTRACT_HASH, gth_iron_condor_gate_failures
 from spx_spark.application.order_map.strategy_regime import (
     StrategyPolicy,
     butterfly_entry_clock_open,
@@ -1450,19 +1451,18 @@ def _iron_condor_hard_gates(
         WING_WIDTH,
         human_iron_condor_entry_contract,
     )
-
     gates: list[dict[str, Any]] = []
     session_mode = str(_map(facts.get("session")).get("mode") or "").lower()
-    if session_mode != "rth":
+    if session_mode not in {"rth", "gth"}:
         gates.append(
             {
                 "gate": _IRON_CONDOR_HUMAN_GATE,
                 "actual": session_mode or None,
-                "threshold": "rth_only",
+                "threshold": "rth_or_gth_transition",
             }
         )
     authority = _map(facts.get("iron_condor_authority"))
-    if session_mode == "rth" and authority.get("status") != "ready":
+    if session_mode in {"rth", "gth"} and authority.get("status") != "ready":
         gates.append(
             {
                 "gate": "iron_condor_session_authority_unavailable",
@@ -1471,7 +1471,7 @@ def _iron_condor_hard_gates(
             }
         )
     accepted_count = _number(authority.get("accepted_count"))
-    if session_mode == "rth" and accepted_count is not None and accepted_count >= 1:
+    if session_mode in {"rth", "gth"} and accepted_count is not None and accepted_count >= 1:
         gates.append(
             {
                 "gate": "iron_condor_session_cap",
@@ -1484,10 +1484,7 @@ def _iron_condor_hard_gates(
             {
                 "gate": "iron_condor_entry_window_closed",
                 "actual": candidate.get("decision_at"),
-                "threshold": (
-                    f"{HUMAN_ENTRY_START_ET.strftime('%H:%M')}-"
-                    f"{HUMAN_ENTRY_END_ET.strftime('%H:%M')} ET"
-                ),
+                "threshold": "GTH expansion-to-contraction" if session_mode == "gth" else f"{HUMAN_ENTRY_START_ET:%H:%M}-{HUMAN_ENTRY_END_ET:%H:%M} ET",
             }
         )
     short_delta = _number(candidate.get("short_abs_delta"))
@@ -1499,14 +1496,16 @@ def _iron_condor_hard_gates(
                 "threshold": HUMAN_SHORT_DELTA,
             }
         )
-    if candidate.get("evidence_contract_hash") != HUMAN_EVIDENCE_CONTRACT_HASH:
+    expected_evidence_hash = GTH_EVIDENCE_CONTRACT_HASH if session_mode == "gth" else HUMAN_EVIDENCE_CONTRACT_HASH
+    if candidate.get("evidence_contract_hash") != expected_evidence_hash:
         gates.append(
             {
                 "gate": "iron_condor_evidence_contract_invalid",
                 "actual": candidate.get("evidence_contract_hash"),
-                "threshold": HUMAN_EVIDENCE_CONTRACT_HASH,
+                "threshold": expected_evidence_hash,
             }
         )
+    gates.extend(gth_iron_condor_gate_failures(candidate, session_mode))
     legs = candidate.get("legs")
     if not isinstance(legs, list) or len(legs) != 4 or any(not _map(leg) for leg in legs):
         gates.append(

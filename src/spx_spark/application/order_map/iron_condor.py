@@ -8,6 +8,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from spx_spark.analytics.options.strategy_payoff import (
+    IRON_CONDOR_MANAGEMENT_POLICY,
+    RTH_IRON_CONDOR_MANAGEMENT_POLICY,
     conservative_iron_condor_bbo,
     iron_condor_economics,
 )
@@ -25,6 +27,11 @@ from spx_spark.application.order_map.candidate_factory import (
     _session_option_legs,
     _time,
     nearest_abs_delta_strike,
+)
+from spx_spark.application.order_map.gth_iron_condor import (
+    GTH_EVIDENCE_CONTRACT_HASH,
+    gth_iron_condor_gate_failures,
+    gth_iron_condor_transition,
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
@@ -135,6 +142,8 @@ def build_iron_condor_map(
         "gth" if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now) else "rth"
     )
     primary["session_mode"] = session_mode
+    if session_mode == "gth":
+        primary["gth_transition"] = gth_iron_condor_transition(facts, now=now)
     primary["variants"] = [
         {
             "short_abs_delta": row.get("short_abs_delta"),
@@ -247,10 +256,16 @@ def enumerate_iron_condor_candidates(
     if session_policy is None:
         return []
     session_mode = "gth" if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now) else "rth"
-    human_window_open = session_mode == "rth" and _human_entry_window_open(now)
+    gth_transition = _map(structure.get("gth_transition"))
+    human_window_open = bool(
+        (session_mode == "rth" and _human_entry_window_open(now))
+        or (session_mode == "gth" and gth_transition.get("status") == "qualified")
+    )
+    candidate_quote_policy = session_policy
     if human_window_open:
         expiry = str(structure.get("expiry") or "")
         spot = _number(structure.get("spot"))
+        candidate_quote_policy = policy if session_mode == "gth" else session_policy
         human_structure = (
             _structure_for_short_delta(
                 latest,
@@ -258,8 +273,8 @@ def enumerate_iron_condor_candidates(
                 spot=spot,
                 short_abs_delta=HUMAN_SHORT_DELTA,
                 now=now,
-                session_policy=session_policy,
-                providers=(Provider.SCHWAB,),
+                session_policy=candidate_quote_policy,
+                providers=(Provider.IBKR,) if session_mode == "gth" else (Provider.SCHWAB,),
             )
             if expiry and spot is not None
             else None
@@ -296,7 +311,7 @@ def enumerate_iron_condor_candidates(
         candidate_id,
         *(leg.get("contract_id") for leg in legs),
     )
-    quote_valid = _quote_valid_until(legs, now=now, policy=session_policy)
+    quote_valid = _quote_valid_until(legs, now=now, policy=candidate_quote_policy)
     score = float(structure.get("selection_score") or 0.0)
     human_surface_gate = human_iron_condor_surface_gate(facts)
     put_short_delta = abs(_number(put_short.get("delta")) or 0.0)
@@ -353,7 +368,9 @@ def enumerate_iron_condor_candidates(
         gamma_risk = {
             "status": "ready",
             "version": GAMMA_RISK_VERSION,
-            "decision_effect": "explanation_only",
+            "decision_effect": (
+                "gth_iron_condor_gate" if session_mode == "gth" else "explanation_only"
+            ),
             "state": gamma_state,
             "net_gamma_per_spx_point": round(net_gamma, 8),
             "delta_shock_10_trader_delta": round(abs(net_gamma) * 10.0 * 100.0, 4),
@@ -361,15 +378,17 @@ def enumerate_iron_condor_candidates(
             "gcr10": round(gcr10, 8),
             "gcr20": round(0.5 * abs(net_gamma) * 20.0**2 / credit, 8),
             "nearest_short_abs_delta": round(max(put_short_delta, call_short_delta), 8),
-            "entry_gate_applied": False,
+            "entry_gate_applied": session_mode == "gth",
         }
     else:
         gamma_risk = {
             "status": "unavailable",
             "version": GAMMA_RISK_VERSION,
-            "decision_effect": "explanation_only",
+            "decision_effect": (
+                "gth_iron_condor_gate" if session_mode == "gth" else "explanation_only"
+            ),
             "state": "UNAVAILABLE",
-            "entry_gate_applied": False,
+            "entry_gate_applied": session_mode == "gth",
             "reason": "iron_condor_leg_gamma_unavailable",
         }
     return [
@@ -377,7 +396,11 @@ def enumerate_iron_condor_candidates(
             "candidate_id": candidate_id,
             "strategy_type": IRON_CONDOR_TYPE,
             "setup_kind": IRON_CONDOR_DELTA,
-            "setup_state": "ENTRY_WINDOW_OPEN",
+            "setup_state": (
+                "GTH_EXPANSION_TO_CONTRACTION"
+                if session_mode == "gth" and human_window_open
+                else "ENTRY_WINDOW_OPEN"
+            ),
             "direction": "NEUTRAL",
             "thesis_direction": "NEUTRAL",
             "payoff_shape": "RANGE",
@@ -418,6 +441,7 @@ def enumerate_iron_condor_candidates(
                 else None
             ),
             "gamma_risk": gamma_risk,
+            "gth_transition": gth_transition,
             "wing_width": WING_WIDTH,
             "quote_valid_until": quote_valid.isoformat() if quote_valid else now.isoformat(),
             "opportunity_valid_until": (
@@ -428,40 +452,64 @@ def enumerate_iron_condor_candidates(
             else f"rth_{quote.get('provider')}_iron_condor",
             "session_mode": session_mode,
             "geometry_source": (
-                "rth_20delta_fixed10_iron_condor"
-                if human_window_open
+                "gth_20delta_fixed10_transition_iron_condor"
+                if session_mode == "gth" and human_window_open
+                else "rth_20delta_fixed10_iron_condor"
+                if session_mode == "rth" and human_window_open
                 else "delta_5_20_ten_wide_iron_condor_map"
             ),
             "authorization_policy": policy.policy_version,
             "evidence_status": "forward_unvalidated_user_override",
-            "evidence_contract_hash": HUMAN_EVIDENCE_CONTRACT_HASH,
+            "evidence_contract_hash": (
+                GTH_EVIDENCE_CONTRACT_HASH
+                if session_mode == "gth"
+                else HUMAN_EVIDENCE_CONTRACT_HASH
+            ),
             "management_policy_version": (
-                "management_policy.iron_condor.tp50_sl200_hold1545.v2"
+                IRON_CONDOR_MANAGEMENT_POLICY.policy_version
+                if session_mode == "gth"
+                else RTH_IRON_CONDOR_MANAGEMENT_POLICY.policy_version
             ),
             "management_plan": {
                 "entry": "net_credit_limit",
                 "take_profit_buyback_fraction": HUMAN_TAKE_PROFIT_BUYBACK_FRACTION,
                 "stop_buyback_multiple": HUMAN_STOP_BUYBACK_MULTIPLE,
                 "stop_loss_return_on_credit": 2.0,
-                "hard_exit_et": HUMAN_HARD_EXIT_ET,
+                "hard_exit_et": (
+                    IRON_CONDOR_MANAGEMENT_POLICY.hard_exit_et
+                    if session_mode == "gth"
+                    else HUMAN_HARD_EXIT_ET
+                ),
                 "management_quote_max_age_seconds": 30.0,
                 "management_quote_max_skew_seconds": 30.0,
             },
-            "production_evidence": {
-                "contract": "rth_20delta_fixed10_daily_first_credit25_or_expansion_to_contraction_credit23_balanced_sides_schwab_only_1000_1100_locked_surface_advisory.v6",
-                "transition_replay_sessions": 36,
-                "transition_resolved_trades": 18,
-                "transition_wins": 16,
-                "transition_mean_net_pnl_dollars": 60.00,
-                "transition_minimum_net_pnl_dollars": -605.56,
-                "limitations": [
-                    "same_sample_policy_search",
-                    "production_v51_environment_not_fully_reconstructable",
-                    "credit23_boundary_uses_displayed_bbo",
-                    "one_minute_stop_sampling",
-                    "not_fill_probability",
-                ],
-            },
+            "production_evidence": (
+                {
+                    "contract": "gth_20delta_fixed10_expansion_to_contraction_ibkr_gcr20_credit25_balanced_tp50_sl200_clear1230.v1",
+                    "status": "forward_unvalidated_user_override",
+                    "limitations": [
+                        "atm_straddle_is_short_gamma_pressure_proxy_not_dealer_inventory",
+                        "gth_exact_bbo_fill_probability_not_modeled",
+                        "overnight_gap_tail_remains",
+                    ],
+                }
+                if session_mode == "gth"
+                else {
+                    "contract": "rth_20delta_fixed10_daily_first_credit25_or_expansion_to_contraction_credit23_balanced_sides_schwab_only_1000_1100_locked_surface_advisory.v6",
+                    "transition_replay_sessions": 36,
+                    "transition_resolved_trades": 18,
+                    "transition_wins": 16,
+                    "transition_mean_net_pnl_dollars": 60.00,
+                    "transition_minimum_net_pnl_dollars": -605.56,
+                    "limitations": [
+                        "same_sample_policy_search",
+                        "production_v51_environment_not_fully_reconstructable",
+                        "credit23_boundary_uses_displayed_bbo",
+                        "one_minute_stop_sampling",
+                        "not_fill_probability",
+                    ],
+                }
+            ),
             "automatic_ordering": False,
             "manual_action_only": True,
         }
@@ -513,30 +561,40 @@ def iron_condor_session_state(
     *,
     now: datetime,
 ) -> dict[str, Any]:
-    """Freeze the first qualifying RTH candidate; surface remains advisory."""
+    """Freeze the first qualifying candidate independently for RTH and GTH."""
 
     session_date = str(facts.get("session_date") or "")
+    session_mode = str(_map(facts.get("session")).get("mode") or "").lower()
     previous = _map(payload.get("previous_strategy_decision"))
     previous_facts = _map(previous.get("market_facts"))
     previous_state = _map(previous_facts.get(HUMAN_SESSION_STATE_KEY))
     if (
         str(previous.get("session_date") or previous_facts.get("session_date") or "")
         == session_date
+        and str(previous_state.get("session_mode") or "rth").lower() == session_mode
         and previous_state.get("status") == "eligible"
     ):
         return {**previous_state, "carried_forward": True}
 
     current_state = _map(facts.get(HUMAN_SESSION_STATE_KEY))
-    if current_state.get("status") == "eligible":
+    if (
+        current_state.get("status") == "eligible"
+        and str(current_state.get("session_mode") or "rth").lower() == session_mode
+    ):
         return dict(current_state)
 
     base = {
         "status": "waiting",
         "session_date": session_date,
-        "contract": "daily_first_credit25_or_transition_credit23_candidate_lock_surface_advisory",
+        "session_mode": session_mode,
+        "contract": (
+            "gth_first_expansion_to_contraction_credit25_gcr20_candidate_lock"
+            if session_mode == "gth"
+            else "rth_daily_first_credit25_or_transition_credit23_candidate_lock_surface_advisory"
+        ),
         "carried_forward": False,
     }
-    if str(_map(facts.get("session")).get("mode") or "").lower() != "rth":
+    if session_mode not in {"rth", "gth"}:
         return base
     for candidate in candidates:
         if not _qualifies_for_human_candidate_lock(candidate, facts):
@@ -557,6 +615,14 @@ def iron_condor_session_state(
 def human_iron_condor_entry_contract(
     candidate: Mapping[str, Any], facts: Mapping[str, Any]
 ) -> dict[str, Any]:
+    if str(candidate.get("session_mode") or "").lower() == "gth":
+        transition = _map(candidate.get("gth_transition"))
+        return {
+            "minimum_credit_fraction": MIN_CREDIT_FRACTION,
+            "minimum_side_credit_share": TRANSITION_MIN_SIDE_CREDIT_SHARE,
+            "environment_state": transition.get("status"),
+            "transition_contract": transition.get("status") == "qualified",
+        }
     environment = _map(facts.get("rth_environment"))
     transition = environment.get("state") == "EXPANSION_TO_CONTRACTION"
     return {
@@ -585,6 +651,13 @@ def _qualifies_for_human_candidate_lock(
     minimum_credit = float(entry_contract["minimum_credit_fraction"])
     minimum_side_share = _number(entry_contract.get("minimum_side_credit_share"))
     actual_side_share = _number(candidate.get("minimum_side_credit_share"))
+    session_mode = str(candidate.get("session_mode") or "").lower()
+    expected_hash = (
+        GTH_EVIDENCE_CONTRACT_HASH
+        if session_mode == "gth"
+        else HUMAN_EVIDENCE_CONTRACT_HASH
+    )
+    gth_gate_ready = not gth_iron_condor_gate_failures(candidate, session_mode)
     return bool(
         credit_fraction is not None
         and minimum_credit - 1e-9 <= credit_fraction <= MAX_CREDIT_FRACTION
@@ -598,7 +671,8 @@ def _qualifies_for_human_candidate_lock(
         and loss is not None
         and 0.0 < loss * 100.0 <= HUMAN_MAX_RISK_DOLLARS
         and candidate.get("spot_inside_shorts") is True
-        and candidate.get("evidence_contract_hash") == HUMAN_EVIDENCE_CONTRACT_HASH
+        and candidate.get("evidence_contract_hash") == expected_hash
+        and gth_gate_ready
     )
 
 

@@ -163,7 +163,11 @@ def build_strategy_decision(
                 session_mode = str(_map(facts.get("session")).get("mode") or "")
                 independent_preaverage = any(
                     row.get("setup_kind")
-                    in {"PREAVERAGE15_PULLBACK", CLOSE_CONVERGENCE_60M}
+                    in {
+                        "PREAVERAGE15_PULLBACK",
+                        CLOSE_CONVERGENCE_60M,
+                        "IRON_CONDOR_DELTA",
+                    }
                     for row in rank.passed
                 )
                 winner_lock = (
@@ -935,10 +939,10 @@ def _accepted_session_cards(session_date: str):
 def _iron_condor_session_authority(
     facts: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Fail closed unless the accepted-card ledger proves the RTH quota is free."""
+    """Fail closed unless the ledger proves this session-mode quota is free."""
 
     session_mode = str(_map(facts.get("session")).get("mode") or "").lower()
-    if session_mode != "rth":
+    if session_mode not in {"rth", "gth"}:
         return {"status": "map_only", "accepted_count": None}
     session_date = str(facts.get("session_date") or "")
     if not session_date:
@@ -949,7 +953,7 @@ def _iron_condor_session_authority(
     accepted = sum(
         1
         for row in rows
-        if str(row.get("session_mode") or "").lower() == "rth"
+        if str(row.get("session_mode") or "").lower() == session_mode
         and str(row.get("setup_kind") or "") == "IRON_CONDOR_DELTA"
     )
     return {"status": "ready", "accepted_count": accepted}

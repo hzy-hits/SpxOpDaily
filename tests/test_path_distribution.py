@@ -431,7 +431,8 @@ def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) ->
     assert distribution["risk_objective"]["automatic_ordering"] is False
     text = path_distribution_desk_text(distribution)
     assert text is not None
-    assert text.startswith("GTH旧研究·次日12:30ET前 路径 P10/P50/P90 $")
+    assert "0.5C止盈/3C止损" in text
+    assert "次日12:30ET前 路径 P10/P50/P90 $" in text
     assert text.endswith("样本不足，仅研究")
 
 

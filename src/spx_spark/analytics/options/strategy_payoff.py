@@ -46,11 +46,17 @@ class ManagementPolicy:
 
 
 DEFAULT_MANAGEMENT_POLICY = ManagementPolicy()
-# Legacy GTH clearing overlay remains map-only and ends at 12:30 ET.
+# GTH iron condors use the same mechanical 50% take-profit / 200% credit-loss
+# stop as the RTH contract, but clear during RTH at 12:30 ET.  This remains a
+# manual-only, forward-unvalidated contract.
 IRON_CONDOR_MANAGEMENT_POLICY = ManagementPolicy(
-    policy_version="management_policy.iron_condor.clear_1230.v1",
-    time_stop_minutes=24 * 60,
+    policy_version="management_policy.iron_condor.gth_tp50_sl200_clear1230.v2",
+    premium_stop_fraction=None,
+    time_stop_minutes=None,
     hard_exit_et="12:30",
+    entry_side="credit",
+    credit_take_profit_fraction=0.50,
+    credit_stop_loss_multiple=2.00,
 )
 # The user-authorized RTH contract buys the package back at half the entry
 # credit, stops when buyback liability reaches 3x entry credit (a 200% pre-fee

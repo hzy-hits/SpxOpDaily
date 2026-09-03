@@ -315,6 +315,20 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         put_distance_text = f"{put_distance:.1f}点" if put_distance is not None else "-"
         call_distance_text = f"{call_distance:.1f}点" if call_distance is not None else "-"
         gamma_risk = candidate.get("gamma_risk") or {}
+        management_plan = candidate.get("management_plan") or {}
+        hard_exit_et = str(management_plan.get("hard_exit_et") or "15:45")
+        transition = candidate.get("gth_transition") or {}
+        transition_line = ""
+        if transition.get("status") == "qualified":
+            expansion = _finite_number(transition.get("straddle_expansion_fraction"))
+            contraction = _finite_number(
+                transition.get("straddle_contraction_from_high_fraction")
+            )
+            if expansion is not None and contraction is not None:
+                transition_line = (
+                    f"GTH 波动：跨式先扩张 {expansion:.1%}、后从峰值收缩 "
+                    f"{contraction:.1%}（不是 dealer 持仓推断）"
+                )
         if gamma_risk.get("status") == "ready":
             net_gamma = _finite_number(gamma_risk.get("net_gamma_per_spx_point"))
             delta_shock = _finite_number(gamma_risk.get("delta_shock_10_trader_delta"))
@@ -347,11 +361,12 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "## 风险",
             f"最大亏损 {loss} · 短腿 {invalidation} 被触及时刷新四腿回购价",
             gamma_line,
+            *([transition_line] if transition_line else []),
             f"止损：回购价 ≥ {_fmt_premium(stop_buyback)}（入场贷记 3倍，净亏200%）",
             "",
             "## 目标",
             f"止盈：回购价 ≤ {_fmt_premium(take_profit)}（入场贷记 50%）",
-            "15:45 ET 前未触发则用新鲜四腿报价平仓",
+            f"{hard_exit_et} ET 前未触发则用新鲜四腿报价平仓",
         ]
     elif str(candidate.get("strategy_type") or "").endswith("_BUTTERFLY"):
         ask = quote.get("ask")
@@ -763,7 +778,7 @@ def _flood_control_block(
     for row in accepted:
         if (
             setup_kind == "IRON_CONDOR_DELTA"
-            and str(row.get("session_mode") or session_mode) == "rth"
+            and str(row.get("session_mode") or session_mode) == session_mode
             and str(row.get("setup_kind") or "") == "IRON_CONDOR_DELTA"
         ):
             iron_condor_hits += 1
@@ -786,7 +801,7 @@ def _flood_control_block(
             "outcome": "flood_control_iron_condor_session_cap",
             "counts": counts,
         }
-    if session_mode in {"gth", "rth"}:
+    if session_mode in {"gth", "rth"} and setup_kind != "IRON_CONDOR_DELTA":
         stick_seconds = (
             DEFAULT_STRATEGY_POLICY.gth_winner_stick_seconds
             if session_mode == "gth"

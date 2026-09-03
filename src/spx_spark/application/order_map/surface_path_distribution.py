@@ -71,8 +71,8 @@ def path_distribution_desk_text(distribution: Mapping[str, Any] | None) -> str |
     policy = str(distribution.get("management_policy_version") or "")
     if policy == "management_policy.iron_condor.tp50_sl200_hold1545.v2":
         prefix = "RTH 0.5C止盈/3C止损·最迟15:45ET "
-    elif policy == "management_policy.iron_condor.clear_1230.v1":
-        prefix = "GTH旧研究·次日12:30ET前 "
+    elif policy == "management_policy.iron_condor.gth_tp50_sl200_clear1230.v2":
+        prefix = "GTH 0.5C止盈/3C止损·次日12:30ET前 "
     else:
         method = distribution.get("method")
         prefix = (

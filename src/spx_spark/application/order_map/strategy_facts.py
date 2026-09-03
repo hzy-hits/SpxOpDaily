@@ -375,6 +375,7 @@ def build_market_fact_pack(
             "atm_straddle_decay_15m": _number(volatility.get("atm_straddle_decay_15m")),
             "atm_straddle_gth_high": _number(atm_straddle_gth_mid.get("high")),
             "atm_straddle_gth_low": _number(atm_straddle_gth_mid.get("low")),
+            "atm_straddle_gth_extrema": {**atm_straddle_gth_mid, "observations": atm_straddle_gth.get("observations")},
             "atm_straddle_vs_gth_high_fraction": _number(
                 atm_straddle_gth_mid.get("current_vs_high_fraction")
             ),

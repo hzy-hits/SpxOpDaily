@@ -255,7 +255,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v62"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v63"
     assert ranked.passed == []
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
@@ -493,9 +493,10 @@ def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> N
     assert "心跳 · 健康检查" not in sections.desk_view
     assert "最近候选  无" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "结论  不做" in sections.desk_view
+    assert "NO TRADE" in sections.desk_view
     assert "扫描赢家已推送" not in sections.desk_view
-    assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 8 最大亏损 2" in sections.desk_view
+    assert "20Δ/10宽 · 等待跨式先扩张、再收缩" in sections.desk_view
+    assert "7680/7690/7810/7820" not in sections.desk_view
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 

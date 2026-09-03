@@ -613,6 +613,40 @@ def test_desk_sections_include_captured_option_flow_without_granting_authority()
     assert "不等于入场授权" in sections.primary_path
 
 
+def test_research_signals_collapse_to_one_confirm_or_conflict_advice() -> None:
+    payload = _payload()
+    payload["strategy_decision"] = {
+        "decision_type": "NO_TRADE",
+        "candidate": None,
+        "action_authority": "none",
+        "execution": {"action": "WAIT"},
+        "regime": {"path_direction": "UP"},
+        "market_facts": {
+            "ict_liquidity": {
+                "status": "active",
+                "stage": "MSS_DISPLACEMENT_CONFIRMED",
+                "direction": "UP",
+            }
+        },
+        "why_not": {"reasons": ["confirmed_price_trigger_unavailable"]},
+    }
+    payload["spring_gamma_v3_shadow"] = {
+        "status": "ready",
+        "direction": {"decision": "down"},
+    }
+    payload["intraday_shock_state"] = {
+        "captured_net_premium_divergence": {
+            "snapshot": {"divergence": "BEARISH"}
+        }
+    }
+
+    sections = build_desk_message_sections(payload, NOW)
+
+    assert "研究建议  确认偏多：ICT；冲突：Spring、资金流背离，少追价" in (
+        sections.structure
+    )
+
+
 def test_missing_live_spx_labels_latched_decision_spot_as_non_actionable_reference() -> None:
     payload = _payload()
     payload["underlier"] = {"price": None, "source": None}
@@ -816,7 +850,9 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 9 最大亏损 1" in sections.desk_view
+    assert "20Δ/10宽 · 等待跨式先扩张、再收缩" in sections.desk_view
+    assert "7680/7690/7810/7820" not in sections.desk_view
+    assert "等待跨式先扩张、再收缩" in sections.desk_view
 
 
 def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
@@ -874,10 +910,13 @@ def test_gth_competing_session_is_rendered_as_paused_not_scanning() -> None:
     }
 
     sections = build_desk_message_sections(payload, gth_now)
+    rendered = render_operator_status_brief(payload, [], gth_now)
 
-    assert "GTH实时期权行情暂停（IBKR 10197" in sections.structure
-    assert "PAUSED · IBKR 10197实时行情冲突" in sections.execution
-    assert "主要影响：IBKR返回实时行情会话冲突（10197）" in sections.data_quality
+    assert "GTH实时期权行情暂停" not in sections.structure
+    assert sections.execution == "PAUSED · 等待 GTH 报价自动恢复"
+    assert "IBKR返回实时行情会话冲突（10197）" in sections.data_quality
+    assert len(rendered.splitlines()) <= 8
+    assert rendered.count("10197") == 1
 
 
 @pytest.mark.parametrize(

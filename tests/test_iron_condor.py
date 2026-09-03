@@ -12,6 +12,7 @@ from spx_spark.application.order_map.iron_condor import (
     IRON_CONDOR_DELTA,
     build_iron_condor_map,
     enumerate_iron_condor_candidates,
+    gth_iron_condor_transition,
     iron_condor_session_state,
 )
 from spx_spark.application.order_map.operator_status import build_desk_message_sections
@@ -135,6 +136,25 @@ def _rth_state(
     return LatestState(created_at=now, as_of=now, quotes=quotes, best_quotes=quotes)
 
 
+def _gth_state(now: datetime = NOW) -> LatestState:
+    rows = []
+    for quote in _quotes(now, with_greeks=True):
+        right = str(getattr(quote.instrument.right, "value", quote.instrument.right) or "")
+        rich_short = (
+            (right == "P" and quote.instrument.strike == 7690.0)
+            or (right == "C" and quote.instrument.strike == 7810.0)
+        )
+        rows.append(
+            replace(
+                quote,
+                bid=(quote.bid or 0.0) + (0.75 if rich_short else 0.0),
+                ask=(quote.ask or 0.0) + (0.75 if rich_short else 0.0),
+            )
+        )
+    quotes = tuple(rows)
+    return LatestState(created_at=now, as_of=now, quotes=quotes, best_quotes=quotes)
+
+
 def _facts() -> dict[str, object]:
     return {
         "schema_version": "market_fact_pack.v1",
@@ -222,6 +242,35 @@ def _rth_facts(
             },
         }
     )
+    facts["capabilities"]["path"] = {"ready": True}
+    return facts
+
+
+def _gth_transition_facts() -> dict[str, object]:
+    facts = _facts()
+    facts["path"] = {
+        "impulse_15m_points": 2.0,
+        "atr_5m": 4.0,
+    }
+    facts["volatility"] = {
+        "expected_move_points": 40.0,
+        "atm_iv_0dte": 0.18,
+        "put_skew_25d_0dte": 0.03,
+        "call_skew_25d_0dte": 0.02,
+        "atm_straddle_mid": 24.0,
+        "atm_straddle_gth_high": 30.0,
+        "atm_straddle_gth_low": 20.0,
+        "atm_straddle_gth_high_at": (NOW - timedelta(minutes=10)).isoformat(),
+        "atm_straddle_gth_low_at": (NOW - timedelta(minutes=45)).isoformat(),
+        "atm_straddle_gth_observations": 60,
+        "atm_straddle_decay_15m": 0.08,
+        "atm_iv_change_5m": -0.002,
+        "atm_iv_change_15m": -0.004,
+    }
+    facts["iron_condor_authority"] = {
+        "status": "ready",
+        "accepted_count": 0,
+    }
     facts["capabilities"]["path"] = {"ready": True}
     return facts
 
@@ -385,8 +434,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v62"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v62"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v63"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v63"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -431,7 +480,125 @@ def test_ready_iron_condor_is_map_only_not_a_human_winner() -> None:
     assert ranked.near_misses
     miss = ranked.near_misses[0]
     assert miss["strategy_type"] == "IRON_CONDOR"
-    assert "iron_condor_not_human_authorized" in miss["rejection_reasons"]
+    assert "gth_iron_condor_transition_unconfirmed" in miss["rejection_reasons"]
+
+
+def test_gth_expansion_to_contraction_can_reach_manual_iron_condor() -> None:
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
+
+    facts = _gth_transition_facts()
+    transition = gth_iron_condor_transition(facts, now=NOW)
+    rows = enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _gth_state(),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+
+    assert transition["status"] == "qualified"
+    assert transition["proxy"] == "atm_straddle_and_atm_iv_not_dealer_gamma"
+    assert transition["straddle_expansion_fraction"] == 0.5
+    assert transition["straddle_contraction_from_high_fraction"] == 0.2
+    assert rows[0]["manual_authority_eligible"] is True
+    assert rows[0]["session_mode"] == "gth"
+    assert rows[0]["strikes"] == [7680.0, 7690.0, 7810.0, 7820.0]
+    assert rows[0]["short_abs_delta"] == 0.20
+    assert rows[0]["quote"]["credit"] == 2.5
+    assert {leg["provider"] for leg in rows[0]["legs"]} == {"ibkr"}
+    assert rows[0]["gamma_risk"]["gcr10"] == 0.0
+    assert rows[0]["management_plan"]["hard_exit_et"] == "12:30"
+    card = _render_strategy_candidate(
+        {"market_facts": {"spot": {"spx": SPOT}}}, rows[0]
+    )
+    assert "跨式先扩张 50.0%、后从峰值收缩 20.0%" in card
+    assert "不是 dealer 持仓推断" in card
+    assert "12:30 ET 前未触发" in card
+
+    session_state = iron_condor_session_state(_payload(), facts, rows, now=NOW)
+    assert session_state["status"] == "eligible"
+    facts["iron_condor_session_state"] = session_state
+    ranked = rank_candidates(
+        rows,
+        facts,
+        {
+            "path_state": "BALANCED",
+            "terminal_state": "NONE",
+            "pin": {},
+        },
+        policy=StrategyPolicy(),
+        data_root=None,
+        probability_settings=None,
+        now=NOW,
+    )
+    assert ranked.passed, ranked.near_misses
+
+
+def test_gth_transition_never_falls_back_to_schwab_execution_quotes() -> None:
+    facts = _gth_transition_facts()
+
+    assert build_iron_condor_map(
+        _payload(),
+        facts,
+        _rth_state(NOW),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )["status"] == "ready"
+    assert enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _rth_state(NOW),
+        now=NOW,
+        policy=StrategyPolicy(),
+    ) == []
+
+
+def test_gth_transition_iron_condor_uses_unified_manual_decision(
+    monkeypatch, tmp_path
+) -> None:
+    facts = _gth_transition_facts()
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+        lambda payload, latest, at: facts,
+    )
+    monkeypatch.setattr(
+        "spx_spark.application.order_map.strategy_select._accepted_session_cards",
+        lambda session_date: (),
+    )
+
+    decision = build_strategy_decision(
+        _payload(), _gth_state(), NOW, data_root=tmp_path
+    )
+
+    assert decision["decision_type"] == "IRON_CONDOR", decision["why_not"]
+    assert decision["action_authority"] == "manual"
+    assert decision["automatic_ordering"] is False
+    assert decision["execution"]["order_type"] == "NET_CREDIT_LIMIT"
+    assert decision["candidate"]["session_mode"] == "gth"
+    assert decision["candidate"]["gth_transition"]["status"] == "qualified"
+    assert decision["candidate"]["management_policy_version"] == (
+        "management_policy.iron_condor.gth_tp50_sl200_clear1230.v2"
+    )
+
+
+def test_gth_transition_requires_contraction_not_just_an_earlier_spike() -> None:
+    facts = _gth_transition_facts()
+    facts["volatility"]["atm_iv_change_5m"] = 0.001
+    facts["volatility"]["atm_straddle_decay_15m"] = -0.01
+
+    transition = gth_iron_condor_transition(facts, now=NOW)
+    rows = enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _gth_state(),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+
+    assert transition["status"] == "waiting"
+    assert "gth_transition_straddle_not_decaying" in transition["reasons"]
+    assert "gth_transition_atm_iv_5m_not_contracting" in transition["reasons"]
+    assert rows[0]["manual_authority_eligible"] is False
 
 
 def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
@@ -810,11 +977,14 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
     assert "心跳 · 非交易卡" not in sections.execution
     assert "可看 ·" not in sections.desk_view
     assert "7730/7725" not in sections.desk_view
-    assert "结论  不做" in sections.desk_view
+    assert "NO TRADE" in sections.desk_view
     assert "扫描赢家已推送" not in sections.desk_view
     assert "无过门赢家" not in sections.desk_view
-    assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 2.4 最大亏损 7.6" in sections.desk_view
-    assert "卖20Δ 10宽 7680/7690/7810/7820 贷记 2.4 最大亏损 7.6" in sections.structure
+    assert "20Δ/10宽 · 等待跨式先扩张、再收缩" in sections.desk_view
+    assert "7680/7690/7810/7820" not in sections.desk_view
+    assert "等待跨式先扩张、再收缩" in sections.desk_view
+    assert "研究建议" not in sections.desk_view
+    assert "策略状态·铁鹰" not in sections.structure
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 

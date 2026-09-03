@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
@@ -204,7 +205,11 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
         )
 
     if iron_condor:
-        condor_text = iron_condor_desk_line(iron_condor)
+        condor_text = (
+            compact_iron_condor_desk_line(payload, decision)
+            if current_session_is_gth(payload, _mapping(payload.get("level_decision")))
+            else iron_condor_desk_line(iron_condor)
+        )
         condor_gate = next(
             (
                 row
@@ -245,6 +250,8 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
             }.get(environment_state, environment_state)
         )
         lines.insert(0, f"RTH环境  {label}；宏观只作过滤，不产生方向")
+    if advice := research_decision_advice(payload):
+        lines.append(advice)
     return tuple(lines)
 
 
@@ -253,8 +260,7 @@ def _gth_scan_desk_view(
     decision: Mapping[str, Any],
     reasons: list[str],
 ) -> str:
-    del payload
-    ic_line = iron_condor_desk_line(_mapping(decision.get("iron_condor_map")))
+    ic_line = compact_iron_condor_desk_line(payload, decision)
     quality = _mapping(decision.get("data_quality"))
     quality_reasons = [
         str(reason)
@@ -262,19 +268,186 @@ def _gth_scan_desk_view(
         if str(reason).strip()
     ]
     if quality_reasons:
-        primary = quality_reason_text(quality_reasons[0])
+        primary = (
+            "GTH 报价暂停"
+            if quality_reasons[0] == "ibkr_competing_session"
+            else quality_reason_text(quality_reasons[0])
+        )
     elif reasons:
         primary = humanize_strategy_reason(reasons[0])
     else:
         primary = "1 分钟报价持续重算 5–50 点价差与 5–20Δ 10 点翼宽铁鹰"
-    return "\n".join(
-        (
-            "结论  不做",
-            f"主因  {primary}",
-            f"铁鹰  {ic_line}",
-            "下一步  仅「SPX 人工候选」可做",
+    candidate = _mapping(decision.get("candidate"))
+    if (
+        decision.get("action_authority") == "manual"
+        and str(candidate.get("strategy_type") or "").upper() == "IRON_CONDOR"
+    ):
+        conclusion = f"人工铁鹰候选已另发 · {ic_line}"
+    else:
+        conclusion = f"NO TRADE · {primary} · 铁鹰：{ic_line}"
+    advice = research_decision_advice(payload)
+    return f"{conclusion}\n{advice}" if advice else conclusion
+
+
+def compact_iron_condor_desk_line(
+    payload: Mapping[str, Any], decision: Mapping[str, Any] | None = None
+) -> str:
+    """One-line GTH iron-condor state; the full ticket remains a separate card."""
+
+    decision = _mapping(decision or payload.get("strategy_decision"))
+    candidate = _mapping(decision.get("candidate"))
+    if str(candidate.get("strategy_type") or "").upper() != "IRON_CONDOR":
+        candidate = {}
+    map_structure = _mapping(decision.get("iron_condor_map"))
+    transition = _mapping(map_structure.get("gth_transition"))
+    if not candidate:
+        nearest = _mapping(_mapping(decision.get("why_not")).get("nearest_candidate"))
+        if str(nearest.get("strategy_type") or "").upper() == "IRON_CONDOR":
+            transition = _mapping(nearest.get("gth_transition")) or transition
+        if transition.get("status") == "qualified":
+            return "20Δ/10宽 · 收缩已确认，等待 IBKR 四腿与赔率门"
+        return "20Δ/10宽 · 等待跨式先扩张、再收缩"
+
+    structure = candidate
+    strikes = "/".join(f"{value:g}" for value in structure.get("strikes") or ()) or "-"
+    credit = finite_float(_mapping(structure.get("quote")).get("credit"))
+    delta = finite_float(structure.get("short_abs_delta"))
+    delta_text = f"{delta * 100:.0f}Δ" if delta is not None else "逐边≤20Δ"
+    credit_text = f" · 贷记 {credit:.2f}" if credit is not None else ""
+    return f"{delta_text}/10宽 {strikes}{credit_text} · 人工候选已另发"
+
+
+def research_decision_advice(payload: Mapping[str, Any]) -> str | None:
+    """Collapse research into one confirm/conflict advisory line."""
+
+    decision = _mapping(payload.get("strategy_decision"))
+    facts = _mapping(decision.get("market_facts"))
+    signals: list[tuple[str, str]] = []
+    ict = _mapping(facts.get("ict_liquidity"))
+    if (
+        ict.get("status") == "active"
+        and ict.get("stage") == "MSS_DISPLACEMENT_CONFIRMED"
+        and str(ict.get("direction") or "").upper() in {"UP", "DOWN"}
+    ):
+        signals.append(("ICT", str(ict["direction"]).upper()))
+    spring = _mapping(payload.get("spring_gamma_v3_shadow"))
+    spring_direction = str(_mapping(spring.get("direction")).get("decision") or "").upper()
+    if spring.get("status") == "ready" and spring_direction in {"UP", "DOWN"}:
+        signals.append(("Spring", spring_direction))
+    flow_state = _mapping(
+        _mapping(payload.get("intraday_shock_state")).get(
+            "captured_net_premium_divergence"
         )
     )
+    flow = _mapping(flow_state.get("snapshot")) or flow_state
+    flow_direction = {
+        "BEARISH": "DOWN",
+        "BULLISH": "UP",
+    }.get(str(flow.get("divergence") or "").upper())
+    if flow_direction:
+        signals.append(("资金流背离", flow_direction))
+    if not signals:
+        return None
+
+    candidate = _mapping(decision.get("candidate"))
+    reference = str(
+        candidate.get("direction")
+        or _mapping(decision.get("regime")).get("path_direction")
+        or ""
+    ).upper()
+    if reference not in {"UP", "DOWN"}:
+        unique = {direction for _, direction in signals}
+        if len(unique) != 1:
+            return "研究建议  信号互相冲突；等待价格确认"
+        direction = unique.pop()
+        names = "、".join(name for name, _ in signals)
+        return f"研究建议  {names}偏{'多' if direction == 'UP' else '空'}；不能单独开仓"
+
+    aligned = [name for name, direction in signals if direction == reference]
+    opposed = [name for name, direction in signals if direction != reference]
+    direction_text = "偏多" if reference == "UP" else "偏空"
+    parts = []
+    if aligned:
+        parts.append(f"确认{direction_text}：{'、'.join(aligned)}")
+    if opposed:
+        parts.append(f"冲突：{'、'.join(opposed)}，少追价")
+    return "研究建议  " + "；".join(parts)
+
+
+def compact_gth_no_trade(
+    payload: Mapping[str, Any], decision: Mapping[str, Any] | None = None
+) -> bool:
+    decision = _mapping(decision or payload.get("strategy_decision"))
+    return bool(
+        current_session_is_gth(payload, _mapping(payload.get("level_decision")))
+        and decision.get("decision_type") == "NO_TRADE"
+    )
+
+
+def compact_gth_no_trade_sections(
+    payload: Mapping[str, Any], sections: Any, *, quality_reasons: tuple[str, ...]
+) -> Any:
+    """Trim the fixed GTH NO_TRADE projection without changing its facts."""
+
+    decision = _mapping(payload.get("strategy_decision"))
+    if not compact_gth_no_trade(payload, decision):
+        return sections
+    location_parts = sections.location.split(" · ")
+    location = " · ".join(
+        [*location_parts[:2], *[part for part in location_parts[2:] if "VWAP" in part][:1]]
+    )
+    structure = sections.structure.splitlines()[0]
+    provider_conflict = (
+        _mapping(payload.get("strategy_entry_control")).get("allowed") is not True
+        and _mapping(payload.get("strategy_entry_control")).get("reason")
+        == "ibkr_competing_session"
+    )
+    if provider_conflict:
+        structure = structure.split(" · GTH实时", maxsplit=1)[0]
+    transition = _mapping(
+        _mapping(_mapping(decision.get("why_not")).get("nearest_candidate")).get(
+            "gth_transition"
+        )
+    )
+    if transition.get("status") == "qualified":
+        contraction = finite_float(transition.get("straddle_contraction_from_high_fraction"))
+        if contraction is not None:
+            structure += f" · 跨式较峰值收缩 {contraction:.1%}"
+    trigger_lines = [line.strip() for line in sections.primary_path.splitlines()]
+    primary_path = " · ".join(
+        line.removeprefix("下一触发  ").removeprefix("流确认  ")
+        for line in trigger_lines
+        if line.startswith(("下一触发", "流确认"))
+    ) or "等待当前关键位确认"
+    data_quality = (
+        "执行数据 READY"
+        if not quality_reasons
+        else f"执行数据 DEGRADED · {quality_reason_text(quality_reasons[0])}"
+    )
+    return replace(
+        sections,
+        location=location,
+        structure=structure,
+        primary_path=primary_path,
+        alternative_path="无持仓；新结构形成后重算",
+        targets="无交易目标",
+        execution="PAUSED · 等待 GTH 报价自动恢复" if provider_conflict else sections.execution,
+        data_quality=data_quality,
+    )
+
+
+def render_compact_gth_brief(payload: Mapping[str, Any], sections: Any) -> str | None:
+    if not compact_gth_no_trade(payload):
+        return None
+    fields = (
+        ("结论", sections.desk_view),
+        ("位置", sections.location),
+        ("结构", sections.structure),
+        ("触发", sections.primary_path),
+        ("执行", sections.execution),
+        ("数据", sections.data_quality),
+    )
+    return "\n".join((sections.title, *(f"{label}  {value}" for label, value in fields)))
 
 
 def strategy_candidate_label(candidate: Mapping[str, Any]) -> str:
@@ -362,6 +535,9 @@ def humanize_strategy_reason(reason: str) -> str:
         "iron_condor_session_authority_unavailable": "铁鹰当日推送账本不可用，失效关闭",
         "iron_condor_session_cap": "当日 RTH 铁鹰候选已推送一次",
         "iron_condor_entry_window_closed": "铁鹰人工入场窗只在 10:00–11:00 ET",
+        "gth_iron_condor_transition_unconfirmed": "GTH 跨式尚未完成扩张转收缩",
+        "gth_iron_condor_ibkr_quote_required": "GTH 铁鹰缺少 IBKR 四腿新鲜报价",
+        "gth_iron_condor_gamma_risk_hot": "GTH 铁鹰的 10 点 Gamma/贷记风险过热",
         "iron_condor_human_short_delta": "人工铁鹰固定使用 20Δ 短腿",
         "iron_condor_evidence_contract_invalid": "铁鹰生产证据合同不匹配",
         "iron_condor_max_risk": "铁鹰单组合定义风险超过 $1,000",
