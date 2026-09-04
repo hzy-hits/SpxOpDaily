@@ -510,7 +510,7 @@ def enumerate_iron_condor_candidates(
             },
             "production_evidence": (
                 {
-                    "contract": "gth_20delta_fixed10_expansion_to_contraction_ibkr_gcr20_credit25_balanced_tp50_sl200_clear1230_quote30_skew10.v2",
+                    "contract": "gth_20delta_fixed10_local_expansion_to_contraction_ibkr_gcr20_credit25_balanced_tp50_sl200_clear1230_quote30_skew10.v3",
                     "status": "forward_unvalidated_user_override",
                     "limitations": [
                         "atm_straddle_is_short_gamma_pressure_proxy_not_dealer_inventory",

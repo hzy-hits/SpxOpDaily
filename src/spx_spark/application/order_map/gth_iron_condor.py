@@ -7,19 +7,23 @@ from datetime import datetime, timezone
 from typing import Any
 
 from spx_spark.application.order_map.candidate_factory import _map, _number, _time
+from spx_spark.application.market_features.session_episode import (
+    ATM_STRADDLE_GTH_ACTIVE_EXPANSION_FRACTION,
+    ATM_STRADDLE_GTH_ACTIVE_WINDOW_SECONDS,
+)
 
 GTH_EVIDENCE_CONTRACT_HASH = (
-    "sha256:bb9092af1f7920c7766d874a711b8b73fb956a159ccc918e854bb3d1f772c114"
+    "sha256:901d69561a93d3503495210c1f49f5c35791695065c0b298470c4e554dd446ba"
 )
-GTH_TRANSITION_VERSION = "gth_short_gamma_expansion_to_contraction.v1"
+GTH_TRANSITION_VERSION = "gth_short_gamma_expansion_to_contraction.v2"
 GTH_MAX_EXACT_QUOTE_AGE_SECONDS = 30.0
 GTH_MAX_EXACT_QUOTE_SKEW_SECONDS = 10.0
 GTH_MIN_STRADDLE_OBSERVATIONS = 30
-GTH_MIN_EXPANSION_FRACTION = 0.10
+GTH_MIN_EXPANSION_FRACTION = ATM_STRADDLE_GTH_ACTIVE_EXPANSION_FRACTION
 GTH_MIN_CONTRACTION_FROM_HIGH_FRACTION = 0.08
 GTH_MIN_STRADDLE_DECAY_15M = 0.03
 GTH_MIN_PEAK_AGE_SECONDS = 300.0
-GTH_MAX_PEAK_AGE_SECONDS = 7_200.0
+GTH_MAX_PEAK_AGE_SECONDS = ATM_STRADDLE_GTH_ACTIVE_WINDOW_SECONDS
 GTH_MAX_ABS_15M_MOVE_ATR = 1.25
 GTH_MAX_GCR10 = 0.20
 
@@ -35,18 +39,42 @@ def gth_iron_condor_transition(
     extrema = _map(volatility.get("atm_straddle_gth_extrema"))
     path = _map(facts.get("path"))
     current = _number(volatility.get("atm_straddle_mid"))
-    high = _number(volatility.get("atm_straddle_gth_high"))
-    low = _number(volatility.get("atm_straddle_gth_low"))
-    peak_base_low = _number(
-        volatility.get("atm_straddle_gth_high_base_low")
-        or extrema.get("high_base_low")
+    session_high = _number(volatility.get("atm_straddle_gth_high"))
+    session_low = _number(volatility.get("atm_straddle_gth_low"))
+    active_high = _number(extrema.get("active_high"))
+    active_high_at = _time(extrema.get("active_high_at"))
+    active_base_low = _number(extrema.get("active_base_low"))
+    active_base_low_at = _time(extrema.get("active_base_low_at"))
+    active_episode_available = None not in {
+        active_high,
+        active_high_at,
+        active_base_low,
+        active_base_low_at,
+    }
+    high = active_high if active_episode_available else session_high
+    low = session_low
+    peak_base_low = (
+        active_base_low
+        if active_episode_available
+        else _number(
+            volatility.get("atm_straddle_gth_high_base_low")
+            or extrema.get("high_base_low")
+        )
     )
     observations = int(_number(volatility.get("atm_straddle_gth_observations") or extrema.get("observations")) or 0)
-    high_at = _time(volatility.get("atm_straddle_gth_high_at") or extrema.get("high_at"))
+    high_at = (
+        active_high_at
+        if active_episode_available
+        else _time(volatility.get("atm_straddle_gth_high_at") or extrema.get("high_at"))
+    )
     low_at = _time(volatility.get("atm_straddle_gth_low_at") or extrema.get("low_at"))
-    peak_base_low_at = _time(
-        volatility.get("atm_straddle_gth_high_base_low_at")
-        or extrema.get("high_base_low_at")
+    peak_base_low_at = (
+        active_base_low_at
+        if active_episode_available
+        else _time(
+            volatility.get("atm_straddle_gth_high_base_low_at")
+            or extrema.get("high_base_low_at")
+        )
     )
     # Backward-compatible migration for a session state written before the
     # causal peak basis was persisted.  This fallback is valid only when the
@@ -122,10 +150,16 @@ def gth_iron_condor_transition(
         "status": "qualified" if not reasons else "waiting",
         "decision_effect": "gth_iron_condor_gate",
         "proxy": "atm_straddle_and_atm_iv_not_dealer_gamma",
+        "extrema_scope": (
+            "rolling_local_expansion_episode"
+            if active_episode_available
+            else "legacy_session_extrema"
+        ),
         "observations": observations,
         "straddle_current": current,
         "straddle_high": high,
         "straddle_low": low,
+        "straddle_session_high": session_high,
         "straddle_peak_base_low": peak_base_low,
         "straddle_peak_base_low_at": (
             peak_base_low_at.isoformat() if peak_base_low_at is not None else None

@@ -1,4 +1,4 @@
-"""Session-level structural path retained above individual wall/flip events."""
+"""Session-level structural and volatility episodes retained across decisions."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Mapping
 
 from spx_spark.application.market_features.models import (
+    FrameQuality,
     MinuteMarketFrame,
     OptionStructureFrame,
 )
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
 from spx_spark.config import StorageSettings
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -29,6 +31,226 @@ class SessionEpisodePhase(str, Enum):
     V_REVERSAL_CONFIRMED = "v_reversal_confirmed"
     RECOVERY = "recovery"
     REVERSAL_INVALIDATED = "reversal_invalidated"
+
+
+ATM_STRADDLE_GTH_ACTIVE_EXPANSION_FRACTION = 0.10
+ATM_STRADDLE_GTH_ACTIVE_WINDOW_SECONDS = 7_200.0
+
+
+def update_atm_straddle_session(
+    previous: dict[str, object],
+    frame: OptionStructureFrame,
+    *,
+    now: datetime,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Track causal GTH/RTH ATM straddle and ATM-IV extrema for one expiry."""
+
+    observed_at = as_utc(now)
+    trading_date = DEFAULT_MARKET_CALENDAR.spx_session_date_for(observed_at)
+    if trading_date is None:
+        return dict(previous), _atm_straddle_session_projection(
+            previous,
+            current_straddle=None,
+            current_atm_iv=None,
+            segment=None,
+            quality="unavailable",
+            reason="outside_spx_session",
+        )
+
+    window = DEFAULT_MARKET_CALENDAR.spx_session_window(trading_date)
+    segment = window.segment_at(observed_at) if window is not None else None
+    expected_expiry = trading_date.strftime("%Y%m%d")
+    if (
+        previous.get("session_date") == trading_date.isoformat()
+        and previous.get("expiry") == expected_expiry
+    ):
+        previous_gth = previous.get("gth")
+        previous_rth = previous.get("rth")
+        state = {
+            **previous,
+            "gth": dict(previous_gth) if isinstance(previous_gth, dict) else {},
+            "rth": dict(previous_rth) if isinstance(previous_rth, dict) else {},
+        }
+    else:
+        state = {
+            "schema_version": 1,
+            "session_date": trading_date.isoformat(),
+            "expiry": expected_expiry,
+            "gth": {},
+            "rth": {},
+        }
+
+    current_straddle = _number(frame.volatility.get("atm_straddle_mid"))
+    current_atm_iv = _number(frame.volatility.get("atm_iv_0dte"))
+    if current_straddle is not None and current_straddle <= 0:
+        current_straddle = None
+    if current_atm_iv is not None and current_atm_iv <= 0:
+        current_atm_iv = None
+    reason: str | None = None
+    if segment not in {"gth", "rth"}:
+        reason = f"segment_{segment or 'unavailable'}"
+    elif frame.front_expiry != expected_expiry:
+        reason = "front_expiry_mismatch"
+    elif frame.quality is not FrameQuality.READY:
+        reason = "option_frame_not_ready"
+    elif current_straddle is None and current_atm_iv is None:
+        reason = "atm_straddle_and_iv_unavailable"
+
+    if reason is None and segment is not None:
+        at = observed_at.isoformat()
+        raw_bucket = state.get(segment)
+        bucket = dict(raw_bucket) if isinstance(raw_bucket, dict) else {}
+        bucket["observations"] = int(bucket.get("observations") or 0) + 1
+        _update_extrema(bucket, "straddle_mid", current_straddle, at=at)
+        if segment == "gth":
+            _update_active_expansion_extrema(
+                bucket,
+                "straddle_mid",
+                current_straddle,
+                at=at,
+            )
+        _update_extrema(bucket, "atm_iv", current_atm_iv, at=at)
+        state[segment] = bucket
+        state["updated_at"] = at
+
+    return state, _atm_straddle_session_projection(
+        state,
+        current_straddle=current_straddle if reason is None else None,
+        current_atm_iv=current_atm_iv if reason is None else None,
+        segment=segment,
+        quality="ready" if reason is None else "unavailable",
+        reason=reason,
+    )
+
+
+def _update_extrema(
+    bucket: dict[str, object], prefix: str, value: float | None, *, at: str
+) -> None:
+    if value is None:
+        return
+    high, low = _number(bucket.get(f"{prefix}_high")), _number(bucket.get(f"{prefix}_low"))
+    low_at = bucket.get(f"{prefix}_low_at")
+    if high is None or value > high:
+        if low is not None and low_at is not None and value > low:
+            bucket[f"{prefix}_high_base_low"], bucket[f"{prefix}_high_base_low_at"] = low, low_at
+        bucket[f"{prefix}_high"] = value
+        bucket[f"{prefix}_high_at"] = at
+    if low is None or value < low:
+        bucket[f"{prefix}_low"] = value
+        bucket[f"{prefix}_low_at"] = at
+    bucket[f"{prefix}_last"] = value
+    bucket[f"{prefix}_last_at"] = at
+
+
+def _update_active_expansion_extrema(
+    bucket: dict[str, object], prefix: str, value: float | None, *, at: str
+) -> None:
+    if value is None:
+        return
+    observed_at = _time(at)
+    base = _number(bucket.get(f"{prefix}_active_base_low"))
+    base_at = _time(bucket.get(f"{prefix}_active_base_low_at"))
+    high = _number(bucket.get(f"{prefix}_active_high"))
+    high_at = _time(bucket.get(f"{prefix}_active_high_at"))
+    expanded = bool(
+        base is not None
+        and high is not None
+        and base > 0.0
+        and (high - base) / base >= ATM_STRADDLE_GTH_ACTIVE_EXPANSION_FRACTION
+    )
+    anchor_at = high_at if expanded else base_at
+    age_seconds = (
+        (observed_at - anchor_at).total_seconds()
+        if observed_at is not None and anchor_at is not None
+        else None
+    )
+    if (
+        base is None
+        or high is None
+        or base <= 0.0
+        or high < base
+        or age_seconds is None
+        or age_seconds < 0.0
+        or age_seconds > ATM_STRADDLE_GTH_ACTIVE_WINDOW_SECONDS
+    ):
+        bucket[f"{prefix}_active_base_low"] = value
+        bucket[f"{prefix}_active_base_low_at"] = at
+        bucket[f"{prefix}_active_high"] = value
+        bucket[f"{prefix}_active_high_at"] = at
+        return
+
+    if not expanded and value < base:
+        bucket[f"{prefix}_active_base_low"] = value
+        bucket[f"{prefix}_active_base_low_at"] = at
+        bucket[f"{prefix}_active_high"] = value
+        bucket[f"{prefix}_active_high_at"] = at
+    elif value > high:
+        bucket[f"{prefix}_active_high"] = value
+        bucket[f"{prefix}_active_high_at"] = at
+
+
+def _atm_straddle_session_projection(
+    state: dict[str, object],
+    *,
+    current_straddle: float | None,
+    current_atm_iv: float | None,
+    segment: str | None,
+    quality: str,
+    reason: str | None,
+) -> dict[str, object]:
+    projection: dict[str, object] = {
+        "schema_version": 1,
+        "quality": quality,
+        "reason": reason,
+        "session_date": state.get("session_date"),
+        "expiry": state.get("expiry"),
+        "segment": segment,
+        "observed_at": state.get("updated_at"),
+        "current": {"straddle_mid": current_straddle, "atm_iv": current_atm_iv},
+    }
+    for session_segment in ("gth", "rth"):
+        raw_bucket = state.get(session_segment)
+        bucket = raw_bucket if isinstance(raw_bucket, dict) else {}
+        projection[session_segment] = {
+            "observations": int(bucket.get("observations") or 0),
+            "straddle_mid": _extrema_projection(bucket, "straddle_mid", current=current_straddle),
+            "atm_iv": _extrema_projection(bucket, "atm_iv", current=current_atm_iv),
+        }
+    return projection
+
+
+def _extrema_projection(
+    bucket: Mapping[str, object], prefix: str, *, current: float | None
+) -> dict[str, object]:
+    high = _number(bucket.get(f"{prefix}_high"))
+    low = _number(bucket.get(f"{prefix}_low"))
+    position = (
+        (current - low) / (high - low)
+        if current is not None and high is not None and low is not None and high > low
+        else None
+    )
+    return {
+        "high": high,
+        "high_at": bucket.get(f"{prefix}_high_at"),
+        "high_base_low": _number(bucket.get(f"{prefix}_high_base_low")),
+        "high_base_low_at": bucket.get(f"{prefix}_high_base_low_at"),
+        "active_base_low": _number(bucket.get(f"{prefix}_active_base_low")),
+        "active_base_low_at": bucket.get(f"{prefix}_active_base_low_at"),
+        "active_high": _number(bucket.get(f"{prefix}_active_high")),
+        "active_high_at": bucket.get(f"{prefix}_active_high_at"),
+        "low": low,
+        "low_at": bucket.get(f"{prefix}_low_at"),
+        "last": _number(bucket.get(f"{prefix}_last")),
+        "last_at": bucket.get(f"{prefix}_last_at"),
+        "current_vs_high": _difference(current, high),
+        "current_vs_high_fraction": (
+            (current - high) / high
+            if current is not None and high is not None and high > 0
+            else None
+        ),
+        "current_vs_low": _difference(current, low),
+        "position_in_range": position,
+    }
 
 
 def record_session_episode_transition(
@@ -507,6 +729,10 @@ def _number(value: object) -> float | None:
         return None
     parsed = float(value)
     return parsed if math.isfinite(parsed) else None
+
+
+def _difference(first: float | None, second: float | None) -> float | None:
+    return first - second if first is not None and second is not None else None
 
 
 def _time(value: object) -> datetime | None:

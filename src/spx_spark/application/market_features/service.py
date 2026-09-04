@@ -58,7 +58,6 @@ from spx_spark.application.market_features.options import (
     level_decision_live_structure,
     merge_option_history,
     option_frame_has_usable_live_structure,
-    update_atm_straddle_session,
 )
 from spx_spark.application.market_features.play_outcome_stats import (
     PlayOutcomeStats,
@@ -73,6 +72,7 @@ from spx_spark.application.market_features.provider_entry_control import (
     gth_ibkr_entry_control as _gth_ibkr_entry_control,
     provider_entry_control as _provider_entry_control,
 )
+from spx_spark.application.market_features.session_episode import update_atm_straddle_session
 from spx_spark.application.market_features.state import (
     append_audit,
     feature_state_path,

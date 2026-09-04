@@ -434,8 +434,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v64"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v64"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v65"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v65"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -621,6 +621,36 @@ def test_gth_transition_keeps_pre_peak_low_when_session_low_occurs_later() -> No
     assert transition["straddle_expansion_fraction"] == 0.5
     assert transition["straddle_peak_base_low"] == 20.0
     assert "gth_transition_extrema_order_invalid" not in transition["reasons"]
+
+
+def test_gth_transition_uses_fresh_local_episode_after_session_peak_expires() -> None:
+    facts = _gth_transition_facts()
+    facts["volatility"].update(
+        {
+            "atm_straddle_mid": 24.5,
+            "atm_straddle_gth_high": 30.0,
+            "atm_straddle_gth_high_at": (NOW - timedelta(hours=4)).isoformat(),
+            "atm_straddle_gth_extrema": {
+                "observations": 60,
+                "high": 30.0,
+                "high_at": (NOW - timedelta(hours=4)).isoformat(),
+                "active_base_low": 24.0,
+                "active_base_low_at": (NOW - timedelta(minutes=30)).isoformat(),
+                "active_high": 27.0,
+                "active_high_at": (NOW - timedelta(minutes=10)).isoformat(),
+            },
+        }
+    )
+
+    transition = gth_iron_condor_transition(facts, now=NOW)
+
+    assert transition["status"] == "qualified"
+    assert transition["extrema_scope"] == "rolling_local_expansion_episode"
+    assert transition["straddle_high"] == 27.0
+    assert transition["straddle_session_high"] == 30.0
+    assert transition["straddle_expansion_fraction"] == 0.125
+    assert transition["straddle_contraction_from_high_fraction"] == 0.09259259
+    assert "gth_transition_peak_age_outside_window" not in transition["reasons"]
 
 
 def test_gth_gamma_gate_uses_fresh_legs_without_requiring_greek_clock_skew() -> None:
