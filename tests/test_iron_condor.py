@@ -1122,6 +1122,11 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
             "strikes": [7680.0, 7690.0, 7810.0, 7820.0],
             "quote": {"credit": 2.4},
             "economics": {"max_gain_points": 2.4, "max_loss_points": 7.6, "width_points": 10.0},
+            "gth_transition": {
+                "status": "waiting",
+                "move_15m_atr": 3.684,
+                "reasons": ["gth_transition_price_not_balanced"],
+            },
             "reason": None,
         },
         "rejection_funnel": {"candidate_enumerated": 64, "hard_gate_pass": 0},
@@ -1145,9 +1150,10 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
     assert "NO TRADE" in sections.desk_view
     assert "扫描赢家已推送" not in sections.desk_view
     assert "无过门赢家" not in sections.desk_view
-    assert "20Δ/10宽 · 等待跨式先扩张、再收缩" in sections.desk_view
-    assert "7680/7690/7810/7820" not in sections.desk_view
-    assert "等待跨式先扩张、再收缩" in sections.desk_view
+    assert "20Δ/10宽 7680/7690/7810/7820" in sections.desk_view
+    assert "贷记 2.40" in sections.desk_view
+    assert "翼宽比 24%" in sections.desk_view
+    assert "价格仍单边 3.7 ATR（需≤1.25）" in sections.desk_view
     assert "研究建议" not in sections.desk_view
     assert "策略状态·铁鹰" not in sections.structure
     assert "扫描中 · 仅人工候选可做" in sections.execution

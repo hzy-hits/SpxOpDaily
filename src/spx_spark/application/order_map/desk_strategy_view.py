@@ -304,9 +304,68 @@ def compact_iron_condor_desk_line(
         nearest = _mapping(_mapping(decision.get("why_not")).get("nearest_candidate"))
         if str(nearest.get("strategy_type") or "").upper() == "IRON_CONDOR":
             transition = _mapping(nearest.get("gth_transition")) or transition
-        if transition.get("status") == "qualified":
-            return "20Δ/10宽 · 收缩已确认，等待 IBKR 四腿与赔率门"
-        return "20Δ/10宽 · 等待跨式先扩张、再收缩"
+        strikes = "/".join(
+            f"{value:g}"
+            for raw in map_structure.get("strikes") or ()
+            if (value := finite_float(raw)) is not None
+        )
+        quote = _mapping(map_structure.get("quote"))
+        economics = _mapping(map_structure.get("economics"))
+        credit = finite_float(quote.get("credit"))
+        credit_fraction = finite_float(economics.get("credit_fraction_of_width"))
+        width = finite_float(economics.get("width_points"))
+        if credit_fraction is None and credit is not None and width is not None and width > 0.0:
+            credit_fraction = credit / width
+        details = [f"20Δ/10宽 {strikes}" if strikes else "20Δ/10宽"]
+        if credit is not None:
+            details.append(f"贷记 {credit:.2f}")
+        if credit_fraction is not None:
+            details.append(f"翼宽比 {credit_fraction:.0%}")
+
+        reasons = {str(reason) for reason in transition.get("reasons") or ()}
+        if "gth_transition_price_not_balanced" in reasons:
+            move_atr = finite_float(transition.get("move_15m_atr"))
+            wait = (
+                f"仅观察：价格仍单边 {move_atr:.1f} ATR（需≤1.25）"
+                if move_atr is not None
+                else "仅观察：价格仍单边，等恢复平衡"
+            )
+        elif reasons & {
+            "gth_transition_volatility_inputs_unavailable",
+            "gth_transition_expansion_basis_unavailable",
+            "gth_transition_path_inputs_unavailable",
+            "gth_transition_observations_insufficient",
+        }:
+            wait = "仅观察：扩张–收缩输入尚不完整"
+        elif "gth_transition_expansion_too_small" in reasons:
+            expansion = finite_float(transition.get("straddle_expansion_fraction"))
+            wait = (
+                f"仅观察：跨式仅扩张 {expansion:.1%}（需≥10%）"
+                if expansion is not None
+                else "仅观察：等待跨式扩张"
+            )
+        elif "gth_transition_peak_age_outside_window" in reasons:
+            wait = "仅观察：跨式峰值确认中"
+        elif reasons & {
+            "gth_transition_contraction_too_small",
+            "gth_transition_straddle_not_decaying",
+            "gth_transition_atm_iv_5m_not_contracting",
+            "gth_transition_atm_iv_15m_not_contracting",
+        }:
+            contraction = finite_float(
+                transition.get("straddle_contraction_from_high_fraction")
+            )
+            wait = (
+                f"仅观察：从峰值仅收缩 {contraction:.1%}（需≥8%）"
+                if contraction is not None
+                else "仅观察：等待跨式与 IV 收缩"
+            )
+        elif transition.get("status") == "qualified":
+            wait = "仅观察：收缩已确认，等待四腿赔率/风控过门"
+        else:
+            wait = "仅观察：等待跨式扩张→收缩"
+        details.append(wait)
+        return " · ".join(details)
 
     structure = candidate
     strikes = "/".join(f"{value:g}" for value in structure.get("strikes") or ()) or "-"

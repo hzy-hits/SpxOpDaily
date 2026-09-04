@@ -850,9 +850,10 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "20Δ/10宽 · 等待跨式先扩张、再收缩" in sections.desk_view
-    assert "7680/7690/7810/7820" not in sections.desk_view
-    assert "等待跨式先扩张、再收缩" in sections.desk_view
+    assert "20Δ/10宽 7680/7690/7810/7820" in sections.desk_view
+    assert "贷记 9.00" in sections.desk_view
+    assert "翼宽比 90%" in sections.desk_view
+    assert "等待跨式扩张→收缩" in sections.desk_view
 
 
 def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:

@@ -495,8 +495,9 @@ def test_gth_desk_map_shows_scan_not_empty_heartbeat_when_a_winner_exists() -> N
     assert "可看 ·" not in sections.desk_view
     assert "NO TRADE" in sections.desk_view
     assert "扫描赢家已推送" not in sections.desk_view
-    assert "20Δ/10宽 · 等待跨式先扩张、再收缩" in sections.desk_view
-    assert "7680/7690/7810/7820" not in sections.desk_view
+    assert "20Δ/10宽 7680/7690/7810/7820" in sections.desk_view
+    assert "贷记 8.00" in sections.desk_view
+    assert "翼宽比 80%" in sections.desk_view
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 
