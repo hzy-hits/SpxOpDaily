@@ -322,6 +322,19 @@ def compact_iron_condor_desk_line(
         if credit_fraction is not None:
             details.append(f"翼宽比 {credit_fraction:.0%}")
 
+        if map_structure.get("status") != "ready" or not strikes:
+            quote_reasons = _mapping(map_structure.get("quote")).get("reasons") or ()
+            raw_reason = str(
+                map_structure.get("reason")
+                or next((reason for reason in quote_reasons if str(reason).strip()), "")
+            )
+            details.append(
+                f"仅观察：{humanize_strategy_reason(raw_reason)}"
+                if raw_reason
+                else "仅观察：当前四腿报价不完整"
+            )
+            return " · ".join(details)
+
         reasons = {str(reason) for reason in transition.get("reasons") or ()}
         if "gth_transition_price_not_balanced" in reasons:
             move_atr = finite_float(transition.get("move_15m_atr"))

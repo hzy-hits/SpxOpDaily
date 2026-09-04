@@ -888,6 +888,7 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
     assert "7750/7745" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
+    assert "20Δ/10宽 · 仅观察：5–20Δ 卖权铁鹰缺少带 delta 的新鲜报价" in sections.desk_view
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 
