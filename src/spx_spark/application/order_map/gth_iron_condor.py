@@ -9,9 +9,11 @@ from typing import Any
 from spx_spark.application.order_map.candidate_factory import _map, _number, _time
 
 GTH_EVIDENCE_CONTRACT_HASH = (
-    "sha256:0a7b31adf74ce22862bdb573782f85792bc732aebe74a2cbe081de57b224926f"
+    "sha256:bb9092af1f7920c7766d874a711b8b73fb956a159ccc918e854bb3d1f772c114"
 )
 GTH_TRANSITION_VERSION = "gth_short_gamma_expansion_to_contraction.v1"
+GTH_MAX_EXACT_QUOTE_AGE_SECONDS = 30.0
+GTH_MAX_EXACT_QUOTE_SKEW_SECONDS = 10.0
 GTH_MIN_STRADDLE_OBSERVATIONS = 30
 GTH_MIN_EXPANSION_FRACTION = 0.10
 GTH_MIN_CONTRACTION_FROM_HIGH_FRACTION = 0.08
@@ -35,17 +37,40 @@ def gth_iron_condor_transition(
     current = _number(volatility.get("atm_straddle_mid"))
     high = _number(volatility.get("atm_straddle_gth_high"))
     low = _number(volatility.get("atm_straddle_gth_low"))
+    peak_base_low = _number(
+        volatility.get("atm_straddle_gth_high_base_low")
+        or extrema.get("high_base_low")
+    )
     observations = int(_number(volatility.get("atm_straddle_gth_observations") or extrema.get("observations")) or 0)
     high_at = _time(volatility.get("atm_straddle_gth_high_at") or extrema.get("high_at"))
     low_at = _time(volatility.get("atm_straddle_gth_low_at") or extrema.get("low_at"))
+    peak_base_low_at = _time(
+        volatility.get("atm_straddle_gth_high_base_low_at")
+        or extrema.get("high_base_low_at")
+    )
+    # Backward-compatible migration for a session state written before the
+    # causal peak basis was persisted.  This fallback is valid only when the
+    # recorded session low demonstrably preceded the peak.
+    if (
+        peak_base_low is None
+        and peak_base_low_at is None
+        and low is not None
+        and low_at is not None
+        and high_at is not None
+        and low_at < high_at
+    ):
+        peak_base_low = low
+        peak_base_low_at = low_at
     decay_15m = _number(volatility.get("atm_straddle_decay_15m"))
     iv_change_5m = _number(volatility.get("atm_iv_change_5m"))
     iv_change_15m = _number(volatility.get("atm_iv_change_15m"))
     impulse_15m = _number(path.get("impulse_15m_points"))
     atr_5m = _number(path.get("atr_5m"))
     expansion = (
-        (high - low) / low
-        if high is not None and low is not None and high > low > 0.0
+        (high - peak_base_low) / peak_base_low
+        if high is not None
+        and peak_base_low is not None
+        and high > peak_base_low > 0.0
         else None
     )
     contraction = (
@@ -65,11 +90,17 @@ def gth_iron_condor_transition(
         reasons.append("gth_transition_session_mismatch")
     if observations < GTH_MIN_STRADDLE_OBSERVATIONS:
         reasons.append("gth_transition_observations_insufficient")
-    if None in {current, high, low, high_at, low_at, decay_15m, iv_change_5m, iv_change_15m}:
+    if None in {current, high, high_at, decay_15m, iv_change_5m, iv_change_15m}:
         reasons.append("gth_transition_volatility_inputs_unavailable")
+    if peak_base_low is None or peak_base_low_at is None:
+        reasons.append("gth_transition_expansion_basis_unavailable")
     if None in {impulse_15m, atr_5m}:
         reasons.append("gth_transition_path_inputs_unavailable")
-    if high_at is not None and low_at is not None and not low_at < high_at:
+    if (
+        high_at is not None
+        and peak_base_low_at is not None
+        and not peak_base_low_at < high_at
+    ):
         reasons.append("gth_transition_extrema_order_invalid")
     if peak_age is None or not GTH_MIN_PEAK_AGE_SECONDS <= peak_age <= GTH_MAX_PEAK_AGE_SECONDS:
         reasons.append("gth_transition_peak_age_outside_window")
@@ -95,6 +126,10 @@ def gth_iron_condor_transition(
         "straddle_current": current,
         "straddle_high": high,
         "straddle_low": low,
+        "straddle_peak_base_low": peak_base_low,
+        "straddle_peak_base_low_at": (
+            peak_base_low_at.isoformat() if peak_base_low_at is not None else None
+        ),
         "straddle_expansion_fraction": round(expansion, 8) if expansion is not None else None,
         "straddle_contraction_from_high_fraction": (
             round(contraction, 8) if contraction is not None else None
@@ -137,7 +172,17 @@ def gth_iron_condor_gate_failures(
         )
     gamma_risk = _map(candidate.get("gamma_risk"))
     gcr10 = _number(gamma_risk.get("gcr10"))
-    if gamma_risk.get("status") != "ready" or gcr10 is None or gcr10 > GTH_MAX_GCR10:
+    if gamma_risk.get("status") != "ready" or gcr10 is None:
+        gates.append(
+            {
+                "gate": "gth_iron_condor_gamma_risk_unavailable",
+                "actual": gamma_risk.get("reason") or gamma_risk.get("status"),
+                "threshold": (
+                    f"four_leg_gamma_age<={GTH_MAX_EXACT_QUOTE_AGE_SECONDS:g}s"
+                ),
+            }
+        )
+    elif gcr10 > GTH_MAX_GCR10:
         gates.append(
             {
                 "gate": "gth_iron_condor_gamma_risk_hot",

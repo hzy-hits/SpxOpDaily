@@ -299,6 +299,42 @@ def test_rth_atr14_ignores_real_gth_path_and_overnight_gap() -> None:
     assert production_diagnostics["method"] == diagnostics["method"]
 
 
+def test_gth_atr_uses_current_contiguous_session_bars() -> None:
+    old = bar(
+        DAY.replace(day=22, hour=20, minute=15),
+        open_=5000.0,
+        high=5100.0,
+        low=4900.0,
+        close=5000.0,
+        segment="asia",
+    )
+    start = DAY.replace(day=23, hour=20, minute=15)
+    current = [
+        bar(
+            start + timedelta(minutes=5 * index),
+            open_=5000.0 + index,
+            high=5001.0 + index,
+            low=4999.0 + index,
+            close=5000.0 + index,
+            segment="asia",
+        )
+        for index in range(8)
+    ]
+
+    result = build_market_state_5m_inputs(
+        bars=[old, *current],
+        market_samples=[],
+        range_baselines={},
+        now=start + timedelta(minutes=40),
+    )
+    diagnostics = result["diagnostics"]["gth_atr"]
+
+    assert diagnostics["value"] == pytest.approx(2.0)
+    assert diagnostics["observed_path_bars"] == 6
+    assert diagnostics["status"] == "ready"
+    assert diagnostics["source"] == "contiguous_observed_gth_5m_bars"
+
+
 def test_rth_sma_fails_closed_without_contract_identity() -> None:
     start = DAY.replace(hour=9, minute=30)
     rows = [

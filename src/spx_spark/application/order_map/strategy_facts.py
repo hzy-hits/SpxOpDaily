@@ -126,11 +126,12 @@ def build_market_fact_pack(
     )
     coordinate_ready = spx is not None
     market_ready = market.get("quality") == "ready"
-    atr = _first(
-        averages.get("atr_5m"),
-        _map(diagnostics.get("rolling_path_percentiles")).get("atr_5m"),
+    rth_atr = _first(
+        averages.get("atr_5m"), _map(diagnostics.get("rolling_path_percentiles")).get("atr_5m"),
         _map(diagnostics.get("atr")).get("value"),
     )
+    gth_atr = _map(diagnostics.get("gth_atr")).get("value")
+    atr = _first(gth_atr, rth_atr) if session_mode == "gth" else rth_atr
     atr_ready = atr is not None
     vwap_ready = any(
         value is not None

@@ -398,6 +398,49 @@ def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
     assert reset["rth"]["observations"] == 0
 
 
+def test_atm_straddle_session_preserves_the_low_before_a_later_peak() -> None:
+    start = datetime(2026, 8, 27, 0, 30, tzinfo=UTC)
+    frame = OptionStructureFrame(
+        schema_version=1,
+        frame_id="options:20260827",
+        as_of=start,
+        quality=FrameQuality.READY,
+        front_expiry="20260827",
+        next_expiry="20260828",
+        structure={},
+        volatility={"atm_straddle_mid": 20.0, "atm_iv_0dte": 0.12},
+        concentration={},
+        density={},
+        l1=L1MicrostructureFrame(
+            quality=FrameQuality.READY,
+            expiry="20260827",
+            contract_count=20,
+            metrics={},
+            diagnostics={},
+        ),
+        diagnostics={},
+    )
+    state, _ = update_atm_straddle_session({}, frame, now=start)
+    peak_at = start + timedelta(minutes=20)
+    state, _ = update_atm_straddle_session(
+        state,
+        replace(frame, volatility={"atm_straddle_mid": 30.0, "atm_iv_0dte": 0.16}),
+        now=peak_at,
+    )
+    later_low_at = start + timedelta(minutes=35)
+    state, projection = update_atm_straddle_session(
+        state,
+        replace(frame, volatility={"atm_straddle_mid": 18.0, "atm_iv_0dte": 0.11}),
+        now=later_low_at,
+    )
+
+    straddle = projection["gth"]["straddle_mid"]
+    assert straddle["high"] == 30.0
+    assert straddle["low"] == 18.0
+    assert straddle["high_base_low"] == 20.0
+    assert straddle["high_base_low_at"] == start.isoformat()
+
+
 def test_wall_rank_persistence_tracks_primary_rank_and_confidence() -> None:
     history = [
         {

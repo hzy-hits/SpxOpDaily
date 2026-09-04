@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -30,6 +31,8 @@ from spx_spark.application.order_map.candidate_factory import (
 )
 from spx_spark.application.order_map.gth_iron_condor import (
     GTH_EVIDENCE_CONTRACT_HASH,
+    GTH_MAX_EXACT_QUOTE_AGE_SECONDS,
+    GTH_MAX_EXACT_QUOTE_SKEW_SECONDS,
     gth_iron_condor_gate_failures,
     gth_iron_condor_transition,
 )
@@ -265,7 +268,15 @@ def enumerate_iron_condor_candidates(
     if human_window_open:
         expiry = str(structure.get("expiry") or "")
         spot = _number(structure.get("spot"))
-        candidate_quote_policy = policy if session_mode == "gth" else session_policy
+        candidate_quote_policy = (
+            replace(
+                policy,
+                quote_max_age_seconds=GTH_MAX_EXACT_QUOTE_AGE_SECONDS,
+                quote_max_skew_seconds=GTH_MAX_EXACT_QUOTE_SKEW_SECONDS,
+            )
+            if session_mode == "gth"
+            else session_policy
+        )
         human_structure = (
             _structure_for_short_delta(
                 latest,
@@ -339,15 +350,12 @@ def enumerate_iron_condor_candidates(
         and all(value is not None for value in gamma_values)
         and all(observed_at is not None for observed_at in gamma_times)
         and all(
-            0.0 <= (now - observed_at).total_seconds() <= policy.quote_max_age_seconds
+            0.0
+            <= (now - observed_at).total_seconds()
+            <= candidate_quote_policy.quote_max_age_seconds
             for observed_at in gamma_times
             if observed_at is not None
         )
-        and (
-            max(observed_at for observed_at in gamma_times if observed_at is not None)
-            - min(observed_at for observed_at in gamma_times if observed_at is not None)
-        ).total_seconds()
-        <= policy.quote_max_skew_seconds
         and credit is not None
         and credit > 0
     ):
@@ -355,6 +363,15 @@ def enumerate_iron_condor_candidates(
             float(value) for value in gamma_values if value is not None
         )
         net_gamma = put_long_gamma - put_short_gamma - call_short_gamma + call_long_gamma
+        greek_ages = [
+            (now - observed_at).total_seconds()
+            for observed_at in gamma_times
+            if observed_at is not None
+        ]
+        greek_skew = (
+            max(observed_at for observed_at in gamma_times if observed_at is not None)
+            - min(observed_at for observed_at in gamma_times if observed_at is not None)
+        ).total_seconds()
         gcr10 = 0.5 * abs(net_gamma) * 10.0**2 / credit
         gamma_state = (
             "LOW"
@@ -378,6 +395,14 @@ def enumerate_iron_condor_candidates(
             "gcr10": round(gcr10, 8),
             "gcr20": round(0.5 * abs(net_gamma) * 20.0**2 / credit, 8),
             "nearest_short_abs_delta": round(max(put_short_delta, call_short_delta), 8),
+            **(
+                {
+                    "greeks_max_age_seconds": round(max(greek_ages), 3),
+                    "greeks_source_skew_seconds": round(greek_skew, 3),
+                }
+                if session_mode == "gth"
+                else {}
+            ),
             "entry_gate_applied": session_mode == "gth",
         }
     else:
@@ -389,7 +414,7 @@ def enumerate_iron_condor_candidates(
             ),
             "state": "UNAVAILABLE",
             "entry_gate_applied": session_mode == "gth",
-            "reason": "iron_condor_leg_gamma_unavailable",
+            "reason": "iron_condor_leg_gamma_missing_or_stale",
         }
     return [
         {
@@ -485,7 +510,7 @@ def enumerate_iron_condor_candidates(
             },
             "production_evidence": (
                 {
-                    "contract": "gth_20delta_fixed10_expansion_to_contraction_ibkr_gcr20_credit25_balanced_tp50_sl200_clear1230.v1",
+                    "contract": "gth_20delta_fixed10_expansion_to_contraction_ibkr_gcr20_credit25_balanced_tp50_sl200_clear1230_quote30_skew10.v2",
                     "status": "forward_unvalidated_user_override",
                     "limitations": [
                         "atm_straddle_is_short_gamma_pressure_proxy_not_dealer_inventory",
@@ -588,7 +613,7 @@ def iron_condor_session_state(
         "session_date": session_date,
         "session_mode": session_mode,
         "contract": (
-            "gth_first_expansion_to_contraction_credit25_gcr20_candidate_lock"
+            "gth_first_expansion_to_contraction_credit25_gcr20_quote30_skew10_candidate_lock"
             if session_mode == "gth"
             else "rth_daily_first_credit25_or_transition_credit23_candidate_lock_surface_advisory"
         ),

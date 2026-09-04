@@ -537,6 +537,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "iron_condor_entry_window_closed": "铁鹰人工入场窗只在 10:00–11:00 ET",
         "gth_iron_condor_transition_unconfirmed": "GTH 跨式尚未完成扩张转收缩",
         "gth_iron_condor_ibkr_quote_required": "GTH 铁鹰缺少 IBKR 四腿新鲜报价",
+        "gth_iron_condor_gamma_risk_unavailable": "GTH 铁鹰四腿 Gamma 缺失或陈旧",
         "gth_iron_condor_gamma_risk_hot": "GTH 铁鹰的 10 点 Gamma/贷记风险过热",
         "iron_condor_human_short_delta": "人工铁鹰固定使用 20Δ 短腿",
         "iron_condor_evidence_contract_invalid": "铁鹰生产证据合同不匹配",

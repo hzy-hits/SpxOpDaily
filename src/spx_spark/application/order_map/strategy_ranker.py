@@ -1479,7 +1479,7 @@ def _iron_condor_hard_gates(
                 "threshold": 1,
             }
         )
-    if candidate.get("manual_authority_eligible") is not True:
+    if candidate.get("manual_authority_eligible") is not True and session_mode != "gth":
         gates.append(
             {
                 "gate": "iron_condor_entry_window_closed",

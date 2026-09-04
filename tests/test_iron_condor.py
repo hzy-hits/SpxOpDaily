@@ -434,8 +434,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v63"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v63"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v64"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v64"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -481,6 +481,7 @@ def test_ready_iron_condor_is_map_only_not_a_human_winner() -> None:
     miss = ranked.near_misses[0]
     assert miss["strategy_type"] == "IRON_CONDOR"
     assert "gth_iron_condor_transition_unconfirmed" in miss["rejection_reasons"]
+    assert "iron_condor_entry_window_closed" not in miss["rejection_reasons"]
 
 
 def test_gth_expansion_to_contraction_can_reach_manual_iron_condor() -> None:
@@ -599,6 +600,140 @@ def test_gth_transition_requires_contraction_not_just_an_earlier_spike() -> None
     assert "gth_transition_straddle_not_decaying" in transition["reasons"]
     assert "gth_transition_atm_iv_5m_not_contracting" in transition["reasons"]
     assert rows[0]["manual_authority_eligible"] is False
+
+
+def test_gth_transition_keeps_pre_peak_low_when_session_low_occurs_later() -> None:
+    facts = _gth_transition_facts()
+    facts["volatility"].update(
+        {
+            "atm_straddle_gth_low": 18.0,
+            "atm_straddle_gth_low_at": (NOW - timedelta(minutes=2)).isoformat(),
+            "atm_straddle_gth_high_base_low": 20.0,
+            "atm_straddle_gth_high_base_low_at": (
+                NOW - timedelta(minutes=45)
+            ).isoformat(),
+        }
+    )
+
+    transition = gth_iron_condor_transition(facts, now=NOW)
+
+    assert transition["status"] == "qualified"
+    assert transition["straddle_expansion_fraction"] == 0.5
+    assert transition["straddle_peak_base_low"] == 20.0
+    assert "gth_transition_extrema_order_invalid" not in transition["reasons"]
+
+
+def test_gth_gamma_gate_uses_fresh_legs_without_requiring_greek_clock_skew() -> None:
+    offsets = {
+        (7680.0, "P"): 29,
+        (7690.0, "P"): 20,
+        (7810.0, "C"): 10,
+        (7820.0, "C"): 1,
+    }
+    rows = []
+    for quote in _gth_state().quotes:
+        right = str(
+            getattr(quote.instrument.right, "value", quote.instrument.right) or ""
+        )
+        offset = offsets.get((float(quote.instrument.strike or 0.0), right))
+        rows.append(
+            replace(
+                quote,
+                raw={
+                    **dict(quote.raw or {}),
+                    "greeks_observed_at": (
+                        NOW - timedelta(seconds=offset)
+                    ).isoformat(),
+                }
+                if offset is not None
+                else quote.raw,
+            )
+        )
+    state = LatestState(
+        created_at=NOW,
+        as_of=NOW,
+        quotes=tuple(rows),
+        best_quotes=tuple(rows),
+    )
+
+    candidate = enumerate_iron_condor_candidates(
+        _payload(),
+        _gth_transition_facts(),
+        state,
+        now=NOW,
+        policy=StrategyPolicy(),
+    )[0]
+
+    assert candidate["manual_authority_eligible"] is True
+    assert candidate["gamma_risk"]["status"] == "ready"
+    assert candidate["gamma_risk"]["greeks_max_age_seconds"] == 29.0
+    assert candidate["gamma_risk"]["greeks_source_skew_seconds"] == 28.0
+
+
+def test_gth_human_iron_condor_accepts_29_second_quotes_but_rejects_31() -> None:
+    facts = _gth_transition_facts()
+
+    accepted = enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _gth_state(NOW - timedelta(seconds=29)),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+    rejected = enumerate_iron_condor_candidates(
+        _payload(),
+        facts,
+        _gth_state(NOW - timedelta(seconds=31)),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+
+    assert accepted
+    assert accepted[0]["manual_authority_eligible"] is True
+    assert rejected == []
+
+
+def test_gth_human_iron_condor_accepts_10_second_bbo_skew_but_rejects_more() -> None:
+    def state_with_skew(seconds: float) -> LatestState:
+        quotes = tuple(
+            replace(
+                quote,
+                quote_time=NOW - timedelta(seconds=seconds),
+            )
+            if quote.instrument.strike == 7680.0
+            and str(
+                getattr(quote.instrument.right, "value", quote.instrument.right)
+                or ""
+            )
+            == "P"
+            else quote
+            for quote in _gth_state().quotes
+        )
+        return LatestState(
+            created_at=NOW,
+            as_of=NOW,
+            quotes=quotes,
+            best_quotes=quotes,
+        )
+
+    accepted = enumerate_iron_condor_candidates(
+        _payload(),
+        _gth_transition_facts(),
+        state_with_skew(10.0),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+    rejected = enumerate_iron_condor_candidates(
+        _payload(),
+        _gth_transition_facts(),
+        state_with_skew(10.001),
+        now=NOW,
+        policy=StrategyPolicy(),
+    )
+
+    assert accepted
+    assert accepted[0]["manual_authority_eligible"] is True
+    assert rejected == []
 
 
 def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:

@@ -2068,3 +2068,18 @@ IBKR `10197` 冲突都不能生成该人工卡。该合同标记
 
 策略版本为 `strategy_policy.bootstrap.v63`。不新增服务、定时器、数据库、队列或 Rust
 合同；自动下单继续关闭。
+
+---
+
+## 32. v64 GTH 铁鹰报价新鲜度修正
+
+GTH 扩张转收缩铁鹰的四腿 IBKR exact BBO 与各腿 Greeks 最大年龄由 15 秒放宽为
+30 秒。四腿 BBO 的源时间偏斜放宽为 10 秒，避免 IBKR 未同步更新的安静腿造成运营误拒，
+同时防止把跨度过大的市场时刻拼成虚假贷记；
+Greeks 只要求每条腿各自在 30 秒内，不要求四腿 Greeks 同时更新。31 秒及以上的报价或
+Greeks 继续失效关闭，Schwab frozen quote 与 IBKR `10197` 仍不得生成候选。
+
+其他 GTH 铁鹰合同保持不变：20Δ 短腿、10 点翼、扩张转收缩、25%–55% 贷记、两侧
+平衡、`GCR10≤20%`、定义风险不超过 $1,000、每 GTH session 最多一张、人工限价且
+`automatic_ordering=false`。策略版本为 `strategy_policy.bootstrap.v64`；不新增服务、
+定时器、数据库、队列或 Rust 合同。

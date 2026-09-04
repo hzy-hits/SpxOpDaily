@@ -28,6 +28,7 @@ from spx_spark.application.market_features.rolling_path_percentiles import (
     rank_rolling_path_percentiles,
 )
 from spx_spark.config import NY_TZ
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import as_utc
 
 
@@ -75,6 +76,22 @@ def build_market_state_5m_inputs(
         if bar.get("segment") == "rth" and bar.get("trading_date_et") == trading_date.isoformat()
     ]
     atr, atr_diagnostics = _atr_5m(closed)
+    gth_bars = [
+        bar
+        for bar in closed
+        if bar.get("segment") in {"asia", "europe", "us_premarket"}
+        and (start := _parse_at(bar.get("bar_start"))) is not None
+        and DEFAULT_MARKET_CALENDAR.is_spx_gth_open(start + timedelta(seconds=1))
+    ]
+    gth_path = observed_rolling_path_state(gth_bars, strict_atr=None)
+    gth_atr_diagnostics = {
+        "value": gth_path.get("atr_5m"),
+        "source": "contiguous_observed_gth_5m_bars",
+        "status": gth_path.get("status"),
+        "reason": gth_path.get("reason"),
+        "observed_path_bars": gth_path.get("observed_bar_count"),
+        "input_quality": gth_path.get("input_quality"),
+    }
     vwap_series, vwap_diagnostics = _es_vwap_series(
         market_samples,
         trading_date=trading_date,
@@ -130,6 +147,7 @@ def build_market_state_5m_inputs(
             "rth_bar_count": len(rth_bars),
             "rth_ok_bar_count": sum(bar.get("quality") == "ok" for bar in rth_bars),
             "atr": atr_diagnostics,
+            "gth_atr": gth_atr_diagnostics,
             "vwap": vwap_diagnostics,
             "opening_range": opening_diagnostics,
             "rth_bar_path": [dict(bar) for bar in rth_bars],

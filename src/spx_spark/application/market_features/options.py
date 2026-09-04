@@ -505,17 +505,16 @@ def update_atm_straddle_session(
 
 
 def _update_extrema(
-    bucket: dict[str, Any],
-    prefix: str,
-    value: float | None,
-    *,
-    at: str,
+    bucket: dict[str, Any], prefix: str, value: float | None, *, at: str
 ) -> None:
     if value is None:
         return
-    high = _number(bucket.get(f"{prefix}_high"))
-    low = _number(bucket.get(f"{prefix}_low"))
+    high, low = _number(bucket.get(f"{prefix}_high")), _number(bucket.get(f"{prefix}_low"))
+    low_at = bucket.get(f"{prefix}_low_at")
     if high is None or value > high:
+        # Preserve the causal low that existed before this peak.
+        if low is not None and low_at is not None and value > low:
+            bucket[f"{prefix}_high_base_low"], bucket[f"{prefix}_high_base_low_at"] = low, low_at
         bucket[f"{prefix}_high"] = value
         bucket[f"{prefix}_high_at"] = at
     if low is None or value < low:
@@ -583,6 +582,7 @@ def _extrema_projection(
     return {
         "high": high,
         "high_at": bucket.get(f"{prefix}_high_at"),
+        "high_base_low": _number(bucket.get(f"{prefix}_high_base_low")), "high_base_low_at": bucket.get(f"{prefix}_high_base_low_at"),
         "low": low,
         "low_at": bucket.get(f"{prefix}_low_at"),
         "last": _number(bucket.get(f"{prefix}_last")),
