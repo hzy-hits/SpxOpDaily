@@ -9,6 +9,7 @@ from spx_spark.analytics.growth_dislocation import (
     apply_crowding,
     candidate_state,
     extrinsic_value_ratio,
+    iv_rv_score,
     priority_sort_key,
     rsi_recovery_score,
     score_candidate,
@@ -206,7 +207,7 @@ def _universe() -> Universe:
     )
 
 
-def test_v10_defaults_encode_the_three_hard_gates() -> None:
+def test_v11_defaults_make_iv_rv_a_smooth_score() -> None:
     policy = _policy()
 
     assert policy.min_market_cap == 10_000_000_000.0
@@ -219,7 +220,8 @@ def test_v10_defaults_encode_the_three_hard_gates() -> None:
     assert (policy.target_delta_min, policy.target_delta_max) == (0.68, 0.80)
     assert policy.max_leaps_spread_mid == 0.08
     assert policy.max_current_leaps_iv == 0.60
-    assert policy.max_iv_rv_ratio == 1.00
+    assert policy.iv_rv_full_score_ratio == 0.80
+    assert policy.iv_rv_zero_score_ratio == 2.00
     assert policy.min_target_leaps_open_interest == 100
     assert policy.max_extrinsic_value_ratio == 0.20
 
@@ -265,16 +267,17 @@ def test_rsi_recovery_score_is_continuous_at_state_thresholds() -> None:
     assert rsi_recovery_score(45.0, 30.0, policy) == 30.0
 
 
-def test_v1_score_uses_only_iv_rsi_recovery_and_sector_strength() -> None:
+def test_v11_score_includes_iv_rv_without_changing_52w_priority() -> None:
     row = _eligible_score_row()
 
     scored = score_candidate(row, _policy())
 
     assert scored is not None
     assert round(scored["iv_score"], 2) == 30.00
+    assert round(scored["ivrv_score"], 2) == 100.00
     assert scored["rsi_score"] == 100.0
     assert round(scored["rs_score"], 2) == 60.40
-    assert round(scored["final_score"], 2) == 57.08
+    assert round(scored["final_score"], 2) == 64.08
     assert round(scored["price_dislocation_score"], 2) == 75.00
     assert round(scored["ivp_52w_score"], 2) == 60.00
     assert round(scored["priority_score"], 2) == 67.50
@@ -351,18 +354,30 @@ def test_extrinsic_value_rejects_mid_below_call_intrinsic_value() -> None:
     )
 
 
-def test_three_gate_contract_rejects_high_ivp_iv_rv_and_time_value() -> None:
+def test_contract_rejects_high_ivp_absolute_iv_oi_and_time_value() -> None:
     row = _eligible_score_row()
     for field, value in (
         ("ivp_52w", 0.21),
         ("current_iv", 0.61),
-        ("realized_vol_20d", 0.19),
         ("target_leaps_oi", 99),
         ("leaps_ask", 50.0),
     ):
         rejected = dict(row)
         rejected[field] = value
         assert score_candidate(rejected, _policy()) is None
+
+
+def test_iv_rv_ratio_of_one_and_a_half_reduces_score_without_rejecting() -> None:
+    row = _eligible_score_row()
+    row["current_iv"] = 0.45
+    row["realized_vol_20d"] = 0.30
+
+    scored = score_candidate(row, _policy())
+
+    assert scored is not None
+    assert round(iv_rv_score(0.45, 0.30, _policy()), 2) == 41.67
+    assert round(scored["ivrv_score"], 2) == 41.67
+    assert round(scored["final_score"], 2) == 58.25
 
 
 def test_eligible_candidates_rank_by_market_cap_then_score() -> None:

@@ -214,7 +214,9 @@ run has completed without provider-wide errors or request exhaustion.
   `ivp_13w / ivp_26w / ivp_52w <= 0.20`, `market_cap >= $10B`, and
   `dividend_yield < 1.50%`. Target-call hard gates are 450–730 DTE, delta
   0.68–0.80, valid bid/ask, spread/mid `<= 0.08`, current IV `<= 0.60`,
-  current IV / RV20 `<= 1.00`, OI `>= 100`, and time value / spot `<= 0.20`.
+  OI `>= 100`, and time value / spot `<= 0.20`. Current IV / RV20 is not a
+  hard gate: it receives 100 points at or below 0.80, declines linearly, and
+  reaches zero points at or above 2.00.
   The selector first prefers 540–730 DTE, then delta nearest 0.74, then spread
   and OI; a very tight but poorly matched contract no longer wins by itself. The current
   Schwab endpoints do not provide trustworthy underlying average option volume,
@@ -244,8 +246,8 @@ run has completed without provider-wide errors or request exhaustion.
   call is 450–730 DTE with 0.68–0.80 delta, while the intended research
   holding window is roughly two to three months; that holding horizon is not an
   extra scanner score or an automatic exit rule.
-- `FinalScore` is only 50% IV cheapness, 30% RSI recovery, and 20%
-  sector-relative strength. After all hard gates pass, the stored candidate
+- `FinalScore` is 40% IV-percentile cheapness, 10% IV/RV20 cheapness, 30% RSI
+  recovery, and 20% sector-relative strength. After all hard gates pass, the stored candidate
   priority remains market cap descending, with `FinalScore` used only as a
   tiebreaker. Feishu and Bark render their Top 10 by a separate `PriorityScore`:
   50% 52-week price dislocation plus 50% 52-week IV percentile cheapness. Both

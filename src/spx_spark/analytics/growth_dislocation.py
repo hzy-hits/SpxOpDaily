@@ -10,7 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v10"
+POLICY_VERSION = "growth_dislocation_leaps.v11"
 IV_SCORE_CHEAP_CUTOFF = 0.10
 
 
@@ -55,7 +55,6 @@ def select_target_leaps(
     policy: GrowthDislocationSettings,
     *,
     spot: float | None = None,
-    realized_vol_20d: float | None = None,
 ) -> Any | None:
     eligible: list[Any] = []
     for contract in contracts:
@@ -74,9 +73,6 @@ def select_target_leaps(
             continue
         if int(contract.open_interest) < policy.min_target_leaps_open_interest:
             continue
-        if realized_vol_20d is not None and realized_vol_20d > 0.0:
-            if float(contract.volatility) / realized_vol_20d > policy.max_iv_rv_ratio:
-                continue
         if spot is not None:
             value_ratio = extrinsic_value_ratio(
                 spot=spot,
@@ -180,7 +176,6 @@ def score_candidate(
         current_iv <= 0.0
         or current_iv > policy.max_current_leaps_iv
         or realized_vol_20d <= 0.0
-        or current_iv / realized_vol_20d > policy.max_iv_rv_ratio
     ):
         return None
     if int(data["target_leaps_oi"]) < policy.min_target_leaps_open_interest:
@@ -198,6 +193,7 @@ def score_candidate(
         float(data["ivp_13w"]),
         float(data["ivp_26w"]),
     )
+    ivrv_score = iv_rv_score(current_iv, realized_vol_20d, policy)
     rsi_score = rsi_recovery_score(
         float(data["rsi14"]),
         float(data["rsi14_min_20d"]),
@@ -209,7 +205,7 @@ def score_candidate(
         float(data["sector_return_5d"]),
         float(data["sector_return_10d"]),
     )
-    final_score = 0.50 * iv_score + 0.30 * rsi_score + 0.20 * rs_score
+    final_score = 0.40 * iv_score + 0.10 * ivrv_score + 0.30 * rsi_score + 0.20 * rs_score
     price_dislocation_score: float | None = None
     ivp_52w_score: float | None = None
     priority_score: float | None = None
@@ -233,6 +229,7 @@ def score_candidate(
     )
     return {
         "iv_score": iv_score,
+        "ivrv_score": ivrv_score,
         "rs_score": rs_score,
         "rsi_score": rsi_score,
         "final_score": final_score,
@@ -298,6 +295,22 @@ def iv_cheapness_score(
 ) -> float:
     weighted_ivp = 0.60 * ivp_13w + 0.40 * ivp_26w
     return 100.0 * max(0.0, 1.0 - weighted_ivp / IV_SCORE_CHEAP_CUTOFF)
+
+
+def iv_rv_score(
+    current_iv: float,
+    realized_vol_20d: float,
+    policy: GrowthDislocationSettings,
+) -> float:
+    """Score option IV relative to recent realized volatility without gating it."""
+
+    ratio = current_iv / realized_vol_20d
+    return 100.0 * clamp(
+        (policy.iv_rv_zero_score_ratio - ratio)
+        / (policy.iv_rv_zero_score_ratio - policy.iv_rv_full_score_ratio),
+        0.0,
+        1.0,
+    )
 
 
 def rsi_recovery_score(

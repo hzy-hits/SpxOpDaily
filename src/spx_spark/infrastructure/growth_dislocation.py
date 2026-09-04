@@ -406,16 +406,10 @@ def _build_document(
                 "max_option_dte": chain.max_dte,
             }
         )
-        features = price_features([entry.close for entry in history])
         target = select_target_leaps(
             chain.contracts,
             policy,
             spot=quote.last,
-            realized_vol_20d=(
-                float(features["realized_vol_20d"])
-                if features and float(features.get("realized_vol_20d") or 0.0) > 0.0
-                else None
-            ),
         )
         if target is None:
             reason = "target_leaps_hard_filter" if chain.contracts else "target_leaps_missing"
@@ -533,7 +527,7 @@ def _build_document(
             "request_limited": request_limited,
             "ivp_incomplete": False,
             "errors": sorted(set(errors)),
-            "volatility_contract": "13-week, 26-week, and 52-week percentiles calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; selected LEAPS current IV and IV/RV20 also pass configured hard limits",
+            "volatility_contract": "13-week, 26-week, and 52-week percentiles calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; selected LEAPS current IV passes its hard limit while IV/RV20 is score-only",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
             "classification": "official sector fallback; subindustry unavailable",
         },
@@ -1167,8 +1161,8 @@ def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
     if raw.get("schema_version") not in {None, 2, STATE_SCHEMA_VERSION}:
         return {}
     # V6 smoothed the score curve, V7 changed notification priority, V8 added
-    # the Core Pool, V9 made RSI score-only, and V10 tightened all three entry
-    # gates while preserving price, IV-history, and contract caches.
+    # the Core Pool, V9 made RSI score-only, V10 tightened all three entry gates,
+    # and V11 made IV/RV score-only while preserving all existing caches.
     if raw.get("policy_version") not in {
         None,
         "growth_dislocation_leaps.v5",
@@ -1176,6 +1170,7 @@ def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
         "growth_dislocation_leaps.v7",
         "growth_dislocation_leaps.v8",
         "growth_dislocation_leaps.v9",
+        "growth_dislocation_leaps.v10",
         POLICY_VERSION,
     }:
         return {}

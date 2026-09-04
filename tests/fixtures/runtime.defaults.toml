@@ -285,7 +285,8 @@ target_delta_min = { value = 0.68, description = "Minimum call delta accepted by
 target_delta_max = { value = 0.80, description = "Maximum call delta accepted by the target LEAPS selector." }
 max_leaps_spread_mid = { value = 0.08, description = "Hard maximum target-LEAPS bid/ask spread divided by mid for candidate eligibility." }
 max_current_leaps_iv = { value = 0.60, description = "Hard maximum target-LEAPS current implied volatility expressed as a fraction." }
-max_iv_rv_ratio = { value = 1.00, description = "Hard maximum target-LEAPS current IV divided by underlying 20-day realized volatility." }
+iv_rv_full_score_ratio = { value = 0.80, description = "Target-LEAPS IV/RV20 ratio at or below which the smooth IV/RV score is 100." }
+iv_rv_zero_score_ratio = { value = 2.00, description = "Target-LEAPS IV/RV20 ratio at or above which the smooth IV/RV score is zero." }
 min_target_leaps_open_interest = { value = 100, description = "Hard minimum open interest for the selected target LEAPS contract." }
 max_extrinsic_value_ratio = { value = 0.20, description = "Hard maximum target-LEAPS extrinsic value divided by the underlying spot price." }
 rsi_oversold_threshold = { value = 30.0, description = "RSI threshold that proves the stock was recently oversold." }

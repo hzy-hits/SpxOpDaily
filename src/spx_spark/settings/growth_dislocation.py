@@ -26,7 +26,8 @@ class GrowthDislocationSettings:
     target_delta_max: float
     max_leaps_spread_mid: float
     max_current_leaps_iv: float
-    max_iv_rv_ratio: float
+    iv_rv_full_score_ratio: float
+    iv_rv_zero_score_ratio: float
     min_target_leaps_open_interest: int
     max_extrinsic_value_ratio: float
     rsi_oversold_threshold: float
@@ -54,13 +55,14 @@ class GrowthDislocationSettings:
             ("target_delta_max", self.target_delta_max),
             ("max_leaps_spread_mid", self.max_leaps_spread_mid),
             ("max_current_leaps_iv", self.max_current_leaps_iv),
-            ("max_iv_rv_ratio", self.max_iv_rv_ratio),
             ("max_extrinsic_value_ratio", self.max_extrinsic_value_ratio),
         ):
             if not 0.0 < value <= 1.0:
                 raise ValueError(f"growth-dislocation {label} must be in (0, 1]")
         if self.target_delta_min >= self.target_delta_max:
             raise ValueError("growth-dislocation target delta range is invalid")
+        if not 0.0 < self.iv_rv_full_score_ratio < self.iv_rv_zero_score_ratio:
+            raise ValueError("growth-dislocation IV/RV score thresholds are not ordered")
         if self.min_market_cap <= 0.0:
             raise ValueError("growth-dislocation min_market_cap must be positive")
         if self.ibkr_history_timeout_seconds <= 0.0:
@@ -123,7 +125,8 @@ def load_growth_dislocation_settings(
         target_delta_max=float(value("target_delta_max")),
         max_leaps_spread_mid=float(value("max_leaps_spread_mid")),
         max_current_leaps_iv=float(value("max_current_leaps_iv")),
-        max_iv_rv_ratio=float(value("max_iv_rv_ratio")),
+        iv_rv_full_score_ratio=float(value("iv_rv_full_score_ratio")),
+        iv_rv_zero_score_ratio=float(value("iv_rv_zero_score_ratio")),
         min_target_leaps_open_interest=int(value("min_target_leaps_open_interest")),
         max_extrinsic_value_ratio=float(value("max_extrinsic_value_ratio")),
         rsi_oversold_threshold=float(value("rsi_oversold_threshold")),
