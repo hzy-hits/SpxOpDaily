@@ -42,6 +42,7 @@ git@github-spxopdaily:hzy-hits/SpxOpDaily.git
 
 ## 3. 事实与安全边界
 
+- 回测、回放及策略生效／失效归因必须从原始 IBKR／Schwab 券商期权与标的行情重建，按当时可用时间还原信号、选腿和退出；不得用历史策略卡、NO_TRADE 或推送记录筛选研究样本、生成收益标签或证明 edge。Bark 保持不动，不读取其数据做本次归因，也不修改其代码、配置或投递行为。
 - `systemctl` 显示 `active` 只证明进程存活，不证明行情新鲜或策略可交易。分别检查服务状态、provider/token 状态、源时间戳/NBBO readiness、数据覆盖和通知投递。
 - SPXW exact-leg 必须核对订阅需求、确认状态、`ready_at` 和 bid/ask 新鲜度，不能只看宽链或 latest-state 是否有行。
 - GTH 与 RTH 的 provider 规则不同；不得用 frozen Schwab 行情静默替代 GTH 的 IBKR SPXW 两边 NBBO。
