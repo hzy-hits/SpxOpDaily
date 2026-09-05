@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -164,7 +164,7 @@ def execute_chain_lane(
         snapshot = snapshot_from_chain_payload(
             payload,
             underlier=plan.canonical,
-            received_at=now,
+            received_at=datetime.now(timezone.utc),
         )
         if plan.raw_only:
             snapshot = _research_snapshot(snapshot, lane_key=plan.lane_key)

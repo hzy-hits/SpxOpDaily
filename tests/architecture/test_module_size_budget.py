@@ -10,7 +10,6 @@ OVERSIZED_MODULE_LINE_BASELINE = {
     "application/market_features/service.py": 1186,
     "application/order_map/candidate_factory.py": 1483,
     "application/order_map/operator_status.py": 1214,
-    "application/order_map/path_distribution.py": 1005,
     "application/order_map/rth_daily_acceptance.py": 1046,
     "application/order_map/service.py": 1041,
     "application/order_map/strategy_facts.py": 1375,

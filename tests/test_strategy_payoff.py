@@ -62,6 +62,49 @@ from spx_spark.settings.strategy_distribution import StrategyDistributionSetting
 from spx_spark.storage import LatestState
 
 
+def test_unrelated_exemption_cannot_free_an_opposite_candidate_from_direction_lock():
+    from spx_spark.application.order_map.strategy_ranker import GthDirectionLock, apply_winner_stick
+    now = datetime(2026, 9, 4, 14, tzinfo=timezone.utc)
+    lock = GthDirectionLock("DOWN", "old", now)
+    opposite = {"opportunity_id": "opposite", "direction": "UP", "setup_kind": "ES_VOLUME_MOMENTUM"}
+    independent = {"opportunity_id": "independent", "direction": "UP", "setup_kind": "PREAVERAGE15_PULLBACK"}
+    assert apply_winner_stick([opposite], lock, session_mode="rth")[0] == []
+    assert apply_winner_stick([opposite, independent], lock, session_mode="rth")[0] == [independent]
+
+
+def test_path_veto_evaluates_next_candidate_and_records_first_rejection(monkeypatch):
+    from spx_spark.application.order_map import strategy_select
+    now = datetime(2026, 8, 7, 15, tzinfo=timezone.utc)
+    payload = _decision_payload(now)
+    original = build_strategy_decision(payload, _state(now), now)["candidate"]
+    candidates = [{**deepcopy(original), "candidate_id": name, "opportunity_id": name,
+                   "selection_score": score, "selection_score_base": score}
+                  for name, score in (("adverse", .9), ("acceptable", .5))]
+    monkeypatch.setattr(strategy_select, "enumerate_candidates", lambda *a, **k: candidates)
+    def paths(candidate, *args, **kwargs):
+        if candidate["opportunity_id"] == "adverse":
+            return {**candidate, "evidence_status": "forward_unvalidated_user_override", "edge": {
+                **candidate.get("edge", {}), "path_distribution": {"p90_net_pnl": -1,
+                    "risk_objective": {"status": "available", "n_sessions": 25,
+                                       "objective_dollars": -20, "loss_probability": .8, "shadow_choice": "NO_TRADE"}}}}
+        return candidate
+    monkeypatch.setattr(strategy_select, "attach_path_distribution", paths)
+    decision = build_strategy_decision(payload, _state(now), now)
+    assert decision["candidate"]["opportunity_id"] == "acceptable"
+    assert any(row.get("candidate_id") == "adverse" and "forward_path_distribution_veto" in row.get("rejection_reasons", [])
+               for row in decision["rejection_funnel"]["candidate_evaluations"])
+
+
+def test_frozen_decision_manifest_detects_mutated_quotes():
+    from spx_spark.application.order_map.decision_consistency import committed_strategy_decision
+    now = datetime(2026, 8, 7, 15, tzinfo=timezone.utc)
+    decision = build_strategy_decision(_decision_payload(now), _state(now), now)
+    assert committed_strategy_decision(decision, now=now) == decision
+    mutated = deepcopy(decision)
+    mutated["candidate"]["quote"]["ask"] += 1
+    assert committed_strategy_decision(mutated, now=now) == {}
+
+
 def test_rth_environment_separates_expansion_balance_and_missing_data() -> None:
     facts = {
         "session": {"mode": "rth"},
@@ -814,7 +857,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v65"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v66"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1103,7 +1146,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v65"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v66"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1236,8 +1279,8 @@ def test_stable_pin_builds_candidate_specific_terminal_range_probability(
         path = tmp_path / "features" / "spx_standardized_samples" / f"date={day}" / "events.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         rows = [
-            {"status": "selected", "minute": f"{day}T19:00:00+00:00", "selected": {"price": 7712.0}},
-            {"status": "selected", "minute": f"{day}T19:05:00+00:00", "selected": {"price": 7712.0}},
+            {"status": "selected", "minute": f"{day}T19:00:00+00:00", "observed_at": f"{day}T19:00:00+00:00", "selected": {"price": 7712.0}},
+            {"status": "selected", "minute": f"{day}T19:05:00+00:00", "observed_at": f"{day}T19:05:00+00:00", "selected": {"price": 7712.0}},
         ]
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     payload = _pin_payload(now)
@@ -1255,10 +1298,12 @@ def test_stable_pin_builds_candidate_specific_terminal_range_probability(
         probability_settings=StrategyDistributionSettings(),
     )
 
-    assert decision["decision_type"] == "CALL_BUTTERFLY", decision["why_not"]
-    assert decision["probability_evidence"]["method"] == "physical_terminal_range_bootstrap.v1"
-    assert decision["probability_evidence"]["n_effective"] == 30.0
-    assert decision["candidate"]["utility"]["conservative_lower_bound"] > 0
+    assert decision["decision_type"] == "NO_TRADE"
+    assert "strategy_edge_model_artifact_missing" in decision["why_not"]["reasons"]
+    candidate = decision["why_not"]["nearest_candidate"]
+    assert candidate["probability_evidence"]["method"] == "physical_terminal_range_bootstrap.v1"
+    assert candidate["probability_evidence"]["n_effective"] == 30.0
+    assert candidate["utility"]["conservative_lower_bound"] > 0
 
 
 def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
@@ -1273,7 +1318,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v65"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v66"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1411,7 +1456,7 @@ def test_rth_momentum_uses_manual_fallback_only_when_model_artifact_is_missing(
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v65"
+        "strategy_policy.bootstrap.v66"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["fallback_reason"] == (
         "strategy_edge_model_artifact_missing"
@@ -1632,7 +1677,7 @@ def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_v
     assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
     assert decision["candidate"]["economics"]["width_points"] == 15.0
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v65"
+        "strategy_policy.bootstrap.v66"
     )
     assert decision["regime"]["rth_environment"]["status"] != "ready"
     assert decision["action_authority"] == "manual"
@@ -4052,7 +4097,7 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
         json.dumps(
             {
                 "schema_version": "policy_ev_table.v1",
-                "management_policy_version": "management_policy.v1",
+                "management_policy_version": PIN_BUTTERFLY_MANAGEMENT_POLICY.policy_version,
                 "generated_at": now.isoformat(),
                 "source_sessions": ["2026-08-05", "2026-08-06"],
                 "buckets": {
@@ -4092,7 +4137,7 @@ def test_policy_ev_annotation_is_rank_only_and_does_not_change_order(
     assert without_table.passed[0]["edge"]["policy_ev_reason"] == "table_unavailable"
     assert with_table.passed[0]["edge"]["policy_ev"] == pytest.approx(0.35)
     assert with_table.passed[0]["edge"]["policy_ev_n"] == 24
-    assert with_table.passed[0]["edge"]["policy_ev_version"] == "management_policy.v1"
+    assert with_table.passed[0]["edge"]["policy_ev_version"] == PIN_BUTTERFLY_MANAGEMENT_POLICY.policy_version
     assert with_table.passed[0]["edge"]["policy_ev_reason"] is None
 
 
@@ -4293,7 +4338,7 @@ def test_gth_selector_evidence_uses_current_minute_authority(
         "first_touch_time_stop_net_pnl_authority_unavailable"
     ]
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v65"
+        "strategy_policy.bootstrap.v66"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["gate_kind"] == (
         "gth_minute_confirmation"
@@ -4401,7 +4446,7 @@ def test_europe_confirmed_trend_transition_uses_gth_minute_authority(
     assert candidate["setup_kind"] == "EUROPE_TREND_TRANSITION"
     assert candidate["source_kind"] == "gth_es_trend_transition"
     assert candidate["source_segment"] == "europe"
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v65"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v66"
     assert candidate["evidence_status"] == "forward_unvalidated_user_override"
     assert candidate["edge"]["strategy_edge"]["gate_kind"] == (
         "gth_minute_confirmation"
@@ -5390,7 +5435,7 @@ def test_close_convergence_policy_holds_without_intrahour_stop_until_1555() -> N
 
     assert label.exit_reason == "hard_close"
     assert label.exit_at == start + timedelta(minutes=55)
-    assert label.policy_version == "management_policy.close_convergence.hold_1555.v1"
+    assert label.policy_version == "management_policy.close_convergence.hold_1555.v2"
     assert management_policy_for_candidate(
         {"setup_kind": "CLOSE_CONVERGENCE_60M"}
     ) == CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY
@@ -5451,43 +5496,67 @@ def test_management_policy_pnl_bounded_by_path(entry: float, peak_mult: float) -
     assert label.policy_pnl_points >= -entry - fees - 1e-9
 
 
-def test_policy_ev_score_is_rank_only_attachment() -> None:
-    from spx_spark.data_platform.research.strategy_policy_calibration import (
-        apply_policy_ev_score,
-        calibration_report,
-    )
+def test_policy_report_excludes_censored_labels_and_does_not_infer_promotion() -> None:
+    from spx_spark.data_platform.research.strategy_policy_calibration import calibration_report
 
-    candidate = {
-        "economics": {"max_loss_points": 2.0},
-        "utility": {"liquidity_penalty": 0.1, "model_uncertainty": 0.2},
-    }
-    scored = apply_policy_ev_score(
-        candidate, expected_policy_pnl=0.4, expected_shortfall_10=1.0
-    )
-    assert scored["policy_ev"]["authority"] == "rank_only"
-    assert scored["policy_ev"]["score"] == pytest.approx(
-        0.4 / 2.0 - 0.5 * 1.0 / 2.0 - 0.25 * 0.1 - 0.25 * 0.2
-    )
-    report = calibration_report(
-        [
-            {
-                "session_date": "2026-08-05",
-                "policy_pnl_points": 0.2,
-                "entry_ask": 1.0,
-                "regime_terminal_state": "PIN_STABLE",
-                "setup_kind": "STABLE_PIN",
-                "strategy_type": "CALL_BUTTERFLY",
-            },
-            {
-                "session_date": "2026-08-06",
-                "policy_pnl_points": -0.5,
-                "entry_ask": 2.0,
-                "regime_terminal_state": "TREND",
-                "setup_kind": "BREAKOUT_ACCEPTANCE",
-                "strategy_type": "CALL_DEBIT_VERTICAL",
-            },
-        ]
-    )
-    assert report["policy_authority"] == "rank_only"
+    complete = {"session_date": "2026-08-05", "policy_pnl_points": 0.2,
+                "exit_reason": "hard_close", "policy_version": "management_policy.v2"}
+    report = calibration_report([complete, {**complete, "exit_reason": "marks_exhausted", "policy_pnl_points": 1000.0}])
+    assert report["gates"]["labeled_rows"] == 1
+    assert report["gates"]["excluded_rows"] == 1
+    assert report["bucket_stats"][0]["mean_policy_pnl"] == 0.2
     assert report["gates"]["promotion_ready"] is False
-    assert report["gates"]["sessions_covered"] == 2
+
+
+@pytest.mark.parametrize("policy", [DEFAULT_MANAGEMENT_POLICY, RTH_IRON_CONDOR_MANAGEMENT_POLICY])
+def test_observation_end_is_not_a_completed_exit(policy) -> None:
+    start = datetime(2026, 8, 6, 14, 30, tzinfo=timezone.utc)
+    label = simulate_management_policy(
+        [PolicyMark(start + timedelta(minutes=1), 1.0)],
+        entry_ask=1.0, leg_count=4, entry_at=start, policy=policy,
+    )
+    assert label.exit_reason == "marks_exhausted"
+    assert label.exit_at is None
+    assert label.policy_pnl_points is None
+
+
+def test_gap_before_stop_cannot_prove_a_completed_trade() -> None:
+    start = datetime(2026, 8, 6, 14, 30, tzinfo=timezone.utc)
+    label = simulate_management_policy(
+        [PolicyMark(start, 1.0), PolicyMark(start + timedelta(minutes=5), 0.3)],
+        entry_ask=1.0, leg_count=2, entry_at=start, max_quote_gap_seconds=60,
+    )
+    assert label.exit_reason == "quote_gap"
+    assert label.policy_pnl_points is None
+
+
+@pytest.mark.parametrize("entry,liquidation", [(0.9, 0.45 + 1e-14), (1.3, 0.65 + 1e-14), (1.6, 0.8 + 1e-14)])
+def test_exact_premium_stop_survives_leg_sum_roundoff(entry, liquidation):
+    # Three actual August replay discrepancies: equality must stop on this tick.
+    start = datetime(2026, 8, 10, 17, tzinfo=timezone.utc)
+    first = start + timedelta(seconds=5)
+    label = simulate_management_policy([PolicyMark(first, liquidation)],
+                                      entry_ask=entry, leg_count=4, entry_at=start)
+    assert label.exit_reason == "premium_stop"
+    assert label.exit_at == first
+    assert label.policy_pnl_points == pytest.approx(-entry / 2 - 0.1056)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_marks_cannot_be_completed_pnl(value):
+    start = datetime(2026, 8, 10, 19, 44, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="finite"):
+        simulate_management_policy([PolicyMark(start + timedelta(minutes=1), value)],
+                                   entry_ask=1.0, leg_count=4, entry_at=start)
+
+
+def test_close_convergence_cannot_arm_a_trail_even_for_a_cheap_butterfly():
+    start = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    label = simulate_management_policy([
+        PolicyMark(start + timedelta(minutes=10), 1.2),
+        PolicyMark(start + timedelta(minutes=11), 0.7),
+        PolicyMark(start + timedelta(minutes=55), 1.0),
+    ], entry_ask=0.1, entry_at=start, leg_count=4, policy=CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY)
+    assert label.exit_reason == "hard_close"
+    assert label.exit_at == start + timedelta(minutes=55)
+    assert label.tp_armed is False

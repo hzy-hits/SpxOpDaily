@@ -66,6 +66,18 @@ def build_option_structure_frame(
             now=now,
         )
     volatility = option_volatility_features(front, next_expiry, history=history, now=now)
+    if front is not None:
+        atm_quotes = [quote for quote in _fresh_front_quotes(
+            state, expiry=front.expiry, now=now, policy=policy,
+        ) if quote.instrument.strike == front.atm_strike]
+        if (len(atm_quotes) == 2
+                and {quote.instrument.right for quote in atm_quotes} == {OptionRight.CALL, OptionRight.PUT}
+                and len({quote.provider for quote in atm_quotes}) == 1
+                and front.atm_straddle_mid is not None
+                and math.isclose(sum(float(quote.mid) for quote in atm_quotes), front.atm_straddle_mid)):
+            sources = sorted(quote_source_at(quote).isoformat() for quote in atm_quotes)
+            volatility["atm_observation_source_times"] = sources
+            volatility["atm_observation_provider"] = sorted({quote.provider.value for quote in atm_quotes})
     concentration = concentration_features(state, front)
     density = density_features(front, history=history, now=now)
     exposure = exposure_features(
@@ -387,6 +399,7 @@ def option_volatility_features(
     current_iv = front.atm_iv
     current_straddle = getattr(front, "atm_straddle_mid", None)
     result = {
+        "atm_strike": front.atm_strike,
         "atm_iv_0dte": current_iv,
         "atm_straddle_mid": current_straddle,
         "atm_iv_1dte": next_expiry.atm_iv if next_expiry else None,
@@ -403,6 +416,8 @@ def option_volatility_features(
     prior_straddle = _history_value(
         history, now=now, minutes=15, section="volatility", key="atm_straddle_mid"
     )
+    if _history_value(history, now=now, minutes=15, section="volatility", key="atm_strike") != front.atm_strike:
+        prior_straddle = None
     result["atm_straddle_decay_15m"] = (
         (prior_straddle - current_straddle) / prior_straddle
         if prior_straddle and current_straddle is not None

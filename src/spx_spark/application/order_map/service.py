@@ -41,6 +41,7 @@ from spx_spark.application.order_map.convexity_idea_radar import (
     attach_convexity_idea_radar,
 )
 from spx_spark.application.order_map.decision_consistency import (
+    committed_strategy_decision,
     apply_decision_projections,
 )
 from spx_spark.application.order_map.delivery import send_order_map
@@ -99,7 +100,6 @@ from spx_spark.application.order_map.spot import (
 from spx_spark.application.order_map.spring_gamma_projection import (
     attach_spring_gamma_v3_shadow,
 )
-from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.application.order_map.trigger_coordinates import (
     qualified_es_basis_points,
     resolve_trigger_coordinate,
@@ -467,13 +467,17 @@ def build_order_payload_with_retry(
     # chain-implied SPX, else ES+basis. Do not leave underlier empty just because
     # cash SPX is closed or Hyperliquid pricing gates blocked trade math.
     _attach_strategy_trigger_coordinate(payload, state, now=evaluation_now)
-    payload["strategy_decision"] = build_strategy_decision(
-        payload,
-        state,
-        evaluation_now,
-        data_root=storage_settings.data_root,
-        probability_settings=app.strategy_distribution,
+    # Core owns the final decision. The report renders its committed export;
+    # changing latest market projections must not create another authorization.
+    decision = committed_strategy_decision(
+        load_json(Path(storage_settings.data_root) / "latest" / "strategy_decision.json"), now=evaluation_now,
     )
+    payload["strategy_decision"] = decision
+    payload["strategy_decision_reference"] = {
+        "decision_id": decision.get("decision_id"),
+        "decision_at": decision.get("decision_at"),
+        "source": "core_committed_decision" if decision else "unavailable",
+    }
     return payload
 
 

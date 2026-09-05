@@ -434,8 +434,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v65"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v65"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v66"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v66"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -1189,3 +1189,22 @@ def test_gth_width_scan_adds_delta_anchors_when_greeks_exist() -> None:
     assert all(
         abs(float(row["long"]["delta"])) <= 0.20 + 1e-12 for row in delta_scan_longs
     )
+
+
+def test_surface_penalty_is_counted_once_through_candidate_and_ranker(monkeypatch, tmp_path) -> None:
+    import pytest
+    from spx_spark.analytics.options.surface_attribution import attribute_candidate_surface
+
+    def attribution(*args, **kwargs):
+        return {**attribute_candidate_surface(*args, **kwargs), "decision_modifier": -0.03}
+
+    monkeypatch.setattr("spx_spark.application.order_map.iron_condor.attribute_candidate_surface", attribution)
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_ranker.attribute_candidate_surface", attribution)
+    facts = _rth_facts()
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack", lambda *args: facts)
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select._accepted_session_cards", lambda *args: ())
+    decision = build_strategy_decision(_payload(), _rth_state(), RTH_NOW, data_root=tmp_path)
+    assert decision["decision_type"] == "IRON_CONDOR"
+    candidate = decision["candidate"]
+    assert candidate["surface_decision_modifier"] == -0.03
+    assert candidate["selection_score"] == pytest.approx(candidate["selection_score_base"] - 0.03, abs=1e-4)

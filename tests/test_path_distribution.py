@@ -36,6 +36,7 @@ def _write_session(root: Path, day: str, *, start_et: time, prices: list[float])
                 {
                     "status": "selected",
                     "minute": minute.isoformat(),
+                    "observed_at": minute.isoformat(),
                     "selected": {"price": price},
                 }
             )
@@ -214,7 +215,7 @@ def test_winner_path_distribution_is_ordered_and_does_not_change_score(tmp_path:
     assert distribution["n_paths"] >= 30
     assert distribution["p10_pnl_points"] <= distribution["p50_pnl_points"] <= distribution["p90_pnl_points"]
     assert candidate["selection_score"] == 1.25
-    assert distribution["method"] == "physical_path_management_policy.v3"
+    assert distribution["method"] == "physical_path_management_policy.v4"
     assert distribution["risk_objective"]["status"] == "available"
     assert distribution["risk_objective"]["authority"] == "advisory_only"
     assert distribution["pnl_histogram"]
@@ -239,11 +240,11 @@ def test_joint_surface_replay_is_primary_and_keeps_sticky_baseline(tmp_path: Pat
         now=RTH_NOW,
     )
 
-    assert distribution["method"] == "joint_spot_surface_management_policy.v1"
+    assert distribution["method"] == "joint_spot_surface_management_policy.v2"
     assert distribution["surface_coordinate"].startswith("historical_dynamic_25d")
     assert distribution["surface_cadence_seconds"] == 300
     assert distribution["n_sessions"] == 2
-    assert distribution["sticky_iv_baseline"]["method"] == "sticky_iv_same_spot_paths.v1"
+    assert distribution["sticky_iv_baseline"]["method"] == "sticky_iv_same_spot_paths.v2"
     assert "joint_spot_atm_skew_curvature_replay" in distribution["reason_codes"]
 
 
@@ -326,7 +327,7 @@ def test_butterfly_uses_three_leg_path_and_pin_management_policy(tmp_path: Path)
     )
 
     assert distribution["status"] == "estimated_uncalibrated"
-    assert distribution["method"] == "physical_path_management_policy.v3"
+    assert distribution["method"] == "physical_path_management_policy.v4"
     assert distribution["management_policy_version"] == "management_policy.pin_butterfly.hold_1545.v1"
     assert distribution["premium_stop_rate"] == 0.0
     assert distribution["pnl_histogram"]
@@ -409,7 +410,7 @@ def test_iron_condor_does_not_reuse_twenty_minute_debit_policy() -> None:
     assert distribution["p90_pnl_points"] is None
 
 
-def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) -> None:
+def test_iron_condor_rejects_overnight_gap_in_observation_path(tmp_path: Path) -> None:
     _write_open_to_clear(tmp_path, "2026-08-04", open_px=7750.0, clear_px=7751.0)
     _write_open_to_clear(tmp_path, "2026-08-05", open_px=7751.0, clear_px=7752.0)
 
@@ -421,19 +422,10 @@ def test_iron_condor_path_holds_to_1230_et_not_twenty_minutes(tmp_path: Path) ->
         now=GTH_NOW,
     )
 
-    assert distribution["method"] == "physical_path_iron_condor_clear_1230.v1"
-    assert distribution["hard_exit_et"] == "12:30"
-    assert distribution["time_stop_rate"] == 0.0
-    assert distribution["median_hold_minutes"] > 20
-    assert distribution["p10_pnl_points"] <= distribution["p50_pnl_points"] <= distribution["p90_pnl_points"]
-    assert distribution["pnl_histogram"]
-    assert distribution["risk_objective"]["status"] == "available"
-    assert distribution["risk_objective"]["automatic_ordering"] is False
-    text = path_distribution_desk_text(distribution)
-    assert text is not None
-    assert "0.5C止盈/3C止损" in text
-    assert "次日12:30ET前 路径 P10/P50/P90 $" in text
-    assert text.endswith("样本不足，仅研究")
+    # RTH-only observations do not reveal whether the overnight stop fired.
+    assert distribution["status"] == "unavailable"
+    assert "quote_gap" in distribution["reason_codes"]
+    assert distribution["risk_objective"]["status"] == "unavailable"
 
 
 def test_gth_iron_condor_uses_joint_surface_path_and_sticky_comparison(
@@ -452,10 +444,10 @@ def test_gth_iron_condor_uses_joint_surface_path_and_sticky_comparison(
         now=GTH_NOW,
     )
 
-    assert distribution["method"] == "joint_spot_surface_iron_condor_clear_1230.v1"
+    assert distribution["method"] == "joint_spot_surface_iron_condor_clear_1230.v2"
     assert distribution["n_sessions"] == 2
     assert distribution["surface_cadence_seconds"] == 300
-    assert distribution["sticky_iv_baseline"]["method"] == "sticky_iv_same_spot_paths.v1"
+    assert distribution["sticky_iv_baseline"]["method"] == "sticky_iv_same_spot_paths.v2"
     assert distribution["hard_exit_et"] == "12:30"
 
 
@@ -483,7 +475,7 @@ def test_rth_iron_condor_map_uses_tp50_sl200_hold1545_policy(tmp_path: Path) -> 
     )
 
     distribution = result["path_distribution"]
-    assert distribution["method"] == "physical_path_management_policy.v3"
+    assert distribution["method"] == "physical_path_management_policy.v4"
     assert distribution["management_policy_version"] == (
         "management_policy.iron_condor.tp50_sl200_hold1545.v2"
     )
@@ -515,10 +507,122 @@ def test_rth_iron_condor_joint_surface_replay_keeps_credit_policy(tmp_path: Path
     )
 
     distribution = result["path_distribution"]
-    assert distribution["method"] == "joint_spot_surface_management_policy.v1"
+    assert distribution["method"] == "joint_spot_surface_management_policy.v2"
     assert distribution["management_policy_version"] == (
         "management_policy.iron_condor.tp50_sl200_hold1545.v2"
     )
     assert distribution["hard_exit_et"] == "15:45"
     assert distribution["premium_stop_rate"] == 0.0
     assert "stop_loss_rate" in distribution
+
+
+def test_credit_projection_preserves_economic_pnl_and_reaches_stop() -> None:
+    import numpy as np
+    import pytest
+    from spx_spark.application.order_map.surface_path_distribution import _to_combo_bid
+    from spx_spark.analytics.options.strategy_payoff import (
+        PolicyMark, RTH_IRON_CONDOR_MANAGEMENT_POLICY, simulate_management_policy,
+    )
+
+    for buyback, gross_pnl, reason in ((1.25, 1.25, "profit_take"), (7.5, -5.0, "stop_loss")):
+        combo = _to_combo_bid(
+            np.array([[-2.5, -buyback]]), model0=-2.5, close_seed=2.5,
+            entry_credit=2.5, spots=np.array([[7750.0, 7750.0]]),
+        )
+        label = simulate_management_policy(
+            [PolicyMark(RTH_NOW + timedelta(minutes=i), float(mark))
+             for i, mark in enumerate(combo["bids"][0])],
+            entry_ask=2.5, leg_count=4, entry_at=RTH_NOW,
+            policy=RTH_IRON_CONDOR_MANAGEMENT_POLICY,
+        )
+        assert label.exit_reason == reason
+        assert label.policy_pnl_points == pytest.approx(gross_pnl - 0.1056)
+
+
+def test_physical_and_joint_iron_condor_lose_on_large_up_move(tmp_path: Path) -> None:
+    from spx_spark.application.market_features.physical_followthrough import PhysicalSpotPath
+
+    candidate = _iron_condor(session_mode="rth")
+    facts = {**_facts(now=RTH_NOW), "volatility": {}}
+    prices = (7750.0,) + (7870.0,) * 315
+    physical = estimate_path_distribution(
+        candidate, facts, now=RTH_NOW, data_root=None,
+        probability_settings=None,
+        paths=(PhysicalSpotPath(date(2026, 8, 5), 630, prices, True),),
+    )
+    assert physical["stop_loss_rate"] == 1.0
+    assert physical["p90_net_pnl"] < -160.0
+    # A jump in the same historical spot path must hurt the credit seller in
+    # both the joint surface and sticky-IV engines.
+    _write_surface_session(tmp_path, "2026-08-05", start_et=time(10, 30), count=64)
+    for path in (tmp_path / "features/iv_surface").rglob("*.jsonl"):
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        for row in rows:
+            row["underlier_price"] = 7750.0 if row["as_of"] == "2026-08-05T14:30:00+00:00" else 7870.0
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    joint = estimate_path_distribution(
+        candidate, facts, now=RTH_NOW, data_root=tmp_path,
+        probability_settings=None,
+    )
+    assert joint["stop_loss_rate"] == 1.0
+    assert joint["p90_net_pnl"] < -160.0
+    assert joint["sticky_iv_baseline"]["p90_net_pnl"] < -160.0
+
+
+def test_butterfly_path_charges_four_contracts_at_hard_close() -> None:
+    import pytest
+    from spx_spark.application.market_features.physical_followthrough import PhysicalSpotPath
+    from spx_spark.application.order_map.path_distribution import _sticky_legs, _model_mid
+    from spx_spark.analytics.options.pricing import time_to_expiry_years
+
+    now = datetime(2026, 8, 6, 19, 44, tzinfo=timezone.utc)
+    candidate = _call_butterfly()
+    legs = _sticky_legs(candidate["legs"], spot=7750.0, tau_years=time_to_expiry_years(EXPIRY, as_of=now))
+    delta = _model_mid(legs, spot=7750.0, tau_years=time_to_expiry_years(EXPIRY, as_of=now + timedelta(minutes=1))) - _model_mid(legs, spot=7750.0, tau_years=time_to_expiry_years(EXPIRY, as_of=now))
+    result = estimate_path_distribution(
+        candidate, _facts(now=now), now=now, data_root=None, probability_settings=None,
+        paths=(PhysicalSpotPath(date(2026, 8, 5), 944, (7750.0, 7750.0), True),),
+    )
+    assert result["hard_close_rate"] == 1.0
+    assert result["p50_pnl_points"] == pytest.approx(max(0.4 + delta, 0) - 0.8 - 0.1056, abs=1e-6)
+
+
+def test_close_convergence_fallback_covers_1555_and_rejects_short_path(tmp_path: Path) -> None:
+    from spx_spark.application.market_features.physical_followthrough import PhysicalSpotPath
+
+    now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
+    candidate = {**_call_butterfly(), "setup_kind": "CLOSE_CONVERGENCE_60M"}
+    _write_session(tmp_path, "2026-08-05", start_et=time(9, 30), prices=[7750.0] * 391)
+    complete = estimate_path_distribution(candidate, _facts(now=now), now=now, data_root=tmp_path, probability_settings=None)
+    assert complete["horizon_minutes"] == 55
+    assert complete["hard_close_rate"] == 1.0
+    assert complete["median_hold_minutes"] == 55
+    short = estimate_path_distribution(
+        candidate, _facts(now=now), now=now, data_root=None, probability_settings=None,
+        paths=(PhysicalSpotPath(date(2026, 8, 5), 900, (7750.0,) * 46, True),),
+    )
+    assert short["status"] == "unavailable"
+    assert short["p50_net_pnl"] is None
+
+
+def test_late_backfill_does_not_change_old_physical_paths(tmp_path: Path) -> None:
+    _write_session(tmp_path, "2026-08-05", start_et=time(10, 0), prices=[7750.0] * 80)
+    kwargs = dict(now=RTH_NOW, trading_date=date(2026, 8, 6), window_days=35, horizon_minutes=20)
+    before = load_physical_spot_paths(tmp_path / "features", **kwargs)
+    path = tmp_path / "features/spx_standardized_samples/date=2026-08-05/events.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        row["observed_at"] = "2026-08-08T00:00:00+00:00"
+        row["selected"]["price"] = 1.0
+    with path.open("a") as handle:
+        handle.write("\n".join(json.dumps(row) for row in rows) + "\n")
+    assert load_physical_spot_paths(tmp_path / "features", **kwargs) == before
+
+
+def test_partial_final_minute_uses_exact_exit_clock(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 6, 19, 0, 37, tzinfo=timezone.utc)
+    candidate = {**_call_butterfly(), "setup_kind": "CLOSE_CONVERGENCE_60M"}
+    _write_session(tmp_path, "2026-08-05", start_et=time(9, 30), prices=[7750.0] * 391)
+    result = estimate_path_distribution(candidate, _facts(now=now), now=now, data_root=tmp_path, probability_settings=None)
+    assert result["hard_close_rate"] == 1.0
+    assert result["median_hold_minutes"] == round(55 - 37 / 60, 3)

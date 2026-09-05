@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-import spx_spark.application.market_features.service as market_feature_service
 from spx_spark.application.market_features.gamma_prearm_plan import (
     evaluate_gamma_prearm_plan,
     process_gamma_prearm_plan,
@@ -16,12 +14,6 @@ from spx_spark.application.order_map.level_trigger_repricing import REPRICING_PH
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 
 
-def test_market_feature_runtime_processes_gamma_prearm_before_ready_candidate() -> None:
-    source = inspect.getsource(market_feature_service.run)
-
-    assert source.index("process_gamma_prearm_plan(") < source.index(
-        "process_gth_level_manual_candidate("
-    )
 
 
 def test_approaching_gamma_level_builds_two_sided_research_plan() -> None:

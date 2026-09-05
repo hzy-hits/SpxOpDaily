@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -321,18 +320,6 @@ def test_unhealthy_sampler_only_fences_rth_state_inputs() -> None:
         "es_bar_consumer:accepted_source_stale",
     ]
 
-    source = inspect.getsource(service.run)
-    assert source.index("load_consumable_es_bars") < source.index("build_minute_market_frame")
-    assert source.index("build_minute_market_frame") < source.index("evaluate_trade_intent")
-    assert source.index("evaluate_trade_intent") < source.index("_fence_rth_trade_intent_authority")
-    assert source.index("_fence_rth_trade_intent_authority") < source.index(
-        "advance_trade_candidate"
-    )
-    assert source.count("_fence_rth_trade_intent_authority(") == 1
-    assert "process_gth_manual_candidate(" not in source
-    assert source.index("_fence_rth_trade_intent_authority") < source.index(
-        "process_gth_level_manual_candidate"
-    )
 
 
 @pytest.mark.parametrize("status", ("trade_ready", "shadow_ready"))

@@ -306,8 +306,9 @@ def test_research_chains_land_raw_without_entering_latest_projection(
         or snapshot.quotes[0].sampling_mode != "schwab_research_chain"
         for snapshot in persisted
     )
-    raw_path = data_root / "raw/provider=schwab/date=2026-07-06/hour=14/quotes.jsonl"
-    raw_rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    raw_rows = [json.loads(line)
+                for path in data_root.glob("raw/provider=schwab/date=*/hour=*/quotes.jsonl")
+                for line in path.read_text(encoding="utf-8").splitlines()]
     assert len(raw_rows) == 4
     assert {row["sampling_mode"] for row in raw_rows} == {"schwab_research_chain"}
 
@@ -565,9 +566,9 @@ def test_collector_tiered_chain_cadence_and_request_counts(
     first_chain_as_of = dict(first["chain_as_of"])
     assert all(first_chain_as_of[symbol] == t0.isoformat() for symbol in first_chain_as_of)
     first_persisted_count = len(persisted)
-    first_spx_received_at = next(
+    prior_spx_received_at = next(
         snapshot.received_at
-        for snapshot in persisted
+        for snapshot in reversed(persisted)
         if snapshot.quotes and snapshot.quotes[0].instrument.underlier == "SPX"
     )
 
@@ -589,8 +590,7 @@ def test_collector_tiered_chain_cadence_and_request_counts(
         for snapshot in reversed(persisted)
         if snapshot.quotes and snapshot.quotes[0].instrument.underlier == "SPX"
     )
-    assert latest_spx.received_at == t0
-    assert first_spx_received_at == t0
+    assert latest_spx.received_at == prior_spx_received_at
 
     chain_calls.clear()
     t2 = t0 + timedelta(seconds=15)
@@ -631,9 +631,12 @@ def test_skipped_chain_does_not_forge_received_at(
     )
 
     t0 = datetime(2026, 7, 11, 15, 0, 0, tzinfo=timezone.utc)
+    before = datetime.now(timezone.utc)
     assert schwab_collector.run(now=t0) == 0
     capsys.readouterr()
-    assert persisted_received_at == [t0]
+    assert len(persisted_received_at) == 1
+    receipt = persisted_received_at[0]
+    assert before <= receipt <= datetime.now(timezone.utc)
 
     t1 = t0 + timedelta(seconds=5)
     assert schwab_collector.run(now=t1) == 0
@@ -643,7 +646,46 @@ def test_skipped_chain_does_not_forge_received_at(
     assert output["chain_as_of"]["SPY"] == t0.isoformat()
     assert output["request_count"] == 0
     # No second persist: prior chain timestamp must remain the only write.
-    assert persisted_received_at == [t0]
+    assert persisted_received_at == [receipt]
+
+
+@pytest.mark.parametrize("lane", ["quotes", "chain"])
+def test_rest_receipt_clock_advances_only_after_response(monkeypatch, tmp_path, capsys, lane):
+    from spx_spark.schwab import chain_lane, collector_io
+
+    _isolate_collector_storage(monkeypatch, tmp_path)
+    monkeypatch.setenv("SCHWAB_COLLECT_QUOTES", "SPY" if lane=="quotes" else "")
+    monkeypatch.setenv("SCHWAB_COLLECT_CHAINS", "SPY" if lane=="chain" else "")
+    started = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    clock = {"at": started}
+
+    class ReceiptClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["at"].astimezone(tz)
+
+    class FakeClient:
+        def get_json(self, path, params):
+            clock["at"] = started+timedelta(seconds=3)
+            quote_time = int((started+timedelta(seconds=2)).timestamp()*1000)
+            if lane=="quotes":
+                return 200, {"SPY": {"assetMainType": "EQUITY", "quote": {
+                    "bidPrice": 749.9, "askPrice": 750.1, "quoteTime": quote_time,
+                }}}
+            payload = _chain_payload("SPY")
+            payload["callExpDateMap"]["2026-07-06:0"]["750.0"][0]["quoteTimeInLong"] = quote_time
+            return 200, payload
+
+    monkeypatch.setattr(chain_lane, "datetime", ReceiptClock)
+    monkeypatch.setattr(collector_io, "datetime", ReceiptClock)
+    monkeypatch.setattr(schwab_collector, "build_schwab_client", lambda _: FakeClient())
+    snapshots = []
+    monkeypatch.setattr(schwab_collector, "persist_provider_snapshot", lambda s, _: snapshots.append(s))
+    assert schwab_collector.run(now=started) == 0
+    capsys.readouterr()
+    assert len(snapshots) == 1
+    assert snapshots[0].received_at == started+timedelta(seconds=3)
+    assert snapshots[0].quotes[0].received_at >= snapshots[0].quotes[0].quote_time
 
 
 def test_collector_fails_when_due_lanes_all_fail_despite_cadence_skips(

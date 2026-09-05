@@ -13,6 +13,7 @@ from typing import Any
 from spx_spark.analytics.options.surface_attribution import attribute_candidate_surface
 from spx_spark.analytics.options.strategy_payoff import (
     debit_vertical_reach_reasons,
+    management_policy_for_candidate,
     vertical_entry_quality,
     vertical_width_path_reasons,
 )
@@ -221,34 +222,34 @@ def apply_winner_stick(
     lock expires rather than replacing the human card.
     """
 
-    if lock is None or not passed:
-        return passed, None
-    locked_direction = lock.direction.upper()
-    matching = [
-        row for row in passed if str(row.get("opportunity_id") or "") == lock.opportunity_id
-    ]
-    if matching:
-        rest = [
-            row for row in passed if str(row.get("opportunity_id") or "") != lock.opportunity_id
-        ]
-        return [matching[0], *rest], None
-    mode = str(session_mode or "").strip().lower()
-    if mode == "rth" and locked_direction == "NEUTRAL":
-        return [], "rth_pin_winner_stick_center_locked"
-    same_direction = [
-        row for row in passed if str(row.get("direction") or "").upper() == locked_direction
-    ]
-    if same_direction:
-        others = [
-            row for row in passed if str(row.get("direction") or "").upper() != locked_direction
-        ]
-        return [*same_direction, *others], None
-    reason = (
-        "gth_winner_stick_direction_locked"
-        if mode == "gth"
-        else "rth_winner_stick_direction_locked"
-    )
-    return [], reason
+    eligible = [row for row in passed
+                if candidate_direction_lock_reason(row, lock, session_mode=session_mode) is None]
+    if lock is not None:
+        eligible.sort(key=lambda row: str(row.get("opportunity_id") or "") != lock.opportunity_id)
+    reason = (candidate_direction_lock_reason(passed[0], lock, session_mode=session_mode)
+              if passed and not eligible else None)
+    return eligible, reason
+
+
+def candidate_direction_lock_reason(
+    candidate: Mapping[str, Any], lock: GthDirectionLock | None, *, session_mode: str,
+) -> str | None:
+    """One candidate's eligibility; shared by selection and notification admission."""
+    if lock is None:
+        return None
+    setup = str(candidate.get("setup_kind") or "")
+    mode = str(session_mode).lower()
+    if setup == "IRON_CONDOR_DELTA" or (mode == "rth" and setup in {
+        _PREAVERAGE15_PULLBACK, _CLOSE_CONVERGENCE_60M,
+    }):
+        return None
+    if mode == "rth" and lock.direction.upper() == "NEUTRAL":
+        if setup != "STABLE_PIN" or candidate.get("opportunity_id") == lock.opportunity_id:
+            return None
+        return "rth_pin_winner_stick_center_locked"
+    if str(candidate.get("direction") or "").upper() != lock.direction.upper():
+        return f"{mode}_winner_stick_direction_locked"
+    return None
 
 
 def apply_gth_winner_stick(
@@ -373,7 +374,7 @@ def _apply_surface_risk_modifier(
     policy: StrategyPolicy,
     now: datetime,
 ) -> dict[str, Any]:
-    base = float(candidate.get("selection_score") or 0.0)
+    base = float(candidate.get("selection_score_base", candidate.get("selection_score")) or 0.0)
     attribution = attribute_candidate_surface(
         candidate,
         facts,
@@ -1835,12 +1836,12 @@ def _policy_ev_annotation(
     data_root: str | Path | None,
 ) -> dict[str, Any]:
     table = _load_policy_ev_table(data_root)
-    if table is None:
+    if table is None or table.get("management_policy_version") != management_policy_for_candidate(candidate).policy_version:
         return {
             "policy_ev": None,
             "policy_ev_n": None,
             "policy_ev_version": None,
-            "policy_ev_reason": "table_unavailable",
+            "policy_ev_reason": "table_unavailable" if table is None else "management_policy_mismatch",
         }
     bucket = _map(_map(table).get("buckets")).get(_policy_ev_bucket_key(candidate, regime))
     if not isinstance(bucket, Mapping):

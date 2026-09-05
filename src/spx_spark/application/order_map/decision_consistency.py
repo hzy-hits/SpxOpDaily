@@ -4,6 +4,27 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from datetime import datetime, timezone
+import hashlib
+import json
+
+
+def committed_strategy_decision(decision: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    """Validate the frozen Core export without recomputing it from latest features."""
+    try:
+        available = datetime.fromisoformat(str(decision.get("available_at") or decision["decision_at"]))
+        decided = datetime.fromisoformat(str(decision["decision_at"]))
+        if available.tzinfo is None or decided.tzinfo is None or max(available, decided) > now.astimezone(timezone.utc):
+            return {}
+    except (KeyError, ValueError, TypeError):
+        return {}
+    manifest = decision.get("decision_manifest")
+    if isinstance(manifest, Mapping):
+        content = {key: value for key, value in decision.items() if key != "decision_manifest"}
+        encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        if hashlib.sha256(encoded.encode()).hexdigest() != manifest.get("content_sha256"):
+            return {}
+    return dict(decision)
 
 
 LEVEL_KEYS = ("put_wall", "flip_low", "flip_high", "call_wall")

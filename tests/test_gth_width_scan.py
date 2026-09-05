@@ -255,7 +255,7 @@ def test_gth_scan_pushes_only_the_ranked_winner(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v65"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v66"
     assert ranked.passed == []
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
@@ -594,7 +594,7 @@ def test_gth_winner_stick_keeps_locked_opportunity_over_higher_score() -> None:
 
     assert reason is None
     assert stuck[0]["opportunity_id"] == "strategy-opportunity:butterfly"
-    assert [row["direction"] for row in stuck] == ["NEUTRAL", "UP", "DOWN"]
+    assert [row["direction"] for row in stuck] == ["NEUTRAL"]
 
 
 def test_gth_winner_stick_keeps_same_direction_when_winner_drops() -> None:

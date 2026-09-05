@@ -11,18 +11,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from functools import lru_cache
 import json
+import hashlib
 import math
 from pathlib import Path
 from typing import Any
 
+from spx_spark.analytics.options.strategy_payoff import management_policy_for_candidate
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.application.order_map.surface_path_distribution import SUPERSEDED_PATH_METHODS
 
 
 SCHEMA_VERSION = "strategy_edge_model.v1"
 FEATURE_VERSION = "strategy_edge_features.v1"
+ARTIFACT_VERSION_PREFIX = "entry_edge.v2:"
 ARTIFACT_RELATIVE_PATH = ("research", "strategy_edge_model.v1.json")
 _PREAVERAGE_SETUP = "PREAVERAGE15_PULLBACK"
 _PREAVERAGE_CONTRACT_HASH = (
@@ -33,7 +38,7 @@ _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
 _ES_VOLUME_MOMENTUM_SETUP = "ES_VOLUME_MOMENTUM"
-_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v65"
+_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v66"
 _ES_VOLUME_MOMENTUM_CONTRACT_HASH = (
     "sha256:878fb878a4fdc83b6bb5309804a5e91a0c11a9674006cab2132614645bb0799c"
 )
@@ -52,7 +57,7 @@ _IRON_CONDOR_CONTRACT_HASH = (
 _GTH_IRON_CONDOR_CONTRACT_HASH = (
     "sha256:901d69561a93d3503495210c1f49f5c35791695065c0b298470c4e554dd446ba"
 )
-_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v65"
+_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v66"
 _GTH_MINUTE_GATE_CONTRACT_HASH = (
     "sha256:a37c9ec4ae262c425965238229d80f4fa3c0e30d6ac8d35c09195a54fd88d9e0"
 )
@@ -126,9 +131,9 @@ FEATURE_NAMES: tuple[str, ...] = (
 
 _DEFAULT_THRESHOLDS = {
     "min_expected_pnl_points": 0.25,
-    "min_expected_pnl_lcb_points": 0.10,
-    "min_p_profit": 0.58,
-    "max_p_stop_first_5m": 0.30,
+    "min_pnl_residual_q10_points": 0.10,
+    "min_profit_score": 0.58,
+    "max_early_stop_score": 0.30,
     "min_return_on_risk": 0.08,
 }
 
@@ -149,6 +154,8 @@ def reject_adverse_forward_path(
     if candidate.get("evidence_status") != "forward_unvalidated_user_override":
         return None
     distribution = _map(_map(candidate.get("edge")).get("path_distribution"))
+    if distribution.get("method") in SUPERSEDED_PATH_METHODS:
+        return None
     objective = _map(distribution.get("risk_objective"))
     n_sessions = _number(objective.get("n_sessions"))
     p90 = _number(distribution.get("p90_net_pnl"))
@@ -301,22 +308,22 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v65",
+                "strategy_policy.bootstrap.v66",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _RTH_LEVEL_CONFIRMATION_SETUP: (
-                "strategy_policy.bootstrap.v65",
+                "strategy_policy.bootstrap.v66",
                 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
                 "rth_level_confirmation_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v65",
+                "strategy_policy.bootstrap.v66",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v65",
+                "strategy_policy.bootstrap.v66",
                 (
                     _GTH_IRON_CONDOR_CONTRACT_HASH
                     if str(candidate.get("session_mode") or "").lower() == "gth"
@@ -531,6 +538,32 @@ def score_candidate_with_edge_model(
             candidate,
             {"status": "artifact_timestamp_missing", "model_key": model_key},
         ), ["strategy_edge_model_artifact_invalid"]
+    if generated_at > observed_now:
+        return _attach_model_payload(
+            candidate, {"status": "artifact_from_future", "model_key": model_key},
+        ), ["strategy_edge_model_artifact_from_future"]
+    try:
+        trained_through = date.fromisoformat(str(raw_model.get("trained_through") or ""))
+    except ValueError:
+        return _attach_model_payload(
+            candidate, {"status": "training_timestamp_missing", "model_key": model_key},
+        ), ["strategy_edge_model_artifact_invalid"]
+    if trained_through >= min(
+        observed_now.astimezone(ZoneInfo("America/New_York")).date(),
+        generated_at.astimezone(ZoneInfo("America/New_York")).date(),
+    ):
+        return _attach_model_payload(
+            candidate, {"status": "training_from_future", "model_key": model_key},
+        ), ["strategy_edge_model_training_from_future"]
+    if not str(artifact.get("artifact_version") or "").startswith(ARTIFACT_VERSION_PREFIX):
+        return _attach_model_payload(
+            candidate, {"status": "recalculation_required", "model_key": model_key},
+        ), ["strategy_edge_model_recalculation_required"]
+    management_policy = management_policy_for_candidate(candidate)
+    if artifact.get("management_policy_version") != management_policy.policy_version:
+        return _attach_model_payload(
+            candidate, {"status": "management_policy_mismatch", "model_key": model_key},
+        ), ["strategy_edge_model_management_policy_mismatch"]
     if valid_days is not None and valid_days > 0:
         age_days = (observed_now - generated_at).total_seconds() / 86_400.0
         if age_days > valid_days:
@@ -548,7 +581,7 @@ def score_candidate_with_edge_model(
     try:
         standardized = _standardize(features, raw_model)
         expected = _linear(raw_model, "pnl", standardized)
-        p_profit = _sigmoid(_linear(raw_model, "profit", standardized))
+        profit_score = _sigmoid(_linear(raw_model, "profit", standardized))
         p_stop = _sigmoid(_linear(raw_model, "stop_first_5m", standardized))
     except (KeyError, TypeError, ValueError, OverflowError):
         return _attach_model_payload(
@@ -575,11 +608,15 @@ def score_candidate_with_edge_model(
         "model_key": model_key,
         "model_version": raw_model.get("model_version"),
         "artifact_version": artifact.get("artifact_version"),
+        "artifact_sha256": hashlib.sha256(json.dumps(artifact, sort_keys=True).encode()).hexdigest(),
         "feature_version": FEATURE_VERSION,
         "expected_pnl_points": round(expected, 6),
-        "expected_pnl_lcb_points": round(lower_bound, 6),
-        "p_profit": round(p_profit, 6),
-        "p_stop_first_5m": round(p_stop, 6),
+        "pnl_residual_q10_points": round(lower_bound, 6),
+        "pnl_bound_semantics": "prediction_plus_oof_residual_q10",
+        "probability_semantics": "uncalibrated_model_estimate",
+        "management_policy_version": management_policy.policy_version,
+        "profit_score": round(profit_score, 6),
+        "early_stop_score": round(p_stop, 6),
         "return_on_risk": round(return_on_risk, 6),
         "max_abs_z": round(max_abs_z, 6),
         "domain_limit": round(domain_limit, 6),
@@ -595,12 +632,12 @@ def score_candidate_with_edge_model(
         failures.append("strategy_edge_model_out_of_domain")
     if expected < float(thresholds["min_expected_pnl_points"]):
         failures.append("strategy_edge_expected_pnl_below_threshold")
-    if lower_bound < float(thresholds["min_expected_pnl_lcb_points"]):
-        failures.append("strategy_edge_lower_bound_below_threshold")
-    if p_profit < float(thresholds["min_p_profit"]):
-        failures.append("strategy_edge_profit_probability_below_threshold")
-    if p_stop > float(thresholds["max_p_stop_first_5m"]):
-        failures.append("strategy_edge_early_stop_probability_above_threshold")
+    if lower_bound < float(thresholds["min_pnl_residual_q10_points"]):
+        failures.append("strategy_edge_residual_q10_below_threshold")
+    if profit_score < float(thresholds["min_profit_score"]):
+        failures.append("strategy_edge_profit_score_below_threshold")
+    if p_stop > float(thresholds["max_early_stop_score"]):
+        failures.append("strategy_edge_early_stop_score_above_threshold")
     if return_on_risk < float(thresholds["min_return_on_risk"]):
         failures.append("strategy_edge_return_on_risk_below_threshold")
     return result, failures
@@ -798,9 +835,9 @@ def _sigmoid(value: float) -> float:
 def _edge_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, float]:
     model = _map(_map(candidate.get("edge")).get("strategy_edge"))
     loss = _number(_map(candidate.get("economics")).get("max_loss_points")) or 0.0
-    lower = _number(model.get("expected_pnl_lcb_points"))
+    lower = _number(model.get("pnl_residual_q10_points"))
     expected = _number(model.get("expected_pnl_points"))
-    stop = _number(model.get("p_stop_first_5m"))
+    stop = _number(model.get("early_stop_score"))
     return (
         (lower / loss) if lower is not None and loss > 0 else -999.0,
         expected if expected is not None else -999.0,

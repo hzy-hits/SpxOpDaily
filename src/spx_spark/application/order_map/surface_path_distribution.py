@@ -22,6 +22,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     IRON_CONDOR_MANAGEMENT_POLICY,
     ManagementPolicy,
     PolicyMark,
+    policy_mark_horizon_end,
     risk_adjusted_cvar_objective,
     simulate_management_policy,
 )
@@ -29,11 +30,13 @@ from spx_spark.iv_surface import IvSurfaceExpiry, IvSurfaceSnapshot, snapshot_fr
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
-JOINT_SURFACE_METHOD = "joint_spot_surface_management_policy.v1"
-JOINT_SURFACE_CLEARING_METHOD = "joint_spot_surface_iron_condor_clear_1230.v1"
+JOINT_SURFACE_METHOD = "joint_spot_surface_management_policy.v2"
+JOINT_SURFACE_CLEARING_METHOD = "joint_spot_surface_iron_condor_clear_1230.v2"
 JOINT_SURFACE_COORDINATE = "historical_dynamic_25d_to_entry_frozen_strikes.v1"
-PHYSICAL_METHOD = "physical_path_management_policy.v3"
-PHYSICAL_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v1"
+SUPERSEDED_PATH_METHODS = frozenset({
+    "physical_path_management_policy.v3", "physical_path_iron_condor_clear_1230.v1",
+    "joint_spot_surface_management_policy.v1", "joint_spot_surface_iron_condor_clear_1230.v1",
+})
 SURFACE_CADENCE_MINUTES = 5
 SURFACE_HISTORY_REFRESH_MINUTES = 30
 SURFACE_SESSION_INDEX_MINUTES = 24 * 60
@@ -61,27 +64,23 @@ def path_distribution_desk_text(distribution: Mapping[str, Any] | None) -> str |
 
     if not isinstance(distribution, Mapping):
         return None
+    if distribution.get("method") in SUPERSEDED_PATH_METHODS:
+        return "旧路径估值待重算，不作为收益或否决证据"
     if distribution.get("status") not in {"estimated_uncalibrated", "insufficient_sample"}:
         return None
     values = tuple(distribution.get(key) for key in ("p10_net_pnl", "p50_net_pnl", "p90_net_pnl"))
     if not all(isinstance(value, int | float) and not isinstance(value, bool) for value in values):
         return None
     n_paths = distribution.get("n_paths")
-    sample = f" n={int(n_paths)}" if isinstance(n_paths, int | float) else ""
+    sample = f" 路径={int(n_paths)} / 独立session={distribution.get('n_sessions', 0)}" if isinstance(n_paths, int | float) else ""
     policy = str(distribution.get("management_policy_version") or "")
-    if policy == "management_policy.iron_condor.tp50_sl200_hold1545.v2":
-        prefix = "RTH 0.5C止盈/3C止损·最迟15:45ET "
-    elif policy == "management_policy.iron_condor.gth_tp50_sl200_clear1230.v2":
-        prefix = "GTH 0.5C止盈/3C止损·次日12:30ET前 "
+    hard_exit = distribution.get("hard_exit_et")
+    if "iron_condor.gth" in policy:
+        prefix = f"GTH 0.5C止盈/3C止损·次日{hard_exit}ET前 "
+    elif "iron_condor" in policy:
+        prefix = f"RTH 0.5C止盈/3C止损·最迟{hard_exit}ET "
     else:
-        method = distribution.get("method")
-        prefix = (
-            "最迟12:30ET "
-            if method in {PHYSICAL_CLEARING_METHOD, JOINT_SURFACE_CLEARING_METHOD}
-            else "最迟15:45ET "
-            if method in {PHYSICAL_METHOD, JOINT_SURFACE_METHOD}
-            else ""
-        )
+        prefix = f"最迟{hard_exit}ET " if hard_exit else ""
     p10, p50, p90 = (float(value) for value in values)
     warning = " · 样本不足，仅研究" if distribution.get("status") == "insufficient_sample" else ""
     return f"{prefix}路径 P10/P50/P90 ${p10:.0f}/${p50:.0f}/${p90:.0f}{sample}{warning}"
@@ -301,6 +300,7 @@ def estimate_joint_debit_distribution(
     )
     if not paths:
         return None
+    horizon_end = policy_mark_horizon_end(now, policy, session_date=_session_date(facts.get("session_date")))
     scale, scale_reason = _path_scale(paths, facts=facts, horizon_minutes=horizon_minutes)
     model0 = _model_mid(priced_legs, spot=spot, expiry=expiry, now=now)
     entry_credit = entry if policy.entry_side == "credit" else None
@@ -316,6 +316,7 @@ def estimate_joint_debit_distribution(
         model0=model0,
         close_seed=close_seed,
         entry_credit=entry_credit,
+        horizon_end=horizon_end,
     )
     sticky = _sticky_combo_bid_matrix(
         paths,
@@ -327,18 +328,19 @@ def estimate_joint_debit_distribution(
         model0=model0,
         close_seed=close_seed,
         entry_credit=entry_credit,
+        horizon_end=horizon_end,
     )
     invalidation, invalidation_reason = _invalidation_touch(
         candidate, credit=entry_credit is not None, spot=spot
     )
     simulation = _simulate(
         joint,
-        paths=paths,
         entry=entry,
-        leg_count=len(priced_legs),
+        leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
         now=now,
         policy=policy,
         invalidation=invalidation,
+        session_date=_session_date(facts.get("session_date")),
     )
     return _distribution(
         simulation,
@@ -357,9 +359,9 @@ def estimate_joint_debit_distribution(
         started=started,
         sticky=sticky,
         entry=entry,
-        leg_count=len(priced_legs),
+        leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
         now=now,
-        session_date=None,
+        session_date=_session_date(facts.get("session_date")),
     )
 
 
@@ -382,7 +384,8 @@ def estimate_joint_iron_condor_distribution(
     target = datetime.combine(session_date, time(12, 30), tzinfo=NEW_YORK).astimezone(
         timezone.utc
     )
-    horizon = int((target - now).total_seconds() // 60)
+    horizon = math.ceil((target - now).total_seconds() / 60)
+    horizon_end = target
     if horizon <= 0:
         return None
     paths, mode = load_joint_surface_paths(
@@ -408,6 +411,7 @@ def estimate_joint_iron_condor_distribution(
         model0=model0,
         close_seed=close_seed,
         entry_credit=entry,
+        horizon_end=horizon_end,
     )
     sticky = _sticky_combo_bid_matrix(
         paths,
@@ -419,14 +423,14 @@ def estimate_joint_iron_condor_distribution(
         model0=model0,
         close_seed=close_seed,
         entry_credit=entry,
+        horizon_end=horizon_end,
     )
     invalidation, invalidation_reason = _invalidation_touch(candidate, credit=True, spot=spot)
     policy = IRON_CONDOR_MANAGEMENT_POLICY
     simulation = _simulate(
         joint,
-        paths=paths,
         entry=entry,
-        leg_count=len(priced_legs),
+        leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
         now=now,
         policy=policy,
         invalidation=invalidation,
@@ -449,7 +453,7 @@ def estimate_joint_iron_condor_distribution(
         started=started,
         sticky=sticky,
         entry=entry,
-        leg_count=len(priced_legs),
+        leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
         now=now,
         session_date=session_date,
     )
@@ -520,6 +524,7 @@ def _joint_combo_bid_matrix(
     model0: float,
     close_seed: float,
     entry_credit: float | None,
+    horizon_end: datetime | None = None,
 ) -> dict[str, np.ndarray]:
     raw_spots = np.asarray([path.prices for path in paths], dtype=float)
     origins = raw_spots[:, :1]
@@ -537,7 +542,7 @@ def _joint_combo_bid_matrix(
         [
             time_to_expiry_years(
                 expiry,
-                as_of=now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES),
+                as_of=min(now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES), horizon_end) if horizon_end is not None else now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES),
             )
             for offset in range(spots.shape[1])
         ],
@@ -574,6 +579,7 @@ def _sticky_combo_bid_matrix(
     model0: float,
     close_seed: float,
     entry_credit: float | None,
+    horizon_end: datetime | None = None,
 ) -> dict[str, np.ndarray]:
     raw = np.asarray([path.prices for path in paths], dtype=float)
     spots = spot + scale * (raw - raw[:, :1])
@@ -581,7 +587,7 @@ def _sticky_combo_bid_matrix(
         [
             time_to_expiry_years(
                 expiry,
-                as_of=now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES),
+                as_of=min(now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES), horizon_end) if horizon_end is not None else now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES),
             )
             for offset in range(spots.shape[1])
         ],
@@ -607,19 +613,21 @@ def _to_combo_bid(
     entry_credit: float | None,
     spots: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    close_mark = np.maximum(close_seed + (model - model0), 0.0)
-    bids = (
-        np.maximum(2.0 * entry_credit - close_mark, 0.0)
-        if entry_credit is not None
-        else close_mark
-    )
-    return {"spots": spots, "bids": bids}
+    # Model values carry the signed quantities (+1/-1/-1/+1 for credit).
+    # A more negative position value means a larger buyback liability.
+    if entry_credit is not None:
+        buyback_cost = np.maximum(close_seed - (model - model0), 0.0)
+        # PolicyMark uses an entry-relative value; this is not a market bid
+        # and must remain negative when buyback exceeds twice the credit.
+        policy_marks = 2.0 * entry_credit - buyback_cost
+    else:
+        policy_marks = np.maximum(close_seed + (model - model0), 0.0)
+    return {"spots": spots, "bids": policy_marks}
 
 
 def _simulate(
     combo: Mapping[str, np.ndarray],
     *,
-    paths: Sequence[JointSurfacePath],
     entry: float,
     leg_count: int,
     now: datetime,
@@ -637,12 +645,13 @@ def _simulate(
         "hard_close": 0,
         "time_stop": 0,
     }
-    for index, _path in enumerate(paths):
+    horizon_end = policy_mark_horizon_end(now, policy, session_date=session_date)
+    for index in range(len(combo["bids"])):
         projected = tuple(float(value) for value in combo["spots"][index])
         if invalidation is not None and invalidation(projected):
             counters["invalidation"] += 1
         marks = [
-            PolicyMark(now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES), float(bid))
+            PolicyMark(min(now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES), horizon_end), float(bid))
             for offset, bid in enumerate(combo["bids"][index])
         ]
         label = simulate_management_policy(
@@ -652,7 +661,10 @@ def _simulate(
             entry_at=now,
             policy=policy,
             session_date=session_date,
+            max_quote_gap_seconds=SURFACE_CADENCE_MINUTES * 60,
         )
+        if label.policy_pnl_points is None:
+            return {"pnls": [], "holds": [], "counters": counters, "reason": label.exit_reason}
         pnls.append(label.policy_pnl_points)
         if label.exit_at is not None:
             holds.append((label.exit_at - now).total_seconds() / 60.0)
@@ -685,8 +697,10 @@ def _distribution(
     session_date: date | None,
 ) -> dict[str, Any]:
     pnls = list(simulation["pnls"])
+    if not pnls:
+        return {"status": "unavailable", "method": method, "reason_codes": [simulation["reason"]]}
     counters, count = simulation["counters"], len(pnls)
-    sessions = sorted(path.session_date.isoformat() for path in paths)
+    sessions = sorted({path.session_date.isoformat() for path in paths})
     p10, p50, p90 = _percentiles(pnls, (10.0, 50.0, 90.0))
     status = "estimated_uncalibrated" if count >= settings.minimum_physical_samples else "insufficient_sample"
     reasons = [
@@ -771,7 +785,6 @@ def _baseline(
 ) -> dict[str, Any]:
     pnls = _simulate(
         combo,
-        paths=tuple(_BaselinePath() for _ in combo["bids"]),
         entry=entry,
         leg_count=leg_count,
         now=now,
@@ -779,9 +792,11 @@ def _baseline(
         invalidation=None,
         session_date=session_date,
     )["pnls"]
+    if not pnls:
+        return {"status": "unavailable", "reason_codes": ["incomplete_baseline"]}
     p10, p50, p90 = _percentiles(pnls, (10.0, 50.0, 90.0))
     return {
-        "method": "sticky_iv_same_spot_paths.v1",
+        "method": "sticky_iv_same_spot_paths.v2",
         "p10_net_pnl": _dollars(p10),
         "p50_net_pnl": _dollars(p50),
         "p90_net_pnl": _dollars(p90),
@@ -789,11 +804,6 @@ def _baseline(
             pnls, candidate=candidate, quote=quote, session_count=session_count
         ),
     }
-
-
-@dataclass(frozen=True)
-class _BaselinePath:
-    session_date: date = date.min
 
 
 def _model_mid(
@@ -917,8 +927,10 @@ def _risk_objective(
 
 
 def _pnl_histogram(values: Sequence[float]) -> list[dict[str, float | int]]:
+    if not values:
+        return []
     low, high = min(values), max(values)
-    if math.isclose(low, high, abs_tol=1e-12):
+    if math.isclose(low, high, rel_tol=0.0, abs_tol=1e-12):
         half = max(abs(low) * 0.005, 0.005)
         return [{
             "lower_pnl_points": round(low - half, 6),

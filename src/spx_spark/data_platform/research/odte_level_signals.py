@@ -153,6 +153,7 @@ class OptionTick(NamedTuple):
     bid: float | None
     ask: float | None
     mid: float | None
+    source_at: datetime | None = None
 
 
 class UnderlierTick(NamedTuple):

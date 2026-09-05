@@ -26,7 +26,7 @@ from spx_spark.marketdata import (
     Quote,
 )
 from spx_spark.settings.analytics import AnalyticsSettings
-from spx_spark.storage import LatestMarketProjectionStore
+from spx_spark.storage import LatestStateStore
 
 
 NOW = datetime(2026, 7, 11, 20, 0, tzinfo=timezone.utc)
@@ -52,7 +52,7 @@ def _store(storage: StorageSettings):
 
 
 def _seed_spx(storage: StorageSettings, *, now: datetime) -> None:
-    LatestMarketProjectionStore(storage).update(
+    LatestStateStore(storage).update(
         [
             Quote(
                 instrument=InstrumentId.index("SPX"),

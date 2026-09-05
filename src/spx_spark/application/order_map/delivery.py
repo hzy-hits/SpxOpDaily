@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from time import monotonic
+from spx_spark.application.order_map.decision_consistency import committed_strategy_decision
 
 from spx_spark.application.notifications.report_enqueue import (
     daily_report_semantic,
@@ -22,8 +24,6 @@ from spx_spark.application.order_map.desk_projection_export import (
 from spx_spark.application.order_map.image_delivery import (
     NET_PREMIUM_FLOW_IMAGE_PUBLIC_URL,
     OPEN_INTEREST_IMAGE_PUBLIC_URL,
-    STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL,
-    STRATEGY_RISK_IMAGE_PUBLIC_URL,
     publish_net_premium_flow_image,
     publish_open_interest_image,
     publish_strategy_risk_image,
@@ -32,6 +32,7 @@ from spx_spark.application.order_map.guidance import price_action_playbook_text
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.render import render_template
 from spx_spark.application.order_map.strategy_ranker import (
+    candidate_direction_lock_reason,
     outbox_accepted_strategy_cards,
     session_direction_lock,
 )
@@ -115,9 +116,14 @@ def enqueue_strategy_decision(
     *,
     now: datetime,
     storage_settings: StorageSettings | None = None,
+    action_clock: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     """Send one deterministic unified candidate through the existing trade-ready lane."""
 
+    started = monotonic()
+    clock = action_clock or (lambda: now + timedelta(seconds=monotonic() - started))
+    if decision.get("decision_manifest") and not committed_strategy_decision(decision, now=now):
+        return {"accepted": False, "outcome": "decision_snapshot_invalid"}
     candidate = decision.get("candidate")
     if decision.get("action_authority") != "manual" or not isinstance(candidate, dict):
         return {"accepted": False, "outcome": "no_manual_candidate"}
@@ -142,19 +148,18 @@ def enqueue_strategy_decision(
     if flood is not None:
         return flood
     text = _render_strategy_candidate(decision, candidate)
+    strategy_risk_image = None
     if storage_settings is not None:
-        facts = (
-            decision.get("market_facts") if isinstance(decision.get("market_facts"), dict) else {}
+        strategy_risk_image = publish_strategy_risk_image(
+            storage_settings, decision=decision, now=now
         )
-        session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
-        strategy_risk_url = (
-            STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL
-            if str(session.get("mode") or "").lower() == "gth"
-            else STRATEGY_RISK_IMAGE_PUBLIC_URL
-        )
-        text = (
-            f"{text}\n\n## 策略图\n"
-            f"[查看概率、结构与损益图]({strategy_risk_url})\n"
+        if strategy_risk_image.get("status") == "published":
+            text += (
+                "\n\n## 策略图\n"
+                f"[查看概率、结构与损益图]({strategy_risk_image['public_url']})"
+            )
+        text += (
+            "\n\n## 实时仪表盘（持续更新）\n"
             f"[查看最新 OI 墙位图]({OPEN_INTEREST_IMAGE_PUBLIC_URL})\n"
             f"[查看 0DTE 资金流图]({NET_PREMIUM_FLOW_IMAGE_PUBLIC_URL})"
         )
@@ -164,6 +169,14 @@ def enqueue_strategy_decision(
         f"{_gamma_proxy_line(decision)}\n"
         f"{_ict_liquidity_line(decision, candidate)}"
     )
+    enqueue_at = clock()
+    available_at = _timestamp(decision.get("available_at")) or occurred_at
+    if expires_at <= enqueue_at or occurred_at > enqueue_at or available_at > enqueue_at:
+        return {"accepted": False, "outcome": "candidate_expired_during_preparation"}
+    quote_until = _timestamp(candidate.get("quote_valid_until"))
+    quote_status = "ready" if quote_until is not None and quote_until > enqueue_at else "refresh_required"
+    if quote_status == "refresh_required":
+        text = "本次报价已过期；刷新组合报价并重新确认后才可提交限价单。\n\n" + text
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -179,7 +192,7 @@ def enqueue_strategy_decision(
         text=text,
         feishu_text=text,
         friend=True,
-        enqueued_at=now,
+        enqueued_at=enqueue_at,
     )
     outcome = {
         "accepted": result.accepted,
@@ -188,17 +201,14 @@ def enqueue_strategy_decision(
         "outcome": result.outcome,
         "event_id": result.envelope.event_id,
         "targets": list(result.targets),
+        "quote_status": quote_status,
+        "action_revalidated_at": enqueue_at.isoformat(),
         "idea_memo": "omitted:trade_ready_latency_budget",
     }
-    strategy_risk_image = None
     open_interest_image = None
     net_premium_flow_image = None
-    # The operator card must enter the outbox before optional image rendering.
-    # Delivery can proceed while the stable image URLs are refreshed in place.
+    # Live dashboard images are independent of the frozen decision evidence.
     if storage_settings is not None and result.accepted and result.inserted:
-        strategy_risk_image = publish_strategy_risk_image(
-            storage_settings, decision=decision, now=now
-        )
         open_interest_image = publish_open_interest_image(storage_settings, now=now)
         net_premium_flow_image = publish_net_premium_flow_image(storage_settings, now=now)
     if strategy_risk_image is not None:
@@ -356,13 +366,16 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
                 f"Call {call_delta_text}（距SPX {call_distance_text}）"
             ),
             f"净贷记 ≥ {_fmt_premium(credit)} · 提交前刷新报价 · 禁止市价",
-            f"有效至 {until}（北京）",
+            f"观点有效至 {until}（北京）",
             "",
             "## 风险",
             f"最大亏损 {loss} · 短腿 {invalidation} 被触及时刷新四腿回购价",
             gamma_line,
             *([transition_line] if transition_line else []),
             f"止损：回购价 ≥ {_fmt_premium(stop_buyback)}（入场贷记 3倍，净亏200%）",
+            *(["该止损阈值超过翼宽；正常到期价值范围内不可达，应按展示的最大亏损评估风险。"]
+              if stop_buyback is not None and isinstance(economics.get("width_points"), int | float)
+              and stop_buyback > float(economics["width_points"]) else []),
             "",
             "## 目标",
             f"止盈：回购价 ≤ {_fmt_premium(take_profit)}（入场贷记 50%）",
@@ -389,10 +402,10 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "## 执行",
             f"{_butterfly_leg_text(candidate)}",
             f"净借记 ≤ {_fmt_premium(ask)} · 提交前刷新报价 · 禁止市价",
-            f"有效至 {until}（北京）",
+            f"观点有效至 {until}（北京）",
             "",
             "## 风险",
-            f"最大亏损 {loss} · SPX 离开 {invalidation} 失效",
+            f"最大亏损 {loss} · SPX 离开 {invalidation} 时重新评估",
             "",
             "## 目标",
             f"SPX {target}{payoff}",
@@ -463,12 +476,12 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "## 执行",
             f"{legs}",
             f"净借记 ≤ {_fmt_premium(ask)} · 提交前刷新报价 · 禁止市价",
-            f"有效至 {until}（北京）",
+            f"观点有效至 {until}（北京）",
             "",
             "## 风险",
-            f"最大亏损 {loss} · SPX 跌破 {invalidation} 失效"
+            f"最大亏损 {loss} · SPX 跌破 {invalidation} 时重新评估"
             if str(candidate.get("direction") or "") == "UP"
-            else f"最大亏损 {loss} · SPX 升破 {invalidation} 失效",
+            else f"最大亏损 {loss} · SPX 升破 {invalidation} 时重新评估",
             "",
             "## 目标",
             f"SPX {target}{payoff}",
@@ -494,6 +507,11 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         )
     )
     del decision
+    lines.extend((
+        "",
+        f"本次报价有效截至 {_beijing_clock(candidate.get('quote_valid_until'))}（北京）；提交前必须刷新",
+        "SPX 结构失效线用于重新评估；回放退出按止盈止损与时间合同执行。",
+    ))
     return "\n".join(lines)
 
 
@@ -702,29 +720,18 @@ def _beijing_clock(value: object) -> str:
 
 def _strategy_card_title(candidate: dict[str, Any]) -> str:
     kind = _strategy_type_cn(candidate)
+    prefix = (
+        "人工试验候选｜前向未验证"
+        if candidate.get("evidence_status") == "forward_unvalidated_user_override"
+        else "SPX 人工候选"
+    )
     if candidate.get("setup_kind") == "IRON_CONDOR_DELTA":
-        return f"SPX 人工候选 · {kind} {_iron_condor_strike_text(candidate)}"
+        return f"{prefix} · {kind} {_iron_condor_strike_text(candidate)}"
     long_token = _leg_token(candidate.get("long"))
     short_token = _leg_token(candidate.get("short"))
     if long_token != "-" and short_token != "-":
-        return f"SPX 人工候选 · {kind} {long_token}/{short_token}"
-    return f"SPX 人工候选 · {kind}"
-
-
-def _render_strategy_idea_memo(memo: dict[str, Any]) -> str:
-    watch_levels = "、".join(_fmt_strike(level) for level in memo.get("watch_levels") or ()) or "-"
-    falsification = "；".join(str(item) for item in memo.get("falsification") or ()) or "-"
-    risks = "；".join(str(item) for item in memo.get("risks") or ()) or "-"
-    return "\n".join(
-        (
-            "## 研究备忘",
-            f"看法  {memo.get('thesis') or '-'}",
-            f"证伪  {falsification}",
-            f"盯盘  {watch_levels}",
-            f"风险  {risks}",
-            "以上只解释结构，不授权下单",
-        )
-    )
+        return f"{prefix} · {kind} {long_token}/{short_token}"
+    return f"{prefix} · {kind}"
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -813,7 +820,9 @@ def _flood_control_block(
             stick_seconds=stick_seconds,
             session_mode=session_mode,
         )
-        if lock is not None and direction.upper() != lock.direction.upper():
+        if lock is not None and candidate_direction_lock_reason(
+            candidate, lock, session_mode=session_mode
+        ) is not None:
             return {
                 "accepted": False,
                 "outcome": (

@@ -215,9 +215,9 @@ def test_build_runtime_evaluator_emits_and_delivers(tmp_path, monkeypatch) -> No
         ProviderStatus,
         Quote,
     )
-    from spx_spark.storage import LatestMarketProjectionStore
+    from spx_spark.storage import LatestStateStore
 
-    LatestMarketProjectionStore(storage).update(
+    LatestStateStore(storage).update(
         [
             Quote(
                 instrument=InstrumentId.index("SPX"),

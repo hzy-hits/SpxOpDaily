@@ -95,23 +95,32 @@ def update_atm_straddle_session(
         reason = "option_frame_not_ready"
     elif current_straddle is None and current_atm_iv is None:
         reason = "atm_straddle_and_iv_unavailable"
+    source_times = [_time(value) for value in frame.volatility.get("atm_observation_source_times") or ()]
+    if reason is None and (len(source_times) != 2 or any(
+        at is None or not 0 <= (observed_at - at).total_seconds() <= 30 for at in source_times
+    )):
+        reason = "atm_observation_source_time_unavailable"
 
     if reason is None and segment is not None:
-        at = observed_at.isoformat()
+        at = max(source_times).isoformat()
         raw_bucket = state.get(segment)
         bucket = dict(raw_bucket) if isinstance(raw_bucket, dict) else {}
-        bucket["observations"] = int(bucket.get("observations") or 0) + 1
-        _update_extrema(bucket, "straddle_mid", current_straddle, at=at)
-        if segment == "gth":
-            _update_active_expansion_extrema(
-                bucket,
-                "straddle_mid",
-                current_straddle,
-                at=at,
-            )
-        _update_extrema(bucket, "atm_iv", current_atm_iv, at=at)
-        state[segment] = bucket
-        state["updated_at"] = at
+        previous_at = _time(bucket.get("last_observation_at"))
+        # Count at most one distinct source observation per five-second bucket.
+        # Re-consuming a frame or running the process faster adds no evidence.
+        if previous_at is None or int(max(source_times).timestamp() // 5) > int(previous_at.timestamp() // 5):
+            coordinate = [frame.volatility.get("atm_strike"), frame.volatility.get("atm_observation_provider")]
+            if bucket.get("observation_coordinate") != coordinate:
+                bucket = {key: value for key, value in bucket.items() if "_active_" not in key}
+                bucket.update({"observation_coordinate": coordinate, "observations": 0})
+            bucket["last_observation_at"] = at
+            bucket["observations"] = int(bucket.get("observations") or 0) + 1
+            _update_extrema(bucket, "straddle_mid", current_straddle, at=at)
+            if segment == "gth":
+                _update_active_expansion_extrema(bucket, "straddle_mid", current_straddle, at=at)
+            _update_extrema(bucket, "atm_iv", current_atm_iv, at=at)
+            state[segment] = bucket
+            state["updated_at"] = at
 
     return state, _atm_straddle_session_projection(
         state,
@@ -213,6 +222,8 @@ def _atm_straddle_session_projection(
         bucket = raw_bucket if isinstance(raw_bucket, dict) else {}
         projection[session_segment] = {
             "observations": int(bucket.get("observations") or 0),
+            "observation_coordinate": bucket.get("observation_coordinate"),
+            "observation_cadence_seconds": 5,
             "straddle_mid": _extrema_projection(bucket, "straddle_mid", current=current_straddle),
             "atm_iv": _extrema_projection(bucket, "atm_iv", current=current_atm_iv),
         }

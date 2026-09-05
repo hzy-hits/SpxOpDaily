@@ -41,7 +41,7 @@ from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.settings.alerts import AlertSettings
 from spx_spark.settings.analytics import AnalyticsSettings
-from spx_spark.storage import LatestMarketProjectionStore
+from spx_spark.storage import LatestStateStore
 
 
 def default_runtime_defaults_path() -> Path:
@@ -72,7 +72,7 @@ def default_outbox_path(storage: StorageSettings) -> Path:
 
 
 def market_snapshot_from_projection(
-    store: LatestMarketProjectionStore,
+    store: LatestStateStore,
     *,
     now: datetime | None = None,
 ) -> MarketSnapshot:
@@ -95,7 +95,7 @@ def market_snapshot_from_projection(
 
 @dataclass
 class ProjectionSnapshotSource:
-    store: LatestMarketProjectionStore
+    store: LatestStateStore
 
     def read(self) -> MarketSnapshot:
         return market_snapshot_from_projection(self.store)
@@ -165,7 +165,7 @@ class TickProjectionSink:
 
 
 def resolve_alert_evaluator(
-    store: LatestMarketProjectionStore,
+    store: LatestStateStore,
     *,
     evaluation_enabled: bool | None = None,
     alert_settings: AlertSettings | None = None,
@@ -254,7 +254,7 @@ def build_realtime_runtime(
         else None
     )
     notification_settings = notification_settings or NotificationSettings.from_env()
-    projection = LatestMarketProjectionStore(storage)
+    projection = LatestStateStore(storage)
     notification_engine = (
         create_engine((outbox_path or default_outbox_path(storage)).parent)
         if outbox_path is not None

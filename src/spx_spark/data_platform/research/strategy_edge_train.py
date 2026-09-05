@@ -1,8 +1,8 @@
 """Train candidate-level SPXW edge models from existing operational history.
 
 This one-shot offline command replays conservative combination bids from the
-quote lake, labels selected/no-trade/shadow candidates with a fixed 20-minute
-debit management contract, performs session-purged walk-forward validation,
+quote lake, labels selected/no-trade/shadow candidates with a current debit
+management contract, performs session-purged walk-forward validation,
 and emits the JSON artifact consumed by ``strategy_edge_model``.
 
 The command never auto-promotes a weak model: each RTH/GTH structure family
@@ -15,8 +15,8 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import json
 import math
 from pathlib import Path
@@ -27,11 +27,13 @@ import numpy as np
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    REPLAY_MAX_QUOTE_GAP_SECONDS,
     policy_mark_horizon_end,
     simulate_management_policy,
 )
 from spx_spark.application.order_map.strategy_edge_model import (
     ARTIFACT_RELATIVE_PATH,
+    ARTIFACT_VERSION_PREFIX,
     FEATURE_NAMES,
     FEATURE_VERSION,
     SCHEMA_VERSION,
@@ -43,20 +45,16 @@ from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
 from spx_spark.data_platform.research.strategy_policy_backfill import (
     _candidate_legs,
     _combo_bid_marks,
-    _entry_ask,
+    _entry_price,
 )
 
 
-ENTRY_EDGE_POLICY = replace(
-    DEFAULT_MANAGEMENT_POLICY,
-    policy_version="management_policy.entry_edge_20m.v1",
-    time_stop_minutes=20,
-)
+ENTRY_EDGE_POLICY = DEFAULT_MANAGEMENT_POLICY
 DEFAULT_THRESHOLDS = {
     "min_expected_pnl_points": 0.25,
-    "min_expected_pnl_lcb_points": 0.10,
-    "min_p_profit": 0.58,
-    "max_p_stop_first_5m": 0.30,
+    "min_pnl_residual_q10_points": 0.10,
+    "min_profit_score": 0.58,
+    "max_early_stop_score": 0.30,
     "min_return_on_risk": 0.08,
 }
 DEFAULT_PROMOTION_GATES = {
@@ -76,7 +74,6 @@ def load_candidate_labels(
     data_root: Path,
     start_date: str | None = None,
     end_date: str | None = None,
-    lookforward_minutes: int = 20,
 ) -> list[dict[str, Any]]:
     """Label all persisted candidate-bearing decisions from existing history."""
 
@@ -116,7 +113,6 @@ def load_candidate_labels(
             row = _label_decision(
                 decision,
                 store=store,
-                lookforward_minutes=lookforward_minutes,
             )
             if row is not None:
                 rows.append(row)
@@ -129,7 +125,6 @@ def _label_decision(
     decision: Mapping[str, Any],
     *,
     store: QuoteStore,
-    lookforward_minutes: int,
 ) -> dict[str, Any] | None:
     candidate = _candidate(decision)
     decision_at = _time(decision.get("decision_at"))
@@ -148,7 +143,7 @@ def _label_decision(
     legs = _candidate_legs(candidate)
     if len(legs) < 2:
         return None
-    entry_ask = _entry_ask(legs)
+    entry_ask = _entry_price(legs)
     if entry_ask is None:
         return None
     provider = str(legs[0].get("provider") or "schwab")
@@ -156,25 +151,28 @@ def _label_decision(
         decision_at,
         ENTRY_EDGE_POLICY,
         session_date=session_date,
-        lookforward_minutes=lookforward_minutes,
     )
     marks = _combo_bid_marks(
         store,
         legs=legs,
         provider=provider,
         start=decision_at,
-        end=end,
+        end=end + timedelta(seconds=REPLAY_MAX_QUOTE_GAP_SECONDS),
     )
     if not marks:
         return None
     label = simulate_management_policy(
         marks,
         entry_ask=entry_ask,
-        leg_count=len(legs),
+        leg_count=sum(abs(int(leg["quantity"])) for leg in legs),
         entry_at=decision_at,
         policy=ENTRY_EDGE_POLICY,
         session_date=session_date,
+        max_quote_gap_seconds=REPLAY_MAX_QUOTE_GAP_SECONDS,
     )
+    if label.policy_pnl_points is None:
+        return None
+
     features = candidate_edge_features(
         candidate,
         facts,
@@ -201,6 +199,7 @@ def _label_decision(
         "entry_ask": entry_ask,
         "max_loss_points": max_loss if max_loss is not None else entry_ask,
         "features": features,
+        "available_at": label.exit_at.isoformat(),
         "policy_pnl_points": label.policy_pnl_points,
         "profit": int(label.policy_pnl_points > 0.0),
         "stop_first_5m": int(
@@ -227,10 +226,15 @@ def train_edge_artifact(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Train independent session/family models with expanding walk-forward OOF."""
 
+    generated = _utc(generated_at)
     by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in rows:
         row = dict(raw)
-        if _valid_training_row(row):
+        session = _date(row.get("session_date"))
+        available = _time(row.get("available_at"))
+        if (_valid_training_row(row) and session is not None
+            and session < generated.astimezone(ZoneInfo("America/New_York")).date()
+            and available is not None and available <= generated):
             by_key[str(row["model_key"])].append(row)
 
     models: dict[str, Any] = {}
@@ -248,15 +252,16 @@ def train_edge_artifact(
         if model is not None:
             models[model_key] = model
 
-    generated = _utc(generated_at)
     artifact = {
         "schema_version": SCHEMA_VERSION,
         "feature_version": FEATURE_VERSION,
-        "artifact_version": f"entry_edge.v1:{generated.strftime('%Y%m%dT%H%M%SZ')}",
+        "artifact_version": f"{ARTIFACT_VERSION_PREFIX}{generated.strftime('%Y%m%dT%H%M%SZ')}",
         "generated_at": generated.isoformat(),
         "valid_days": 14,
         "feature_names": list(FEATURE_NAMES),
         "management_policy_version": ENTRY_EDGE_POLICY.policy_version,
+        "probability_semantics": "uncalibrated_model_estimate",
+        "pnl_bound_semantics": "prediction_plus_oof_residual_q10",
         "models": models,
     }
     report = {
@@ -364,7 +369,7 @@ def _train_group(
     )
 
     final_fit = _fit_models(ordered)
-    model_version = f"entry_edge_{model_key.replace('|', '_')}_v1"
+    model_version = f"entry_edge_{model_key.replace('|', '_')}_v2"
     model = {
         **final_fit,
         "model_version": model_version,
@@ -441,9 +446,8 @@ def _fit_logistic(factory: Any, x: np.ndarray, labels: np.ndarray) -> dict[str, 
         }
     model = factory(
         C=0.5,
-        class_weight="balanced",
         max_iter=2_000,
-        solver="liblinear",
+        solver="lbfgs",
         random_state=0,
     ).fit(x, labels)
     return {
@@ -466,7 +470,7 @@ def _predict_rows(
     )
     z = (x - mean) / scale
     expected = _linear_predictions(z, _map(fitted.get("pnl")))
-    p_profit = _sigmoid_array(_linear_predictions(z, _map(fitted.get("profit"))))
+    profit_score = _sigmoid_array(_linear_predictions(z, _map(fitted.get("profit"))))
     p_stop = _sigmoid_array(
         _linear_predictions(z, _map(fitted.get("stop_first_5m")))
     )
@@ -474,7 +478,7 @@ def _predict_rows(
     for row, pnl, profit, stop in zip(
         rows,
         expected,
-        p_profit,
+        profit_score,
         p_stop,
         strict=True,
     ):
@@ -482,8 +486,8 @@ def _predict_rows(
             {
                 **dict(row),
                 "expected_pnl_points": float(pnl),
-                "p_profit": float(profit),
-                "p_stop_first_5m": float(stop),
+                "profit_score": float(profit),
+                "early_stop_score": float(stop),
             }
         )
     return result
@@ -515,13 +519,13 @@ def _selection_metrics(
         return_on_risk = lower / max_loss
         if (
             expected >= float(thresholds["min_expected_pnl_points"])
-            and lower >= float(thresholds["min_expected_pnl_lcb_points"])
-            and float(row["p_profit"]) >= float(thresholds["min_p_profit"])
-            and float(row["p_stop_first_5m"])
-            <= float(thresholds["max_p_stop_first_5m"])
+            and lower >= float(thresholds["min_pnl_residual_q10_points"])
+            and float(row["profit_score"]) >= float(thresholds["min_profit_score"])
+            and float(row["early_stop_score"])
+            <= float(thresholds["max_early_stop_score"])
             and return_on_risk >= float(thresholds["min_return_on_risk"])
         ):
-            row["expected_pnl_lcb_points"] = lower
+            row["pnl_residual_q10_points"] = lower
             row["return_on_risk"] = return_on_risk
             selected.append(row)
     selected.sort(
@@ -699,7 +703,9 @@ def _candidate(decision: Mapping[str, Any]) -> Mapping[str, Any]:
 def _valid_training_row(row: Mapping[str, Any]) -> bool:
     features = _map(row.get("features"))
     return (
-        str(row.get("model_key") or "") != ""
+        row.get("policy_version") == ENTRY_EDGE_POLICY.policy_version
+        and row.get("exit_reason") in {"premium_stop", "trail", "time_stop", "hard_close"}
+        and str(row.get("model_key") or "") != ""
         and all(name in features for name in FEATURE_NAMES)
         and _number(row.get("policy_pnl_points")) is not None
         and _number(row.get("max_loss_points")) is not None
@@ -768,7 +774,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--holdout-sessions", type=int, default=8)
     parser.add_argument("--min-train-sessions", type=int, default=12)
-    parser.add_argument("--lookforward-minutes", type=int, default=20)
     parser.add_argument("--artifact", type=Path, default=None)
     parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args(argv)
@@ -778,7 +783,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         data_root=args.data_root,
         start_date=args.start_date,
         end_date=args.end_date,
-        lookforward_minutes=args.lookforward_minutes,
     )
     artifact, report = train_edge_artifact(
         rows,

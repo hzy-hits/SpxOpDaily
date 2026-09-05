@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -138,20 +140,22 @@ def publish_strategy_risk_image(
     decision: dict[str, Any],
     now: datetime,
 ) -> dict[str, object]:
-    """Publish the latest pushed manual candidate without affecting authority."""
+    """Freeze the decision image and manifest; latest is a separate live alias."""
 
     facts = decision.get("market_facts") if isinstance(decision.get("market_facts"), dict) else {}
     session = facts.get("session") if isinstance(facts.get("session"), dict) else {}
     gth = str(session.get("mode") or "").lower() == "gth"
-    public_path = STRATEGY_RISK_GTH_IMAGE_PUBLIC_PATH if gth else STRATEGY_RISK_IMAGE_PUBLIC_PATH
-    public_url = STRATEGY_RISK_GTH_IMAGE_PUBLIC_URL if gth else STRATEGY_RISK_IMAGE_PUBLIC_URL
+    snapshot = json.dumps(decision, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    artifact_id = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+    public_path = f"/strategy-risk/{artifact_id}.png"
+    public_url = f"https://spx.zh3nyu.com{public_path}"
     try:
         output = (
             Path(storage_settings.data_root)
             / "published"
             / "spxw-surface"
             / "strategy-risk"
-            / "latest.png"
+            / f"{artifact_id}.png"
         )
         if not decision:
             raise ValueError("strategy decision unavailable")
@@ -163,10 +167,19 @@ def publish_strategy_risk_image(
             and abs((decision_at - facts_at).total_seconds()) > 1.0
         ):
             raise ValueError("strategy risk decision and market facts are not time-aligned")
-        write_strategy_risk_png(decision, output)
-        if gth:
-            session_output = output.with_name("gth-latest.png")
-            temporary = output.with_name(f".gth-latest.{os.getpid()}.tmp")
+        if not output.exists():
+            write_strategy_risk_png(decision, output)
+        manifest = output.with_suffix(".json")
+        if not manifest.exists():
+            with manifest.open("x", encoding="utf-8") as handle:
+                json.dump({
+                    "decision": decision,
+                    "image_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                    "public_path": public_path,
+                }, handle, ensure_ascii=False, sort_keys=True)
+        for alias in ("latest.png", "gth-latest.png") if gth else ("latest.png",):
+            session_output = output.with_name(alias)
+            temporary = output.with_name(f".{alias}.{os.getpid()}.tmp")
             try:
                 temporary.unlink(missing_ok=True)
                 os.link(output, temporary)
@@ -185,6 +198,7 @@ def publish_strategy_risk_image(
         "as_of": str(decision.get("available_at") or now.isoformat()),
         "decision_id": decision.get("decision_id"),
         "strategy_type": decision.get("decision_type"),
+        "manifest_url": public_url.removesuffix(".png") + ".json",
         "public_path": public_path,
         "public_url": public_url,
         "bytes": output.stat().st_size,

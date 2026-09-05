@@ -1,13 +1,11 @@
-"""LatestMarketProjectionStore boundary tests."""
+"""LatestStateStore boundary tests."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 from spx_spark.config import StorageSettings
-from spx_spark.infrastructure.market_data.latest_projection import (
-    LatestMarketProjectionStore,
-)
+from spx_spark.storage import LatestStateStore
 from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
@@ -16,7 +14,6 @@ from spx_spark.marketdata import (
     ProviderStatus,
     Quote,
 )
-from spx_spark.storage import LatestMarketProjectionStore as StorageProjection
 
 
 NOW = datetime(2026, 7, 11, 18, 0, tzinfo=timezone.utc)
@@ -36,8 +33,7 @@ def _settings(tmp_path) -> StorageSettings:
 
 
 def test_projection_store_update_and_load_roundtrip(tmp_path) -> None:
-    assert LatestMarketProjectionStore is StorageProjection
-    store = LatestMarketProjectionStore(_settings(tmp_path))
+    store = LatestStateStore(_settings(tmp_path))
     quote = Quote(
         instrument=InstrumentId.index("SPX"),
         provider=Provider.SCHWAB,

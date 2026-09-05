@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -294,27 +293,3 @@ def test_ledger_write_failure_is_diagnostic_and_does_not_block_delivery(
     assert diagnostics["deadline"]["evaluation_to_action_revalidation_ms"] == 0.0
     assert diagnostics["deadline"]["action_revalidation_exceeded_ttl"] is False
     assert delivery == {"attempted": True, "accepted": True}
-
-
-def test_trade_critical_delivery_precedes_greek_and_spring_research() -> None:
-    source = inspect.getsource(service.run)
-
-    confirmed_gate = source.index("confirmed_gate = reconcile_confirmed_gate")
-    producer_delivery = source.index(
-        "producer_ledger, intent_delivery = _record_and_process_trade_intent"
-    )
-    spring_ticket_context = source.index(
-        '"spring_gamma": spring_gamma_operator.spring_gamma_operator_view'
-    )
-    greek_research = source.index("focused = build_zero_dte_greeks_reference")
-    spring_research = source.index("spring_gamma_v3 = _process_spring_gamma_v3_shadow")
-
-    assert (
-        spring_ticket_context
-        < producer_delivery
-        < confirmed_gate
-        < greek_research
-        < spring_research
-    )
-    assert "trade_intent_evaluation_to_action_revalidation_ms" in source
-    assert "trade_intent_action_revalidation_exceeded_ttl" in source

@@ -14,7 +14,7 @@ from spx_spark.options_map.render import (
     render_open_interest_mirror_svg,
     render_strategy_risk_svg,
 )
-from spx_spark.storage import LatestMarketProjectionStore
+from spx_spark.storage import LatestStateStore
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -101,7 +101,7 @@ def run(argv: list[str] | None = None) -> int:
         output.write_text(svg, encoding="utf-8")
         print(output)
         return 0
-    state = LatestMarketProjectionStore(settings).load()
+    state = LatestStateStore(settings).load()
     options_map = build_options_map(state, storage_settings=settings)
     if args.json:
         print(json.dumps(options_map.to_dict(), indent=2, sort_keys=True))

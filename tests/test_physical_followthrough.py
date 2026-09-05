@@ -313,11 +313,13 @@ def test_terminal_range_bootstrap_is_prior_day_and_session_weighted(tmp_path: Pa
             {
                 "status": "selected",
                 "minute": f"{day}T14:00:00+00:00",
+                "observed_at": f"{day}T14:00:00+00:00",
                 "selected": {"price": 100.0},
             },
             {
                 "status": "selected",
                 "minute": f"{day}T14:05:00+00:00",
+                "observed_at": f"{day}T14:05:00+00:00",
                 "selected": {"price": terminal},
             },
         ]

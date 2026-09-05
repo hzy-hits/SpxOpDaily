@@ -7,15 +7,16 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.density import summarize_strike_surface_shape
+from spx_spark.analytics.options.strategy_payoff import management_policy_for_candidate
 from spx_spark.application.market_features.physical_close_convergence import (
     estimate_physical_close_convergence,
 )
 from spx_spark.application.order_map.candidate_factory import (
-    CLOSE_CONVERGENCE_60M,
     candidate_generation_reasons,
     enumerate_candidates,
 )
@@ -34,7 +35,6 @@ from spx_spark.application.order_map.iron_condor import (
 from spx_spark.application.order_map.path_distribution import (
     attach_iron_condor_path_distribution,
     attach_path_distribution,
-    load_decision_spot_paths,
 )
 from spx_spark.application.order_map.strategy_edge_model import (
     apply_strategy_edge_authority,
@@ -51,6 +51,7 @@ from spx_spark.application.order_map.strategy_ranker import (
     GthDirectionLock,
     RankResult,
     apply_winner_stick,
+    candidate_direction_lock_reason,
     gth_direction_lock,
     outbox_accepted_strategy_cards,
     rank_candidates,
@@ -67,6 +68,7 @@ def build_strategy_decision(
     probability_settings: StrategyDistributionSettings | None = None,
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
+    facts["strategy_distribution_settings"] = asdict(probability_settings) if probability_settings else None
     facts["iron_condor_authority"] = _iron_condor_session_authority(facts)
     facts[HUMAN_SESSION_STATE_KEY] = iron_condor_session_state(
         payload, facts, (), now=_utc(now)
@@ -156,40 +158,20 @@ def build_strategy_decision(
             rank = RankResult(
                 passed=edge_authority.passed,
                 near_misses=[*edge_authority.rejected, *rank.near_misses][:3],
-                gate_audit=rank.gate_audit,
+                gate_audit=[*rank.gate_audit, *edge_authority.rejected],
             )
             stick_reason: str | None = None
             if rank.passed:
                 session_mode = str(_map(facts.get("session")).get("mode") or "")
-                independent_preaverage = any(
-                    row.get("setup_kind")
-                    in {
-                        "PREAVERAGE15_PULLBACK",
-                        CLOSE_CONVERGENCE_60M,
-                        "IRON_CONDOR_DELTA",
-                    }
+                winner_lock = _session_direction_lock(
+                    facts, now=_utc(now), policy=DEFAULT_STRATEGY_POLICY, payload=payload,
+                )
+                locked_out = [
+                    {**row, "rejection_reasons": [reason]}
                     for row in rank.passed
-                )
-                winner_lock = (
-                    None
-                    if independent_preaverage
-                    else _session_direction_lock(
-                        facts,
-                        now=_utc(now),
-                        policy=DEFAULT_STRATEGY_POLICY,
-                        payload=payload,
-                    )
-                )
-                if (
-                    winner_lock is not None
-                    and winner_lock.direction.upper() == "NEUTRAL"
-                    and not any(
-                        row.get("setup_kind")
-                        in {"STABLE_PIN", CLOSE_CONVERGENCE_60M}
-                        for row in rank.passed
-                    )
-                ):
-                    winner_lock = None
+                    if (reason := candidate_direction_lock_reason(
+                        row, winner_lock, session_mode=session_mode))
+                ]
                 stuck, stick_reason = apply_winner_stick(
                     rank.passed,
                     winner_lock,
@@ -197,10 +179,12 @@ def build_strategy_decision(
                 )
                 rank = RankResult(
                     passed=stuck,
-                    near_misses=rank.near_misses,
-                    gate_audit=rank.gate_audit,
+                    near_misses=[*locked_out, *rank.near_misses],
+                    gate_audit=[*rank.gate_audit, *locked_out],
                 )
-            if rank.passed:
+            path_evaluations = 0
+            while rank.passed and path_evaluations < 3:
+                path_evaluations += 1
                 winner, shadows, iron_condor_map = _attach_winner_path_distributions(
                     facts,
                     rank.passed,
@@ -215,12 +199,13 @@ def build_strategy_decision(
                 )
                 if path_rejected:
                     rank = RankResult(
-                        passed=[],
-                        near_misses=[path_rejected, *rank.near_misses][:3],
-                        gate_audit=rank.gate_audit,
+                        passed=rank.passed[1:],
+                        near_misses=[path_rejected, *rank.near_misses],
+                        gate_audit=[*rank.gate_audit, path_rejected],
                     )
                     stick_reason = None
                 else:
+                    rank.passed[0] = winner
                     shadow_candidates, shadow_candidates_skipped = _shadow_candidates(
                         shadows
                     )
@@ -245,6 +230,13 @@ def build_strategy_decision(
                         iron_condor_map,
                     )
             reasons = [stick_reason] if stick_reason else _rank_reasons(rank)
+            if rank.passed:
+                reasons.append("path_evaluation_budget_exhausted")
+                rank.gate_audit.extend(
+                    {**row, "rejection_reasons": ["path_not_evaluated_budget"]}
+                    for row in rank.passed
+                )
+                rank.passed = []
         else:
             event_reason = event_settlement_generation_reason(
                 payload, now=_utc(now)
@@ -319,6 +311,7 @@ def _base_decision(facts: Mapping[str, Any], regime: Mapping[str, Any], identity
         "regime": regime,
         "probability_evidence": _probability_evidence(facts),
         "automatic_ordering": False,
+        "position_status": "UNKNOWN",
     }
 
 
@@ -366,6 +359,7 @@ def _candidate_decision(
     )
     result.update({
         "available_at": available,
+        "management_contract": asdict(management_policy_for_candidate(candidate)),
         "geometry_source": geometry_source,
         "candidates_considered": candidates_considered[:5],
         "probability_evidence": dict(_map(candidate.get("probability_evidence"))),
@@ -610,6 +604,7 @@ def _rejection_funnel(
         delivery_status = "not_applicable"
     return {
         "cycles": 1,
+        "candidate_evaluations": rank.gate_audit,
         "facts_ready": int(facts_ready),
         "setup_detected": int(setup_detected),
         "entry_window_open": int(entry_window_open),
@@ -672,7 +667,7 @@ def _candidate_strikes(candidate: Mapping[str, Any]) -> list[float]:
 
 def _candidate_score(candidate: Mapping[str, Any]) -> float:
     edge = _map(_map(candidate.get("edge")).get("strategy_edge"))
-    lower = _number(edge.get("expected_pnl_lcb_points"))
+    lower = _number(edge.get("pnl_residual_q10_points"))
     loss = _number(_map(candidate.get("economics")).get("max_loss_points"))
     if lower is not None and loss is not None and loss > 0:
         return round(lower / loss, 6)
@@ -750,20 +745,12 @@ def _attach_winner_path_distributions(
     if str(first.get("strategy_type") or "") == IRON_CONDOR_TYPE:
         winner = first
     else:
-        paths, clock_mode = load_decision_spot_paths(
-            facts,
-            data_root=data_root,
-            probability_settings=probability_settings,
-            now=now,
-        )
         winner = attach_path_distribution(
             first,
             facts,
             data_root=data_root,
             probability_settings=probability_settings,
             now=now,
-            paths=paths,
-            clock_mode=clock_mode,
         )
     # First slice: winner + iron-condor map only. Shadow cards stay rank-only.
     shadows = [dict(row) for row in passed[1:3]]
@@ -963,6 +950,15 @@ def _with_iron_condor_map(
     decision: dict[str, Any], iron_condor_map: Mapping[str, Any]
 ) -> dict[str, Any]:
     decision["iron_condor_map"] = dict(iron_condor_map)
+    lockfile = Path(__file__).resolve().parents[4] / "uv.lock"
+    decision["decision_manifest"] = {
+        "knowledge_cutoff": decision["decision_at"],
+        "code_revision": decision.get("runtime_git_sha"),
+        "dependency_lock_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest() if lockfile.exists() else None,
+        "strategy_contract": asdict(DEFAULT_STRATEGY_POLICY),
+        "facts_sha256": _hash(decision["market_facts"]),
+        "content_sha256": _hash(decision),
+    }
     return decision
 
 

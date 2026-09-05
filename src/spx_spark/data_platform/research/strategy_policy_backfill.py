@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
+from dataclasses import replace
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    REPLAY_MAX_QUOTE_GAP_SECONDS,
+    ManagementPolicy,
     PolicyMark,
     management_policy_for_candidate,
     policy_mark_horizon_end,
@@ -48,7 +52,7 @@ def backfill_policy_labels(
                 rows.append(labeled)
     finally:
         store.close()
-    accepted = resolve_accepted_opportunity_ids(rows)
+    accepted = resolve_accepted_opportunity_ids(rows, database_path=database_path)
     # Enforce outbox-first only when the outbox actually holds accepted cards.
     # Empty/unavailable outbox (typical offline historical backfill) falls back
     # to earliest-by-time so research labeling remains usable.
@@ -62,48 +66,79 @@ def _label_decision(
     *,
     store: QuoteStore,
     lookforward_minutes: int,
-) -> dict[str, Any] | None:
+    entry_at: datetime | None = None,
+    entry_price: float | None = None,
+) -> dict[str, Any]:
     decision_at = _time(decision.get("decision_at"))
-    if decision_at is None:
-        return None
     candidate = _map(decision.get("candidate")) or _map(
         _map(decision.get("why_not")).get("nearest_candidate")
     )
+    base = {"decision_id": decision.get("decision_id"),
+            "session_date": decision.get("session_date"),
+            "decision_at": decision.get("decision_at"),
+            "strategy_type": candidate.get("strategy_type") or decision.get("decision_type"),
+            "opportunity_id": candidate.get("opportunity_id"),
+            "event_key": decision.get("event_key"),
+            "policy_pnl_points": None}
+    if decision_at is None:
+        return {**base, "label_status": "SESSION_ERROR", "exit_reason": "decision_time_missing"}
     if not candidate:
-        return None
+        return {**base, "label_status": "NO_CANDIDATE"}
     legs = _candidate_legs(candidate)
     if len(legs) < 2:
-        return None
-    entry_ask = _entry_ask(legs)
-    if entry_ask is None:
-        return None
+        return {**base, "label_status": "UNSUPPORTED_STRUCTURE"}
+    policy = management_policy_for_candidate(candidate)
+    frozen_contract = _map(decision.get("management_contract"))
+    if frozen_contract:
+        try:
+            policy = ManagementPolicy(**frozen_contract)
+        except (TypeError, ValueError):
+            return {**base, "label_status": "POLICY_MISMATCH"}
+    frozen_policy = _map(candidate.get("management_plan")).get("policy_version")
+    if not frozen_contract and frozen_policy == "management_policy.v1":
+        policy = replace(policy, policy_version=frozen_policy, time_stop_minutes=20)
+    elif frozen_policy and frozen_policy != policy.policy_version:
+        return {**base, "label_status": "POLICY_MISMATCH", "policy_version": frozen_policy}
+    entry_ask = _entry_price(legs, entry_side=policy.entry_side) if entry_price is None else entry_price
+    if entry_ask is None or not math.isfinite(entry_ask) or entry_ask <= 0:
+        return {**base, "label_status": "ENTRY_QUOTE_UNAVAILABLE"}
     provider = str(legs[0].get("provider") or "schwab")
     session = _session_date(decision.get("session_date"))
-    policy = management_policy_for_candidate(candidate)
+    entry_at = entry_at or decision_at
+    if entry_at < decision_at:
+        return {**base, "label_status": "SESSION_ERROR", "exit_reason": "entry_before_decision"}
     end = policy_mark_horizon_end(
-        decision_at,
+        entry_at,
         policy,
         session_date=session,
         lookforward_minutes=(
             None if policy.time_stop_minutes is None else lookforward_minutes
         ),
     )
+    if end <= entry_at:
+        return {**base, "label_status": "SESSION_ERROR", "exit_reason": "session_error"}
     marks = _combo_bid_marks(
         store,
         legs=legs,
         provider=provider,
-        start=decision_at,
-        end=end,
+        start=entry_at,
+        end=end + timedelta(seconds=REPLAY_MAX_QUOTE_GAP_SECONDS),
+        entry_credit=entry_ask if policy.entry_side == "credit" else None,
+        max_quote_age_seconds=float(_map(candidate.get("management_plan")).get(
+            "management_quote_max_age_seconds") or 15),
+        max_source_skew_seconds=float(_map(candidate.get("management_plan")).get(
+            "management_quote_max_skew_seconds") or 2),
     )
     if not marks:
-        return None
+        return {**base, "label_status": "QUOTE_GAP", "mark_count": 0}
     label = simulate_management_policy(
         marks,
         entry_ask=entry_ask,
-        leg_count=len(legs),
-        entry_at=decision_at,
+        leg_count=sum(abs(int(leg["quantity"])) for leg in legs),
+        entry_at=entry_at,
         policy=policy,
         session_date=session,
+        max_quote_gap_seconds=REPLAY_MAX_QUOTE_GAP_SECONDS,
     )
     regime = _map(decision.get("regime"))
     return {
@@ -113,7 +148,7 @@ def _label_decision(
         "event_key": decision.get("event_key"),
         "session_date": decision.get("session_date"),
         "decision_at": decision_at.isoformat(),
-        "available_at": decision.get("available_at"),
+        "available_at": label.exit_at.isoformat() if label.exit_at else None,
         "decision_type": decision.get("decision_type"),
         "strategy_type": candidate.get("strategy_type"),
         "direction": candidate.get("direction"),
@@ -121,7 +156,13 @@ def _label_decision(
         "opportunity_id": candidate.get("opportunity_id"),
         "shadow_only": bool(candidate.get("shadow_only")),
         "entry_ask": entry_ask,
+        "entry_at": entry_at.isoformat(),
         "leg_count": len(legs),
+        "contract_count": sum(abs(int(leg["quantity"])) for leg in legs),
+        "entry_side": policy.entry_side,
+        "label_status": ("COMPLETE_EXIT" if label.policy_pnl_points is not None else
+                         {"quote_gap": "QUOTE_GAP", "session_error": "SESSION_ERROR"}.get(
+                             label.exit_reason, "CENSORED")),
         "mark_count": len(marks),
         "regime_terminal_state": regime.get("terminal_state") or regime.get("path_state"),
         "policy_version": label.policy_version,
@@ -147,7 +188,24 @@ def _combo_bid_marks(
     provider: str,
     start: datetime,
     end: datetime,
+    entry_credit: float | None = None,
+    max_quote_age_seconds: float = 15,
+    max_source_skew_seconds: float = 2,
 ) -> list[PolicyMark]:
+    quotes = _combo_quotes(store, legs=legs, provider=provider, start=start, end=end,
+                           max_quote_age_seconds=max_quote_age_seconds,
+                           max_source_skew_seconds=max_source_skew_seconds)
+    return [PolicyMark(at=at, combo_bid=(2 * entry_credit - max(-liquidation, 0.0)
+                                        if entry_credit is not None else liquidation))
+            for at, _purchase, liquidation in quotes]
+
+
+def _combo_quotes(
+    store: QuoteStore, *, legs: Sequence[Mapping[str, Any]], provider: str,
+    start: datetime, end: datetime, max_quote_age_seconds: float = 15,
+    max_source_skew_seconds: float = 2,
+) -> list[tuple[datetime, float, float]]:
+    """(knowledge time, signed purchase cost, signed liquidation value), in points."""
     series = []
     for leg in legs:
         expiry = _expiry(leg)
@@ -161,47 +219,66 @@ def _combo_bid_marks(
             expiry=expiry,
             strike=strike,
             right=right,
-            start=start,
+            start=start - timedelta(seconds=max_quote_age_seconds),
             end=end,
         )
         series.append((quantity, ticks))
     if any(not ticks for _, ticks in series):
         return []
 
-    # Align on union of timestamps; use last-known bid/ask per leg.
-    times = sorted({tick.at for _, ticks in series for tick in ticks})
+    # Arrival advances knowledge, never another leg's source time. Discard
+    # out-of-order source updates and check every carried leg at each timestamp.
+    times = sorted({start} | {tick.at for _, ticks in series for tick in ticks if start <= tick.at <= end})
     cursors = [0] * len(series)
-    last: list[tuple[float | None, float | None]] = [(None, None)] * len(series)
-    marks: list[PolicyMark] = []
+    last = [None] * len(series)
+    quotes: list[tuple[datetime, float, float]] = []
     for at in times:
         if at.tzinfo is None:
             at = at.replace(tzinfo=timezone.utc)
-        complete = True
         for index, (quantity, ticks) in enumerate(series):
             while cursors[index] < len(ticks) and ticks[cursors[index]].at <= at:
                 tick = ticks[cursors[index]]
-                last[index] = (tick.bid, tick.ask)
+                source = getattr(tick, "source_at", None)
+                prior = last[index]
+                if tick.bid is None or tick.ask is None or source is None:
+                    last[index] = tick
+                elif source <= at and (
+                    prior is None or prior.source_at is None or source >= prior.source_at
+                ):
+                    last[index] = tick
                 cursors[index] += 1
-            bid, ask = last[index]
-            if bid is None or ask is None:
-                complete = False
-                break
-        if not complete:
+        if any(tick is None or tick.bid is None or tick.ask is None
+               or not 0 <= tick.bid <= tick.ask or tick.ask <= 0 or not math.isfinite(tick.ask)
+               or not 0 <= (at - tick.source_at).total_seconds() <= max_quote_age_seconds
+               for tick in last):
             continue
-        credit = 0.0
-        for (quantity, _), (bid, ask) in zip(series, last, strict=True):
-            assert bid is not None and ask is not None
-            credit += float(quantity) * (bid if quantity > 0 else ask)
-        marks.append(PolicyMark(at=at.astimezone(timezone.utc), combo_bid=max(credit, 0.0)))
-    return marks
+        source_times = [tick.source_at for tick in last]
+        if (max(source_times) - min(source_times)).total_seconds() > max_source_skew_seconds:
+            continue
+        signed_value = sum(quantity * (tick.bid if quantity > 0 else tick.ask)
+                           for (quantity, _), tick in zip(series, last, strict=True))
+        purchase = sum(quantity * (tick.ask if quantity > 0 else tick.bid)
+                       for (quantity, _), tick in zip(series, last, strict=True))
+        quotes.append((at.astimezone(timezone.utc), purchase, signed_value))
+    return quotes
 
 
 def _candidate_legs(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = candidate.get("legs")
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)) and raw:
         legs = [dict(_map(item)) for item in raw]
+        if (all(_number(leg.get("quantity")) is None for leg in legs) and len(legs) == 2
+                and str(candidate.get("strategy_type") or "").endswith("DEBIT_VERTICAL")):
+            for leg, quantity in zip(legs, (1, -1), strict=True):
+                leg["quantity"] = quantity
         if all(_number(leg.get("quantity")) is None for leg in legs) and len(legs) == 3:
             for leg, quantity in zip(legs, (1.0, -2.0, 1.0), strict=True):
+                leg["quantity"] = quantity
+        if (all(_number(leg.get("quantity")) is None for leg in legs) and len(legs) == 4
+                and candidate.get("strategy_type") == "IRON_CONDOR"
+                and [str(leg.get("right")).upper() for leg in legs] == ["P", "P", "C", "C"]
+                and all(float(a["strike"]) < float(b["strike"]) for a, b in zip(legs, legs[1:]))):
+            for leg, quantity in zip(legs, (1, -1, -1, 1), strict=True):
                 leg["quantity"] = quantity
         return legs
     long, short = dict(_map(candidate.get("long"))), dict(_map(candidate.get("short")))
@@ -212,15 +289,16 @@ def _candidate_legs(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [long, short]
 
 
-def _entry_ask(legs: Sequence[Mapping[str, Any]]) -> float | None:
+def _entry_price(legs: Sequence[Mapping[str, Any]], *, entry_side: str = "debit") -> float | None:
     values = []
     for leg in legs:
         quantity, bid, ask = (_number(leg.get(key)) for key in ("quantity", "bid", "ask"))
-        if quantity is None or bid is None or ask is None:
+        if (quantity is None or quantity == 0 or quantity != int(quantity)
+                or bid is None or ask is None or not 0 <= bid <= ask or ask <= 0):
             return None
         values.append(quantity * (ask if quantity > 0 else bid))
-    debit = sum(values)
-    return round(debit, 4) if debit > 0 else None
+    price = sum(values) * (-1 if entry_side == "credit" else 1)
+    return round(price, 4) if price > 0 else None
 
 
 def write_labels_parquet(rows: Sequence[Mapping[str, Any]], output_root: Path) -> Path | None:
@@ -273,6 +351,9 @@ def build_policy_ev_table(
     database_path: Path,
     session_date: str | None = None,
 ) -> dict[str, Any]:
+    excluded = Counter(str(row.get("policy_version") or "unknown") for row in rows
+                       if row.get("policy_version") != DEFAULT_MANAGEMENT_POLICY.policy_version)
+    rows = [row for row in rows if row.get("policy_version") == DEFAULT_MANAGEMENT_POLICY.policy_version]
     decisions = _deduped_persisted_decisions(
         database_path=database_path,
         session_date=session_date,
@@ -280,12 +361,15 @@ def build_policy_ev_table(
     labeled_ids = {
         str(row.get("decision_id") or "")
         for row in rows
-        if _row_counts_for_policy_ev(row)
+        if _row_counts_for_policy_ev(row) and _number(row.get("policy_pnl_points")) is not None
     }
     censored_ids = _censored_decision_ids(
         database_path=database_path,
         session_date=session_date,
     )
+    censored_ids.update(str(row.get("decision_id") or "") for row in rows
+                        if row.get("label_status") in {"CENSORED", "QUOTE_GAP"}
+                        and _row_counts_for_policy_ev(row))
     buckets: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"values": [], "n_censored": 0}
     )
@@ -324,6 +408,7 @@ def build_policy_ev_table(
     return {
         "schema_version": "policy_ev_table.v1",
         "management_policy_version": DEFAULT_MANAGEMENT_POLICY.policy_version,
+        "excluded_management_policy_counts": dict(excluded),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "source_sessions": sorted(source_sessions),
         "buckets": {
@@ -347,7 +432,7 @@ def outcome_censor_distribution(
     database_path: Path,
     session_date: str | None = None,
 ) -> dict[str, int]:
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(f"file:{database_path.resolve()}?mode=ro", uri=True)
     try:
         rows = connection.execute(
             """
@@ -372,34 +457,15 @@ def outcome_censor_distribution(
 
 
 def resolve_accepted_opportunity_ids(
-    rows: Sequence[Mapping[str, Any]],
-) -> set[str] | None:
-    """Return opportunity ids accepted by the notification outbox.
-
-    Returns ``None`` when the outbox cannot be consulted (disabled / missing
-    settings), so callers can fall back to earliest-by-time dedupe.
-    """
-
-    try:
-        from spx_spark.config import NotificationSettings
-        from spx_spark.notifier.dispatcher import notification_event_exists
-    except Exception:
-        return None
-    try:
-        settings = NotificationSettings.from_env()
-    except Exception:
-        return None
-    accepted: set[str] = set()
-    for row in rows:
-        opportunity_id = _opportunity_id(row)
-        if not opportunity_id:
-            continue
-        try:
-            if notification_event_exists(settings, f"{opportunity_id}:ready"):
-                accepted.add(opportunity_id)
-        except Exception:
-            return None
-    return accepted
+    rows: Sequence[Mapping[str, Any]], *, database_path: Path,
+) -> set[str]:
+    """Consult the requested research database, never live notification settings."""
+    with sqlite3.connect(f"file:{database_path.resolve()}?mode=ro", uri=True) as connection:
+        events = {row[0] for row in connection.execute(
+            "SELECT DISTINCT logical_event_id FROM notification_events "
+            "WHERE source='strategy_decision' AND lane='trade_ready'"
+        )}
+    return {_opportunity_id(row) for row in rows if f"{_opportunity_id(row)}:ready" in events}
 
 
 def mark_duplicate_opportunities(
@@ -488,7 +554,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         lookforward_minutes=args.lookforward_minutes,
     )
     summary = {
-        "labeled": len(rows),
+        "evaluated": len(rows),
+        "label_status_counts": dict(Counter(row.get("label_status") for row in rows)),
         "session_date": args.session_date,
         "policy_version": DEFAULT_MANAGEMENT_POLICY.policy_version,
         "censor_distribution": outcome_censor_distribution(
@@ -522,7 +589,7 @@ def _read_persisted_decisions(
     database_path: Path,
     session_date: str | None,
 ) -> list[dict[str, Any]]:
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(f"file:{database_path.resolve()}?mode=ro", uri=True)
     try:
         rows = connection.execute(
             """
@@ -582,7 +649,7 @@ def _deduped_persisted_decisions(
         database_path=database_path,
         session_date=session_date,
     )
-    accepted = resolve_accepted_opportunity_ids(decisions)
+    accepted = resolve_accepted_opportunity_ids(decisions, database_path=database_path)
     # Match backfill_policy_labels: empty/unavailable outbox falls back to
     # earliest-by-time so offline historical EV tables remain usable.
     if accepted:
@@ -607,7 +674,7 @@ def _censored_decision_ids(
     horizon = DEFAULT_MANAGEMENT_POLICY.time_stop_minutes
     if horizon is None or horizon <= 0:
         return set()
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(f"file:{database_path.resolve()}?mode=ro", uri=True)
     try:
         rows = connection.execute(
             """
@@ -697,7 +764,8 @@ def _percentile(values: Sequence[float], quantile: float) -> float:
 
 
 def _number(value: object) -> float | None:
-    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+    return (float(value) if isinstance(value, int | float) and not isinstance(value, bool)
+            and math.isfinite(value) else None)
 
 
 def _time(value: object) -> datetime | None:

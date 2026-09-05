@@ -19,24 +19,11 @@ os.environ["SPX_SPARK_DISABLE_RUNTIME_OVERRIDES"] = "1"
 os.environ["SPX_SPARK_RUNTIME_CONFIG"] = str(_FIXTURE_SETTINGS)
 
 
-def _dotenv_keys(path: Path) -> list[str]:
-    if not path.is_file():
-        return []
-    keys: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key = stripped.split("=", 1)[0].strip()
-        if key:
-            keys.append(key)
-    return keys
-
-
 def pytest_configure() -> None:
-    """Drop keys that a local .env may have already injected into the process."""
-    for key in _dotenv_keys(Path.cwd() / ".env"):
-        os.environ.pop(key, None)
+    """Isolate inherited application overrides without reading local credentials."""
+    for key in tuple(os.environ):
+        if key.startswith(("SPX_", "IBKR_", "SCHWAB_", "BARK_", "FEISHU_")):
+            os.environ.pop(key, None)
     # Ensure the fixture path wins even if a parent conftest changed it.
     os.environ.pop("SPX_SPARK_RUNTIME_OVERRIDES", None)
     os.environ["SPX_SPARK_DISABLE_DOTENV"] = "1"
@@ -49,35 +36,6 @@ def pytest_configure() -> None:
     except Exception:
         # Package may not be importable yet during very early collection failures.
         pass
-
-
-@pytest.fixture(autouse=True)
-def isolate_strategy_edge_authority(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep legacy fixtures independent of a host model artifact.
-
-    Dedicated strategy-edge tests call the public scorer directly or replace
-    this seam inside the test. Production always uses the real fail-closed
-    authority path from ``strategy_select``.
-    """
-
-    from spx_spark.application.order_map import strategy_select
-    from spx_spark.application.order_map.strategy_edge_model import (
-        EdgeAuthorityResult,
-    )
-
-    def passthrough(candidates, *_args, **_kwargs):
-        return EdgeAuthorityResult(
-            passed=[dict(candidate) for candidate in candidates],
-            rejected=[],
-        )
-
-    monkeypatch.setattr(
-        strategy_select,
-        "apply_strategy_edge_authority",
-        passthrough,
-    )
 
 
 @pytest.fixture

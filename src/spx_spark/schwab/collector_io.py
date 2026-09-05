@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 
@@ -101,7 +101,6 @@ def collect_quote_batches(
     *,
     settings: SchwabSettings,
     storage_settings: StorageSettings,
-    received_at: datetime,
     batch_size: int,
     priority_symbol_count: int,
     available_requests: int,
@@ -126,7 +125,9 @@ def collect_quote_batches(
         try:
             payload = fetch_quotes(client, batch, settings)
             request_count += 1
-            snapshot = snapshot_from_quote_payload(payload, batch, received_at=received_at)
+            snapshot = snapshot_from_quote_payload(
+                payload, batch, received_at=datetime.now(timezone.utc)
+            )
             persist_snapshot(snapshot, storage_settings)
             key = "quotes:hot_context" if hot_lane else f"quotes:{label}"
             quote_counts[key] = quote_counts.get(key, 0) + snapshot.quote_count

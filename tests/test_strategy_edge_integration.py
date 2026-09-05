@@ -47,7 +47,7 @@ def test_v44_close_convergence_manual_authority_is_explicitly_unvalidated(
 ) -> None:
     candidate = {
         "setup_kind": "CLOSE_CONVERGENCE_60M",
-        "authorization_policy": "strategy_policy.bootstrap.v65",
+        "authorization_policy": "strategy_policy.bootstrap.v66",
         "evidence_contract_hash": (
             "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
         ),
@@ -109,7 +109,7 @@ def test_v48_gth_confirmed_source_uses_minute_gate_without_model(tmp_path: Path)
 
     assert result.rejected == []
     candidate = result.passed[0]
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v65"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v66"
     assert candidate["edge"]["edge_status"] == "explicit_manual_policy_unvalidated"
     assert candidate["edge"]["strategy_edge"]["gate_kind"] == "gth_minute_confirmation"
 
@@ -260,15 +260,6 @@ def test_model_rejection_prevents_manual_authority(monkeypatch) -> None:
         strategy_select,
         "_attach_iron_condor_only_paths",
         lambda *_args, **_kwargs: {},
-    )
-    monkeypatch.setattr(
-        strategy_select,
-        "_base_decision",
-        lambda *_args, **_kwargs: {
-            "schema_version": "strategy_decision.v2",
-            "decision_at": NOW.isoformat(),
-            "available_at": NOW.isoformat(),
-        },
     )
 
     decision = strategy_select.build_strategy_decision(

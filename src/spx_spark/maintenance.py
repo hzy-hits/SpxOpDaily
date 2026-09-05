@@ -18,7 +18,7 @@ from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.notifier.unified_delivery import notification_event_id
 from spx_spark.notifier.review_audit import review_audit_path
 from spx_spark.state_io import atomic_write_json_secure, exclusive_state_lock, read_json_object
-from spx_spark.storage import LatestMarketProjectionStore
+from spx_spark.storage import LatestStateStore
 
 
 PROTECTED_DATA_SEGMENTS = frozenset({"latest", "runtime"})
@@ -406,7 +406,7 @@ def purge_latest_provider(provider_name: str, *, settings: MaintenanceSettings) 
         slow_index_stale_after_seconds=300.0,
         slow_index_labels=frozenset({"index:SKEW", "index:VVIX"}),
     )
-    result = LatestMarketProjectionStore(storage_settings).purge_provider_quotes(provider)
+    result = LatestStateStore(storage_settings).purge_provider_quotes(provider)
     return {
         "provider": provider.value,
         "latest_state": result.path,

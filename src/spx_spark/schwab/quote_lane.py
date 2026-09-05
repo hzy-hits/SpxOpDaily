@@ -79,7 +79,6 @@ def collect_quote_lane(
         symbols,
         settings=settings,
         storage_settings=storage_settings,
-        received_at=now,
         batch_size=typed_settings.capacity.operational_quote_batch_size,
         priority_symbol_count=len(priority_symbols),
         available_requests=max(request_ceiling - requests_used, 0),

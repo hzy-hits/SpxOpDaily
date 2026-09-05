@@ -557,79 +557,6 @@ def run(
         )
         research_component_started = finished
 
-    # Research overlays enrich the persisted/output context only. They run
-    # after the trade-critical producer ledger and durable delivery attempt.
-    contract_id = str(trade_intent.get("contract_id") or "")
-    greek_cache_token = (
-        evaluation_now.replace(second=0, microsecond=0).isoformat(),
-        contract_id,
-    )
-    cached_focused = (
-        state_cache.get("greeks_reference_0dte") if state_cache is not None else None
-    )
-    cached_greek_decision = (
-        state_cache.get("greek_decision") if state_cache is not None else None
-    )
-    if (
-        state_cache is not None
-        and state_cache.get("greek_cache_token") == greek_cache_token
-        and isinstance(cached_focused, dict)
-        and isinstance(cached_greek_decision, dict)
-    ):
-        focused = cached_focused
-        greek_decision = cached_greek_decision
-    else:
-        focused = build_zero_dte_greeks_reference(
-            latest,
-            options_map=options_map,
-            grouped_quotes=grouped_quotes,
-            storage_settings=storage,
-            focus_contract_ids=(contract_id,) if contract_id else (),
-            max_serialized_contracts=1 if contract_id else 0,
-            serialized_scenario_names=(
-                "clock_plus_5m",
-                "clock_plus_15m",
-                "clock_plus_30m",
-                "iv_down_1vol",
-                "iv_down_3vol",
-            ),
-        )
-        greek_decision = build_greek_decision(
-            focused,
-            [trade_intent] if contract_id else [],
-            macro_event=macro_event,
-            policy=policy,
-        )
-        if state_cache is not None:
-            state_cache["greek_cache_token"] = greek_cache_token
-            state_cache["greeks_reference_0dte"] = focused
-            state_cache["greek_decision"] = greek_decision
-    finish_research_component("greeks")
-    spring_gamma_v3 = _process_spring_gamma_v3_shadow(
-        storage=storage,
-        latest_state=latest,
-        options_map=options_map,
-        market_frame=market_frame,
-        option_frame=option_frame,
-        greek_reference=focused,
-        exposure_map=exposure_map,
-        level_decision=level_decision,
-        now=evaluation_now,
-        settings=app.spring_gamma_v3,
-    )
-    spring_gamma_snapshot = load_json(latest_spring_gamma_v3_shadow_path(storage.data_root))
-    finish_research_component("spring_gamma")
-    if contract_id:
-        score = greek_decision.get("contract_scores", {}).get(contract_id)
-        if isinstance(score, dict):
-            trade_intent = {**trade_intent, "greek_confidence": score}
-    context = replace(
-        context,
-        trade_intent=trade_intent,
-        greek_decision=greek_decision,
-        trade_candidate=trade_candidate,
-        confirmed_gate=confirmed_gate,
-    )
     # Delivery may cross a process/network boundary.  Never open or close a
     # lifecycle episode from the evaluation clock or the earlier quote snapshot.
     action_snapshot_at = as_utc(resolved_action_clock())
@@ -639,39 +566,7 @@ def run(
         and latest_projection_version == projection_version()
         else latest_store.load(now=action_snapshot_at)
     )
-    outcome_minute = action_snapshot_at.replace(second=0, microsecond=0).isoformat()
-    cached_outcome_minute = (
-        state_cache.get("strategy_outcome_observation_minute")
-        if state_cache is not None
-        else None
-    )
-    cached_outcome = (
-        state_cache.get("strategy_outcome_observation")
-        if state_cache is not None
-        else None
-    )
-    if cached_outcome_minute == outcome_minute and isinstance(cached_outcome, dict):
-        strategy_outcome_observation = cached_outcome
-    else:
-        try:
-            strategy_outcome_observation = observe_due_strategy_outcomes(
-                action_latest,
-                now=action_snapshot_at,
-                data_root=storage.data_root,
-            )
-        except Exception as exc:
-            strategy_outcome_observation = {
-                "observed": 0,
-                "error": f"{type(exc).__name__}:{exc}",
-            }
-        if state_cache is not None:
-            state_cache["strategy_outcome_observation_minute"] = outcome_minute
-            state_cache["strategy_outcome_observation"] = strategy_outcome_observation
-    finish_research_component("outcomes")
-    # Freeze the authority clock only after the action snapshot and due outcomes
-    # have been read.  The failover controller runs independently in this same
-    # process; reusing the earlier snapshot clock can otherwise make its newly
-    # published control state appear to come from the future during a slow cycle.
+    # Provider control may advance while the action snapshot is loading.
     action_now = as_utc(resolved_action_clock())
     action_provider_entry_control = _provider_entry_control(
         failover_settings,
@@ -736,6 +631,7 @@ def run(
             # manual signal lifecycle that was durably processed above.
             strategy_distribution_forecast_error = f"{type(exc).__name__}:{exc}"
     finish_research_component("forecast")
+    spring_gamma_snapshot = load_json(latest_spring_gamma_v3_shadow_path(storage.data_root))
     gamma_prearm_plan = process_gamma_prearm_plan(
         storage,
         repricing,
@@ -891,8 +787,9 @@ def run(
         try:
             strategy_delivery = enqueue_strategy_decision(
                 strategy_decision,
-                now=action_now,
+                now=as_utc(resolved_action_clock()),
                 storage_settings=storage,
+                action_clock=resolved_action_clock,
             )
         except Exception as exc:  # delivery diagnostics must not stop feature collection
             strategy_delivery = {
@@ -903,7 +800,7 @@ def run(
             strategy_delivery = {
                 **strategy_delivery,
                 "pin_stable_watch": enqueue_pin_stable_watch(
-                    strategy_decision, now=action_now
+                    strategy_decision, now=as_utc(resolved_action_clock())
                 ),
             }
         except Exception as exc:  # observation card must not block trade_ready
@@ -914,6 +811,100 @@ def run(
                     "outcome": f"error:{type(exc).__name__}:{exc}",
                 },
             }
+    # Optional explanation and labels run after the final decision is committed and queued.
+    contract_id = str(trade_intent.get("contract_id") or "")
+    cache = state_cache if state_cache is not None else {}
+    try:
+        greek_cache_token = (
+            evaluation_now.replace(second=0, microsecond=0).isoformat(),
+            contract_id,
+        )
+        cached_focused = cache.get("greeks_reference_0dte")
+        cached_greek_decision = cache.get("greek_decision")
+        if (
+            state_cache is not None
+            and state_cache.get("greek_cache_token") == greek_cache_token
+            and isinstance(cached_focused, dict)
+            and isinstance(cached_greek_decision, dict)
+        ):
+            focused = cached_focused
+            greek_decision = cached_greek_decision
+        else:
+            focused = build_zero_dte_greeks_reference(
+                latest,
+                options_map=options_map,
+                grouped_quotes=grouped_quotes,
+                storage_settings=storage,
+                focus_contract_ids=(contract_id,) if contract_id else (),
+                max_serialized_contracts=1 if contract_id else 0,
+                serialized_scenario_names=(
+                    "clock_plus_5m",
+                    "clock_plus_15m",
+                    "clock_plus_30m",
+                    "iv_down_1vol",
+                    "iv_down_3vol",
+                ),
+            )
+            greek_decision = build_greek_decision(
+                focused,
+                [trade_intent] if contract_id else [],
+                macro_event=macro_event,
+                policy=policy,
+            )
+            if state_cache is not None:
+                state_cache["greek_cache_token"] = greek_cache_token
+                state_cache["greeks_reference_0dte"] = focused
+                state_cache["greek_decision"] = greek_decision
+        finish_research_component("greeks")
+        spring_gamma_v3 = _process_spring_gamma_v3_shadow(
+            storage=storage,
+            latest_state=latest,
+            options_map=options_map,
+            market_frame=market_frame,
+            option_frame=option_frame,
+            greek_reference=focused,
+            exposure_map=exposure_map,
+            level_decision=level_decision,
+            now=evaluation_now,
+            settings=app.spring_gamma_v3,
+        )
+        finish_research_component("spring_gamma")
+    except Exception as exc:
+        focused, greek_decision = {}, {}
+        spring_gamma_v3 = {"status": "unavailable", "error": f"{type(exc).__name__}:{exc}"}
+        finish_research_component("research_context_failed")
+    if contract_id:
+        score = greek_decision.get("contract_scores", {}).get(contract_id)
+        if isinstance(score, dict):
+            trade_intent = {**trade_intent, "greek_confidence": score}
+    context = replace(
+        context,
+        trade_intent=trade_intent,
+        greek_decision=greek_decision,
+        trade_candidate=trade_candidate,
+        confirmed_gate=confirmed_gate,
+    )
+    outcome_minute = action_snapshot_at.replace(second=0, microsecond=0).isoformat()
+    cached_outcome_minute = cache.get("strategy_outcome_observation_minute")
+    cached_outcome = cache.get("strategy_outcome_observation")
+    if cached_outcome_minute == outcome_minute and isinstance(cached_outcome, dict):
+        strategy_outcome_observation = cached_outcome
+    else:
+        try:
+            strategy_outcome_observation = observe_due_strategy_outcomes(
+                action_latest,
+                now=action_snapshot_at,
+                data_root=storage.data_root,
+            )
+        except Exception as exc:
+            strategy_outcome_observation = {
+                "observed": 0,
+                "error": f"{type(exc).__name__}:{exc}",
+            }
+        if state_cache is not None:
+            state_cache["strategy_outcome_observation_minute"] = outcome_minute
+            state_cache["strategy_outcome_observation"] = strategy_outcome_observation
+    finish_research_component("outcomes")
     virtual_strategy = process_virtual_strategy(
         storage,
         action_latest,

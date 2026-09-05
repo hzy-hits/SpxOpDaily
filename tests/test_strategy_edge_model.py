@@ -101,7 +101,7 @@ def _write_artifact(
     promoted: bool = True,
     expected: float = 0.50,
     residual_q10: float = -0.10,
-    p_profit_logit: float = 1.0,
+    profit_score_logit: float = 1.0,
     p_stop_logit: float = -2.0,
 ) -> None:
     model = {
@@ -110,9 +110,9 @@ def _write_artifact(
         "promotion": {"promoted": promoted},
         "thresholds": {
             "min_expected_pnl_points": 0.25,
-            "min_expected_pnl_lcb_points": 0.10,
-            "min_p_profit": 0.58,
-            "max_p_stop_first_5m": 0.30,
+            "min_pnl_residual_q10_points": 0.10,
+            "min_profit_score": 0.58,
+            "max_early_stop_score": 0.30,
             "min_return_on_risk": 0.08,
         },
         "residual_q10_points": residual_q10,
@@ -120,7 +120,7 @@ def _write_artifact(
         "feature_scale": [1.0] * len(FEATURE_NAMES),
         "pnl": {"intercept": expected, "coef": [0.0] * len(FEATURE_NAMES)},
         "profit": {
-            "intercept": p_profit_logit,
+            "intercept": profit_score_logit,
             "coef": [0.0] * len(FEATURE_NAMES),
         },
         "stop_first_5m": {
@@ -134,8 +134,9 @@ def _write_artifact(
     artifact = {
         "schema_version": SCHEMA_VERSION,
         "feature_version": FEATURE_VERSION,
-        "artifact_version": "entry_edge.v1:test",
+        "artifact_version": "entry_edge.v2:test",
         "generated_at": NOW.isoformat(),
+        "management_policy_version": "management_policy.v2",
         "valid_days": 14,
         "feature_names": list(FEATURE_NAMES),
         "models": {"rth|vertical": model},
@@ -166,7 +167,7 @@ def test_promoted_positive_edge_is_the_only_pass(tmp_path: Path) -> None:
     assert result.rejected == []
     edge = result.passed[0]["edge"]["strategy_edge"]
     assert edge["expected_pnl_points"] == 0.5
-    assert edge["expected_pnl_lcb_points"] == 0.4
+    assert edge["pnl_residual_q10_points"] == 0.4
     assert edge["model_coverage"] == "in_domain"
     assert result.passed[0]["edge"]["edge_status"] == "promoted_model_pass"
 
@@ -192,7 +193,7 @@ def test_missing_or_unpromoted_artifact_fails_closed(tmp_path: Path) -> None:
 
 def test_missing_artifact_allows_authorized_es_momentum_fallback(tmp_path: Path) -> None:
     candidate = _candidate(setup_kind="ES_VOLUME_MOMENTUM")
-    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v65"}
+    regime = {**_regime(), "policy_version": "strategy_policy.bootstrap.v66"}
 
     result = apply_strategy_edge_authority(
         [candidate], _facts(), regime, data_root=tmp_path, now=NOW
@@ -282,7 +283,7 @@ def test_nonpositive_lower_bound_is_rejected(tmp_path: Path) -> None:
     )
 
     assert result.passed == []
-    assert "strategy_edge_lower_bound_below_threshold" in result.rejected[0][
+    assert "strategy_edge_residual_q10_below_threshold" in result.rejected[0][
         "rejection_reasons"
     ]
 
@@ -295,3 +296,35 @@ def test_pure_fixture_without_data_root_preserves_legacy_candidate() -> None:
     assert len(result.passed) == 1
     assert result.rejected == []
     assert "strategy_edge" not in result.passed[0]["edge"]
+
+
+def test_future_or_wrong_management_artifact_cannot_authorize(tmp_path: Path) -> None:
+    from spx_spark.application.order_map.strategy_edge_model import score_candidate_with_edge_model
+
+    _write_artifact(tmp_path)
+    artifact = json.loads((tmp_path / "research/strategy_edge_model.v1.json").read_text())
+    for change, reason in (
+        ({"generated_at": "2026-08-19T15:00:00+00:00"}, "strategy_edge_model_artifact_from_future"),
+        ({"management_policy_version": "management_policy.entry_edge_20m.v1"}, "strategy_edge_model_management_policy_mismatch"),
+    ):
+        _, failures = score_candidate_with_edge_model(_candidate(), _facts(), _regime(), artifact={**artifact, **change}, now=NOW)
+        assert reason in failures
+    artifact["models"]["rth|vertical"]["trained_through"] = "2026-08-18"
+    _, failures = score_candidate_with_edge_model(_candidate(), _facts(), _regime(), artifact=artifact, now=NOW)
+    assert "strategy_edge_model_training_from_future" in failures
+
+
+def test_old_path_valuation_cannot_veto_and_is_marked_for_recalculation() -> None:
+    from spx_spark.application.order_map.surface_path_distribution import path_distribution_desk_text
+
+    distribution = {
+        "method": "joint_spot_surface_management_policy.v1",
+        "status": "estimated_uncalibrated", "p90_net_pnl": -10,
+        "risk_objective": {"status": "available", "n_sessions": 30,
+                           "shadow_choice": "NO_TRADE", "loss_probability": 0.9,
+                           "objective_dollars": -10},
+    }
+    candidate = {**_candidate(), "evidence_status": "forward_unvalidated_user_override",
+                 "edge": {"path_distribution": distribution}}
+    assert reject_adverse_forward_path(candidate, policy=StrategyPolicy()) is None
+    assert "待重算" in path_distribution_desk_text(distribution)

@@ -67,7 +67,7 @@ git@github-spxopdaily:hzy-hits/SpxOpDaily.git
 - `docs/architecture-simplification-blueprint-v1.md`：架构简化与第三方能力替代总方案（上位约束）。
 - `docs/architecture-simplification-execution-plan-v1.md`：简化重构的事实基线、偏差澄清与逐阶段任务卡（执行基线）。
 - `docs/strategy-signal-engine-v2.md`：0DTE 统一策略信号引擎实施合同（S-track 基线；排期与边界裁决见执行方案第 2 节 11–16 条）。
-- `docs/strategy-signal-engine-v4.md`：**已合入**的 reuse-first 事件结算观点扩展（`EVENT_SETTLEMENT_THRESHOLD`）；在高影响宏观事件发布前，把“昨收上方/下方结算”映射为 5 点 Debit Vertical，仍走 `build_strategy_decision`。宏观日历由 `macro_event_clock` + `macro_event_calendar` 在 Core 周期内按 TTL 自动刷新到 `data_root/runtime/macro_events.auto.json`（FF 本周 high-impact + Fed FOMC），种子 `config/macro_events.toml` 作回退。
+- `docs/strategy-signal-engine-v4.md`：**已合入**的 reuse-first 事件结算观点扩展（`EVENT_SETTLEMENT_THRESHOLD`）；在高影响宏观事件发布前，把“昨收上方/下方结算”映射为 5 点 Debit Vertical，仍走 `build_strategy_decision`。宏观日历由现有 Huey Worker 调用 `macro_event_calendar` 按 TTL 刷新，Core 通过 `macro_event_clock` 只读，结果写入 `data_root/runtime/macro_events.auto.json`（FF 本周 high-impact + Fed FOMC），种子 `config/macro_events.toml` 作回退。
 - `docs/refactor-architecture-acceptance-plan.md`：架构目标与验收门槛；与简化方案冲突的章节以简化方案为准。
 - `systemd/`：服务与 timer 定义。
 - `scripts/install-spx-spark-services.sh`：正式部署入口及分支、工作树和 unit drift 防护。
@@ -226,3 +226,5 @@ A change that increases process count, active languages, mutable stores or owner
 22. v63 起，GTH 固定 Desk Map 压缩为结论/位置/结构/触发/执行/数据六项，同一故障码只展示一次；ICT、Spring 与有效资金流背离只汇总为一行确认/冲突建议，不获得交易权限且缺失不阻断。用户明确授权一条 GTH 铁鹰人工合同：因果 ATM 跨式至少 30 个观测，先扩张至少 10%，峰值形成 5–120 分钟后收缩至少 8%，15m 跨式衰减至少 3%，ATM IV 5m/15m 不扩张且 15m 位移不超过 `1.25×ATR5m`；Put/Call 分别选 IBKR 绝对 Delta 不超过且最接近 20Δ 的短腿，固定 10 点翼，只接受四腿 IBKR exact BBO（age ≤15 秒、skew ≤2 秒）、贷记/翼宽 25%–55%、较小侧贷记占比至少 25%、定义风险 ≤$1,000、`GCR10≤20%`。该代理不推断 dealer 持仓；每 GTH session 最多一张，0.5C 止盈、3C 止损、次日 12:30 ET 硬退，标记 `forward_unvalidated_user_override`、人工-only、`automatic_ordering=false`。普通 GTH delta/width scan 继续 map-only，Schwab frozen quote 和 IBKR `10197` 不得生成该卡。
 23. v64 起，仅将 v63 GTH 铁鹰人工合同的四腿 IBKR exact BBO 与各腿 Greeks 最大年龄由 15 秒放宽到 30 秒、四腿 BBO 源偏斜放宽到 ≤10 秒；Greeks 只要求各腿自身年龄 ≤30 秒而不要求同步更新。31 秒及以上、BBO 源偏斜超过 10 秒、Schwab frozen quote 或 IBKR `10197` 仍失效关闭；其余结构、波动收缩、贷记、平衡、Gamma 风险、会话上限、管理与人工-only 合同均不变。
 24. v65 起，GTH 铁鹰的扩张转收缩门使用因果滚动局部周期，不再由整段夜盘绝对最高跨式锁死：未达到 10% 扩张前可由新低重置基准，达到后冻结基准并追踪局部峰值，基准或峰值超过 120 分钟后从当前新鲜观测开始下一周期。整段 GTH 高低仅作展示；部署中途不回填已发生路径。其余 v64 报价、结构、管理、会话上限、人工-only 与 `automatic_ordering=false` 合同不变。
+
+25. v66 起，回放与推送执行本次数据/经济不变量修复：方向锁例外仅限具体候选，赢家路径否决后继续评估下一名，每次决策最多检查三个候选并记录预算未评估项；Core 产生唯一策略记录，报告复用最终导出，入队重验实际动作时间。宏观日历按来源保留 last-good 和覆盖证明，覆盖未知不授权，Core 不同步联网刷新。ATM 观察按真实两腿源时间去重，每五秒最多一次；切换 ATM/provider 时重置局部压缩证据，整段高低仅展示。沿用已授权 TP/SL、候选范围和 `automatic_ordering=false`；验收与限制见 `docs/strategy-push-data-audit-2026-09-05.md`。

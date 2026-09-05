@@ -990,12 +990,22 @@ def test_order_payload_retry_rebuilds_after_stale_candidate_refresh(
     assert not any("bad_quality_for_7550P" in item for item in payload["warnings"])
     assert payload["vol_context"]["vix"] == 16.0
     assert list(payload).count("strategy_decision") == 1
-    decision = payload["strategy_decision"]
-    assert decision["decision_type"] == "NO_TRADE"
-    assert decision["candidate"] is None
-    assert decision["automatic_ordering"] is False
-    assert decision["execution"]["action"] == "WAIT"
-    assert decision["why_not"]["reasons"]
+    assert payload["strategy_decision"] == {}
+    assert payload["strategy_decision_reference"]["source"] == "unavailable"
+
+
+def test_report_reuses_committed_decision_when_current_market_context_changes(monkeypatch, tmp_path):
+    now = datetime(2026, 7, 7, 6, tzinfo=timezone.utc)
+    committed = {"decision_id": "core:one", "decision_at": now.isoformat(),
+                 "available_at": now.isoformat(), "decision_type": "NO_TRADE", "candidate": None,
+                 "why_not": {"reasons": ["frozen_reason"]}}
+    latest = tmp_path / "latest"
+    latest.mkdir()
+    (latest / "strategy_decision.json").write_text(json.dumps(committed))
+    state = make_candidate_retry_state(state_now=now, candidate_quote_at=now, vix=25)
+    payload, _, _ = run_candidate_retry(monkeypatch, tmp_path, [state], now=now)
+    assert payload["strategy_decision"] == committed
+    assert payload["strategy_decision_reference"]["decision_id"] == "core:one"
 
 
 def test_strategy_decision_rejects_future_fact_frames() -> None:
@@ -2503,18 +2513,21 @@ def test_strategy_risk_image_publishes_for_trade_ready_delivery(monkeypatch, tmp
         now=now,
     )
 
-    assert result == {
-        "status": "published",
-        "as_of": now.isoformat(),
-        "decision_id": "strategy:risk-image",
-        "strategy_type": "CALL_DEBIT_VERTICAL",
-        "public_path": "/strategy-risk/latest.png",
-        "public_url": "https://spx.zh3nyu.com/strategy-risk/latest.png",
-        "bytes": 8,
-    }
-    assert (
-        tmp_path / "published/spxw-surface/strategy-risk/latest.png"
-    ).read_bytes() == b"risk-png"
+    assert result["status"] == "published"
+    frozen = tmp_path / "published/spxw-surface" / result["public_path"].lstrip("/")
+    assert frozen.read_bytes() == b"risk-png"
+    manifest = json.loads(frozen.with_suffix(".json").read_text())
+    assert manifest["decision"] == decision
+    assert result["public_url"].endswith(frozen.name)
+    assert (tmp_path / "published/spxw-surface/strategy-risk/latest.png").read_bytes() == b"risk-png"
+    # A later decision updates latest without mutating this decision's evidence.
+    later = {**decision, "decision_id": "strategy:later"}
+    monkeypatch.setattr(delivery_module, "write_strategy_risk_png", lambda payload, output: output.write_bytes(b"later-png"))
+    second = delivery_module.publish_strategy_risk_image(settings, decision=later, now=now)
+    assert second["public_url"] != result["public_url"]
+    assert frozen.read_bytes() == b"risk-png"
+    assert json.loads(frozen.with_suffix(".json").read_text())["decision"] == decision
+    assert (tmp_path / "published/spxw-surface/strategy-risk/latest.png").read_bytes() == b"later-png"
 
 
 def test_strategy_risk_image_publishes_stable_gth_url(monkeypatch, tmp_path) -> None:
@@ -2539,8 +2552,9 @@ def test_strategy_risk_image_publishes_stable_gth_url(monkeypatch, tmp_path) -> 
         now=now,
     )
 
-    assert result["public_path"] == "/strategy-risk/gth-latest.png"
-    assert result["public_url"] == "https://spx.zh3nyu.com/strategy-risk/gth-latest.png"
+    assert result["status"] == "published"
+    assert "latest" not in result["public_url"]
+    assert result["public_url"].endswith(result["public_path"])
     assert (
         tmp_path / "published/spxw-surface/strategy-risk/gth-latest.png"
     ).read_bytes() == b"gth-risk-png"
@@ -5322,7 +5336,8 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
 
     assert result["accepted"] is True
     assert result["idea_memo"] == "omitted:trade_ready_latency_budget"
-    assert str(captured["text"]).startswith(base_text)
+    assert base_text in str(captured["text"])
+    assert result["quote_status"] == "refresh_required"
     assert (
         "## 决策参考\n盘型：尚未形成；继续等待关键位确认\n"
         "Gamma：代理数据不可用"
@@ -5331,6 +5346,33 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
         "ICT：当前无有效 Sweep/MSS/位移事件；不改变本卡授权。"
     )
     assert captured["text"] == captured["feishu_text"]
+
+
+@pytest.mark.parametrize("elapsed,accepted", [(20, True), (301, False)])
+def test_final_enqueue_checks_elapsed_time_and_quote_deadline(monkeypatch, tmp_path, elapsed, accepted):
+    from spx_spark.application.order_map import delivery
+    now = datetime(2026, 8, 7, 15, tzinfo=timezone.utc)
+    decision = _strategy_decision_payload(now)
+    decision["candidate"]["quote_valid_until"] = (now + timedelta(seconds=15)).isoformat()
+    settings = make_settings(str(tmp_path / "strategy.json"))
+    captured = []
+    monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(delivery, "notification_event_exists", lambda *a: False)
+    monkeypatch.setattr(delivery, "_flood_control_block", lambda *a, **k: None)
+    def enqueue(_settings, envelope, **kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(accepted=True, inserted=True, duplicate=False, outcome="pending",
+                               envelope=envelope, targets=("feishu",))
+    monkeypatch.setattr(delivery, "enqueue_notification", enqueue)
+    action_at = now + timedelta(seconds=elapsed)
+    result = delivery.enqueue_strategy_decision(decision, now=now, action_clock=lambda: action_at)
+    assert result["accepted"] is accepted
+    if accepted:
+        assert result["quote_status"] == "refresh_required"
+        assert captured[0]["enqueued_at"] == action_at
+    else:
+        assert captured == []
+        assert result["outcome"] == "candidate_expired_during_preparation"
 
 
 def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> None:
@@ -5632,7 +5674,7 @@ def test_render_strategy_butterfly_prints_three_legs_and_wing_range() -> None:
     assert "稳定钉住 · 中性 · 只许限价" in text
     assert "买 7780P / 卖 2×7785P / 买 7790P" in text
     assert "净借记 ≤ 0.90" in text
-    assert "SPX 离开 7780–7790 失效" in text
+    assert "SPX 离开 7780–7790 时重新评估" in text
     assert "买 - / 卖 -" not in text
     assert "升破 -" not in text
 
@@ -6517,3 +6559,17 @@ def test_compact_price_line_leaves_cash_index_untagged() -> None:
 
     assert "SPX 7550　" in line
     assert "期权隐含" not in line
+
+
+def test_candidate_card_exposes_evidence_and_separate_quote_deadline() -> None:
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate, _strategy_card_title
+
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    decision = _strategy_decision_payload(now)
+    candidate = {**decision["candidate"], "evidence_status": "forward_unvalidated_user_override",
+                 "quote_valid_until": "2026-08-07T15:01:00+00:00",
+                 "opportunity_valid_until": "2026-08-07T15:05:00+00:00"}
+    text = _render_strategy_candidate(decision, candidate)
+    assert "前向未验证" in _strategy_card_title(candidate)
+    assert "报价有效截至 23:01" in text
+    assert "观点有效至 23:05" in text

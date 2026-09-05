@@ -3,8 +3,8 @@
 The primary replay uses completed prior-session SPX and five-coordinate IV
 surface paths when they are causally available.  A like-for-like sticky-IV
 result remains attached as a baseline; sparse surface history fails back to
-the older one-minute physical SPX replay.  Every result is display-only: it
-does not veto, re-rank, or authorize orders.
+the older one-minute physical SPX replay.  Results do not authorize orders; mature adverse evidence can veto a
+forward-unvalidated winner through reject_adverse_forward_path.
 """
 
 from __future__ import annotations
@@ -26,11 +26,11 @@ from spx_spark.analytics.greeks.black_scholes import bs_price, intrinsic_value
 from spx_spark.analytics.options.pricing import time_to_expiry_years
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    ManagementPolicy,
     IRON_CONDOR_MANAGEMENT_POLICY,
     PolicyMark,
     management_policy_for_candidate,
     policy_mark_horizon_end,
-    risk_adjusted_cvar_objective,
     simulate_management_policy,
 )
 from spx_spark.application.market_features.physical_followthrough import (
@@ -44,6 +44,9 @@ from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.surface_path_distribution import (
     JOINT_SURFACE_CLEARING_METHOD,
     JOINT_SURFACE_METHOD,
+    _to_combo_bid,
+    _risk_objective,
+    _pnl_histogram,
     estimate_joint_debit_distribution,
     estimate_joint_iron_condor_distribution,
     load_joint_surface_paths,
@@ -51,8 +54,8 @@ from spx_spark.application.order_map.surface_path_distribution import (
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
-METHOD = "physical_path_management_policy.v3"
-IRON_CONDOR_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v1"
+METHOD = "physical_path_management_policy.v4"
+IRON_CONDOR_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v2"
 SUPPORTED_DEBITS = {
     "CALL_DEBIT_VERTICAL",
     "PUT_DEBIT_VERTICAL",
@@ -132,11 +135,10 @@ def load_decision_spot_paths(
     data_root: str | Path | None,
     probability_settings: StrategyDistributionSettings | None,
     now: datetime,
-    policy: StrategyPolicy | None = None,
+    policy: ManagementPolicy = DEFAULT_MANAGEMENT_POLICY,
 ) -> tuple[tuple[PhysicalSpotPath, ...], str]:
     """Load the shared path library once per strategy decision."""
 
-    del policy
     if data_root is None:
         return (), "unavailable"
     session_date = _session_date(facts.get("session_date"))
@@ -145,10 +147,10 @@ def load_decision_spot_paths(
     settings = probability_settings or StrategyDistributionSettings()
     horizon_end = policy_mark_horizon_end(
         _utc(now),
-        DEFAULT_MANAGEMENT_POLICY,
+        policy,
         session_date=session_date,
     )
-    horizon = int((horizon_end - _utc(now)).total_seconds() // 60)
+    horizon = math.ceil((horizon_end - _utc(now)).total_seconds() / 60)
     if horizon <= 0:
         return (), "unavailable"
     try:
@@ -216,7 +218,7 @@ def estimate_path_distribution(
         management_policy,
         session_date=session_date,
     )
-    requested_horizon = int((horizon_end - now_utc).total_seconds() // 60)
+    requested_horizon = math.ceil((horizon_end - now_utc).total_seconds() / 60)
     close_seed = _number(quote.get("ask") if iron_condor else quote.get("bid"))
     if close_seed is None:
         return _unavailable("path_mark_seed_unavailable")
@@ -246,6 +248,7 @@ def estimate_path_distribution(
             data_root=data_root,
             probability_settings=probability_settings,
             now=now_utc,
+            policy=management_policy,
         )
     if not paths:
         return _unavailable("physical_spot_paths_unavailable")
@@ -269,6 +272,7 @@ def estimate_path_distribution(
         model0=model0,
         close_seed=close_seed,
         entry_credit=entry if iron_condor else None,
+        horizon_end=horizon_end,
     )
     invalidation, invalidation_reason = _invalidation_touch(
         candidate, credit=iron_condor, spot=spot
@@ -284,16 +288,20 @@ def estimate_path_distribution(
         if invalidation is not None and invalidation(projected):
             hit_invalidation += 1
         marks = [
-            PolicyMark(at=now_utc + timedelta(minutes=offset), combo_bid=float(bid))
+            PolicyMark(at=min(now_utc + timedelta(minutes=offset), horizon_end), combo_bid=float(bid))
             for offset, bid in enumerate(combo_bids["bids"][index])
         ]
         label = simulate_management_policy(
             marks,
             entry_ask=entry,
-            leg_count=len(priced_legs),
+            leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
             entry_at=now_utc,
             policy=management_policy,
+            session_date=session_date,
+            max_quote_gap_seconds=60,
         )
+        if label.policy_pnl_points is None:
+            return _unavailable(label.exit_reason)
         pnls.append(label.policy_pnl_points)
         if label.exit_at is not None:
             hold_minutes.append((label.exit_at - now_utc).total_seconds() / 60.0)
@@ -469,11 +477,14 @@ def estimate_iron_condor_clearing_distribution(
         label = simulate_management_policy(
             marks,
             entry_ask=entry,
-            leg_count=len(priced_legs),
+            leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
             entry_at=now_utc,
             policy=IRON_CONDOR_MANAGEMENT_POLICY,
             session_date=session_date,
+            max_quote_gap_seconds=60,
         )
+        if label.policy_pnl_points is None:
+            return _unavailable(label.exit_reason)
         pnls.append(label.policy_pnl_points)
         if label.exit_at is not None:
             hold_minutes.append((label.exit_at - now_utc).total_seconds() / 60.0)
@@ -590,9 +601,9 @@ def _clearing_combo_bids(
             taus,
             str(leg["right"]),
         )
-    close_mark = np.maximum(close_seed + (model - model0), 0.0)
-    bids = np.maximum(2.0 * entry_credit - close_mark, 0.0)
-    return clocks, {"spots": spots, "bids": bids}
+    return clocks, _to_combo_bid(
+        model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots
+    )
 
 
 def _clearing_clocks(
@@ -733,6 +744,7 @@ def _combo_bid_matrix(
     model0: float,
     close_seed: float,
     entry_credit: float | None,
+    horizon_end: datetime | None = None,
 ) -> dict[str, np.ndarray]:
     horizon = len(paths[0].prices)
     origins = np.asarray([path.prices[0] for path in paths], dtype=float)
@@ -740,7 +752,7 @@ def _combo_bid_matrix(
     spots = spot + scale * (raw - origins[:, None])
     taus = np.asarray(
         [
-            time_to_expiry_years(expiry, as_of=now + timedelta(minutes=offset))
+            time_to_expiry_years(expiry, as_of=min(now + timedelta(minutes=offset), horizon_end) if horizon_end is not None else now + timedelta(minutes=offset))
             for offset in range(horizon)
         ],
         dtype=float,
@@ -754,12 +766,9 @@ def _combo_bid_matrix(
             taus,
             str(leg["right"]),
         )
-    close_mark = np.maximum(close_seed + (model - model0), 0.0)
-    if entry_credit is not None:
-        bids = np.maximum(2.0 * entry_credit - close_mark, 0.0)
-    else:
-        bids = close_mark
-    return {"spots": spots, "bids": bids}
+    return _to_combo_bid(
+        model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots
+    )
 
 
 def _bs_price_np(
@@ -857,72 +866,6 @@ def _percentiles(values: Sequence[float], points: Sequence[float]) -> tuple[floa
         interpolated = ordered[lower] * (1.0 - weight) + ordered[upper] * weight
         result.append(round(interpolated, 6))
     return tuple(result)
-
-
-def _risk_objective(
-    pnls: Sequence[float],
-    *,
-    candidate: Mapping[str, Any],
-    quote: Mapping[str, Any],
-    session_count: int,
-) -> dict[str, Any]:
-    max_loss = _number(_map(candidate.get("economics")).get("max_loss_points"))
-    bid = _number(quote.get("bid"))
-    ask = _number(quote.get("ask"))
-    if max_loss is None or max_loss <= 0 or bid is None or ask is None or ask < bid:
-        return {
-            "status": "unavailable",
-            "authority": "advisory_only",
-            "evidence_status": "research_unvalidated",
-            "automatic_ordering": False,
-            "reason_codes": ["risk_objective_inputs_unavailable"],
-        }
-    result = risk_adjusted_cvar_objective(
-        pnls,
-        max_loss_points=max_loss,
-        quote_width_points=ask - bid,
-        session_count=session_count,
-    )
-    return {"status": "available", **result, "reason_codes": []}
-
-
-def _pnl_histogram(values: Sequence[float]) -> list[dict[str, float | int]]:
-    """Return a compact empirical PnL mass function in points and dollars."""
-
-    if not values:
-        return []
-    low, high = min(values), max(values)
-    if math.isclose(low, high, rel_tol=0.0, abs_tol=1e-12):
-        half_width = max(abs(low) * 0.005, 0.005)
-        return [
-            {
-                "lower_pnl_points": round(low - half_width, 6),
-                "upper_pnl_points": round(high + half_width, 6),
-                "lower_net_pnl": round((low - half_width) * 100.0, 2),
-                "upper_net_pnl": round((high + half_width) * 100.0, 2),
-                "probability": 1.0,
-                "count": len(values),
-            }
-        ]
-    bin_count = min(12, max(5, math.ceil(math.sqrt(len(values)))))
-    counts, edges = np.histogram(np.asarray(values, dtype=float), bins=bin_count)
-    total = float(len(values))
-    rows: list[dict[str, float | int]] = []
-    for index, count in enumerate(counts):
-        if count <= 0:
-            continue
-        lower, upper = float(edges[index]), float(edges[index + 1])
-        rows.append(
-            {
-                "lower_pnl_points": round(lower, 6),
-                "upper_pnl_points": round(upper, 6),
-                "lower_net_pnl": round(lower * 100.0, 2),
-                "upper_net_pnl": round(upper * 100.0, 2),
-                "probability": round(float(count) / total, 6),
-                "count": int(count),
-            }
-        )
-    return rows
 
 
 def _expiry_from_legs(legs: Sequence[Mapping[str, Any]]) -> str | None:

@@ -1,6 +1,7 @@
 """Structured-concurrency owner for real-time SPX Core tasks."""
 from __future__ import annotations
 import asyncio
+import logging
 import signal
 import threading
 from collections.abc import Callable, Mapping
@@ -30,11 +31,17 @@ async def _run_owner(name: str, runner: Callable[[], int],
     if not shutdown.is_set():
         raise RuntimeError(f"{name} exited unexpectedly")
 async def _run_periodic(name: str, runner: Callable[[], int],
-                        interval_seconds: float, shutdown: asyncio.Event) -> None:
+                        interval_seconds: float, shutdown: asyncio.Event, *,
+                        critical: bool = True) -> None:
     while not shutdown.is_set():
-        code = await asyncio.to_thread(runner)
-        if code != 0:
-            raise RuntimeError(f"{name} exited with status {code}")
+        try:
+            code = await asyncio.to_thread(runner)
+            if code != 0:
+                raise RuntimeError(f"{name} exited with status {code}")
+        except Exception:
+            if critical:
+                raise
+            logging.getLogger(__name__).exception("Optional Core task failed: %s", name)
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
         except TimeoutError:
@@ -112,7 +119,7 @@ async def main() -> None:
                         ["--json"],
                         unavailable_is_error=False,
                     ),
-                    app_settings.globex_trend.interval_seconds, shutdown))
+                    app_settings.globex_trend.interval_seconds, shutdown, critical=False))
             if runtime.realtime_engine_enabled:
                 tasks.create_task(_run_periodic(
                     "realtime_engine", partial(
@@ -129,10 +136,10 @@ async def main() -> None:
                         app_settings=app_settings,
                         storage_settings=storage,
                     ),
-                    runtime.alert_interval_seconds, shutdown))
+                    runtime.alert_interval_seconds, shutdown, critical=False))
             if app_settings.alerts.steven_enabled:
                 tasks.create_task(_run_periodic(
                     "steven", partial(steven.run, ["--summary-json"]),
-                    runtime.alert_interval_seconds, shutdown))
+                    runtime.alert_interval_seconds, shutdown, critical=False))
     finally:
         request_shutdown()

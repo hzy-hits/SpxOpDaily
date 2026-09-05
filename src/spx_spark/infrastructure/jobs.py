@@ -15,7 +15,7 @@ huey = SqliteHuey(
 )
 
 
-@huey.task(retries=2, retry_delay=5)
+@huey.task(retries=2, retry_delay=5, priority=10)
 def deliver_notification_event(event_id: int) -> None:
     from spx_spark.notifier.unified_delivery import (
         deliver_notification_event as deliver,
@@ -30,12 +30,18 @@ def recover_notification_delivery_tasks() -> None:
         default_engine,
         recover_notification_tasks,
     )
-
     recover_notification_tasks(
         default_engine(),
         schedule=deliver_notification_event,
         now=datetime.now(tz=timezone.utc),
     )
+
+
+@huey.periodic_task(crontab(minute="*/5", strict=True))
+def macro_calendar_refresh() -> None:
+    from spx_spark.macro_event_calendar import refresh_macro_events_if_due
+
+    refresh_macro_events_if_due(_settings.data_root, now=datetime.now(tz=timezone.utc))
 
 
 @huey.periodic_task(crontab(minute="30", hour="23", strict=True))

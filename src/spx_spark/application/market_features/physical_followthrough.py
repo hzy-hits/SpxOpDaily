@@ -248,7 +248,10 @@ def estimate_physical_terminal_range(
             stat = path.stat()
         except OSError:
             continue
-        prices = dict(_load_standardized_session(str(path), stat.st_mtime_ns, stat.st_size))
+        prices = dict(_load_standardized_session(
+            str(path), stat.st_mtime_ns, stat.st_size,
+            now.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat(),
+        ))
         outcomes = []
         for minute, start in prices.items():
             if abs(minute - query_minute) > PIN_CLOCK_WINDOW_MINUTES:
@@ -354,7 +357,10 @@ def load_physical_spot_paths(
             stat = path.stat()
         except OSError:
             continue
-        prices = dict(_load_standardized_session(str(path), stat.st_mtime_ns, stat.st_size))
+        prices = dict(_load_standardized_session(
+            str(path), stat.st_mtime_ns, stat.st_size,
+            now.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat(),
+        ))
         if not prices:
             continue
         for start in prices:
@@ -419,7 +425,10 @@ def load_iron_condor_clearing_paths(
             stat = path.stat()
         except OSError:
             continue
-        loaded = dict(_load_standardized_session(str(path), stat.st_mtime_ns, stat.st_size))
+        loaded = dict(_load_standardized_session(
+            str(path), stat.st_mtime_ns, stat.st_size,
+            now.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat(),
+        ))
         if loaded:
             sessions.append((partition, loaded))
     if not sessions:
@@ -474,9 +483,11 @@ def _new_york_minute(value: datetime) -> int:
 
 @lru_cache(maxsize=64)
 def _load_standardized_session(
-    path_text: str, _mtime_ns: int, _size: int
+    path_text: str, _mtime_ns: int, _size: int, available_before_text: str
 ) -> tuple[tuple[int, float], ...]:
-    """Return the last eligible SPX observation for each New York minute."""
+    """Return only rows whose source and arrival times precede the decision."""
+
+    available_before = datetime.fromisoformat(available_before_text)
 
     prices: dict[int, float] = {}
     try:
@@ -496,6 +507,10 @@ def _load_standardized_session(
         price = _finite(selected.get("price"))
         minute = _timestamp(row.get("minute"))
         if price is None or minute is None:
+            continue
+        arrival = _timestamp(row.get("available_at") or row.get("created_at") or row.get("observed_at"))
+        # Legacy rows without an arrival timestamp cannot establish as-of availability.
+        if arrival is None or max(minute, arrival) > available_before:
             continue
         local = minute.astimezone(NEW_YORK)
         prices[local.hour * 60 + local.minute] = price

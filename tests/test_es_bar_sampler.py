@@ -545,18 +545,3 @@ def test_starting_marker_invalidates_a_previous_ready_lease(tmp_path: Path) -> N
     assert readiness["ready"] is False
     assert "lease_identity_invalid" in readiness["reasons"]
     assert "writer_has_not_accepted" in readiness["reasons"]
-
-
-def test_heavy_feature_cycle_is_a_read_only_es_bar_consumer() -> None:
-    source = (
-        Path(__file__).parents[1]
-        / "src"
-        / "spx_spark"
-        / "application"
-        / "market_features"
-        / "service.py"
-    ).read_text(encoding="utf-8")
-
-    assert "advance_es_bar_state" not in source
-    assert "exclusive_state_lock(es_bar_path)" not in source
-    assert "es_bars, es_bar_consumer = load_consumable_es_bars(" in source

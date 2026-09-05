@@ -18,6 +18,7 @@ from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
+    REPLAY_MAX_QUOTE_GAP_SECONDS,
     management_policy_for_candidate,
     policy_mark_horizon_end,
     simulate_management_policy,
@@ -668,13 +669,13 @@ def _label_candidate(
     from spx_spark.data_platform.research.strategy_policy_backfill import (
         _candidate_legs,
         _combo_bid_marks,
-        _entry_ask,
+        _entry_price,
     )
 
     legs = _candidate_legs(candidate)
     if len(legs) < 2:
         return None
-    entry_ask = _entry_ask(legs)
+    entry_ask = _entry_price(legs)
     if entry_ask is None:
         return None
     provider = str(legs[0].get("provider") or "schwab")
@@ -699,11 +700,15 @@ def _label_candidate(
     label = simulate_management_policy(
         marks,
         entry_ask=entry_ask,
-        leg_count=len(legs),
+        leg_count=sum(abs(int(leg["quantity"])) for leg in legs),
         entry_at=decision_at,
         policy=policy,
         session_date=session,
+        max_quote_gap_seconds=REPLAY_MAX_QUOTE_GAP_SECONDS,
     )
+    if label.policy_pnl_points is None:
+        return None
+
     return {
         "schema_version": "strategy_policy_label.v1",
         "pass": "B",
@@ -819,7 +824,7 @@ def _load_decisions(database_path: Path, session_date: str) -> list[dict[str, An
                 "attributes": payload,
             }
         )
-    accepted = resolve_accepted_opportunity_ids(result)
+    accepted = resolve_accepted_opportunity_ids(result, database_path=database_path)
     if accepted:
         return mark_duplicate_opportunities(result, accepted_opportunity_ids=accepted)
     return mark_duplicate_opportunities(result)

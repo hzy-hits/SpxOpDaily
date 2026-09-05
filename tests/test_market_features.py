@@ -283,6 +283,7 @@ def test_normalized_sample_retains_all_four_schwab_cash_indices() -> None:
 def test_option_volatility_features_keep_both_expiry_contexts() -> None:
     now = datetime(2026, 7, 24, 14, 0, tzinfo=UTC)
     front = SimpleNamespace(
+        atm_strike=7700,
         atm_iv=0.18,
         put_skew_25d=0.03,
         call_skew_25d=-0.01,
@@ -306,6 +307,12 @@ def test_option_volatility_features_keep_both_expiry_contexts() -> None:
     assert result["term_gap"] == pytest.approx(0.02)
 
 
+def _atm_observation(at: datetime, straddle: float, iv: float) -> dict:
+    return {"atm_straddle_mid": straddle, "atm_iv_0dte": iv, "atm_strike": 7700,
+            "atm_observation_source_times": [at.isoformat(), at.isoformat()],
+            "atm_observation_provider": ["ibkr"]}
+
+
 def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
     gth_high_at = datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
     base = OptionStructureFrame(
@@ -316,7 +323,7 @@ def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
         front_expiry="20260827",
         next_expiry="20260828",
         structure={},
-        volatility={"atm_straddle_mid": 24.0, "atm_iv_0dte": 0.14},
+        volatility=_atm_observation(gth_high_at, 24.0, 0.14),
         concentration={},
         density={},
         l1=L1MicrostructureFrame(
@@ -330,13 +337,19 @@ def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
     )
 
     state, projection = update_atm_straddle_session({}, base, now=gth_high_at)
+    for offset in range(1, 100):
+        state, repeated = update_atm_straddle_session(
+            state, base, now=gth_high_at + timedelta(milliseconds=20 * offset),
+        )
+    assert repeated["gth"]["observations"] == 1
+    assert repeated["observed_at"] == gth_high_at.isoformat()
     gth_low_at = datetime(2026, 8, 27, 2, 0, tzinfo=UTC)
     state, projection = update_atm_straddle_session(
         state,
         replace(
             base,
             as_of=gth_low_at,
-            volatility={"atm_straddle_mid": 18.0, "atm_iv_0dte": 0.12},
+            volatility=_atm_observation(gth_low_at, 18.0, 0.12),
         ),
         now=gth_low_at,
     )
@@ -355,7 +368,7 @@ def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
             base,
             as_of=degraded_at,
             quality=FrameQuality.DEGRADED,
-            volatility={"atm_straddle_mid": 30.0, "atm_iv_0dte": 0.18},
+            volatility=_atm_observation(degraded_at, 30.0, 0.18),
         ),
         now=degraded_at,
     )
@@ -369,7 +382,7 @@ def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
         replace(
             base,
             as_of=rth_at,
-            volatility={"atm_straddle_mid": 20.0, "atm_iv_0dte": 0.125},
+            volatility=_atm_observation(rth_at, 20.0, 0.125),
         ),
         now=rth_at,
     )
@@ -386,7 +399,7 @@ def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
         as_of=next_gth_at,
         front_expiry="20260828",
         next_expiry="20260831",
-        volatility={"atm_straddle_mid": 31.0, "atm_iv_0dte": 0.16},
+        volatility=_atm_observation(next_gth_at, 31.0, 0.16),
     )
     reset_state, reset = update_atm_straddle_session(
         state,
@@ -408,7 +421,7 @@ def test_atm_straddle_session_preserves_the_low_before_a_later_peak() -> None:
         front_expiry="20260827",
         next_expiry="20260828",
         structure={},
-        volatility={"atm_straddle_mid": 20.0, "atm_iv_0dte": 0.12},
+        volatility=_atm_observation(start, 20.0, 0.12),
         concentration={},
         density={},
         l1=L1MicrostructureFrame(
@@ -424,13 +437,13 @@ def test_atm_straddle_session_preserves_the_low_before_a_later_peak() -> None:
     peak_at = start + timedelta(minutes=20)
     state, _ = update_atm_straddle_session(
         state,
-        replace(frame, volatility={"atm_straddle_mid": 30.0, "atm_iv_0dte": 0.16}),
+        replace(frame, volatility=_atm_observation(peak_at, 30.0, 0.16)),
         now=peak_at,
     )
     later_low_at = start + timedelta(minutes=35)
     state, projection = update_atm_straddle_session(
         state,
-        replace(frame, volatility={"atm_straddle_mid": 18.0, "atm_iv_0dte": 0.11}),
+        replace(frame, volatility=_atm_observation(later_low_at, 18.0, 0.11)),
         now=later_low_at,
     )
 
@@ -451,7 +464,7 @@ def test_atm_straddle_session_rolls_to_a_new_local_expansion_episode() -> None:
         front_expiry="20260827",
         next_expiry="20260828",
         structure={},
-        volatility={"atm_straddle_mid": 20.0, "atm_iv_0dte": 0.12},
+        volatility=_atm_observation(start, 20.0, 0.12),
         concentration={},
         density={},
         l1=L1MicrostructureFrame(
@@ -467,14 +480,14 @@ def test_atm_straddle_session_rolls_to_a_new_local_expansion_episode() -> None:
     old_peak_at = start + timedelta(minutes=20)
     state, _ = update_atm_straddle_session(
         state,
-        replace(frame, volatility={"atm_straddle_mid": 30.0, "atm_iv_0dte": 0.16}),
+        replace(frame, volatility=_atm_observation(old_peak_at, 30.0, 0.16)),
         now=old_peak_at,
     )
 
     reset_at = old_peak_at + timedelta(minutes=121)
     state, reset = update_atm_straddle_session(
         state,
-        replace(frame, volatility={"atm_straddle_mid": 24.0, "atm_iv_0dte": 0.14}),
+        replace(frame, volatility=_atm_observation(reset_at, 24.0, 0.14)),
         now=reset_at,
     )
     reset_episode = reset["gth"]["straddle_mid"]
@@ -486,12 +499,12 @@ def test_atm_straddle_session_rolls_to_a_new_local_expansion_episode() -> None:
     new_peak_at = reset_at + timedelta(minutes=10)
     state, _ = update_atm_straddle_session(
         state,
-        replace(frame, volatility={"atm_straddle_mid": 27.0, "atm_iv_0dte": 0.16}),
+        replace(frame, volatility=_atm_observation(new_peak_at, 27.0, 0.16)),
         now=new_peak_at,
     )
     state, contracted = update_atm_straddle_session(
         state,
-        replace(frame, volatility={"atm_straddle_mid": 24.5, "atm_iv_0dte": 0.14}),
+        replace(frame, volatility=_atm_observation(new_peak_at + timedelta(minutes=10), 24.5, 0.14)),
         now=new_peak_at + timedelta(minutes=10),
     )
     episode = contracted["gth"]["straddle_mid"]

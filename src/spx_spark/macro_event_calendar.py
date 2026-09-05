@@ -16,6 +16,7 @@ from spx_spark.state_io import atomic_write_json_secure, read_json_object
 
 NY = ZoneInfo("America/New_York")
 REFRESH_TTL = timedelta(hours=6)
+RETRY_INTERVAL = timedelta(minutes=5)
 HTTP_TIMEOUT_SECONDS = 20.0
 USER_AGENT = "spx-spark-macro-calendar/1.0 (+local; read-only economic calendar)"
 FF_THIS_WEEK_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -52,11 +53,7 @@ def refresh_macro_events_if_due(
     now: datetime,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Fetch allowlisted events when the runtime overlay is stale.
-
-    Failures keep the previous overlay (or leave it absent) so the seed TOML
-    calendar remains usable.
-    """
+    """Worker refresh with independent last-good source data and bounded retries."""
 
     path = runtime_macro_events_path(data_root)
     existing = read_json_object(path)
@@ -67,56 +64,62 @@ def refresh_macro_events_if_due(
             "event_count": len(_events_list(existing)),
             "refreshed_at": existing.get("refreshed_at"),
         }
-    try:
-        events = fetch_allowlisted_macro_events(now=now)
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
-        return {
-            "status": "fetch_failed",
-            "path": str(path),
-            "error": f"{type(exc).__name__}:{exc}",
-            "event_count": len(_events_list(existing)),
-            "refreshed_at": existing.get("refreshed_at"),
-        }
+    attempted = _parse_release(existing.get("attempted_at"))
+    if not force and attempted and timedelta(0) <= _utc(now) - attempted < RETRY_INTERVAL:
+        return {"status": "retry_deferred", "path": str(path)}
+    fetched = fetch_allowlisted_macro_events(now=now)
+    previous = existing.get("sources")
+    previous = previous if isinstance(previous, Mapping) else {}
+    sources = {
+        name: ({**dict(previous.get(name) or {}), **result}
+               if result.get("error") else result)
+        for name, result in fetched.items()
+    }
+    complete = all(not source.get("error") for source in sources.values())
+    # Preserve legacy events until a complete refresh replaces them. Their old
+    # format carries no coverage proof and therefore cannot authorize entry.
+    events = ({str(row["id"]): row for row in _events_list(existing)}
+              if not complete and not previous else {})
+    for source in sources.values():
+        events.update({str(row["id"]): row for row in _events_list(source)})
     payload = {
         "schema_version": 1,
-        "refreshed_at": _utc(now).isoformat(),
+        "attempted_at": _utc(now).isoformat(),
+        "refreshed_at": _utc(now).isoformat() if complete else existing.get("refreshed_at"),
+        "sources": sources,
         "source": "ff_thisweek+fomc_html",
         "defaults": {
             "pre_window_minutes": DEFAULT_PRE_WINDOW,
             "post_window_minutes": DEFAULT_POST_WINDOW,
         },
-        "events": events,
+        "events": sorted(events.values(), key=lambda row: str(row["release_at"])),
     }
     atomic_write_json_secure(path, payload)
     return {
-        "status": "refreshed",
+        "status": "refreshed" if complete else "partial_failure",
         "path": str(path),
         "event_count": len(events),
         "refreshed_at": payload["refreshed_at"],
     }
 
 
-def fetch_allowlisted_macro_events(*, now: datetime) -> list[dict[str, Any]]:
+def fetch_allowlisted_macro_events(*, now: datetime) -> dict[str, dict[str, Any]]:
     """Pull near-term FF US high-impact prints plus upcoming FOMC statements.
 
     Sources are independent: a temporary FF rate-limit must not erase FOMC
     coverage, and a Fed HTML outage must not erase the weekly prints.
     """
 
-    rows: dict[str, dict[str, Any]] = {}
-    errors: list[str] = []
+    sources: dict[str, dict[str, Any]] = {}
     for loader, label in (
-        (_ff_this_week_events, "ff_thisweek"),
+        (lambda: _ff_this_week_events(now=now), "ff_thisweek"),
         (lambda: _fomc_statement_events(now=now), "fomc_html"),
     ):
         try:
-            for event in loader():
-                rows[str(event["id"])] = event
+            sources[label] = {**loader(), "refreshed_at": _utc(now).isoformat(), "error": None}
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
-            errors.append(f"{label}:{type(exc).__name__}")
-    if not rows:
-        raise ValueError("macro_calendar_sources_unavailable:" + ",".join(errors) or "unknown")
-    return sorted(rows.values(), key=lambda row: str(row["release_at"]))
+            sources[label] = {"error": type(exc).__name__}
+    return sources
 
 
 def load_merged_macro_calendar(
@@ -128,6 +131,7 @@ def load_merged_macro_calendar(
     seed = tomllib.loads(seed_path.read_text(encoding="utf-8"))
     defaults = seed.get("defaults") if isinstance(seed.get("defaults"), Mapping) else {}
     merged: dict[str, dict[str, Any]] = {}
+    overlay: dict[str, Any] = {}
     for raw in seed.get("events") or []:
         if isinstance(raw, Mapping) and raw.get("id"):
             merged[str(raw["id"])] = dict(raw)
@@ -143,18 +147,25 @@ def load_merged_macro_calendar(
     return {
         "defaults": dict(defaults),
         "events": sorted(merged.values(), key=lambda row: str(row.get("release_at") or "")),
-        "overlay_refreshed_at": (
-            read_json_object(runtime_macro_events_path(data_root)).get("refreshed_at")
-            if data_root is not None
-            else None
-        ),
+        "overlay_refreshed_at": overlay.get("refreshed_at"),
+        "sources": overlay.get("sources", seed.get("sources", {})),
     }
 
 
-def _ff_this_week_events() -> list[dict[str, Any]]:
+def _ff_this_week_events(*, now: datetime) -> dict[str, Any]:
     payload = json.loads(_http_get(FF_THIS_WEEK_URL))
     if not isinstance(payload, list):
         raise ValueError("ff_calendar_thisweek_not_a_list")
+    dates = [_parse_release(row.get("date")) for row in payload if isinstance(row, Mapping)]
+    if not dates or any(at is None for at in dates):
+        raise ValueError("ff_calendar_coverage_unknown")
+    local = _utc(now).astimezone(NY)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+        days=(local.weekday() + 1) % 7
+    )
+    end = start + timedelta(days=7)
+    if any(not start <= at < end for at in dates if at is not None):
+        raise ValueError("ff_calendar_wrong_week")
     selected: dict[tuple[str, str], dict[str, Any]] = {}
     for row in payload:
         if not isinstance(row, Mapping):
@@ -184,16 +195,18 @@ def _ff_this_week_events() -> list[dict[str, Any]]:
             "post_window_minutes": DEFAULT_POST_WINDOW,
             "description": f"Auto-imported from economic calendar: {title}",
         }
-    return list(selected.values())
+    return {"events": list(selected.values()), "coverage_start": start.isoformat(),
+            "coverage_end": end.isoformat()}
 
 
-def _fomc_statement_events(*, now: datetime) -> list[dict[str, Any]]:
+def _fomc_statement_events(*, now: datetime) -> dict[str, Any]:
     html = _http_get(FOMC_CALENDAR_URL).decode("utf-8", "replace")
     year = _utc(now).astimezone(NY).year
     section = _fomc_year_section(html, year)
     if not section:
-        return []
+        raise ValueError("fomc_calendar_year_missing")
     events: list[dict[str, Any]] = []
+    parsed_count = 0
     for month_name, day_text in re.findall(
         r'fomc-meeting__month[^>]*>\s*<strong>\s*([A-Za-z]+)\s*</strong>.*?'
         r'fomc-meeting__date[^>]*>\s*([^<]+)<',
@@ -212,6 +225,7 @@ def _fomc_statement_events(*, now: datetime) -> list[dict[str, Any]]:
             release_local = datetime(year, month, statement_day, 14, 0, tzinfo=NY)
         except ValueError:
             continue
+        parsed_count += 1
         if release_local < _utc(now).astimezone(NY) - timedelta(days=1):
             continue
         event_id = f"us-fomc-{release_local.strftime('%Y-%m-%d')}"
@@ -226,7 +240,11 @@ def _fomc_statement_events(*, now: datetime) -> list[dict[str, Any]]:
                 "description": "Auto-imported from Federal Reserve FOMC calendar.",
             }
         )
-    return events
+    if not parsed_count:
+        raise ValueError("fomc_calendar_meetings_missing")
+    return {"events": events,
+            "coverage_start": datetime(year, 1, 1, tzinfo=NY).isoformat(),
+            "coverage_end": datetime(year + 1, 1, 1, tzinfo=NY).isoformat()}
 
 
 def _fomc_year_section(html: str, year: int) -> str:
@@ -308,6 +326,9 @@ def _http_get(url: str) -> bytes:
 
 
 def _overlay_fresh(payload: Mapping[str, Any], *, now: datetime) -> bool:
+    sources = payload.get("sources")
+    if not isinstance(sources, Mapping) or not sources:
+        return False
     raw = payload.get("refreshed_at")
     if not isinstance(raw, str):
         return False
@@ -317,7 +338,25 @@ def _overlay_fresh(payload: Mapping[str, Any], *, now: datetime) -> bool:
         return False
     if refreshed.tzinfo is None:
         refreshed = refreshed.replace(tzinfo=timezone.utc)
-    return _utc(now) - refreshed.astimezone(timezone.utc) < REFRESH_TTL
+    return (timedelta(0) <= _utc(now) - refreshed.astimezone(timezone.utc) < REFRESH_TTL
+            and all(isinstance(source, Mapping) and not source.get("error") for source in sources.values()))
+
+
+def calendar_coverage(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    """Coverage proves absence only for the existing allowlist, at this knowledge time."""
+    sources = payload.get("sources")
+    sources = sources if isinstance(sources, Mapping) else {}
+    missing = []
+    for name in ("ff_thisweek", "fomc_html"):
+        source = sources.get(name)
+        source = source if isinstance(source, Mapping) else {}
+        start, end, refreshed = (_parse_release(source.get(key)) for key in
+                                 ("coverage_start", "coverage_end", "refreshed_at"))
+        if (start is None or end is None or refreshed is None or not start <= now < end
+                or not timedelta(0) <= _utc(now) - refreshed < REFRESH_TTL):
+            missing.append(name)
+    return {"status": "unknown" if missing else "covered", "missing_sources": missing,
+            "scope": "allowlisted_cpi_ppi_employment_fomc"}
 
 
 def _events_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:

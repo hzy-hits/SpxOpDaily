@@ -14,7 +14,7 @@ from spx_spark.domain.market import MarketSnapshot
 from spx_spark.notifier.policy import alert_key, context_only_alerts, is_human_visible_alert
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import AlertSettings, AppSettings, DEFAULT_ALERT_SETTINGS
-from spx_spark.storage import LatestMarketProjectionStore, LatestState
+from spx_spark.storage import LatestStateStore, LatestState
 
 
 def _utc(now: datetime) -> datetime:
@@ -94,7 +94,7 @@ class AlertEngineEvaluator:
     owns gamma-regime / system-event persistence when it runs.
     """
 
-    store: LatestMarketProjectionStore
+    store: LatestStateStore
     persist_system_events: bool = False
     persist_movement_state: bool = False
     persist_gamma_regime: bool = False
