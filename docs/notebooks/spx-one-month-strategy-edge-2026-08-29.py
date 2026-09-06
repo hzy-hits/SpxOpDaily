@@ -24,7 +24,7 @@ import duckdb
 import numpy as np
 from scipy.optimize import brentq
 
-from spx_spark.analytics.greeks.black_scholes import bs_delta, bs_price
+from spx_spark.analytics.greeks.black_scholes import bs_delta, bs_gamma, bs_price
 
 from spx_spark.analytics.options.strategy_payoff import (
     CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
@@ -290,7 +290,7 @@ def _valid(leg: Mapping[str, Any] | None, at: datetime, age: float) -> bool:
     return bool(
         source is not None
         and received is not None
-        and received <= at
+        and source <= received <= at
         and 0 <= (at - source).total_seconds() <= age
         and leg.get("quality") == "live"
         and str(leg.get("market_data_type", "")).lower() in {"live", "1"}
@@ -353,6 +353,7 @@ def _underlier_minutes(
     for at, contract, tick in rows:
         if (
             tick["source"] is None
+            or tick["source"] > tick["received_at"]
             or not 0 <= (at - tick["source"]).total_seconds() <= 15
             or tick["quality"] != "live"
             or str(tick["market_data_type"]).lower() not in {"live", "1"}
@@ -463,7 +464,7 @@ def _signals(day: date, mode: str, path: Mapping[datetime, float]) -> list[dict[
     return rows
 
 
-def _snapshots(con, files, day: date, times: Sequence[datetime], provider: str, age: float):
+def _snapshots(con, files, day: date, times: Sequence[datetime], provider: str, age: float, *, include_open_interest=False):
     times = sorted(set(times))
     if not times:
         return {}
@@ -474,6 +475,7 @@ def _snapshots(con, files, day: date, times: Sequence[datetime], provider: str, 
         WITH wanted(decision_at) AS (VALUES {values}), latest AS (
           SELECT w.decision_at,q.instrument_id,q.strike,q."right",q.bid,q.ask,q.bid_size,q.ask_size,
             q.quote_time,q.received_at,q.quality,q.market_data_type,q.delta,q.implied_vol,
+            {"q.open_interest" if include_open_interest else "NULL"} AS open_interest,
             row_number() OVER(PARTITION BY w.decision_at,q.instrument_id ORDER BY q.received_at DESC) AS n
           FROM wanted w JOIN broker_quotes q
             ON q.received_at<=w.decision_at AND q.received_at>=w.decision_at-INTERVAL '{int(age)} seconds'
@@ -2168,6 +2170,1011 @@ def relax_exit_contracts(data_root, output, start, end, providers, close_centers
     con.close()
 
 
+def _range_reclaim_signal(day, path, direction):
+    opening = _window(path, _at(day, 9, 45), 15)
+    base = dict(family='vertical', direction=direction)
+    if not opening:
+        return {**base, 'status':'UNDERLIER_GAP'}
+    high, low = max(opening), min(opening)
+    edge = low if direction=='UP' else high
+    sign = 1 if direction=='UP' else -1
+    outside, recovered, armed = 0, 0, False
+    at = _at(day, 9, 46)
+    while at <= _at(day, 13, 30):
+        if at not in path:
+            return {**base, 'status':'UNDERLIER_GAP'}
+        distance = sign*(path[at]-edge)
+        outside = outside+1 if distance < -1 else 0
+        armed = armed or outside >= 2
+        recovered = recovered+1 if armed and distance > 1 else 0
+        if recovered >= 2:
+            return {**base, 'signal_at':at, 'opening_range_high':high, 'opening_range_low':low}
+        at += timedelta(minutes=1)
+    return {**base, 'status':'NO_TRIGGER'}
+
+
+def _price_exit_intent(row, path, deadline, *, ema_span=None):
+    """First observable two-close invalidation, or first loss of its evidence."""
+    day = row['entry_at'].astimezone(ET).date()
+    at = _at(day, 9, 31) if ema_span else row['entry_at'].replace(second=0, microsecond=0)+timedelta(minutes=1)
+    ema, count, streak, prior_side = None, 0, 0, 0
+    while at < deadline:
+        if at not in path:
+            if at > row['entry_at']:
+                return {'at':at, 'reason':'UNDERLIER_EXIT_GAP', 'censored':True}
+            ema, count = None, 0
+            at += timedelta(minutes=1)
+            continue
+        price = path[at]
+        if ema_span:
+            ema = price if ema is None else ema+2/(ema_span+1)*(price-ema)
+            count += 1
+        if at > row['entry_at']:
+            if ema_span:
+                if count < ema_span:
+                    return {'at':at, 'reason':'UNDERLIER_EXIT_GAP', 'censored':True}
+                side = 1 if (price-ema)*(1 if row['direction']=='UP' else -1)<0 else 0
+            else:
+                if row['family']=='condor':
+                    low, high = row['legs'][1]['strike'], row['legs'][2]['strike']
+                else:
+                    low, high = min(leg['strike'] for leg in row['legs']), max(leg['strike'] for leg in row['legs'])
+                side = -1 if price < low else 1 if price > high else 0
+            streak = streak+1 if side and side==prior_side else 1 if side else 0
+            prior_side = side
+            if streak >= 2:
+                return {'at':at, 'reason':f'ema{ema_span}_reversal' if ema_span else 'structure_breach', 'censored':False}
+        at += timedelta(minutes=1)
+    return {'at':deadline, 'reason':'hard_close', 'censored':False}
+
+
+def _action_exit_label(row, marks, intent, deadline, *, quote_management=False, latency_seconds=15):
+    """Choose a causal exit instruction, then its first valid delayed cash book.
+
+    With price-only management, BBO gaps while no order can be triggered are
+    irrelevant. Quote-based TP/SL still requires continuous observable marks.
+    """
+    marks = sorted(marks, key=lambda m:m.at)
+    stop = dict(intent)
+    if quote_management:
+        policy = RTH_IRON_CONDOR_MANAGEMENT_POLICY if row['family']=='condor' else DEFAULT_MANAGEMENT_POLICY
+        policy = replace(policy, hard_exit_et=deadline.astimezone(ET).strftime('%H:%M'))
+        baseline = simulate_management_policy(marks, entry_ask=row['entry_price'], entry_at=row['entry_at'],
+            leg_count=sum(abs(q) for q in row['quantities']), policy=policy,
+            session_date=deadline.astimezone(ET).date(), max_quote_gap_seconds=60)
+        if baseline.exit_at is not None and baseline.exit_at < stop['at']:
+            stop = {'at':baseline.exit_at, 'reason':baseline.exit_reason, 'censored':False}
+        previous = row['entry_at']
+        for mark in marks:
+            if mark.at > stop['at']:
+                break
+            if (mark.at-previous).total_seconds()>60:
+                stop = {'at':previous+timedelta(seconds=60), 'reason':'QUOTE_GAP', 'censored':True}
+                break
+            previous = mark.at
+        if previous+timedelta(seconds=60) < stop['at']:
+            stop = {'at':previous+timedelta(seconds=60), 'reason':'QUOTE_GAP', 'censored':True}
+    result = dict(exit_trigger_at=stop['at'], exit_reason=stop['reason'], pnl_usd=None,
+                  policy_version='research.price_invalidation.v1', exit_latency_seconds=latency_seconds)
+    if stop['censored']:
+        return {**result, 'status':stop['reason']}
+    action = stop['at']+(timedelta(0) if stop['reason']=='hard_close' else timedelta(seconds=latency_seconds))
+    last = min(action+timedelta(seconds=60), _at(deadline.astimezone(ET).date(),16,0)-timedelta(microseconds=1))
+    fill = next((m for m in marks if action<=m.at<=last), None)
+    if fill is None:
+        return {**result, 'exit_action_at':action, 'status':'EXIT_BBO_UNAVAILABLE'}
+    fees = sum(abs(q) for q in row['quantities'])*2*1.32/100
+    return {**result, 'exit_action_at':action, 'status':'COMPLETE_EXIT', 'exit_at':fill.at,
+            'exit_bid':fill.combo_bid, 'fees_points':fees,
+            'cash_exit_points':2*row['entry_price']-fill.combo_bid if row['family']=='condor' else fill.combo_bid,
+            'pnl_usd':100*(fill.combo_bid-row['entry_price']-fees)}
+
+
+def _raw_spx_bars(con, files, day):
+    """OHLC from causal raw SPX observations; a stale final tick invalidates a bar."""
+    if not files:
+        return []
+    _read_quotes(con, files)
+    rows = con.execute("""
+      WITH ticks AS (
+        SELECT received_at, quality, market_data_type,
+          CASE WHEN bid>0 AND ask>=bid THEN (bid+ask)/2 ELSE coalesce(last,effective_price) END AS price,
+          CASE WHEN bid>0 AND ask>=bid THEN quote_time ELSE coalesce(trade_time,quote_time) END AS source
+        FROM broker_quotes WHERE instrument_id='index:SPX' AND received_at>=? AND received_at<?
+      ), clean AS (
+        SELECT *,date_trunc('minute',received_at)+INTERVAL 1 MINUTE available_at,
+          source<=received_at AND source>=received_at-INTERVAL 15 SECOND
+            AND quality='live' AND lower(market_data_type) IN ('1','live') AND price>0 AS valid
+        FROM ticks
+      ) SELECT available_at,arg_min(price,received_at) FILTER(WHERE valid),
+        max(price) FILTER(WHERE valid),min(price) FILTER(WHERE valid),
+        arg_max(price,received_at) FILTER(WHERE valid),
+        arg_max(coalesce(valid,false),received_at),arg_max(source,received_at)
+      FROM clean GROUP BY available_at ORDER BY available_at
+    """, [_at(day,9,30),_at(day,16,0)]).fetchall()
+    return [dict(bar_start=at-timedelta(minutes=1),available_at=at,open=o,high=h,low=low,close=c)
+        for at,o,h,low,c,valid,source in rows if valid and source and (at-source).total_seconds()<=15
+        and all(_finite(v) for v in (o,h,low,c))]
+
+
+def _ict_first_signals(day, bars):
+    """Reuse the production pattern at each prefix; SPX OR15 variant, no ES basis."""
+    from spx_spark.application.order_map.ict_liquidity import build_ict_liquidity_fact
+    found={}
+    by_at={b['available_at']:b for b in bars}
+    prefix=[]
+    at=_at(day,9,31)
+    while at<=_at(day,13,30):
+        if at not in by_at:
+            break
+        prefix.append(by_at[at])
+        if len(prefix)>15:
+            fact=build_ict_liquidity_fact(prefix,session_ranges={},opening_high=max(b['high'] for b in prefix[:15]),
+                opening_low=min(b['low'] for b in prefix[:15]),basis=0.,session_date=str(day),decision_at=at)
+            if fact['status']=='active' and fact['stage']=='MSS_DISPLACEMENT_CONFIRMED':
+                direction=fact['direction']
+                if direction not in found:
+                    found[direction]=dict(family='vertical',direction=direction,signal_at=at,ict=fact,
+                        signal_name='ict_'+direction.lower())
+        at+=timedelta(minutes=1)
+    return [found.get(d,dict(family='vertical',direction=d,signal_name='ict_'+d.lower(),
+        status='UNDERLIER_GAP' if at<=_at(day,13,30) else 'NO_TRIGGER')) for d in ('UP','DOWN')]
+
+
+def _gamma_position(chain, at):
+    """Local OI×BBO gamma concentration, not identified dealer net positions."""
+    anchor=_quote_forward(chain,at)
+    if anchor is None:
+        return {'status':'GAMMA_UNAVAILABLE'}
+    _,center,forward=anchor
+    tau=(_at(at.astimezone(ET).date(),16,0)-at).total_seconds()/(365*86400)
+    weights={}
+    seen=0
+    for strike in range(int(center)-100,int(center)+101,5):
+        for right in ('C','P'):
+            leg=chain.get((strike,right))
+            if leg is None or not _finite(leg.get('open_interest')) or leg['open_interest']<0:
+                continue
+            if leg['quote_time'] is None or not leg['quote_time']<=leg['received_at']<=at:
+                continue
+            greek=_quote_implied_greeks(leg,forward,tau,at)
+            if greek is None:
+                continue
+            seen+=1
+            weights[strike,right]=bs_gamma(forward,strike,greek['iv'],tau)*leg['open_interest']
+    base={'coverage':seen/82,'valid_contracts':seen,'expected_contracts':82,'forward':forward,
+          'dealer_sign':'UNKNOWN','scope':'0DTE local +/-100 points; OI last broker-observed, IV BBO-implied'}
+    if seen/82<.8 or sum(weights.values())<=0:
+        return {**base,'status':'GAMMA_COVERAGE_UNAVAILABLE'}
+    call=[(v,k) for (k,r),v in weights.items() if r=='C' and k>forward and v>0]
+    put=[(v,k) for (k,r),v in weights.items() if r=='P' and k<forward and v>0]
+    centers=[(weights.get((k,'C'),0)+weights.get((k,'P'),0),k) for k in range(int(center)-20,int(center)+21,5)]
+    if not call or not put:
+        return {**base,'status':'GAMMA_WALL_UNAVAILABLE'}
+    signed=sum(v*(1 if r=='C' else -1) for (k,r),v in weights.items())
+    return {**base,'status':'available','call_wall':max(call)[1],'put_wall':max(put)[1],
+        'pin_center':max(centers)[1],'call_minus_put_fraction':signed/sum(weights.values()),
+        'unsigned_gamma_oi':sum(weights.values())}
+
+
+def _wall_condor(chain, at, width, gamma):
+    if gamma['status']!='available':
+        return None,gamma['status']
+    put,call=gamma['put_wall'],gamma['call_wall']
+    legs=[chain.get((put-width,'P')),chain.get((put,'P')),chain.get((call,'C')),chain.get((call+width,'C'))]
+    q=[1,-1,-1,1]
+    cash=_cash_quote(legs,q,at,15,2)
+    if cash is None:
+        return None,'EXACT_LEGS_INVALID'
+    tau=(_at(at.astimezone(ET).date(),16,0)-at).total_seconds()/(365*86400)
+    greek=[_quote_implied_greeks(leg,gamma['forward'],tau,at) for leg in legs[1:3]]
+    if any(g is None or not .10<=abs(g['delta'])<=.20 for g in greek):
+        return None,'WALL_SHORT_OUTSIDE_10_20_DELTA'
+    credit=-cash[0]
+    if not 0<credit<width:
+        return None,'ENTRY_GEOMETRY_INVALID'
+    return dict(family='condor',legs=legs,quantities=q,width=width,signal_package_price=credit,
+        selected_abs_deltas=[abs(g['delta']) for g in greek]),None
+
+
+def _failed_expansion_signal(day, path, outside_direction):
+    """First OR excursion: accept outside, then promptly reject it, with target ahead."""
+    base = dict(direction='DOWN' if outside_direction=='UP' else 'UP')
+    opening = _window(path, _at(day,9,45),15)
+    if not opening:
+        return {**base,'status':'UNDERLIER_GAP'}
+    high, low = max(opening), min(opening)
+    sign = 1 if outside_direction=='UP' else -1
+    edge = high if sign==1 else low
+    center = 5*round((high+low)/10)
+    streak, recovered, armed, extreme = 0, 0, None, edge
+    at = _at(day,9,46)
+    while at <= _at(day,14,0):
+        if at not in path:
+            return {**base,'status':'UNDERLIER_GAP'}
+        price = path[at]
+        distance = sign*(price-edge)
+        if armed is None:
+            streak = streak+1 if distance>1 else 0
+            extreme = (max if sign==1 else min)(extreme,price) if streak else edge
+            if streak>=2:
+                armed=at
+        else:
+            if at>armed+timedelta(minutes=15):
+                return {**base,'status':'FIRST_EXPANSION_DID_NOT_FAIL_IN_15M'}
+            extreme=(max if sign==1 else min)(extreme,price)
+            recovered=recovered+1 if distance < -1 else 0
+            if recovered>=2:
+                return {**base,'signal_at':at,'target_level':center,'invalidation_level':extreme+sign,
+                    'outside_direction':outside_direction,'opening_range_high':high,'opening_range_low':low,
+                    'expansion_confirmed_at':armed,'signal_spx':price,
+                    'target_distance':sign*(price-center),'failed_extreme':extreme}
+        at+=timedelta(minutes=1)
+    return {**base,'status':'NO_TRIGGER'}
+
+
+def _mechanism_signals(day, path):
+    signals=[]
+    for outside in ('UP','DOWN'):
+        failed=_failed_expansion_signal(day,path,outside)
+        for delta in (.15,.20):
+            for width in (10,20):
+                signals.append({**failed,'family':'condor','width':width,'delta_target':delta,
+                    'mechanism':'failed_expansion','signal_name':f'failure_{outside.lower()}_ic{int(delta*100)}_w{width}'})
+        reverse={**failed,'mechanism':'return_to_range','family':'butterfly'}
+        if reverse.get('signal_at') and not 2.5<=reverse['target_distance']<=20:
+            reverse['status']='RETURN_TARGET_ALREADY_REACHED_OR_TOO_FAR'
+        continuation={**_first_directional_range_signal(day,path,outside),
+            'mechanism':'continuation_destination','family':'butterfly'}
+        if continuation.get('signal_at'):
+            at=continuation['signal_at']
+            sign=1 if outside=='UP' else -1
+            opening=_window(path,_at(day,9,45),15)
+            continuation.update(target_level=5*round(path[at]/5)+15*sign,signal_spx=path[at],
+                invalidation_level=(max(opening)-1 if sign==1 else min(opening)+1))
+        for name, trigger in [('return',reverse),('destination',continuation)]:
+            for center in ('target','atm'):
+                signals.append({**trigger,'center_rule':center,
+                    'signal_name':f'{name}_{outside.lower()}_bf_{center}'})
+    # Fixed clocks remain a predeclared control, never a substitute for a missed trigger.
+    signals.extend(dict(signal_name=f'ic20_w{width}',family='condor',direction='NEUTRAL',
+        width=width,signal_at=_at(day,10,0)) for width in (10,20))
+    return signals
+
+
+def _mechanism_exit_intent(row, path, deadline):
+    """Trade a finite price destination; reject a renewed excursion, not a timer."""
+    at=row['entry_at'].replace(second=0,microsecond=0)+timedelta(minutes=1)
+    sign=1 if row['direction']=='UP' else -1
+    streak=0
+    while at<deadline:
+        if at not in path:
+            return dict(at=at,reason='UNDERLIER_EXIT_GAP',censored=True)
+        price=path[at]
+        # Failure ICs have a reversion direction too, but do not take profit merely
+        # because SPX reached the midpoint: their premium TP is a separate variant.
+        if row['family']=='butterfly' and sign*(price-row['target_level'])>=0:
+            return dict(at=at,reason='price_destination_reached',censored=False)
+        invalid=sign*(price-row['invalidation_level'])<0
+        streak=streak+1 if invalid else 0
+        if streak>=2:
+            return dict(at=at,reason='price_hypothesis_failed',censored=False)
+        at+=timedelta(minutes=1)
+    return dict(at=deadline,reason='hard_close',censored=False)
+
+
+def _evaluate_mechanism_replay(rows):
+    """Report frozen hypotheses, including unpriced first attempts and censored risk."""
+    def stats(items):
+        entered=[r for r in items if r.get('entry_at')]
+        complete=[r for r in entered if r.get('pnl_usd') is not None]
+        missing=[r for r in entered if r.get('pnl_usd') is None]
+        profits=[r['pnl_usd'] for r in complete]
+        net=sum(profits)
+        pressure=net-sum(r['defined_risk_usd']+2*1.32*sum(abs(q) for q in r['quantities']) for r in missing)
+        return dict(planned_sessions=len({r['session_date'] for r in items}),entered=len(entered),complete=len(complete),
+            missing=len(missing),net_usd=net,mean_usd=float(np.mean(profits)) if profits else None,
+            wins=sum(p>0 for p in profits),worst_usd=min(profits) if profits else None,
+            missing_full_risk_net_usd=pressure,extra_20usd_slippage_net_usd=pressure-20*len(entered),
+            remove_best_two_missing_pressure_net_usd=pressure-sum(sorted([p for p in profits if p>0],reverse=True)[:2]),
+            mean_entry_points=float(np.mean([r['entry_price'] for r in complete])) if complete else None,
+            exit_reasons=dict(Counter(r.get('exit_reason',r['status']) for r in items)),
+            statuses=dict(Counter(r['status'] for r in items)))
+    def periods(items):
+        return dict(all=stats(items),july=stats([r for r in items if r['session_date']<'2026-08-01']),
+            august_september=stats([r for r in items if r['session_date']>='2026-08-01']))
+    variants={name:periods([r for r in rows if r['setup']==name]) for name in sorted({r['setup'] for r in rows})}
+    primary={}
+    for mechanism,suffix in [('failed_expansion','ic20_w20_price_quote'),
+                              ('return_to_range','bf_target_price_only'),
+                              ('continuation_destination','bf_target_price_only')]:
+        pool=[r for r in rows if r.get('mechanism')==mechanism and r['setup'].endswith(suffix)]
+        chosen=[]
+        for day in sorted({r['session_date'] for r in rows}):
+            candidates=[r for r in pool if r['session_date']==day and r.get('signal_at')]
+            if candidates:
+                # Rank observed intent, not quote availability or completed profit.
+                chosen.append(min(candidates,key=lambda r:(r['signal_at'],r['signal_name'])))
+            else:
+                states=Counter(r['status'] for r in pool if r['session_date']==day)
+                unavailable=next((s for s in ('PARTITION_MISSING','UNDERLIER_GAP') if states[s]),None)
+                chosen.append(dict(session_date=day,status=unavailable or 'NO_SIGNAL',pnl_usd=None,
+                    signal_statuses=dict(states)))
+        primary[mechanism]={**periods(chosen),'decisions':chosen}
+    pairs={}
+    for mechanism in ('return_to_range','continuation_destination'):
+        for variant in ('price_only','price_quote','quote_only'):
+            target=[r for r in rows if r.get('mechanism')==mechanism and r.get('center_rule')=='target'
+                    and r['setup'].endswith('_'+variant)]
+            controls={(r['session_date'],r['direction']):r for r in rows if r.get('mechanism')==mechanism
+                and r.get('center_rule')=='atm' and r['setup'].endswith('_'+variant)}
+            paired=[]
+            for row in target:
+                control=controls.get((row['session_date'],row['direction']))
+                if control and row.get('pnl_usd') is not None and control.get('pnl_usd') is not None:
+                    paired.append(dict(session_date=row['session_date'],direction=row['direction'],
+                        target_pnl=row['pnl_usd'],atm_pnl=control['pnl_usd'],
+                        entry_saving_usd=100*(control['entry_price']-row['entry_price']),
+                        exit_cash_change_usd=100*(row['cash_exit_points']-control['cash_exit_points']),
+                        same_exit_clock=row['exit_at']==control['exit_at']))
+            pairs[mechanism+'_'+variant]=dict(count=len(paired),rows=paired,
+                target_mean=float(np.mean([p['target_pnl'] for p in paired])) if paired else None,
+                atm_mean=float(np.mean([p['atm_pnl'] for p in paired])) if paired else None)
+    return dict(scope='all registered variants, no post-outcome rule selection; overlapping variants never summed',
+        primary_contract='one first observed signal per day, including unavailable entry; IC20 width20 price_quote; BF target price_only',
+        variants=variants,primary=primary,pairs=pairs)
+
+
+def explore_price_exits(data_root, output, start, end, providers, *, signal_filter=None,
+                        entry_delay_seconds=15, exit_latency_seconds=15, position_signals=False,
+                        mechanism_signals=False):
+    output.mkdir(parents=True, exist_ok=False)
+    source = Path(__file__).read_bytes()
+    (output/'research-source.py').write_bytes(source)
+    contract = {'scope':'raw first directional signal / fixed butterfly and IC clocks; no prior card inputs',
+        'vertical_signals':['OR15 first UP/DOWN acceptance','OR15 false break: two outside, two back inside by 1 point'],
+        'vertical_primary':'EMA10: two closes against position; no premium/time stop; no fixed holding duration',
+        'vertical_controls':['EMA5','EMA20','EMA10 plus existing premium/trail','existing premium/trail only'],
+        'butterfly':'15-wide ATM center at 14:00/14:30/15:00; two closes outside wings, no mandatory 15:55 hold',
+        'condor':'fresh BBO-implied 20 delta, 10/20-wide, 10:00; two closes outside same short strike plus existing TP/SL',
+        'quotes':'15s max source age, 2s skew, depth and availability; all cash crossed BBO',
+        'entry':'first signal only, legs frozen, configured entry delay, debit<=45%width at signal and entry',
+        'exit':'price or quote trigger plus configured latency; first fresh valid book within 60sec, never best future quote',
+        'deadline':'vertical/IC 15:45; butterfly 15:59; last pre-16:00 book only, not settlement',
+        'observation':'price-only requires continuous underlier, not irrelevant intrahold BBO; quote TP/SL requires <=60s BBO gaps',
+        'evaluation':'all session denominators; July selection / August-September evaluation; explored window not untouched OOS',
+        'position_signals':position_signals,
+        'position_contract':'SPX OR15 ICT production pattern; gamma OI x BBO gamma +/-100, >=80% grid coverage; BF highest unsigned concentration within ATM +/-20; wall IC 10-20 delta; no dealer inventory claim',
+        'signal_filter':signal_filter, 'entry_delay_seconds':entry_delay_seconds,
+        'exit_latency_seconds':exit_latency_seconds,
+        'bark_access':False,'automatic_ordering':False,'fill_status':'UNKNOWN',
+        'script_sha256':hashlib.sha256(source).hexdigest()}
+    if position_signals:
+        contract.update(vertical_signals=['OR15 first UP/DOWN acceptance','SPX OR15 ICT first MSS+displacement UP/DOWN'],
+            butterfly='ATM vs gamma concentration center at 14:00/14:30/15:00, 15-wide',
+            condor='10:00 BBO-implied 20 delta vs local wall shorts restricted to 10-20 delta; 10/20-wide')
+    if mechanism_signals:
+        contract.update(scope='three registered economic mechanisms, no factor threshold search',
+            hypotheses=['failed directional expansion leaves overpriced tail premium for IC',
+                'buy a displaced butterfly at the prior range midpoint before price returns',
+                'buy a directional butterfly at a finite continuation destination instead of betting on a stationary pin'],
+            trigger='OR15 closes; first two closes >1 point outside, first two >1 point inside within 15m after acceptance; first excursion only through 14:00, no later rescue',
+            butterfly='15-wide; failed-break midpoint rounded5, remaining distance 2.5..20; continuation OR15 three-close acceptance target rounded signal SPX +/-15; target vs same-clock ATM center',
+            condor='failed-break 15/20 delta x 10/20 width; fixed10:00 20delta controls; no fitted IV filter',
+            exits='price_only: BF target first crossed close or two closes beyond frozen invalidation; IC failure extreme invalidation OR short strike breach. price_quote adds existing TP/SL; quote_only control. No fixed holding duration.',
+            evaluation='all 54 variants reported; July/August-September split, missing full-risk stress, paired target/ATM attribution; no selected production signal',
+            mechanism_signals=True)
+    (output/'contract.json').write_text(json.dumps(contract,indent=2))
+    con = duckdb.connect(config={'threads':2,'memory_limit':'768MB'})
+    con.execute("SET TimeZone='UTC'")
+    results, inputs = [], set()
+    day = start
+    while day <= end:
+        if DEFAULT_MARKET_CALENDAR.session(day) is None:
+            day += timedelta(days=1)
+            continue
+        for provider in providers:
+            files = _files(data_root/'lake/quotes/schema=v1',provider,_at(day,9,30),_at(day,16,0))
+            inputs.update(files)
+            spx = _underlier_minutes(con,files,'index:SPX',_at(day,9,30),_at(day,16,0)) if files else {}
+            signals=[]
+            for direction in ('UP','DOWN'):
+                for name, make_signal in [('or15',_first_directional_range_signal),('reclaim',_range_reclaim_signal)]:
+                    signals.append({**make_signal(day,spx,direction),'signal_name':f'{name}_{direction.lower()}'})
+            for hour, minute in ((14,0),(14,30),(15,0)):
+                signals.append(dict(signal_name=f'butterfly_{hour:02}{minute:02}',family='butterfly',direction='NEUTRAL',signal_at=_at(day,hour,minute)))
+            for width in (10,20):
+                signals.append(dict(signal_name=f'ic20_w{width}',family='condor',direction='NEUTRAL',width=width,signal_at=_at(day,10,0)))
+            if position_signals:
+                signals=[s for s in signals if not s['signal_name'].startswith('reclaim')]
+                signals.extend(_ict_first_signals(day,_raw_spx_bars(con,files,day)))
+                signals.extend([{**s,'signal_name':'gamma_'+s['signal_name']} for s in list(signals)
+                    if s['family'] in ('butterfly','condor')])
+            if mechanism_signals:
+                signals=_mechanism_signals(day,spx)
+            if signal_filter is not None:
+                signals=[s for s in signals if s['signal_name']==signal_filter]
+            times = sorted({t for s in signals if s.get('signal_at') for t in
+                (s['signal_at'],s['signal_at']+timedelta(seconds=entry_delay_seconds),
+                 s['signal_at']-timedelta(minutes=15))}|{_at(day,9,45)})
+            books = _snapshots(con,files,day,times,provider,15) if files else {t:{} for t in times}
+            gamma_profiles={}
+            if position_signals:
+                gamma_times=sorted({t for s in signals if s.get('signal_at') for t in
+                    (s['signal_at'],s['signal_at']-timedelta(minutes=10))})
+                gamma_books=_snapshots(con,files,day,gamma_times,provider,15,include_open_interest=True) if files else {t:{} for t in gamma_times}
+                gamma_profiles={t:_gamma_position(gamma_books[t],t) for t in gamma_times}
+            entries=[]
+            for signal in signals:
+                row = {**signal,'provider':provider,'mode':'rth','session_date':str(day),'fill_status':'UNKNOWN'}
+                if not files:
+                    row['status']='PARTITION_MISSING'
+                if 'status' not in row:
+                    at=signal['signal_at']
+                    gamma=gamma_profiles.get(at)
+                    if gamma is not None:
+                        prior=gamma_profiles[at-timedelta(minutes=10)]
+                        row.update(gamma_position=gamma,gamma_prior=prior)
+                    if signal['signal_name'].startswith('gamma_'):
+                        if signal['family']=='condor':
+                            structure,reason=_wall_condor(books[at],at,signal['width'],gamma)
+                        elif gamma['status']=='available':
+                            structure,reason=_structure(signal,books[at],age=15,skew=2,anchor_override=gamma['pin_center'])
+                        else:
+                            structure,reason=None,gamma['status']
+                    else:
+                        structure, reason = (_delta_condor(books[at],at,signal.get('delta_target',.20),signal['width'],'bbo_implied')
+                            if signal['family']=='condor' else _structure(signal,books[at],age=15,skew=2,
+                                anchor_override=signal.get('target_level') if signal.get('center_rule')=='target' else None))
+                    if reason:
+                        row['status']=reason
+                    else:
+                        row.update(structure)
+                        action=at+timedelta(seconds=entry_delay_seconds)
+                        legs=[books[action].get((leg['strike'],leg['right'])) for leg in row['legs']]
+                        quote=_cash_quote(legs,row['quantities'],action,15,2)
+                        credit=row['family']=='condor'
+                        value=(-quote[0] if credit else quote[0]) if quote else None
+                        if not credit and row['signal_package_price']/row['width']>.45:
+                            row['status']='SIGNAL_DEBIT_CAP'
+                        elif quote is None:
+                            row['status']='ENTRY_BBO_UNAVAILABLE'
+                        elif not _depth(legs,row['quantities']):
+                            row['status']='ENTRY_DEPTH_UNAVAILABLE'
+                        elif not 0<value/row['width']<1 or not credit and value/row['width']>.45:
+                            row['status']='ENTRY_PRICE_INVALID'
+                        else:
+                            row.update(status='ENTERED',entry_at=action,entry_price=value,legs=legs,
+                                entry_context=_path_context(spx,at,15),
+                                defined_risk_usd=100*(row['width']-value if credit else value))
+                            if credit:
+                                row['volatility']=_volatility_at_entry(books[at],books[at-timedelta(minutes=15)],at,spx)
+                entries.append(row)
+            entered=[r for r in entries if r['status']=='ENTERED']
+            events=_contract_events(con,files,sorted({leg['instrument_id'] for r in entered for leg in r['legs']}),
+                min(r['entry_at'] for r in entered),_at(day,16,0),provider) if entered else {}
+            plans, action_times=[],set()
+            for entry in entries:
+                deadline=_at(day,15,59) if entry['family']=='butterfly' else _at(day,15,45)
+                if entry['family']=='vertical':
+                    variants=[('ema10',10,False),('ema5',5,False),('ema20',20,False),('ema10_quote',10,True),('quote_only',None,True)]
+                else:
+                    variants=[('price_only',None,False),('price_quote',None,True),('quote_only',None,True)]
+                marks=_package_path(entry,events,_at(day,16,0)-timedelta(microseconds=1),15,2) if entry['status']=='ENTERED' else []
+                for name, span, quote_management in variants:
+                    row={**entry,'setup':entry['signal_name']+'_'+name}
+                    intent={'at':deadline,'reason':'hard_close','censored':False}
+                    if entry['status']=='ENTERED' and name!='quote_only':
+                        intent=_price_exit_intent(entry,spx,deadline,ema_span=span)
+                        if entry.get('mechanism'):
+                            mechanism_intent=_mechanism_exit_intent(entry,spx,deadline)
+                            # BF geometry is not an invalidation: the intended return
+                            # can start outside its narrow wings. IC retains both sides.
+                            intent=(min((intent,mechanism_intent),key=lambda i:i['at'])
+                                if entry['family']=='condor' else mechanism_intent)
+                    plans.append((row,intent,deadline,quote_management,marks))
+                    if entry['status']=='ENTERED':
+                        first=_action_exit_label(row,marks,intent,deadline,quote_management=quote_management,latency_seconds=exit_latency_seconds)
+                        if first.get('exit_action_at'):
+                            action_times.add(first['exit_action_at'])
+            exit_books=_snapshots(con,files,day,sorted(action_times),provider,15) if action_times else {}
+            for row,intent,deadline,quote_management,marks in plans:
+                if row['status']=='ENTERED':
+                    # Add only precomputed action clocks. Their stale books cannot
+                    # create new TP/SL triggers or refresh evidence during holding.
+                    first=_action_exit_label(row,marks,intent,deadline,quote_management=quote_management,latency_seconds=exit_latency_seconds)
+                    action=first.get('exit_action_at')
+                    timed=marks
+                    if action is not None:
+                        legs=[exit_books[action].get((leg['strike'],leg['right'])) for leg in row['legs']]
+                        quote=_cash_quote(legs,row['quantities'],action,15,2)
+                        if quote is not None and _depth(legs,row['quantities'],liquidate=True):
+                            value=quote[1]+(2*row['entry_price'] if row['family']=='condor' else 0)
+                            timed=sorted([m for m in marks if m.at!=action]+[PolicyMark(action,value)],key=lambda m:m.at)
+                    row.update(_action_exit_label(row,timed,intent,deadline,quote_management=quote_management,latency_seconds=exit_latency_seconds))
+                results.append(row)
+                with (output/'rows.jsonl').open('a') as handle:
+                    handle.write(json.dumps(row,default=str)+'\n')
+            print(json.dumps({'day':str(day),'provider':provider,'entered':len(entered)}),flush=True)
+        day+=timedelta(days=1)
+    (output/'summary.json').write_text(json.dumps(_summary(results),indent=2))
+    if mechanism_signals:
+        (output/'mechanism-analysis.json').write_text(json.dumps(_evaluate_mechanism_replay(results),indent=2,default=str))
+    (output/'input-files.json').write_text(json.dumps(sorted(inputs),indent=2))
+    con.close()
+
+
+# Direction is the economic primary hypothesis; the opposite sign is not silently searched.
+# These are research proxies, grouped to avoid counting correlated metrics as new evidence.
+FACTOR_HYPOTHESES = {
+    'rv5': ('volatility', 'low', 'recent five-minute realized variance is low'),
+    'rv15': ('volatility', 'low', 'recent fifteen-minute realized variance is low'),
+    'rv30': ('volatility', 'low', 'recent thirty-minute realized variance is low'),
+    'rv5_over30': ('volatility', 'low', 'short volatility is contracting relative to thirty minutes'),
+    'rv15_over_previous15': ('volatility', 'low', 'realized volatility contracts across adjacent windows'),
+    'jump_share30': ('jumps', 'low', 'no single one-minute move dominates variance'),
+    'bipower_jump_share30': ('jumps', 'low', 'low positive realized-minus-bipower variance proxy'),
+    'semivariance_imbalance30': ('jumps', 'low', 'up and down variance are balanced'),
+    'efficiency15': ('trend', 'low', 'little directional displacement relative to travelled path'),
+    'efficiency30': ('trend', 'low', 'low thirty-minute directional efficiency'),
+    'abs_move5_z': ('trend', 'low', 'no outsized latest displacement'),
+    'abs_move15_z': ('trend', 'low', 'fifteen-minute displacement is contained'),
+    'return_autocorrelation30': ('reversion', 'low', 'negative short-return serial correlation favours reversion'),
+    'variance_ratio5_30': ('reversion', 'low', 'five-minute moves smaller than diffusive scaling'),
+    'twap_distance30_z': ('reversion', 'low', 'price remains near equal-time average, not volume VWAP'),
+    'range15_over30': ('reversion', 'low', 'recent range contracts inside previous thirty-minute range'),
+    'atm_iv': ('implied_volatility', 'high', 'more implied option premium'),
+    'fixed_atm_iv_change5': ('implied_volatility', 'low', 'fixed-strike IV contracts over five minutes'),
+    'fixed_atm_iv_change15': ('implied_volatility', 'low', 'fixed-strike IV contracts over fifteen minutes'),
+    'fixed_straddle_change15': ('implied_volatility', 'low', 'fixed ATM straddle contracts; not pure IV change'),
+    'implied_variance_over_rv30': ('variance_premium', 'high', 'implied variance exceeds trailing thirty-minute projection'),
+    'implied_variance_over_rv15': ('variance_premium', 'high', 'implied variance exceeds trailing fifteen-minute projection'),
+    'abs_25delta_skew': ('surface', 'low', 'less asymmetric tail pricing'),
+    'wing_curvature': ('surface', 'high', 'wing premium relative to ATM reflects costly protection'),
+    'abs_skew_change15': ('surface', 'low', 'fixed-wing skew is stable'),
+    'gamma_signed_fraction': ('position', 'high', 'call-minus-put OI gamma proxy, dealer sign unknown'),
+    'gamma_oi_total': ('position', 'high', 'large local OI gamma concentration, not dealer inventory'),
+    'gamma_coverage': ('data', 'high', 'broad fresh local surface coverage'),
+    'pin_distance_width': ('position', 'low', 'current forward close to local gamma center'),
+    'pin_stability10': ('position', 'high', 'gamma center agrees with snapshot ten minutes earlier'),
+    'wall_balance': ('position', 'high', 'similar distances to upper and lower local walls'),
+    'wall_span_over_ivmove': ('geometry', 'high', 'wall corridor wide relative to implied move'),
+    'wall_clearance_width': ('geometry', 'high', 'IC shorts outside walls; butterfly center close to gamma center'),
+    'entry_reward_fraction': ('geometry', 'high', 'IC credit/width or BF (width-debit)/width is larger'),
+    'center_distance_width': ('geometry', 'low', 'forward close to structure center'),
+    'min_boundary_over_ivmove': ('geometry', 'high', 'nearest short strike or butterfly wing far from forward'),
+    'cash_spread_fraction': ('execution', 'low', 'crossing the package costs less relative to premium'),
+    'fee_fraction': ('execution', 'low', 'fees consume less credit or maximum butterfly gross gain'),
+    'depth_multiple': ('execution', 'high', 'displayed depth covers more package units'),
+    'source_skew_seconds': ('execution', 'low', 'legs are more synchronized'),
+    'package_gamma_risk': ('geometry', 'low', 'small absolute gamma curvature relative to premium'),
+    'normal_rv_expiry_edge_fraction': ('distribution', 'high', 'zero-drift normal RV expiry payoff proxy exceeds cash cost; not managed-exit EV'),
+}
+
+
+def _raw_option_factors(row, path, chain, old5, old15, at):
+    """All observations are signal-time inputs, including cash costs (never entry+15s)."""
+    values={name:None for name in FACTOR_HYPOTHESES}
+    def ratio(a,b):
+        return float(a/b) if a is not None and b is not None and b>0 else None
+    windows={n:_window(path,at,n) for n in (5,15,30)}
+    returns={n:np.diff(p) for n,p in windows.items() if p}
+    variances={n:float(np.mean(r*r)) for n,r in returns.items()}
+    for n,v in variances.items():
+        values[f'rv{n}']=v
+    values['rv5_over30']=ratio(variances.get(5),variances.get(30))
+    if 30 in returns:
+        r=returns[30]
+        total=float(np.sum(r*r))
+        previous=float(np.mean(r[:15]**2))
+        values['rv15_over_previous15']=ratio(variances.get(15),previous)
+        values['jump_share30']=ratio(float(np.max(r*r)),total)
+        bipower=float(np.pi/2*np.sum(np.abs(r[1:])*np.abs(r[:-1])))
+        values['bipower_jump_share30']=ratio(max(total-bipower,0),total)
+        values['semivariance_imbalance30']=ratio(abs(float(np.sum(r[r>0]**2)-np.sum(r[r<0]**2))),total)
+        if np.std(r[:-1])>0 and np.std(r[1:])>0:
+            values['return_autocorrelation30']=float(np.corrcoef(r[:-1],r[1:])[0,1])
+        values['variance_ratio5_30']=ratio(float(np.mean(np.diff(np.asarray(windows[30])[::5])**2)),5*variances[30])
+        values['twap_distance30_z']=ratio(abs(windows[30][-1]-float(np.mean(windows[30]))),math.sqrt(total))
+        if windows[15]:
+            values['range15_over30']=ratio(max(windows[15])-min(windows[15]),max(windows[30])-min(windows[30]))
+    for n in (15,30):
+        if n in returns:
+            values[f'efficiency{n}']=ratio(abs(float(np.sum(returns[n]))),float(np.sum(np.abs(returns[n]))))
+    for n in (5,15):
+        if n in returns:
+            values[f'abs_move{n}_z']=ratio(abs(float(np.sum(returns[n]))),math.sqrt(float(np.sum(returns[n]**2))))
+    anchor=_quote_forward(chain,at)
+    if anchor is None:
+        return values
+    straddle,strike,forward=anchor
+    tau=(_at(at.astimezone(ET).date(),16,0)-at).total_seconds()/(365*86400)
+    remaining=tau*365*1440
+    atm=[_quote_implied_greeks(chain.get((strike,right)),forward,tau,at) for right in ('C','P')]
+    iv=float(np.mean([g['iv'] for g in atm])) if all(atm) else None
+    values['atm_iv']=iv
+    implied_move=forward*iv*math.sqrt(tau) if iv is not None else None
+    for n in (15,30):
+        values[f'implied_variance_over_rv{n}']=ratio(implied_move**2 if implied_move is not None else None,
+            variances[n]*remaining if n in variances else None)
+    for n,old in ((5,old5),(15,old15)):
+        before=at-timedelta(minutes=n)
+        pair=[old.get((strike,right)) for right in ('C','P')]
+        if _cash_quote(pair,[1,1],before,15,2) is not None:
+            prices=[(leg['bid']+leg['ask'])/2 for leg in pair]
+            old_forward=strike+prices[0]-prices[1]
+            old_iv=[_quote_implied_greeks(leg,old_forward,tau+n/(365*1440),before) for leg in pair]
+            if iv is not None and all(old_iv):
+                values[f'fixed_atm_iv_change{n}']=iv-float(np.mean([g['iv'] for g in old_iv]))
+            if n==15:
+                values['fixed_straddle_change15']=ratio(straddle,sum(prices))
+                if values['fixed_straddle_change15'] is not None:
+                    values['fixed_straddle_change15']-=1
+    wings=[]
+    for right in ('P','C'):
+        choices=[]
+        for (k,r),leg in chain.items():
+            if r!=right or (k>=forward if right=='P' else k<=forward):
+                continue
+            g=_quote_implied_greeks(leg,forward,tau,at)
+            if g is not None:
+                choices.append((abs(abs(g['delta'])-.25),k,g))
+        if choices:
+            _,k,g=min(choices,key=lambda item:item[:2])
+            wings.append((right,k,g))
+    if len(wings)==2 and iv is not None:
+        skew=wings[1][2]['iv']-wings[0][2]['iv']
+        values['abs_25delta_skew']=abs(skew)
+        values['wing_curvature']=float(np.mean([g['iv'] for _,_,g in wings]))-iv
+        before=at-timedelta(minutes=15)
+        old_anchor=_quote_forward(old15,before)
+        if old_anchor is not None:
+            old=[_quote_implied_greeks(old15.get((k,r)),old_anchor[2],tau+15/(365*1440),before) for r,k,_ in wings]
+            if all(old):
+                values['abs_skew_change15']=abs(skew-(old[1]['iv']-old[0]['iv']))
+    gamma=row.get('gamma_position',{})
+    width=row.get('width',15.)
+    if gamma.get('status')=='available':
+        values.update(gamma_signed_fraction=gamma['call_minus_put_fraction'],gamma_oi_total=gamma['unsigned_gamma_oi'],
+            gamma_coverage=gamma['coverage'],pin_distance_width=abs(forward-gamma['pin_center'])/width,
+            wall_balance=ratio(min(forward-gamma['put_wall'],gamma['call_wall']-forward),max(forward-gamma['put_wall'],gamma['call_wall']-forward)),
+            wall_span_over_ivmove=ratio(gamma['call_wall']-gamma['put_wall'],implied_move))
+        prior=row.get('gamma_prior',{})
+        if prior.get('status')=='available':
+            values['pin_stability10']=float(prior['pin_center']==gamma['pin_center'])
+    if not row.get('legs'):
+        return values
+    legs=[chain.get((leg['strike'],leg['right'])) for leg in row['legs']]
+    quantities=row['quantities']
+    quote=_cash_quote(legs,quantities,at,15,2)
+    if quote is None or any(not leg['quote_time']<=leg['received_at']<=at for leg in legs):
+        return values
+    credit=row['family']=='condor'
+    premium=-quote[0] if credit else quote[0]
+    if not 0<premium<width:
+        return values
+    low,high=(legs[1]['strike'],legs[2]['strike']) if credit else (min(leg['strike'] for leg in legs),max(leg['strike'] for leg in legs))
+    center=(low+high)/2
+    values.update(entry_reward_fraction=premium/width if credit else (width-premium)/width,
+        center_distance_width=abs(center-forward)/width,
+        min_boundary_over_ivmove=ratio(min(forward-low,high-forward),implied_move),
+        cash_spread_fraction=(quote[0]-quote[1])/premium,
+        fee_fraction=sum(abs(q) for q in quantities)*2*1.32/(100*(premium if credit else width-premium)),
+        source_skew_seconds=(max(leg['quote_time'] for leg in legs)-min(leg['quote_time'] for leg in legs)).total_seconds(),
+        depth_multiple=min(float(leg.get('ask_size' if q>0 else 'bid_size') or 0)/abs(q) for leg,q in zip(legs,quantities)))
+    if gamma.get('status')=='available':
+        values['wall_clearance_width']=(min(gamma['put_wall']-low,high-gamma['call_wall']) if credit else -abs(center-gamma['pin_center']))/width
+    greeks=[_quote_implied_greeks(leg,forward,tau,at) for leg in legs]
+    if all(greeks) and implied_move is not None:
+        combo_gamma=sum(q*bs_gamma(forward,leg['strike'],g['iv'],tau) for q,leg,g in zip(quantities,legs,greeks))
+        values['package_gamma_risk']=abs(combo_gamma)*implied_move**2/premium
+    if variances.get(30,0)>0:
+        sigma=math.sqrt(variances[30]*remaining)
+        expected=0.
+        for leg,q in zip(legs,quantities):
+            distance=(forward-leg['strike'])*(1 if leg['right']=='C' else -1)
+            z=distance/sigma
+            intrinsic=distance*(1+math.erf(z/math.sqrt(2)))/2+sigma*math.exp(-z*z/2)/math.sqrt(2*math.pi)
+            expected+=q*intrinsic
+        fee=sum(abs(q) for q in quantities)*2*1.32/100
+        values['normal_rv_expiry_edge_fraction']=(expected-quote[0]-fee)/width
+    return values
+
+
+FACTOR_PAIRS = (
+    ('implied_variance_over_rv30','efficiency15'),
+    ('implied_variance_over_rv30','jump_share30'),
+    ('entry_reward_fraction','cash_spread_fraction'),
+    ('pin_distance_width','pin_stability10'),
+    ('wall_clearance_width','rv5_over30'),
+    ('normal_rv_expiry_edge_fraction','cash_spread_fraction'),
+    ('abs_25delta_skew','semivariance_imbalance30'),
+    ('gamma_signed_fraction','efficiency15'),
+)
+
+
+def _factor_rule_passes(row, conditions):
+    for name,direction,threshold in conditions:
+        value=row['factors'].get(name)
+        if not _finite(value) or (value<threshold if direction=='high' else value>threshold):
+            return False
+    return True
+
+
+def _factor_return(row):
+    if not row.get('entry_at'):
+        return 0.
+    cash=row.get('pnl_usd')
+    if cash is None:
+        cash=-row['defined_risk_usd']-sum(abs(q) for q in row['quantities'])*2*1.32
+    return cash/row['defined_risk_usd']
+
+
+def _factor_cash_summary(rows):
+    entered=[r for r in rows if r.get('entry_at')]
+    complete=[r for r in entered if r.get('pnl_usd') is not None]
+    cash=[r['pnl_usd'] for r in complete]
+    return {'passed_opportunities':len(rows),'entered':len(entered),'complete':len(complete),
+        'mean_usd':float(np.mean(cash)) if cash else None,'net_sum_usd':sum(cash),
+        'missing_full_loss_stress_sum_usd':sum(_factor_return(r)*r['defined_risk_usd'] for r in entered),
+        'missing_dates':[r['session_date'] for r in entered if r.get('pnl_usd') is None],
+        'complete_dates':[r['session_date'] for r in complete],
+        'worst_usd':min(cash) if cash else None,'win_count':sum(v>0 for v in cash)}
+
+
+def evaluate_option_factor_rules(rows, output=None, *, cutoff='2026-08-01'):
+    """Freeze feature thresholds and model selection using only earlier sessions."""
+    training_dates=sorted({r['session_date'] for r in rows if r['session_date']<cutoff})
+    testing_dates=sorted({r['session_date'] for r in rows if r['session_date']>=cutoff})
+    rules=[]
+    for setup in sorted({r['setup'] for r in rows}):
+        cohort=[r for r in rows if r['setup']==setup]
+        train=[r for r in cohort if r['session_date']<cutoff]
+        medians={}
+        definitions=[('baseline',[])]
+        for name,(_,direction,_) in FACTOR_HYPOTHESES.items():
+            values=[r['factors'][name] for r in train if _finite(r['factors'].get(name))]
+            if not values:
+                continue
+            for quantile in (.5,2/3 if direction=='high' else 1/3):
+                threshold=float(np.quantile(values,quantile))
+                definitions.append((f'{name}:q{quantile:.6f}',[(name,direction,threshold)]))
+                if quantile==.5:
+                    medians[name]=(name,direction,threshold)
+        for first,second in FACTOR_PAIRS:
+            if first in medians and second in medians:
+                definitions.append((f'{first}&{second}',[medians[first],medians[second]]))
+        for name,conditions in definitions:
+            selected=[r for r in train if _factor_rule_passes(r,conditions)]
+            sufficient=sum(r.get('pnl_usd') is not None for r in selected)>=5
+            daily={r['session_date']:_factor_return(r) for r in selected}
+            returns=[daily.get(ds,0.) for ds in training_dates]
+            score=float(np.mean(returns)) if sufficient else None
+            rules.append({'setup':setup,'rule':name,'family':cohort[0]['family'],'conditions':conditions,
+                'train_score':score,'train':_factor_cash_summary(selected),'training_daily_risk_returns':returns})
+    result={'cutoff':cutoff,'training_dates':training_dates,'testing_dates':testing_dates,
+        'registered_factor_count':len(FACTOR_HYPOTHESES),'rules_generated':len(rules),
+        'rules_training_eligible':sum(r['train_score'] is not None for r in rules),'selected':{},'all_rules':rules}
+    # Selection is complete before any test outcome is read.
+    winners={}
+    for family in ('condor','butterfly'):
+        eligible=[r for r in rules if r['family']==family and r['train_score'] is not None]
+        eligible.sort(key=lambda r:(-r['train_score'],len(r['conditions']),r['setup'],r['rule']))
+        winners[family]=dict(eligible[0]) if eligible and eligible[0]['train_score']>0 else None
+        result['selected'][family]={'winner':winners[family], 'best_training_rule':dict(eligible[0]) if eligible else None}
+    for family in ('condor','butterfly'):
+        winner=winners[family]
+        if winner:
+            test=[r for r in rows if r['setup']==winner['setup'] and r['session_date']>=cutoff
+                  and _factor_rule_passes(r,winner['conditions'])]
+            result['selected'][family]['test']=_factor_cash_summary(test)
+            base=[r for r in rows if r['setup']==winner['setup'] and r['session_date']>=cutoff]
+            result['selected'][family]['same_setup_unfiltered_test']=_factor_cash_summary(base)
+        else:
+            result['selected'][family]['test']=None
+    # Preserve all held-period results, including those not selected by July.
+    for rule in rules:
+        test=[r for r in rows if r['setup']==rule['setup'] and r['session_date']>=cutoff
+            and _factor_rule_passes(r,rule['conditions'])]
+        rule['test']=_factor_cash_summary(test)
+    if output is not None:
+        (output/'selection.json').write_text(json.dumps(result,indent=2))
+        # Joint null bootstrap across eligible rules; no claim of formal FWER.
+        eligible=[r for r in rules if r['train_score'] is not None]
+        x=np.array([r['training_daily_risk_returns'] for r in eligible]).T
+        n=len(training_dates)
+        diagnostics={'method':'five-session circular blocks; fixed rules, centered null, maximum studentized mean',
+            'caveat':'approximate search diagnostic with 20 sessions; thresholds not retrained inside bootstrap',
+            'eligible_rules':len(eligible)}
+        if x.size and n>=5:
+            scale=x.std(axis=0,ddof=1)/math.sqrt(n)
+            valid=scale>1e-12
+            score=np.divide(x.mean(axis=0),scale,out=np.zeros(len(scale)),where=valid)
+            centered=x-x.mean(axis=0)
+            rng=np.random.default_rng(20260906)
+            maxima=[]
+            for _ in range(20):
+                starts=rng.integers(0,n,(100,math.ceil(n/5)))
+                indices=((starts[:,:,None]+np.arange(5))%n).reshape(100,-1)[:,:n]
+                means=centered[indices].mean(axis=1)
+                t=np.divide(means,scale,out=np.zeros_like(means),where=valid)
+                maxima.extend(t.max(axis=1).tolist())
+            maximum=np.asarray(maxima)
+            diagnostics.update(observed_max_t=float(score.max()),max_null_95=float(np.quantile(maximum,.95)),
+                max_stat_pvalue=float((1+np.sum(maximum>=score.max()))/(1+len(maximum))))
+            for family,winner in winners.items():
+                if winner:
+                    index=next(i for i,r in enumerate(eligible) if r['setup']==winner['setup'] and r['rule']==winner['rule'])
+                    diagnostics[family]={'winner_t':float(score[index]),'max_stat_adjusted_pvalue':float((1+np.sum(maximum>=score[index]))/(1+len(maximum)))}
+        (output/'search-multiplicity.json').write_text(json.dumps(diagnostics,indent=2))
+    return result
+
+
+def research_option_factors(data_root, output, raw_replay_root):
+    """Rebuild raw features around previously cash-audited raw-only replay outcomes."""
+    output.mkdir(parents=True,exist_ok=False)
+    source=Path(__file__).read_bytes()
+    (output/'research-source.py').write_bytes(source)
+    contract={'raw_parent':str(raw_replay_root),'input':'raw Schwab SPX/SPXW, never cards or push records',
+        'outcomes':'reuse frozen audited raw replay; all factors re-read at signal, not delayed entry',
+        'families':['condor','butterfly'],'factor_registry':FACTOR_HYPOTHESES,
+        'selection':'July-only threshold quantiles and rule selection; Aug-Sep fixed evaluation, explored history not untouched OOS',
+        'fees':'existing exact quantity crossed-BBO cash labels; missing stays missing',
+        'rv_clock':'5/15/30 observed minute closes; variance per one-minute difference (4/14/29 returns), no unobserved opening price',
+        'bark_access':False,'automatic_ordering':False,'script_sha256':hashlib.sha256(source).hexdigest()}
+    (output/'contract.json').write_text(json.dumps(contract,indent=2))
+    rows=[json.loads(line) for line in (raw_replay_root/'rows.jsonl').read_text().splitlines()]
+    rows=[r for r in rows if r['provider']=='schwab' and r['family'] in ('condor','butterfly')]
+    con=duckdb.connect(config={'threads':2,'memory_limit':'768MB'})
+    con.execute("SET TimeZone='UTC'")
+    inputs=set()
+    for ds in sorted({r['session_date'] for r in rows}):
+        day=date.fromisoformat(ds)
+        group=[r for r in rows if r['session_date']==ds]
+        files=_files(data_root/'lake/quotes/schema=v1','schwab',_at(day,9,30),_at(day,16,0))
+        inputs.update(files)
+        path=_underlier_minutes(con,files,'index:SPX',_at(day,9,30),_at(day,16,0)) if files else {}
+        times=sorted({datetime.fromisoformat(r['signal_at'])-timedelta(minutes=n) for r in group if r.get('signal_at') for n in (0,5,15)})
+        books=_snapshots(con,files,day,times,'schwab',15) if files else {t:{} for t in times}
+        cache={}
+        for r in group:
+            at=datetime.fromisoformat(r['signal_at'])
+            key=(r['signal_name'],tuple((leg['strike'],leg['right']) for leg in r.get('legs',[])))
+            if key not in cache:
+                cache[key]=_raw_option_factors(r,path,books[at],books[at-timedelta(minutes=5)],books[at-timedelta(minutes=15)],at)
+            r['factors']=cache[key]
+            r['factor_at']=r['signal_at']
+            with (output/'rows.jsonl').open('a') as f:
+                f.write(json.dumps(r,default=str)+'\n')
+        print(ds,'factor rows',len(group),flush=True)
+    (output/'input-files.json').write_text(json.dumps(sorted(inputs),indent=2))
+    (output/'coverage.json').write_text(json.dumps({name:{'rows':sum(_finite(r['factors'][name]) for r in rows),
+        'unique_sessions':len({r['session_date'] for r in rows if _finite(r['factors'][name])})} for name in FACTOR_HYPOTHESES},indent=2))
+    con.close()
+    evaluate_option_factor_rules(rows,output)
+
+
+def _causal_regime(path, at, baseline_variance):
+    values=_window(path,at,16)
+    if not values:
+        return dict(state='UNKNOWN',expansion_ratio=None)
+    changes=np.diff(values)
+    net=float(values[-1]-values[0])
+    gross=float(np.abs(changes).sum())
+    efficiency=abs(net)/gross if gross else 0.
+    state=('TREND_UP' if net>0 else 'TREND_DOWN') if efficiency>=.55 and abs(net)>=3 else 'BALANCED' if efficiency<=.35 else 'MIXED'
+    ratio=float(np.sqrt(np.mean(changes[-5:]**2)/baseline_variance)) if baseline_variance and baseline_variance>0 else None
+    return dict(state=state,net15=net,efficiency15=efficiency,expansion_ratio=ratio)
+
+
+def _regime_transition_trace(row, path, horizon, *, require_expansion=False):
+    """Two observable closes confirm a change; never relabel a prior entry fault."""
+    at=row['entry_at'].replace(second=0,microsecond=0)
+    initial=_window(path,at,16)
+    variance=float(np.mean(np.diff(initial)**2)) if initial else None
+    def adverse(fact):
+        state=fact['state']
+        trend=state.startswith('TREND_') and (row['family']=='condor' or state!='TREND_'+row['direction'])
+        return trend and (not require_expansion or fact['expansion_ratio'] is not None and fact['expansion_ratio']>=1.5)
+    entry=_causal_regime(path,at,variance)
+    previous=_causal_regime(path,at-timedelta(minutes=1),variance)
+    result=dict(entry_regime=entry,entry_already_adverse=adverse(entry) and adverse(previous),
+        transition_at=None,trace=[])
+    if 'UNKNOWN' in (entry['state'],previous['state']):
+        return {**result,'status':'ENTRY_REGIME_UNAVAILABLE'}
+    armed=not result['entry_already_adverse']
+    safe,streak=0,0
+    at+=timedelta(minutes=1)
+    while at<=horizon:
+        fact=_causal_regime(path,at,variance)
+        result['trace'].append(dict(at=at,**fact))
+        if fact['state']=='UNKNOWN':
+            return {**result,'status':'REGIME_PATH_GAP','gap_at':at}
+        bad=adverse(fact)
+        if not armed:
+            safe=safe+1 if not bad else 0
+            if safe>=2:
+                armed=True
+        else:
+            streak=streak+1 if bad else 0
+            if streak>=2:
+                return {**result,'status':'TRANSITION','transition_at':at,'transition_regime':fact}
+        at+=timedelta(minutes=1)
+    return {**result,'status':'NO_TRANSITION_BEFORE_BASELINE_EXIT'}
+
+
+def research_regime_transitions(data_root,output,raw_replay_root):
+    output.mkdir(parents=True,exist_ok=False)
+    source=Path(__file__).read_bytes()
+    (output/'research-source.py').write_bytes(source)
+    (output/'contract.json').write_text(json.dumps(dict(
+        question='Does an observable regime change precede losses, and would a delayed cash exit help?',
+        cohort='all45 dates, three frozen daily primary hypotheses from raw option-mechanisms replay; no cards',
+        states='15 full one-minute differences; TREND efficiency>=.55 and abs net>=3 SPX points; BALANCED efficiency<=.35; otherwise MIXED; missing UNKNOWN',
+        volatility='last5 mean squared SPX changes / frozen entry15 mean squared changes, square-root ratio>=1.5',
+        detectors=['two confirmed adverse TREND closes','same plus volatility expansion on both closes'],
+        adverse='IC any trend; BF trend opposite the intended return/continuation',
+        entry='already adverse on two closes is reported as entry mismatch, not a later transition; rearm only after two nonadverse closes',
+        counterfactual='only alerts before original exit trigger; delay15s, first fresh exact BBO within60s; earlier baseline exit wins; no future gap repair',
+        evaluation='all alerts including losers saved and winners damaged; same-date paired cash, July/AugSep, unavailable labels retained; explored data not new OOS',
+        scope='transparent raw path regime proxy, not reconstructed production HMM or causal proof of macro news',
+        parent=str(raw_replay_root),parent_sha256=hashlib.sha256((raw_replay_root/'rows.jsonl').read_bytes()).hexdigest(),
+        script_sha256=hashlib.sha256(source).hexdigest(),bark_access=False,automatic_ordering=False),indent=2))
+    parent=[json.loads(line) for line in (raw_replay_root/'rows.jsonl').read_text().splitlines()]
+    primary=_evaluate_mechanism_replay(parent)['primary']
+    cohort=[dict(row,primary=mechanism) for mechanism,group in primary.items() for row in group['decisions']]
+    con=duckdb.connect(config={'threads':2,'memory_limit':'768MB'})
+    con.execute("SET TimeZone='UTC'")
+    results,inputs=[],set()
+    for day in sorted({r['session_date'] for r in cohort}):
+        d=date.fromisoformat(day)
+        files=_files(data_root/'lake/quotes/schema=v1','schwab',_at(d,9,30),_at(d,16,0))
+        inputs.update(files)
+        path=_underlier_minutes(con,files,'index:SPX',_at(d,9,30),_at(d,16,0)) if files else {}
+        plans=[]
+        for raw in [r for r in cohort if r['session_date']==day]:
+            row={**raw}
+            if row.get('entry_at'):
+                row['entry_at']=datetime.fromisoformat(row['entry_at'])
+                for leg in row['legs']:
+                    for key in ('quote_time','received_at'):
+                        leg[key]=datetime.fromisoformat(leg[key])
+            for expansion in (False,True):
+                out=dict(baseline=raw,detector='trend_expansion' if expansion else 'trend',primary=raw['primary'],session_date=day)
+                if not row.get('entry_at'):
+                    out.update(status='NOT_ENTERED',pnl_usd=None)
+                else:
+                    horizon=datetime.fromisoformat(row['exit_trigger_at'])
+                    trace=_regime_transition_trace(row,path,horizon,require_expansion=expansion)
+                    out.update(trace,status=trace['status'],pnl_usd=row.get('pnl_usd'),counterfactual_status=row['status'])
+                    if trace['status'] in ('ENTRY_REGIME_UNAVAILABLE','REGIME_PATH_GAP'):
+                        out.update(pnl_usd=None,counterfactual_status=trace['status'])
+                plans.append((row,out))
+        alerts=[(r,o) for r,o in plans if o.get('transition_at') and o['transition_at']<datetime.fromisoformat(r['exit_trigger_at'])]
+        actions=sorted({o['transition_at']+timedelta(seconds=15) for _,o in alerts})
+        books=_snapshots(con,files,d,actions,'schwab',15) if actions else {}
+        events=_contract_events(con,files,sorted({leg['instrument_id'] for r,_ in alerts for leg in r['legs']}),
+            min(actions),max(actions)+timedelta(seconds=60),'schwab') if actions else {}
+        for row,out in plans:
+            if out.get('transition_at') and out['transition_at']<datetime.fromisoformat(row['exit_trigger_at']):
+                action=out['transition_at']+timedelta(seconds=15)
+                legs=[books[action].get((leg['strike'],leg['right'])) for leg in row['legs']]
+                cash=_cash_quote(legs,row['quantities'],action,15,2)
+                marks=_package_path(row,events,action+timedelta(seconds=60),15,2)
+                if cash is not None and _depth(legs,row['quantities'],liquidate=True):
+                    value=cash[1]+(2*row['entry_price'] if row['family']=='condor' else 0)
+                    marks=sorted([m for m in marks if m.at!=action]+[PolicyMark(action,value)],key=lambda m:m.at)
+                intent=dict(at=out['transition_at'],reason='regime_transition',censored=False)
+                alternative=_action_exit_label(row,marks,intent,_at(d,15,59) if row['family']=='butterfly' else _at(d,15,45))
+                out.update(counterfactual=alternative,counterfactual_status=alternative['status'],pnl_usd=alternative['pnl_usd'])
+            results.append(out)
+            with (output/'rows.jsonl').open('a') as h:
+                h.write(json.dumps(out,default=str)+'\n')
+        print(json.dumps(dict(day=day,alerts=len(alerts))),flush=True)
+    (output/'input-files.json').write_text(json.dumps(sorted(inputs),indent=2))
+    con.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("/srv/data/spx-spark/data"))
@@ -2185,9 +3192,31 @@ def main():
     parser.add_argument("--validate-directional-signal", action="store_true")
     parser.add_argument("--scan-condor-volatility", action="store_true")
     parser.add_argument("--relax-exit-contracts", action="store_true")
+    parser.add_argument("--explore-price-exits", action="store_true")
+    parser.add_argument("--explore-position-signals", action="store_true")
+    parser.add_argument("--explore-mechanism-signals", action="store_true")
+    parser.add_argument("--research-option-factors", type=Path)
+    parser.add_argument("--research-regime-transitions", type=Path)
+    parser.add_argument("--explore-signal", choices=['or15_up','or15_down','reclaim_up','reclaim_down',
+        'butterfly_1400','butterfly_1430','butterfly_1500','ic20_w10','ic20_w20'])
+    parser.add_argument("--exit-latency-seconds",type=int,choices=(15,30,60),default=15)
     parser.add_argument("--close-centers", type=Path)
     parser.add_argument("--signal-entry-delay-seconds", type=int, choices=(15, 30, 60), default=15)
     args = parser.parse_args()
+    if args.research_regime_transitions:
+        research_regime_transitions(args.data_root,args.output_root,args.research_regime_transitions)
+        return
+    if args.research_option_factors:
+        research_option_factors(args.data_root,args.output_root,args.research_option_factors)
+        return
+    if args.explore_price_exits or args.explore_position_signals or args.explore_mechanism_signals:
+        if args.start is None or args.end is None:
+            parser.error('price exit exploration requires explicit --start and --end')
+        explore_price_exits(args.data_root,args.output_root,args.start,args.end,args.providers,
+            signal_filter=args.explore_signal,entry_delay_seconds=args.signal_entry_delay_seconds,
+            exit_latency_seconds=args.exit_latency_seconds,position_signals=args.explore_position_signals,
+            mechanism_signals=args.explore_mechanism_signals)
+        return
     if args.relax_exit_contracts:
         if args.start is None or args.end is None:
             parser.error('exit ablation requires explicit --start and --end')
