@@ -494,7 +494,7 @@ def _snapshots(con, files, day: date, times: Sequence[datetime], provider: str, 
     return result
 
 
-def _structure(signal, chain, *, age: float, skew: float, anchor_override=None):
+def _structure(signal, chain, *, age: float, skew: float, anchor_override=None, butterfly_width=15):
     at = signal["signal_at"]
     pairs = []
     for strike, right in chain:
@@ -526,17 +526,17 @@ def _structure(signal, chain, *, age: float, skew: float, anchor_override=None):
     else:
         choices = []
         for right in ("C", "P"):
-            keys = [(anchor - 15, right), (anchor, right), (anchor + 15, right)]
+            keys = [(anchor - butterfly_width, right), (anchor, right), (anchor + butterfly_width, right)]
             legs = [chain.get(key) for key in keys]
             if any(leg is None for leg in legs):
                 continue
             quote = _cash_quote(legs, (1, -2, 1), at, age, skew)
-            if quote and 0 < quote[0] < 15:
+            if quote and 0 < quote[0] < butterfly_width:
                 choices.append((quote[0], right, keys))
         if not choices:
             return None, "BUTTERFLY_LEGS_UNAVAILABLE"
         keys = min(choices)[2]
-        quantities, width = [1, -2, 1], 15
+        quantities, width = [1, -2, 1], butterfly_width
     legs = [chain.get(key) for key in keys]
     if any(leg is None for leg in legs):
         return None, "EXACT_LEGS_MISSING"
@@ -1865,14 +1865,14 @@ def _quote_forward(chain, at):
     return min(pairs) if pairs else None
 
 
-def _delta_condor(chain, at, delta_target, width, delta_basis):
+def _delta_condor(chain, at, delta_target, width, delta_basis, *, only_right=None):
     anchor = _quote_forward(chain, at)
     if anchor is None:
         return None, 'ANCHOR_BBO_UNAVAILABLE'
     straddle, strike, forward = anchor
     tau = (_at(at.astimezone(ET).date(), 16, 0)-at).total_seconds()/(365*86400)
     shorts, actual = [], []
-    for right in ('P', 'C'):
+    for right in ((only_right,) if only_right else ('P', 'C')):
         choices = []
         for key, leg in chain.items():
             if key[1] != right or (key[0] >= forward if right == 'P' else key[0] <= forward):
@@ -1890,10 +1890,15 @@ def _delta_condor(chain, at, delta_target, width, delta_basis):
         neg_delta, _, short = min(choices, key=lambda value: value[:2])
         shorts.append(short)
         actual.append(-neg_delta)
-    put, call = shorts
-    legs = [chain.get((put['strike']-width, 'P')), put, call,
-            chain.get((call['strike']+width, 'C'))]
-    quantities = [1, -1, -1, 1]
+    if only_right:
+        short=shorts[0]
+        long=chain.get((short['strike']+(-width if only_right=='P' else width),only_right))
+        legs,quantities=[long,short],[1,-1]
+    else:
+        put, call = shorts
+        legs = [chain.get((put['strike']-width, 'P')), put, call,
+                chain.get((call['strike']+width, 'C'))]
+        quantities = [1, -1, -1, 1]
     quote = _cash_quote(legs, quantities, at, 15, 2)
     if quote is None:
         return None, 'EXACT_LEGS_INVALID'
@@ -2216,7 +2221,11 @@ def _price_exit_intent(row, path, deadline, *, ema_span=None):
                 side = 1 if (price-ema)*(1 if row['direction']=='UP' else -1)<0 else 0
             else:
                 if row['family']=='condor':
-                    low, high = row['legs'][1]['strike'], row['legs'][2]['strike']
+                    if len(row['legs'])==2:
+                        short=row['legs'][1]
+                        low,high=(short['strike'],float('inf')) if short['right']=='P' else (-float('inf'),short['strike'])
+                    else:
+                        low, high = row['legs'][1]['strike'], row['legs'][2]['strike']
                 else:
                     low, high = min(leg['strike'] for leg in row['legs']), max(leg['strike'] for leg in row['legs'])
                 side = -1 if price < low else 1 if price > high else 0
@@ -2321,7 +2330,7 @@ def _ict_first_signals(day, bars):
         status='UNDERLIER_GAP' if at<=_at(day,13,30) else 'NO_TRIGGER')) for d in ('UP','DOWN')]
 
 
-def _gamma_position(chain, at):
+def _gamma_position(chain, at, *, include_profile=False):
     """Local OI×BBO gamma concentration, not identified dealer net positions."""
     anchor=_quote_forward(chain,at)
     if anchor is None:
@@ -2344,8 +2353,13 @@ def _gamma_position(chain, at):
             weights[strike,right]=bs_gamma(forward,strike,greek['iv'],tau)*leg['open_interest']
     base={'coverage':seen/82,'valid_contracts':seen,'expected_contracts':82,'forward':forward,
           'dealer_sign':'UNKNOWN','scope':'0DTE local +/-100 points; OI last broker-observed, IV BBO-implied'}
+    if include_profile:
+        base['strike_profile']=[dict(strike=k,call_gamma_oi=weights[k,'C'],put_gamma_oi=weights[k,'P'])
+            for k in sorted({k for k,_ in weights}) if (k,'C') in weights and (k,'P') in weights]
     if seen/82<.8 or sum(weights.values())<=0:
         return {**base,'status':'GAMMA_COVERAGE_UNAVAILABLE'}
+    if include_profile:
+        return {**base,'status':'available','unsigned_gamma_oi':sum(weights.values())}
     call=[(v,k) for (k,r),v in weights.items() if r=='C' and k>forward and v>0]
     put=[(v,k) for (k,r),v in weights.items() if r=='P' and k<forward and v>0]
     centers=[(weights.get((k,'C'),0)+weights.get((k,'P'),0),k) for k in range(int(center)-20,int(center)+21,5)]
@@ -2413,7 +2427,24 @@ def _failed_expansion_signal(day, path, outside_direction):
     return {**base,'status':'NO_TRIGGER'}
 
 
-def _mechanism_signals(day, path):
+def _mechanism_signals(day, path, *, two_sided_auction=False):
+    if two_sided_auction:
+        up, down = [_failed_expansion_signal(day,path,d) for d in ('UP','DOWN')]
+        base=dict(family='condor',direction='NEUTRAL',mechanism='two_sided_auction')
+        if not all(r.get('signal_at') for r in (up,down)):
+            base['status']=('UNDERLIER_GAP' if any(r.get('status')=='UNDERLIER_GAP' for r in (up,down))
+                            else 'TWO_SIDED_FAILURE_NOT_OBSERVED')
+        else:
+            at=max(up['signal_at'],down['signal_at'])
+            base.update(signal_at=at,signal_spx=path[at],
+                auction_lower=down['failed_extreme']-1,auction_upper=up['failed_extreme']+1,
+                lower_failed_extreme=down['failed_extreme'],upper_failed_extreme=up['failed_extreme'],
+                failure_confirmations=[up['signal_at'],down['signal_at']])
+            if not down['opening_range_low'] < path[at] < up['opening_range_high']:
+                base['status']='SECOND_FAILURE_NOT_INSIDE_OPENING_RANGE'
+        return [{**base,'delta_target':delta,'width':width,
+                 'signal_name':f'auction_ic{int(delta*100)}_w{width}'}
+                for delta in (.15,.20) for width in (5,10,20)]
     signals=[]
     for outside in ('UP','DOWN'):
         failed=_failed_expansion_signal(day,path,outside)
@@ -2442,20 +2473,26 @@ def _mechanism_signals(day, path):
     return signals
 
 
-def _mechanism_exit_intent(row, path, deadline):
+def _mechanism_exit_intent(row, path, deadline, *, stay_after_arrival=False):
     """Trade a finite price destination; reject a renewed excursion, not a timer."""
     at=row['entry_at'].replace(second=0,microsecond=0)+timedelta(minutes=1)
     sign=1 if row['direction']=='UP' else -1
-    streak=0
+    streak,arrived=0,False
     while at<deadline:
         if at not in path:
             return dict(at=at,reason='UNDERLIER_EXIT_GAP',censored=True)
         price=path[at]
         # Failure ICs have a reversion direction too, but do not take profit merely
         # because SPX reached the midpoint: their premium TP is a separate variant.
-        if row['family']=='butterfly' and sign*(price-row['target_level'])>=0:
-            return dict(at=at,reason='price_destination_reached',censored=False)
-        invalid=sign*(price-row['invalidation_level'])<0
+        if row['family'] in ('butterfly','vertical'):
+            if sign*(price-row['target_level'])>=0:
+                arrived=True
+                if not stay_after_arrival:
+                    return dict(at=at,reason='price_destination_reached',censored=False)
+            if stay_after_arrival and arrived and abs(price-row['target_level'])>5:
+                return dict(at=at,reason='left_destination_zone',censored=False)
+        invalid=(price<row['auction_lower'] or price>row['auction_upper']
+                 if row.get('mechanism')=='two_sided_auction' else sign*(price-row['invalidation_level'])<0)
         streak=streak+1 if invalid else 0
         if streak>=2:
             return dict(at=at,reason='price_hypothesis_failed',censored=False)
@@ -2487,8 +2524,11 @@ def _evaluate_mechanism_replay(rows):
     primary={}
     for mechanism,suffix in [('failed_expansion','ic20_w20_price_quote'),
                               ('return_to_range','bf_target_price_only'),
-                              ('continuation_destination','bf_target_price_only')]:
+                              ('continuation_destination','bf_target_price_only'),
+                              ('two_sided_auction','auction_ic20_w10_price_quote')]:
         pool=[r for r in rows if r.get('mechanism')==mechanism and r['setup'].endswith(suffix)]
+        if not pool:
+            continue
         chosen=[]
         for day in sorted({r['session_date'] for r in rows}):
             candidates=[r for r in pool if r['session_date']==day and r.get('signal_at')]
@@ -2521,13 +2561,13 @@ def _evaluate_mechanism_replay(rows):
                 target_mean=float(np.mean([p['target_pnl'] for p in paired])) if paired else None,
                 atm_mean=float(np.mean([p['atm_pnl'] for p in paired])) if paired else None)
     return dict(scope='all registered variants, no post-outcome rule selection; overlapping variants never summed',
-        primary_contract='one first observed signal per day, including unavailable entry; IC20 width20 price_quote; BF target price_only',
+        primary_contract='one first observed signal per day, including unavailable entry; failed-expansion IC20 width20 price_quote; BF target price_only; two-sided auction IC20 width10 price_quote',
         variants=variants,primary=primary,pairs=pairs)
 
 
 def explore_price_exits(data_root, output, start, end, providers, *, signal_filter=None,
                         entry_delay_seconds=15, exit_latency_seconds=15, position_signals=False,
-                        mechanism_signals=False):
+                        mechanism_signals=False, butterfly_width=15, two_sided_auction=False, adaptations=False):
     output.mkdir(parents=True, exist_ok=False)
     source = Path(__file__).read_bytes()
     (output/'research-source.py').write_bytes(source)
@@ -2535,7 +2575,7 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
         'vertical_signals':['OR15 first UP/DOWN acceptance','OR15 false break: two outside, two back inside by 1 point'],
         'vertical_primary':'EMA10: two closes against position; no premium/time stop; no fixed holding duration',
         'vertical_controls':['EMA5','EMA20','EMA10 plus existing premium/trail','existing premium/trail only'],
-        'butterfly':'15-wide ATM center at 14:00/14:30/15:00; two closes outside wings, no mandatory 15:55 hold',
+        'butterfly':f'{butterfly_width}-wide ATM center at 14:00/14:30/15:00; two closes outside wings, no mandatory 15:55 hold',
         'condor':'fresh BBO-implied 20 delta, 10/20-wide, 10:00; two closes outside same short strike plus existing TP/SL',
         'quotes':'15s max source age, 2s skew, depth and availability; all cash crossed BBO',
         'entry':'first signal only, legs frozen, configured entry delay, debit<=45%width at signal and entry',
@@ -2543,7 +2583,7 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
         'deadline':'vertical/IC 15:45; butterfly 15:59; last pre-16:00 book only, not settlement',
         'observation':'price-only requires continuous underlier, not irrelevant intrahold BBO; quote TP/SL requires <=60s BBO gaps',
         'evaluation':'all session denominators; July selection / August-September evaluation; explored window not untouched OOS',
-        'position_signals':position_signals,
+        'position_signals':position_signals, 'butterfly_width':butterfly_width,
         'position_contract':'SPX OR15 ICT production pattern; gamma OI x BBO gamma +/-100, >=80% grid coverage; BF highest unsigned concentration within ATM +/-20; wall IC 10-20 delta; no dealer inventory claim',
         'signal_filter':signal_filter, 'entry_delay_seconds':entry_delay_seconds,
         'exit_latency_seconds':exit_latency_seconds,
@@ -2551,7 +2591,7 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
         'script_sha256':hashlib.sha256(source).hexdigest()}
     if position_signals:
         contract.update(vertical_signals=['OR15 first UP/DOWN acceptance','SPX OR15 ICT first MSS+displacement UP/DOWN'],
-            butterfly='ATM vs gamma concentration center at 14:00/14:30/15:00, 15-wide',
+            butterfly=f'ATM vs gamma concentration center at 14:00/14:30/15:00, {butterfly_width}-wide',
             condor='10:00 BBO-implied 20 delta vs local wall shorts restricted to 10-20 delta; 10/20-wide')
     if mechanism_signals:
         contract.update(scope='three registered economic mechanisms, no factor threshold search',
@@ -2559,11 +2599,31 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
                 'buy a displaced butterfly at the prior range midpoint before price returns',
                 'buy a directional butterfly at a finite continuation destination instead of betting on a stationary pin'],
             trigger='OR15 closes; first two closes >1 point outside, first two >1 point inside within 15m after acceptance; first excursion only through 14:00, no later rescue',
-            butterfly='15-wide; failed-break midpoint rounded5, remaining distance 2.5..20; continuation OR15 three-close acceptance target rounded signal SPX +/-15; target vs same-clock ATM center',
+            butterfly=f'{butterfly_width}-wide; failed-break midpoint rounded5, remaining distance 2.5..20; continuation OR15 three-close acceptance target rounded signal SPX +/-15; target vs same-clock ATM center',
             condor='failed-break 15/20 delta x 10/20 width; fixed10:00 20delta controls; no fitted IV filter',
             exits='price_only: BF target first crossed close or two closes beyond frozen invalidation; IC failure extreme invalidation OR short strike breach. price_quote adds existing TP/SL; quote_only control. No fixed holding duration.',
             evaluation='all 54 variants reported; July/August-September split, missing full-risk stress, paired target/ATM attribution; no selected production signal',
             mechanism_signals=True)
+    if two_sided_auction:
+        contract.update(scope='both first OR15 expansions fail; not a one-sided reversal signal',
+            hypotheses=['both directional auctions fail but remaining tail premium still exceeds subsequent buyback and friction'],
+            butterfly='not applicable',
+            trigger='each side: two closes outside by1, two back inside by1 within15m; enter only after BOTH confirmations and current SPX inside original OR15',
+            condor='BBO-implied 15/20delta x5/10/20 widths; shorts outside both observed failed extremes; actual short delta>=10%',
+            exits='two closes outside failed extreme +/-1 or short strike; price_quote adds0.5C/3C; hard15:45',
+            primary='auction_ic20_w10_price_quote; all18 variants retained, no outcome-based replacement',
+            two_sided_auction=True)
+    if adaptations:
+        contract.update(scope='arrival dwell, staged one-sided credit, and causal structure competition',
+            hypotheses=['hold original butterfly after arrival while inside center +/-5',
+                        'sell only rejected side; add opposite only with independent failure while first remains open',
+                        'choose structure using prior dates only, including NO_TRADE'],
+            butterfly=f'{butterfly_width}-wide target, price_only versus arrival then first close outside center +/-5; original invalidation retained; hard15:59',
+            vertical='ATM15 same signal/target/invalidation/hard15:59; price_only',
+            condor='20delta 5/10/20 wings; first failed UP sells call spread, DOWN sells put spread; full IC same-clock control; actual delta>=10%; failed-side short outside observed failed extreme',
+            budget='analysis: one package per leg-stage, total defined risk plus fees <=1000; no fractional sizing, no same-day outcome selection',
+            primary='BF30 dwell vs arrival; staged20delta10wing price_quote, keep standalone controls; competitor prior12 completed eligible sessions mean per planned opportunity >0, else NO_TRADE',
+            adaptations=True)
     (output/'contract.json').write_text(json.dumps(contract,indent=2))
     con = duckdb.connect(config={'threads':2,'memory_limit':'768MB'})
     con.execute("SET TimeZone='UTC'")
@@ -2591,7 +2651,17 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
                 signals.extend([{**s,'signal_name':'gamma_'+s['signal_name']} for s in list(signals)
                     if s['family'] in ('butterfly','condor')])
             if mechanism_signals:
-                signals=_mechanism_signals(day,spx)
+                signals=_mechanism_signals(day,spx,two_sided_auction=two_sided_auction)
+            if adaptations:
+                targets=[r for r in signals if r.get('center_rule')=='target']
+                credits=[r for r in signals if r.get('mechanism')=='failed_expansion' and r.get('delta_target')==.20]
+                credits += [{**r,'width':5,'signal_name':r['signal_name'].replace('_w10','_w5')}
+                            for r in credits if r['width']==10]
+                singles=[{**r,'credit_side':'C' if r.get('outside_direction')=='UP' else 'P',
+                          'signal_name':r['signal_name']+'_single'} for r in credits]
+                verticals=[{**r,'family':'vertical','center_rule':'atm',
+                            'signal_name':r['signal_name'].replace('_bf_target','_vertical')} for r in targets]
+                signals=targets+verticals+credits+singles
             if signal_filter is not None:
                 signals=[s for s in signals if s['signal_name']==signal_filter]
             times = sorted({t for s in signals if s.get('signal_at') for t in
@@ -2619,13 +2689,29 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
                         if signal['family']=='condor':
                             structure,reason=_wall_condor(books[at],at,signal['width'],gamma)
                         elif gamma['status']=='available':
-                            structure,reason=_structure(signal,books[at],age=15,skew=2,anchor_override=gamma['pin_center'])
+                            structure,reason=_structure(signal,books[at],age=15,skew=2,anchor_override=gamma['pin_center'],butterfly_width=butterfly_width)
                         else:
                             structure,reason=None,gamma['status']
                     else:
-                        structure, reason = (_delta_condor(books[at],at,signal.get('delta_target',.20),signal['width'],'bbo_implied')
+                        structure, reason = (_delta_condor(books[at],at,signal.get('delta_target',.20),signal['width'],'bbo_implied',only_right=signal.get('credit_side'))
                             if signal['family']=='condor' else _structure(signal,books[at],age=15,skew=2,
-                                anchor_override=signal.get('target_level') if signal.get('center_rule')=='target' else None))
+                                anchor_override=signal.get('target_level') if signal.get('center_rule')=='target' else None,
+                                butterfly_width=butterfly_width))
+                    if not reason and adaptations and signal['family']=='condor':
+                        if min(structure['selected_abs_deltas'])<.10:
+                            reason='SHORT_DELTA_BELOW_10'
+                        if signal.get('credit_side'):
+                            short=structure['legs'][1]
+                            extreme=signal['failed_extreme']
+                            if not (short['strike']>extreme if short['right']=='C' else short['strike']<extreme):
+                                reason='SHORT_INSIDE_FAILED_EXTREME'
+                    if not reason and signal.get('mechanism')=='two_sided_auction':
+                        shorts=structure['legs'][1:3]
+                        if not (shorts[0]['strike']<signal['lower_failed_extreme']
+                                and shorts[1]['strike']>signal['upper_failed_extreme']):
+                            reason='SHORT_INSIDE_FAILED_EXTREME'
+                        elif min(structure['selected_abs_deltas'])<.10:
+                            reason='SHORT_DELTA_BELOW_10'
                     if reason:
                         row['status']=reason
                     else:
@@ -2655,8 +2741,12 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
                 min(r['entry_at'] for r in entered),_at(day,16,0),provider) if entered else {}
             plans, action_times=[],set()
             for entry in entries:
-                deadline=_at(day,15,59) if entry['family']=='butterfly' else _at(day,15,45)
-                if entry['family']=='vertical':
+                deadline=_at(day,15,59) if entry['family']=='butterfly' or adaptations and entry['family']=='vertical' else _at(day,15,45)
+                if adaptations and entry['family'] in ('vertical','butterfly'):
+                    variants=[('price_only',None,False)]
+                    if entry['family']=='butterfly':
+                        variants.append(('dwell5',None,False))
+                elif entry['family']=='vertical':
                     variants=[('ema10',10,False),('ema5',5,False),('ema20',20,False),('ema10_quote',10,True),('quote_only',None,True)]
                 else:
                     variants=[('price_only',None,False),('price_quote',None,True),('quote_only',None,True)]
@@ -2667,7 +2757,7 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
                     if entry['status']=='ENTERED' and name!='quote_only':
                         intent=_price_exit_intent(entry,spx,deadline,ema_span=span)
                         if entry.get('mechanism'):
-                            mechanism_intent=_mechanism_exit_intent(entry,spx,deadline)
+                            mechanism_intent=_mechanism_exit_intent(entry,spx,deadline,stay_after_arrival=name=='dwell5')
                             # BF geometry is not an invalidation: the intended return
                             # can start outside its narrow wings. IC retains both sides.
                             intent=(min((intent,mechanism_intent),key=lambda i:i['at'])
@@ -3175,6 +3265,833 @@ def research_regime_transitions(data_root,output,raw_replay_root):
     con.close()
 
 
+def _analog_state(path,at):
+    values=_window(path,at,16)
+    if not values:
+        return None
+    changes=np.diff(values)
+    rms=float(np.sqrt(np.mean(changes**2)))
+    if rms<=0:
+        return None
+    return dict(rms=rms,features=[float(np.sum(changes)/(rms*math.sqrt(15))),
+        float(np.sqrt(np.mean(changes[-5:]**2))/rms)])
+
+
+def _analog_cash_scenario(row,current_path,old_path,old_at,at,chain,forward,ivs,scale,iv_log_change15=None):
+    """A model forecast only: replay an earlier day's path on today's frozen legs."""
+    day=at.astimezone(ET).date()
+    end=_at(day,15,59) if row['family']=='butterfly' else _at(day,15,45)
+    path={t:p for t,p in current_path.items() if t<=at}
+    spot=path[at]
+    moment=at+timedelta(minutes=1)
+    while moment<=end:
+        historical=old_at+(moment-at)
+        if historical not in old_path:
+            break
+        path[moment]=spot+scale*(old_path[historical]-old_path[old_at])
+        moment+=timedelta(minutes=1)
+    legs=[chain[leg['strike'],leg['right']] for leg in row['legs']]
+    quantities=row['quantities']
+    cash=_cash_quote(legs,quantities,at,15,2)
+    credit=row['family']=='condor'
+    premium=-cash[0] if credit else cash[0]
+    synthetic={**row,'entry_at':at+timedelta(seconds=15),'entry_price':premium,'legs':legs}
+    mid0=sum(q*(leg['bid']+leg['ask'])/2 for q,leg in zip(quantities,legs,strict=True))
+    half_spread=sum(abs(q)*(leg['ask']-leg['bid'])/2 for q,leg in zip(quantities,legs,strict=True))
+    tau=(_at(day,16,0)-at).total_seconds()/(365*86400)
+    model0=sum(q*bs_price(forward,leg['strike'],iv,tau,leg['right']) for q,leg,iv in zip(quantities,legs,ivs,strict=True))
+    def mark(clock):
+        quote_spot=path[clock.replace(second=0,microsecond=0)]
+        remaining=(_at(day,16,0)-clock).total_seconds()/(365*86400)
+        fraction=min(1.,max(0.,(clock-at).total_seconds()/900))
+        projected=ivs if iv_log_change15 is None else [iv*math.exp(change*fraction) for iv,change in zip(ivs,iv_log_change15,strict=True)]
+        model=sum(q*bs_price(forward+quote_spot-spot,leg['strike'],iv,remaining,leg['right']) for q,leg,iv in zip(quantities,legs,projected,strict=True))
+        mid=mid0+model-model0
+        mid=max(-row['width'],min(0.,mid)) if credit else max(0.,min(row['width'],mid))
+        return PolicyMark(clock,mid-half_spread+(2*premium if credit else 0))
+    marks=[mark(synthetic['entry_at'])]+[mark(t) for t in path if at<t<=end]
+    intent=_mechanism_exit_intent(synthetic,path,end)
+    if credit:
+        intent=min((intent,_price_exit_intent(synthetic,path,end)),key=lambda x:x['at'])
+    result=_action_exit_label(synthetic,marks,intent,end,quote_management=credit)
+    action=result.get('exit_action_at')
+    if action and action.replace(second=0,microsecond=0) in path:
+        marks=sorted([m for m in marks if m.at!=action]+[mark(action)],key=lambda m:m.at)
+        result=_action_exit_label(synthetic,marks,intent,end,quote_management=credit)
+    return dict(status=result['status'],pnl_usd=result['pnl_usd'],exit_reason=result['exit_reason'],
+        exit_at=result.get('exit_at'),scale=scale)
+
+
+def _conditional_option_forecast(row,paths,chain,*,prior_chain=None):
+    """No current-day future, delayed entry price or realized outcome is consumed."""
+    at=datetime.fromisoformat(row['signal_at']) if isinstance(row['signal_at'],str) else row['signal_at']
+    day=at.astimezone(ET).date()
+    path=paths.get(str(day),{})
+    state=_analog_state(path,at)
+    if state is None:
+        return dict(status='CURRENT_PATH_UNAVAILABLE')
+    legs=[chain.get((leg['strike'],leg['right'])) for leg in row.get('legs',[])]
+    cash=_cash_quote(legs,row.get('quantities',[]),at,15,2)
+    if cash is None or not _depth(legs,row['quantities']):
+        return dict(status='SIGNAL_BBO_UNAVAILABLE')
+    anchor=_quote_forward(chain,at)
+    if anchor is None:
+        return dict(status='FORWARD_UNAVAILABLE')
+    tau=(_at(day,16,0)-at).total_seconds()/(365*86400)
+    greeks=[_quote_implied_greeks(leg,anchor[2],tau,at) for leg in legs]
+    if not all(greeks):
+        return dict(status='SIGNAL_IV_UNAVAILABLE')
+    iv_changes=None
+    if prior_chain is not None:
+        before=at-timedelta(minutes=15)
+        old_anchor=_quote_forward(prior_chain,before)
+        old_greeks=[_quote_implied_greeks(prior_chain.get((leg['strike'],leg['right'])),old_anchor[2],tau+15/(365*1440),before)
+            for leg in legs] if old_anchor else []
+        if len(old_greeks)!=len(legs) or not all(old_greeks):
+            return dict(status='PRIOR_FIXED_STRIKE_IV_UNAVAILABLE')
+        iv_changes=[math.log(now['iv']/old['iv']) for now,old in zip(greeks,old_greeks,strict=True)]
+    old=[]
+    for ds,history in sorted(paths.items()):
+        if ds>=str(day):
+            continue
+        clock=datetime.combine(date.fromisoformat(ds),at.astimezone(ET).timetz()).astimezone(UTC)
+        prior=_analog_state(history,clock)
+        if prior is not None:
+            old.append(dict(day=ds,at=clock,state=prior))
+    if len(old)<12:
+        return dict(status='HISTORY_INSUFFICIENT',prior_sessions=len(old))
+    features=np.array([h['state']['features'] for h in old])
+    # Standardization uses only prior sessions. A constant coordinate has no scale.
+    std=features.std(axis=0)
+    std=np.where(std>1e-8,std,1.)
+    distance=np.sum(((features-np.array(state['features']))/std)**2,axis=1)
+    for i,prior in enumerate(old):
+        prior['distance']=float(distance[i])
+        scale=max(.5,min(2.,state['rms']/prior['state']['rms']))
+        prior['scenario']=_analog_cash_scenario(row,path,paths[prior['day']],prior['at'],at,chain,
+            anchor[2],[g['iv'] for g in greeks],scale,iv_changes)
+    premium=-cash[0] if row['family']=='condor' else cash[0]
+    risk=100*(row['width']-premium if row['family']=='condor' else premium)
+    fees=2*1.32*sum(abs(q) for q in row['quantities'])
+    def summarize(scenarios):
+        complete=[s['scenario']['pnl_usd'] for s in scenarios if s['scenario']['pnl_usd'] is not None]
+        missing=len(scenarios)-len(complete)
+        stress=(sum(complete)-missing*(risk+fees))/len(scenarios)
+        return dict(sessions=len(scenarios),complete=len(complete),missing=missing,
+            mean_completed=float(np.mean(complete)) if complete else None,
+            missing_full_risk_stress_mean=stress,positive_forecast=stress>0,
+            scenario_days=[s['day'] for s in scenarios])
+    matched=sorted(old,key=lambda h:(h['distance'],h['day']))[:8]
+    return dict(status='FORECAST_READY',forecast_at=at,current_state=state,signal_premium=premium,
+        signal_mid=(cash[0]+cash[1])/2,signal_cross_spread=cash[0]-cash[1],
+        signal_ivs=[g['iv'] for g in greeks],iv_log_change15=iv_changes,prior_sessions=len(old),trained_through=old[-1]['day'],
+        clock_only=summarize(old),state_matched=summarize(matched),scenarios=old)
+
+
+def research_conditional_option_value(data_root,output,raw_replay_root,*,project_iv_trend=False):
+    output.mkdir(parents=True,exist_ok=False)
+    source=Path(__file__).read_bytes()
+    (output/'research-source.py').write_bytes(source)
+    contract=dict(hypothesis='Entry-time conditional managed option value predicts profitable opportunities better than same-clock unconditional history',
+        cohort='three frozen primary raw mechanisms, all45 dates, no cards/outcome-based substitutions',
+        history='strictly earlier sessions only; >=12 with causal same-clock15m prefix; future scenario gaps preserved',
+        models='all earlier same-clock paths versus nearest8 using normalized15m displacement and last5/15 RMS ratio; prior-only standardization',
+        scaling='future raw SPX displacements scaled by current/prior15m RMS clipped[0.5,2]; same ET clock',
+        pricing='current fresh signal BBO IV per frozen strike, sticky IV and constant forward basis; revalue through projected policy exit, anchored current midpoint; carry current half-spread to exit; four-contract fees',
+        management='same frozen primary policy; signal premium forecast, never delayed actual entry price; one-minute scenario quotes,15sec exit latency with within-minute spot held constant',
+        selection='forecast mean including missing-scenario full-defined-risk stress>0; report completed-only mean separately; no threshold search',
+        validation='predictions saved before joining raw realized labels; all dates, misses, lost winners, prediction error, July/AugSep; explored history not new OOS',
+        scope='synthetic cash is a prediction, never a replacement for raw BBO realized PnL; sticky IV is an uncalibrated modeling assumption',
+        parent=str(raw_replay_root),parent_sha256=hashlib.sha256((raw_replay_root/'rows.jsonl').read_bytes()).hexdigest(),
+        script_sha256=hashlib.sha256(source).hexdigest(),bark_access=False,automatic_ordering=False)
+    if project_iv_trend:
+        contract.update(pricing='Observed per-frozen-strike15m log IV change continues once over next15m, then holds; same current half-spread, basis and cash contract',
+            stage='follow-up sensitivity registered after sticky-IV forecast and oracle diagnostic; not untouched OOS or an optimized threshold',
+            missing_prior_iv='model unavailable, no silent sticky fallback')
+    (output/'contract.json').write_text(json.dumps(contract,indent=2))
+    parent=[json.loads(s) for s in (raw_replay_root/'rows.jsonl').read_text().splitlines()]
+    groups=_evaluate_mechanism_replay(parent)['primary']
+    cohort=[dict(r,primary=k) for k,g in groups.items() for r in g['decisions']]
+    con=duckdb.connect(config={'threads':2,'memory_limit':'768MB'})
+    con.execute("SET TimeZone='UTC'")
+    paths,files_by_day,inputs={},{},set()
+    for ds in sorted({r['session_date'] for r in cohort}):
+        d=date.fromisoformat(ds)
+        files=_files(data_root/'lake/quotes/schema=v1','schwab',_at(d,9,30),_at(d,16,0))
+        files_by_day[ds]=files
+        inputs.update(files)
+        paths[ds]=_underlier_minutes(con,files,'index:SPX',_at(d,9,30),_at(d,16,0)) if files else {}
+    for ds in sorted(paths):
+        group=[r for r in cohort if r['session_date']==ds]
+        times=sorted({datetime.fromisoformat(r['signal_at'])-timedelta(minutes=n) for r in group if r.get('signal_at')
+            for n in ((0,15) if project_iv_trend else (0,))})
+        books=_snapshots(con,files_by_day[ds],date.fromisoformat(ds),times,'schwab',15) if files_by_day[ds] else {t:{} for t in times}
+        for row in group:
+            forecast=(_conditional_option_forecast(row,paths,books[datetime.fromisoformat(row['signal_at'])],
+                prior_chain=books[datetime.fromisoformat(row['signal_at'])-timedelta(minutes=15)] if project_iv_trend else None)
+                if row.get('signal_at') and row.get('legs') else dict(status='NO_PRICEABLE_SIGNAL'))
+            prediction=dict(session_date=ds,primary=row['primary'],forecast=forecast)
+            with (output/'predictions.jsonl').open('a') as h:
+                h.write(json.dumps(prediction,default=str)+'\n')
+            with (output/'rows.jsonl').open('a') as h:
+                h.write(json.dumps({**prediction,'realized':row},default=str)+'\n')
+        print(ds,'forecasted',flush=True)
+    (output/'input-files.json').write_text(json.dumps(sorted(inputs),indent=2))
+    con.close()
+
+
+
+def analyze_strategy_adaptations(data_root, output, replay_root):
+    """Evaluate staged cash and date-ordered structure choice from raw replay, never cards."""
+    from statistics import mean
+
+    output.mkdir(parents=True, exist_ok=False)
+    (output / "analysis-research-source.py").write_text(Path(__file__).read_text())
+    (output / "contract.json").write_text(
+        json.dumps(
+            {
+                "source": "raw broker strategy-adaptations replay, no cards",
+                "budget": "1000 USD including estimated roundtrip fees, at most one package per structure/stage; common budget ceiling, not equal dollars invested",
+                "dwell_primary": "30-wide target butterfly, first observed signal per mechanism/day; price_only vs dwell5; no replacements; all/no-cap and budget-cap results both reported",
+                "staged_primary": "20delta10width price_quote; width5/20 and price_only/quote_only controls retained",
+                "staged_addition": "first observed failure only; add second opposite failure only if first position entered, no exit/censor trigger as of second action, fresh simultaneous first/second BBO, uncrossed shorts, combined piecewise-linear expiry loss plus fees <=1000; no reentry after first exit",
+                "staged_exit": "before add first-side policy; after add earliest side exit or evidence gap applies to whole portfolio; combined four-leg fresh BBO after15sec, first valid within60sec; missing stays censored",
+                "stage_controls": "first side alone, full condor at identical first signal, staged; never add independent trade profits when not simultaneously eligible",
+                "competition": "same first signal/target/invalidation/hard15:59; ATM15 debit vertical versus BF30 price_only; one package budget<=1000; no fractional sizing",
+                "selection": "each arm requires12 previous-date complete budget-eligible entries; historical mean per prior observed opportunity: known no-entry=0, entered censored charged full risk as explicit training stress; choose largest strictly positive historical mean among signal-time feasible arms, else NO_TRADE; ties by arm name; delayed entry failure does not promote other arm",
+                "not_oos": "previously explored dates; temporal selection audit, not untouched validation",
+                "Bark": "untouched",
+            },
+            indent=2,
+        )
+    )
+    rows = [json.loads(s) for s in (replay_root / "rows.jsonl").read_text().splitlines()]
+    days = sorted({r["session_date"] for r in rows})
+    con = duckdb.connect(config={"threads": 2, "memory_limit": "768MB"})
+    con.execute("SET TimeZone='UTC'")
+
+    def risk(r):
+        return r["defined_risk_usd"] + 2 * 1.32 * sum(abs(q) for q in r["quantities"])
+
+    def permitted(r):
+        if not r.get("entry_at"):
+            return False
+        signal_loss = (
+            r["width"] - r["signal_package_price"]
+            if r["family"] == "condor"
+            else r["signal_package_price"]
+        )
+        signal_risk = 100 * signal_loss + 2 * 1.32 * sum(abs(q) for q in r["quantities"])
+        return max(signal_risk, risk(r)) <= 1000 + 1e-8
+
+    def cash_result(r, cap=True):
+        if not r:
+            return dict(status="NO_OBSERVED_SIGNAL", entered=False, pnl_usd=None)
+        if not r.get("entry_at"):
+            return dict(status=r["status"], entered=False, pnl_usd=None)
+        if cap and not permitted(r):
+            return dict(status="BUDGET_REJECTED", entered=False, pnl_usd=None)
+        return dict(
+            status=r["status"], entered=True, pnl_usd=r.get("pnl_usd"), risk=risk(r), source=r
+        )
+
+    def stats(rs):
+        es = [r for r in rs if r["entered"]]
+        cs = [r for r in es if r.get("pnl_usd") is not None]
+        missing = [r for r in es if r.get("pnl_usd") is None]
+        net = sum(r["pnl_usd"] for r in cs)
+        return dict(
+            planned=len(rs),
+            entered=len(es),
+            complete=len(cs),
+            missing=len(missing),
+            net=net,
+            mean=mean(r["pnl_usd"] for r in cs) if cs else None,
+            wins=sum(r["pnl_usd"] > 0 for r in cs),
+            missing_stress_net=net - sum(r["risk"] for r in missing),
+            return_per_risk=mean(r["pnl_usd"] / r["risk"] for r in cs) if cs else None,
+            statuses=dict(Counter(r["status"] for r in rs)),
+        )
+
+    def first(pool, day):
+        rs = [r for r in pool if r["session_date"] == day and r.get("signal_at")]
+        return min(rs, key=lambda r: (r["signal_at"], r["signal_name"])) if rs else None
+
+    out = {
+        "dwell": {},
+        "stage": {},
+        "competition": {},
+        "stage_decisions": [],
+        "competition_decisions": [],
+    }
+    for mechanism in ("return_to_range", "continuation_destination"):
+        pool = [r for r in rows if r.get("mechanism") == mechanism and r["family"] == "butterfly"]
+        for cap in (False, True):
+            variants = {v: [] for v in ("price_only", "dwell5")}
+            pairs = []
+            for day in days:
+                a = first([r for r in pool if r["setup"].endswith("_price_only")], day)
+                b = next(
+                    (
+                        r
+                        for r in pool
+                        if a
+                        and r["session_date"] == day
+                        and r["signal_name"] == a["signal_name"]
+                        and r["setup"].endswith("_dwell5")
+                    ),
+                    None,
+                )
+                x, y = cash_result(a, cap), cash_result(b, cap)
+                variants["price_only"].append(dict(x, session_date=day))
+                variants["dwell5"].append(dict(y, session_date=day))
+                if x.get("pnl_usd") is not None and y.get("pnl_usd") is not None:
+                    pairs.append(
+                        dict(
+                            day=day,
+                            base=x["pnl_usd"],
+                            dwell=y["pnl_usd"],
+                            delta=y["pnl_usd"] - x["pnl_usd"],
+                            reached=a["exit_reason"] == "price_destination_reached",
+                            base_exit=a["exit_at"],
+                            dwell_exit=b["exit_at"],
+                        )
+                    )
+            out["dwell"][mechanism + ("_budget" if cap else "_all")] = dict(
+                variants={k: stats(v) for k, v in variants.items()},
+                pairs=pairs,
+                paired_delta_mean=mean(p["delta"] for p in pairs) if pairs else None,
+            )
+
+    # Complete policy: second-side execution requires the first position still open.
+    for width in (5, 10, 20):
+        for variant in ("price_only", "price_quote", "quote_only"):
+            pool = [
+                r
+                for r in rows
+                if r.get("credit_side")
+                and r["width"] == width
+                and r["setup"].endswith("_" + variant)
+            ]
+            controls = {k: [] for k in ("single", "full_ic", "staged")}
+            for ds in days:
+                a = first(pool, ds)
+                single = cash_result(a)
+                stage = dict(
+                    single, addition="NOT_ENTERED" if not single["entered"] else "NO_SECOND_FAILURE"
+                )
+                full = next(
+                    (
+                        r
+                        for r in rows
+                        if a
+                        and r["session_date"] == ds
+                        and r["setup"] == a["setup"].replace("_single", "")
+                    ),
+                    None,
+                )
+                other = [
+                    r
+                    for r in pool
+                    if a
+                    and r["session_date"] == ds
+                    and r.get("signal_at")
+                    and r["credit_side"] != a["credit_side"]
+                ]
+                b = min(other, key=lambda r: r["signal_at"]) if other else None
+                if single["entered"] and b and b.get("entry_at"):
+                    entry = datetime.fromisoformat(b["entry_at"])
+                    signal = datetime.fromisoformat(b["signal_at"])
+                    stop = datetime.fromisoformat(a["exit_trigger_at"])
+                    if stop <= entry:
+                        stage["addition"] = "FIRST_EXIT_OR_GAP_ALREADY_TRIGGERED"
+                    else:
+                        d = date.fromisoformat(ds)
+                        files = _files(
+                            data_root / "lake/quotes/schema=v1",
+                            "schwab",
+                            _at(d, 9, 30),
+                            _at(d, 16, 0),
+                        )
+                        book = _snapshots(con, files, d, [entry], "schwab", 15)[entry]
+                        legs = [
+                            book.get((leg["strike"], leg["right"])) for leg in a["legs"] + b["legs"]
+                        ]
+                        q = a["quantities"] + b["quantities"]
+                        quote = _cash_quote(legs, q, entry, 15, 2)
+                        put = next(
+                            leg["strike"]
+                            for leg, v in zip(a["legs"] + b["legs"], q)
+                            if v < 0 and leg["right"] == "P"
+                        )
+                        call = next(
+                            leg["strike"]
+                            for leg, v in zip(a["legs"] + b["legs"], q)
+                            if v < 0 and leg["right"] == "C"
+                        )
+                        credit = a["entry_price"] + b["entry_price"]
+                        fees = 2 * 1.32 * sum(abs(v) for v in q)
+                        knots = (
+                            [0]
+                            + [leg["strike"] for leg in a["legs"] + b["legs"]]
+                            + [max(put, call) + 100]
+                        )
+                        worst = min(
+                            credit
+                            + sum(
+                                v
+                                * (
+                                    max(s - leg["strike"], 0)
+                                    if leg["right"] == "C"
+                                    else max(leg["strike"] - s, 0)
+                                )
+                                for leg, v in zip(a["legs"] + b["legs"], q)
+                            )
+                            for s in knots
+                        )
+                        joined_risk = max(0, -100 * worst) + fees
+                        if quote is None or not _depth(legs, q):
+                            stage["addition"] = "JOINT_ENTRY_BBO_UNAVAILABLE"
+                        elif put >= call:
+                            stage["addition"] = "CROSSED_SHORTS"
+                        elif joined_risk > 1000 + 1e-8:
+                            stage["addition"] = "JOINT_BUDGET_REJECTED"
+                        else:
+                            limiting = min((a, b), key=lambda r: r["exit_trigger_at"])
+                            at = datetime.fromisoformat(limiting["exit_trigger_at"])
+                            censored = limiting["exit_reason"] in (
+                                "QUOTE_GAP",
+                                "UNDERLIER_EXIT_GAP",
+                            )
+                            intent = dict(at=at, reason=limiting["exit_reason"], censored=censored)
+                            deadline = _at(d, 15, 45)
+                            action = at + (
+                                timedelta(0)
+                                if intent["reason"] == "hard_close"
+                                else timedelta(seconds=15)
+                            )
+                            end = min(
+                                action + timedelta(seconds=60),
+                                _at(d, 16, 0) - timedelta(microseconds=1),
+                            )
+                            combined = dict(
+                                a, legs=legs, quantities=q, entry_at=entry, entry_price=credit
+                            )
+                            events = (
+                                _contract_events(
+                                    con,
+                                    files,
+                                    [leg["instrument_id"] for leg in legs],
+                                    entry,
+                                    end,
+                                    "schwab",
+                                )
+                                if not censored
+                                else {}
+                            )
+                            marks = (
+                                _package_path(combined, events, end, 15, 2) if not censored else []
+                            )
+                            if not censored:
+                                exitbook = _snapshots(con, files, d, [action], "schwab", 15)[action]
+                                exits = [
+                                    exitbook.get((leg["strike"], leg["right"])) for leg in legs
+                                ]
+                                cash = _cash_quote(exits, q, action, 15, 2)
+                                if cash is not None and _depth(exits, q, liquidate=True):
+                                    marks = [x for x in marks if x.at != action] + [
+                                        PolicyMark(action, 2 * credit + cash[1])
+                                    ]
+                            label = _action_exit_label(combined, marks, intent, deadline)
+                            stage = dict(
+                                label,
+                                entered=True,
+                                risk=max(single["risk"], joined_risk),
+                                addition="ADDED",
+                                source=a,
+                                second=b,
+                                combined_legs=legs,
+                                combined_quantities=q,
+                                combined_entry_credit=credit,
+                                joined_risk=joined_risk,
+                            )
+                elif single["entered"] and b:
+                    stage["addition"] = "SECOND_ENTRY_UNAVAILABLE"
+                controls["single"].append(dict(single, session_date=ds))
+                controls["full_ic"].append(dict(cash_result(full), session_date=ds))
+                controls["staged"].append(dict(stage, session_date=ds))
+                out["stage_decisions"].append(
+                    dict(session_date=ds, width=width, variant=variant, **stage)
+                )
+            out["stage"][f"w{width}_{variant}"] = dict(
+                controls={k: stats(v) for k, v in controls.items()},
+                addition_counts=dict(Counter(r["addition"] for r in controls["staged"])),
+            )
+
+    # Date-ordered selection, signal-time feasible arms; current outcome never ranks arms.
+    for mechanism in ("return_to_range", "continuation_destination"):
+        arms = ("butterfly", "vertical")
+        history = {arm: [] for arm in arms}
+        decisions = []
+        baselines = {arm: [] for arm in arms}
+        pool = [
+            r
+            for r in rows
+            if r.get("mechanism") == mechanism
+            and r["setup"].endswith("_price_only")
+            and r["family"] in arms
+        ]
+        for ds in days:
+            signal = first([r for r in pool if r["family"] == "butterfly"], ds)
+            current = {
+                arm: next(
+                    (
+                        r
+                        for r in pool
+                        if signal
+                        and r["session_date"] == ds
+                        and r["family"] == arm
+                        and r.get("signal_at") == signal["signal_at"]
+                        and r["direction"] == signal["direction"]
+                    ),
+                    None,
+                )
+                for arm in arms
+            }
+            selection = _choose_research_structure(history, current, ds)
+            chosen, scores, trained = (selection[k] for k in ("chosen", "scores", "trained"))
+            realized = (
+                cash_result(current[chosen])
+                if chosen
+                else dict(status="NO_TRADE", entered=False, pnl_usd=None)
+            )
+            decision = dict(
+                session_date=ds,
+                mechanism=mechanism,
+                chosen=chosen,
+                scores=scores,
+                trained=trained,
+                **realized,
+            )
+            assert all(v["through"] is None or v["through"] < ds for v in trained.values())
+            decisions.append(decision)
+            for arm in arms:
+                result = cash_result(current[arm])
+                baselines[arm].append(result)
+                if signal:
+                    history[arm].append((ds, result))
+        out["competition"][mechanism] = dict(
+            selected=stats(decisions),
+            baselines={k: stats(v) for k, v in baselines.items()},
+            choices=dict(Counter(d["chosen"] or "NO_TRADE" for d in decisions)),
+        )
+        out["competition_decisions"].extend(decisions)
+    (output / "results.json").write_text(json.dumps(out, indent=2, default=str))
+    con.close()
+    return out
+
+
+def _choose_research_structure(history, candidates, decision_date):
+    """Past-date economic labels rank arms; only signal-time cash gates current entry."""
+    scores,trained={},{}
+    for arm,observations in history.items():
+        past=[(d,r) for d,r in observations if d<decision_date]
+        complete=sum(r['entered'] and r.get('pnl_usd') is not None for _,r in past)
+        trained[arm]=dict(complete=complete,through=max((d for d,_ in past),default=None))
+        if complete>=12:
+            scores[arm]=float(np.mean([(r['pnl_usd'] if r.get('pnl_usd') is not None else -r['risk'])
+                if r['entered'] else 0 for _,r in past]))
+    feasible=[]
+    for arm,row in candidates.items():
+        if not row or 'signal_package_price' not in row:
+            continue
+        debit=row['signal_package_price']
+        fee=2*1.32*sum(abs(q) for q in row['quantities'])
+        if 0<debit/row['width']<=.45 and 100*debit+fee<=1000 and scores.get(arm,0)>0:
+            feasible.append(arm)
+    chosen=min(feasible,key=lambda arm:(-scores[arm],arm)) if feasible else None
+    return dict(chosen=chosen,scores=scores,trained=trained)
+
+def _gamma_box(profile, spot, mode="signed_proxy"):
+    """Observable concentration plus an explicitly assumed C-minus-P sign convention."""
+    base = dict(dealer_sign="UNKNOWN", actual_regime="UNKNOWN", term_structure="UNKNOWN", mode=mode)
+    points = profile.get("strike_profile", [])
+    if profile.get("status") != "available" or len(points) < 33 or spot is None:
+        return dict(base, status="PROFILE_UNAVAILABLE", paired_strikes=len(points))
+    points = [
+        dict(
+            p,
+            net=p["call_gamma_oi"] - p["put_gamma_oi"],
+            gross=p["call_gamma_oi"] + p["put_gamma_oi"],
+        )
+        for p in points
+    ]
+    local = [p for p in points if abs(p["strike"] - spot) <= 10]
+    total = sum(p["gross"] for p in local)
+    fraction = sum(p["net"] for p in local) / total if total > 0 and len(local) >= 3 else None
+    field = "net" if mode == "signed_proxy" else "gross"
+    below = [p for p in points if 5 <= spot - p["strike"] <= 100 and p[field] > 0]
+    above = [p for p in points if 5 <= p["strike"] - spot <= 100 and p[field] > 0]
+    base.update(
+        spot=spot,
+        local_signed_fraction=fraction,
+        paired_strikes=len(points),
+        sign_assumption="CALL_PLUS_PUT_MINUS; not observed dealer positioning",
+        negative_proxy_strikes=[
+            p["strike"] for p in sorted(points, key=lambda p: p["net"])[:3] if p["net"] < 0
+        ],
+    )
+    if not below or not above:
+        return dict(base, status="NO_TWO_WALLS")
+    lower = max(below, key=lambda p: (p[field], -abs(p["strike"] - spot)))["strike"]
+    upper = max(above, key=lambda p: (p[field], -abs(p["strike"] - spot)))["strike"]
+    inside = [p for p in points if lower < p["strike"] < upper]
+    magnitude = sum(abs(p["net"]) for p in inside)
+    negative = sum(max(-p["net"], 0) for p in inside) / magnitude if magnitude > 0 else None
+    nearby_negative = any(p["net"] < 0 and abs(p["strike"] - spot) <= 15 for p in points)
+    regime = (
+        "UNKNOWN"
+        if fraction is None
+        else "VACUUM_PROXY"
+        if fraction < 0
+        else "TRANSITION_PROXY"
+        if fraction > 0 and nearby_negative
+        else "PIN_PROXY"
+        if fraction > 0 and negative is not None and negative <= 0.20
+        else "MIXED_PROXY"
+    )
+    return dict(
+        base,
+        status="available",
+        lower=lower,
+        upper=upper,
+        width=upper - lower,
+        negative_interior_fraction=negative,
+        proxy_regime=regime,
+    )
+
+
+def _gamma_wall_reaction(path, start, end, wall, side):
+    """First minute-close approach only; unvisited walls are never successful defenses."""
+    sign = 1 if side == "upper" else -1
+    at = start + timedelta(minutes=1)
+    touch = None
+    while at <= end:
+        if at not in path:
+            return dict(status="GAP_AFTER_TOUCH" if touch else "GAP_BEFORE_TOUCH", touch_at=touch)
+        distance = sign * (path[at] - wall)
+        if touch is None and distance >= -1:
+            touch = at
+        if touch is not None:
+            if distance >= 5:
+                return dict(status="BREACH", touch_at=touch, resolved_at=at)
+            if distance <= -5:
+                return dict(status="REJECTION", touch_at=touch, resolved_at=at)
+            if at >= touch + timedelta(minutes=30):
+                return dict(status="UNRESOLVED_30M", touch_at=touch)
+        at += timedelta(minutes=1)
+    return dict(status="SESSION_CUTOFF" if touch else "NO_TOUCH", touch_at=touch)
+
+
+def research_gamma_boxes(data_root, output, start, end):
+    """Freeze daily raw gamma proxies before observing price responses."""
+    output.mkdir(parents=True, exist_ok=False)
+    (output / "research-source.py").write_text(Path(__file__).read_text())
+    contract = dict(
+        scope="0DTE observed OI x BBO-implied gamma; dealer net sign and all-maturity dominance UNKNOWN",
+        clocks="09:25 pre-open availability separately for Schwab/IBKR; primary frozen09:45 Schwab; quarter-hour causal updates through15:45",
+        box="largest strike weight on each side 5..100 points away; signed C-minus-P versus unsigned C-plus-P; >=33 paired strikes",
+        regime="local +/-10 signed fraction; local negative VACUUM_PROXY; local positive with negative within15 TRANSITION_PROXY; otherwise positive with interior negative absolute-net share<=20% PIN_PROXY; else MIXED/UNKNOWN",
+        control="unsigned walls moved5 points inward if both remain >=5 away; neighboring strike diagnostic, not an exact geometry match",
+        reaction="first minute close within1 of wall or beyond; first5 point rejection or5 point breach within30m; no touch and missing remain separate; not executable trade labels",
+        evaluation="all planned days; no daily last-good substitution; pairs clustered by session; explored window not untouched OOS",
+        actual_dealer_sign="UNKNOWN",
+        Bark="untouched",
+        automatic_ordering=False,
+    )
+    (output / "contract.json").write_text(json.dumps(contract, indent=2))
+    con = duckdb.connect(config={"threads": 2, "memory_limit": "768MB"})
+    con.execute("SET TimeZone='UTC'")
+    inputs = set()
+    maps = []
+    reactions = []
+    preopen = []
+    maturities = []
+    day = start
+    while day <= end:
+        if DEFAULT_MARKET_CALENDAR.session(day) is None:
+            day += timedelta(days=1)
+            continue
+        at = _at(day, 9, 45)
+        finish = _at(day, 15, 45)
+        times = [_at(day, 9, 25)] + [at + timedelta(minutes=15 * i) for i in range(25)]
+        files = _files(
+            data_root / "lake/quotes/schema=v1", "schwab", _at(day, 9, 0), _at(day, 16, 0)
+        )
+        inputs.update(files)
+        path = (
+            _underlier_minutes(con, files, "index:SPX", _at(day, 9, 30), _at(day, 16, 0))
+            if files
+            else {}
+        )
+        books = (
+            _snapshots(con, files, day, times, "schwab", 15, include_open_interest=True)
+            if files
+            else {t: {} for t in times}
+        )
+        spots = _spx_at(con, files, times) if files else {}
+        primary = {}
+        for clock in times:
+            profile = _gamma_position(books[clock], clock, include_profile=True)
+            spot = spots.get(clock)
+            if clock == _at(day, 9, 25):
+                preopen.append(
+                    dict(
+                        session_date=str(day),
+                        provider="schwab",
+                        at=clock,
+                        profile_status=profile["status"],
+                        valid_contracts=profile.get("valid_contracts", 0),
+                        spot=spot,
+                    )
+                )
+                continue
+            for mode in ("signed_proxy", "unsigned"):
+                box = _gamma_box(profile, spot, mode)
+                row = dict(session_date=str(day), at=clock, **box)
+                maps.append(row)
+                if clock == at:
+                    primary[mode] = row
+        original = primary["unsigned"]
+        control = dict(original, mode="neighbor_control")
+        if (
+            original["status"] == "available"
+            and original["lower"] + 5 <= original["spot"] - 5
+            and original["upper"] - 5 >= original["spot"] + 5
+        ):
+            control.update(
+                lower=original["lower"] + 5,
+                upper=original["upper"] - 5,
+                width=original["width"] - 10,
+            )
+        else:
+            control["status"] = "CONTROL_UNAVAILABLE"
+        primary["neighbor_control"] = control
+        for mode, box in primary.items():
+            for side in ("lower", "upper"):
+                outcome = (
+                    _gamma_wall_reaction(path, at, finish, box[side], side)
+                    if box["status"] == "available"
+                    else dict(status=box["status"])
+                )
+                reactions.append(
+                    dict(session_date=str(day), mode=mode, side=side, box=box, **outcome)
+                )
+        if files:
+            _read_quotes(con, files)
+            expiry_counts = con.execute(
+                """SELECT split_part(instrument_id,':',4) expiry,
+              count(DISTINCT instrument_id) contracts FROM broker_quotes
+              WHERE instrument_id LIKE 'option:SPX:SPXW:%' AND received_at<=? AND received_at>=?-INTERVAL 15 SECOND
+                AND quote_time<=received_at AND quote_time>=?-INTERVAL 15 SECOND
+                AND quality='live' AND lower(market_data_type) IN ('1','live') AND bid>=0 AND ask>=bid AND ask>0
+              GROUP BY 1 ORDER BY 1""",
+                [at, at, at],
+            ).fetchall()
+        else:
+            expiry_counts = []
+        maturities.append(
+            dict(session_date=str(day), at=at, observed_expiries=expiry_counts, dominance="UNKNOWN")
+        )
+        ibkr = _files(data_root / "lake/quotes/schema=v1", "ibkr", _at(day, 9, 0), _at(day, 9, 26))
+        inputs.update(ibkr)
+        before = _at(day, 9, 25)
+        book = (
+            _snapshots(con, ibkr, day, [before], "ibkr", 15, include_open_interest=True)[before]
+            if ibkr
+            else {}
+        )
+        profile = _gamma_position(book, before, include_profile=True)
+        preopen.append(
+            dict(
+                session_date=str(day),
+                provider="ibkr",
+                at=before,
+                profile_status=profile["status"],
+                valid_contracts=profile.get("valid_contracts", 0),
+            )
+        )
+        print(str(day), {k: v["status"] for k, v in primary.items()}, flush=True)
+        day += timedelta(days=1)
+    for name, value in [
+        ("maps", maps),
+        ("reactions", reactions),
+        ("preopen", preopen),
+        ("maturities", maturities),
+    ]:
+        (output / f"{name}.json").write_text(json.dumps(value, indent=2, default=str))
+    summary = {}
+    for mode in ("signed_proxy", "unsigned", "neighbor_control"):
+        rs = [r for r in reactions if r["mode"] == mode]
+        done = [r for r in rs if r["status"] in ("REJECTION", "BREACH")]
+        summary[mode] = dict(
+            planned_days=len(rs) // 2,
+            statuses=dict(Counter(r["status"] for r in rs)),
+            resolved=len(done),
+            independent_resolved_days=len({r["session_date"] for r in done}),
+            rejection_rate=sum(r["status"] == "REJECTION" for r in done) / len(done)
+            if done
+            else None,
+        )
+    pairs = []
+    for r in reactions:
+        if r["mode"] != "unsigned" or r["status"] not in ("REJECTION", "BREACH"):
+            continue
+        control = next(
+            c
+            for c in reactions
+            if c["session_date"] == r["session_date"]
+            and c["side"] == r["side"]
+            and c["mode"] == "neighbor_control"
+        )
+        if control["status"] in ("REJECTION", "BREACH"):
+            pairs.append(
+                dict(
+                    session_date=r["session_date"],
+                    side=r["side"],
+                    actual=r["status"],
+                    control=control["status"],
+                    delta=int(r["status"] == "REJECTION") - int(control["status"] == "REJECTION"),
+                )
+            )
+    by_day = [
+        float(np.mean([r["delta"] for r in pairs if r["session_date"] == d]))
+        for d in sorted({r["session_date"] for r in pairs})
+    ]
+    rng = np.random.default_rng(20260907)
+    interval = (
+        np.quantile(
+            [np.mean(rng.choice(by_day, len(by_day), replace=True)) for _ in range(2000)],
+            [0.025, 0.975],
+        ).tolist()
+        if by_day
+        else None
+    )
+    summary["paired_control"] = dict(
+        rows=pairs,
+        independent_days=len(by_day),
+        mean_day_difference=float(np.mean(by_day)) if by_day else None,
+        exploratory_session_bootstrap95=interval,
+    )
+    summary["preopen"] = {
+        provider: dict(Counter(r["profile_status"] for r in preopen if r["provider"] == provider))
+        for provider in ("schwab", "ibkr")
+    }
+    (output / "summary.json").write_text(json.dumps(summary, indent=2))
+    (output / "input-files.json").write_text(json.dumps(sorted(inputs), indent=2))
+    con.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=Path("/srv/data/spx-spark/data"))
@@ -3195,27 +4112,47 @@ def main():
     parser.add_argument("--explore-price-exits", action="store_true")
     parser.add_argument("--explore-position-signals", action="store_true")
     parser.add_argument("--explore-mechanism-signals", action="store_true")
+    parser.add_argument("--research-gamma-box", action="store_true")
+    parser.add_argument("--analyze-adaptations", type=Path)
+    parser.add_argument("--explore-adaptations", action="store_true")
+    parser.add_argument("--explore-two-sided-auction", action="store_true")
+    parser.add_argument("--research-butterfly-width", type=int, choices=(15,30,50), default=15)
     parser.add_argument("--research-option-factors", type=Path)
     parser.add_argument("--research-regime-transitions", type=Path)
+    parser.add_argument("--research-conditional-option-value", type=Path)
+    parser.add_argument("--conditional-iv-trend", action="store_true")
     parser.add_argument("--explore-signal", choices=['or15_up','or15_down','reclaim_up','reclaim_down',
         'butterfly_1400','butterfly_1430','butterfly_1500','ic20_w10','ic20_w20'])
     parser.add_argument("--exit-latency-seconds",type=int,choices=(15,30,60),default=15)
     parser.add_argument("--close-centers", type=Path)
     parser.add_argument("--signal-entry-delay-seconds", type=int, choices=(15, 30, 60), default=15)
     args = parser.parse_args()
+    if args.research_gamma_box:
+        if args.start is None or args.end is None:
+            parser.error('gamma box research requires explicit --start and --end')
+        research_gamma_boxes(args.data_root,args.output_root,args.start,args.end)
+        return
+    if args.analyze_adaptations:
+        analyze_strategy_adaptations(args.data_root,args.output_root,args.analyze_adaptations)
+        return
+    if args.research_conditional_option_value:
+        research_conditional_option_value(args.data_root,args.output_root,args.research_conditional_option_value,
+            project_iv_trend=args.conditional_iv_trend)
+        return
     if args.research_regime_transitions:
         research_regime_transitions(args.data_root,args.output_root,args.research_regime_transitions)
         return
     if args.research_option_factors:
         research_option_factors(args.data_root,args.output_root,args.research_option_factors)
         return
-    if args.explore_price_exits or args.explore_position_signals or args.explore_mechanism_signals:
+    if args.explore_price_exits or args.explore_position_signals or args.explore_mechanism_signals or args.explore_two_sided_auction or args.explore_adaptations:
         if args.start is None or args.end is None:
             parser.error('price exit exploration requires explicit --start and --end')
         explore_price_exits(args.data_root,args.output_root,args.start,args.end,args.providers,
             signal_filter=args.explore_signal,entry_delay_seconds=args.signal_entry_delay_seconds,
             exit_latency_seconds=args.exit_latency_seconds,position_signals=args.explore_position_signals,
-            mechanism_signals=args.explore_mechanism_signals)
+            mechanism_signals=args.explore_mechanism_signals or args.explore_two_sided_auction or args.explore_adaptations,
+            butterfly_width=args.research_butterfly_width,two_sided_auction=args.explore_two_sided_auction,adaptations=args.explore_adaptations)
         return
     if args.relax_exit_contracts:
         if args.start is None or args.end is None:

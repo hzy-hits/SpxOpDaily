@@ -174,6 +174,7 @@ def _write_lake(root, rows):
         "effective_price": "DOUBLE",
         "delta": "DOUBLE",
         "implied_vol": "DOUBLE",
+        "open_interest": "DOUBLE",
         "greeks_model": "VARCHAR",
         "quality": "VARCHAR",
         "market_data_type": "VARCHAR",
@@ -782,3 +783,224 @@ def test_zero_variance_does_not_fabricate_infinite_expansion(research):
     fact=research._causal_regime(path,at,0.)
     assert fact['state']=='TREND_UP'
     assert fact['expansion_ratio'] is None
+
+
+def test_conditional_value_never_reads_today_future_or_realized_entry(research):
+    import copy
+
+    at=research._at(DAY,10,0)
+    chain={}
+    tau=6/(365*24)
+    for strike in range(7400,7601,5):
+        for right in ('C','P'):
+            price=research.bs_price(7500,strike,.2,tau,right)
+            chain[strike,right]=leg(strike,price,at,strike=strike,right=right)
+    row=dict(signal_at=at,entry_at=at+timedelta(seconds=15),entry_price=1.,pnl_usd=999.,
+        family='butterfly',direction='UP',width=15,target_level=7515,invalidation_level=7490,
+        quantities=[1,-2,1],legs=[chain[k,'C'] for k in (7500,7515,7530)])
+    paths={}
+    for days in range(13):
+        day=DAY-timedelta(days=days)
+        clock=research._at(day,10,0)
+        paths[str(day)]={clock+timedelta(minutes=i):7500+(i%2)*.2 if i<=0 else 7500+i for i in range(-20,61)}
+    first=research._conditional_option_forecast(row,paths,chain)
+    assert first['status']=='FORECAST_READY'
+    assert first['clock_only']['sessions']==12 and first['state_matched']['sessions']==8
+    altered=copy.deepcopy(paths)
+    for time in altered[str(DAY)]:
+        if time>at:
+            altered[str(DAY)][time]=1e9
+    altered[str(DAY+timedelta(days=1))]=altered[str(DAY)]
+    second=research._conditional_option_forecast({**row,'entry_price':1e9,'pnl_usd':-1e9},altered,chain)
+    assert first==second
+    assert all(s['day']<str(DAY) for s in first['scenarios'])
+    assert research._conditional_option_forecast(row,paths,chain,prior_chain={})['status']=='PRIOR_FIXED_STRIKE_IV_UNAVAILABLE'
+    for ds,path in altered.items():
+        if ds<str(DAY):
+            path.pop(research._at(date.fromisoformat(ds),10,2))
+    missing=research._conditional_option_forecast(row,altered,chain)
+    assert missing['state_matched']['missing']==8
+    assert missing['state_matched']['mean_completed'] is None
+    assert missing['state_matched']['missing_full_risk_stress_mean']<0
+
+
+def test_conditional_condor_forecast_cannot_reverse_a_large_upside_loss(research):
+    at=research._at(DAY,10,0)
+    old_at=research._at(DAY-timedelta(days=1),10,0)
+    tau=6/(365*24)
+    keys=[(7440,'P'),(7450,'P'),(7550,'C'),(7560,'C')]
+    chain={key:leg(i,research.bs_price(7500,key[0],.2,tau,key[1]),at,strike=key[0],right=key[1]) for i,key in enumerate(keys)}
+    row=dict(family='condor',direction='DOWN',width=10,quantities=[1,-1,-1,1],
+        legs=list(chain.values()),target_level=7500,invalidation_level=7600)
+    current={at:7500.}
+    history={old_at+timedelta(minutes=i):7500. if i==0 else 7700. for i in range(4)}
+    result=research._analog_cash_scenario(row,current,history,old_at,at,chain,7500,[.2]*4,1.)
+    assert result['status']=='COMPLETE_EXIT'
+    assert result['pnl_usd']< -100
+    assert result['exit_reason']=='stop_loss'
+
+
+@pytest.mark.parametrize("width", [15, 30, 50])
+def test_butterfly_width_changes_geometry_without_changing_target_or_contract_count(research, width):
+    at = research._at(DAY, 10, 0)
+    chain = {}
+    for strike in range(7350, 7651, 5):
+        for right in ("C", "P"):
+            price = research.bs_price(7500, strike, .20, 6 / (365*24), right)
+            chain[strike, right] = leg(strike, price, at, strike=strike, right=right,
+                                      instrument_id=f"{strike}:{right}")
+    signal = {"family": "butterfly", "signal_at": at, "direction": "UP"}
+    row, reason = research._structure(signal, chain, age=15, skew=2,
+                                     anchor_override=7515, butterfly_width=width)
+    assert reason is None
+    assert [item["strike"] for item in row["legs"]] == [7515-width, 7515, 7515+width]
+    assert sum(abs(q) for q in row["quantities"]) == 4
+    cash = research._cash_quote(row["legs"], row["quantities"], at, 15, 2)
+    assert 0 < cash[0] == row["signal_package_price"] < width
+
+
+def test_two_sided_auction_waits_for_both_failures_and_ignores_future(research):
+    start=research._at(DAY,9,31)
+    values=[7500,7510]*7+[7505,7512,7513,7508,7507,7498,7497,7502,7503]
+    path={start+timedelta(minutes=i):p for i,p in enumerate(values)}
+    at=research._at(DAY,9,53)
+    rows=research._mechanism_signals(DAY,path,two_sided_auction=True)
+    assert len(rows)==6
+    assert all(r['signal_at']==at and r['auction_lower']==7496 and r['auction_upper']==7514 for r in rows)
+    assert research._mechanism_signals(DAY,{**path,at+timedelta(minutes=1):9000},
+                                       two_sided_auction=True)==rows
+    early={t:p for t,p in path.items() if t<at}
+    assert all(not r.get('signal_at') for r in research._mechanism_signals(DAY,early,two_sided_auction=True))
+
+
+@pytest.mark.parametrize('outside',[7495,7515])
+def test_two_sided_auction_exits_when_either_failed_extreme_breaks(research,outside):
+    row=dict(family='condor',direction='NEUTRAL',entry_at=ENTRY,
+             mechanism='two_sided_auction',auction_lower=7496,auction_upper=7514)
+    first=ENTRY.replace(second=0)+timedelta(minutes=1)
+    path={first:7505,first+timedelta(minutes=1):outside,first+timedelta(minutes=2):outside}
+    intent=research._mechanism_exit_intent(row,path,research._at(DAY,15,45))
+    assert intent['at']==first+timedelta(minutes=2)
+    assert not intent['censored']
+
+
+@pytest.mark.parametrize('right', ['P','C'])
+def test_one_sided_credit_uses_only_failed_side_and_two_contract_fees(research,right):
+    at=research._at(DAY,10,0)
+    chain={}
+    for strike in range(7350,7651,5):
+        for side in ('C','P'):
+            if side!=right and strike!=7500:
+                continue
+            price=research.bs_price(7500,strike,.20,6/(365*24),side)
+            chain[strike,side]=leg(strike,price,at,strike=strike,right=side,instrument_id=f'{strike}:{side}')
+    row,reason=research._delta_condor(chain,at,.20,10,'bbo_implied',only_right=right)
+    assert reason is None
+    assert len(row['legs'])==2 and all(q['right']==right for q in row['legs'])
+    assert row['quantities']==[1,-1]
+    row.update(entry_at=at,entry_price=row['signal_package_price'])
+    intent=dict(at=at+timedelta(minutes=1),reason='price_hypothesis_failed',censored=False)
+    result=research._action_exit_label(row,[research.PolicyMark(intent['at']+timedelta(seconds=15),row['entry_price'])],
+                                       intent,research._at(DAY,15,45))
+    assert result['pnl_usd']==pytest.approx(-5.28)
+
+
+@pytest.mark.parametrize('sign',[1,-1])
+def test_dwell_waits_for_arrival_then_leaving_zone_and_preserves_censoring(research,sign):
+    row=dict(family='butterfly',direction='UP' if sign==1 else 'DOWN',entry_at=ENTRY,
+             target_level=7500,invalidation_level=7500-20*sign)
+    first=ENTRY.replace(second=0)+timedelta(minutes=1)
+    path={first+timedelta(minutes=i):7500+sign*d for i,d in enumerate([-8,1,4,-3,6])}
+    deadline=research._at(DAY,15,59)
+    base=research._mechanism_exit_intent(row,path,deadline)
+    dwell=research._mechanism_exit_intent(row,path,deadline,stay_after_arrival=True)
+    assert base['at']==first+timedelta(minutes=1)
+    assert dwell['at']==first+timedelta(minutes=4)
+    assert dwell['reason']=='left_destination_zone'
+    del path[first+timedelta(minutes=2)]
+    assert research._mechanism_exit_intent(row,path,deadline,stay_after_arrival=True)['censored']
+
+
+def test_structure_choice_ignores_current_outcome_entry_and_future_training(research):
+    past=[(f'2026-07-{i:02}',dict(entered=True,pnl_usd=10.,risk=500.)) for i in range(1,13)]
+    history={'vertical':past,'butterfly':[(d,{**r,'pnl_usd':-10.}) for d,r in past]}
+    candidates={arm:dict(signal_package_price=4.,width=15,quantities=[1,-1] if arm=='vertical' else [1,-2,1])
+                for arm in history}
+    expected=research._choose_research_structure(history,candidates,'2026-08-05')
+    assert expected['chosen']=='vertical'
+    altered={arm:{**r,'entry_price':1e9,'pnl_usd':1e12,'status':'EXIT_BBO_UNAVAILABLE'} for arm,r in candidates.items()}
+    later={arm:rs+[('2026-08-05',dict(entered=True,pnl_usd=1e12,risk=1)),
+                  ('2026-08-06',dict(entered=True,pnl_usd=1e12,risk=1))] for arm,rs in history.items()}
+    assert research._choose_research_structure(later,altered,'2026-08-05')==expected
+    candidates['vertical']['signal_package_price']=12
+    assert research._choose_research_structure(history,candidates,'2026-08-05')['chosen'] is None
+    history['vertical']=past[:11]
+    assert research._choose_research_structure(history,altered,'2026-08-05')['chosen'] is None
+
+
+@pytest.mark.parametrize('censored',[False,True])
+def test_staged_policy_cannot_add_after_first_exit_or_quote_gap(research,tmp_path,censored):
+    replay=tmp_path/'replay'
+    replay.mkdir()
+    base=dict(family='condor',mechanism='failed_expansion',width=10,quantities=[1,-1],
+              entry_price=1.5,signal_package_price=1.5,defined_risk_usd=850.,session_date=str(DAY),
+              status='COMPLETE_EXIT',pnl_usd=20.,exit_reason='profit_take')
+    first=dict(base,credit_side='C',direction='DOWN',signal_name='failure_up_ic20_w10_single',
+               setup='failure_up_ic20_w10_single_price_quote',signal_at=str(research._at(DAY,10,0)),
+               entry_at=str(research._at(DAY,10,0)+timedelta(seconds=15)),exit_trigger_at=str(research._at(DAY,10,5)))
+    if censored:
+        first.update(status='QUOTE_GAP',exit_reason='QUOTE_GAP',pnl_usd=None)
+    second=dict(base,credit_side='P',direction='UP',signal_name='failure_down_ic20_w10_single',
+                setup='failure_down_ic20_w10_single_price_quote',signal_at=str(research._at(DAY,11,0)),
+                entry_at=str(research._at(DAY,11,0)+timedelta(seconds=15)),exit_trigger_at=str(research._at(DAY,11,30)),pnl_usd=1000.)
+    (replay/'rows.jsonl').write_text('\n'.join(json.dumps(r) for r in [first,second]))
+    result=research.analyze_strategy_adaptations(tmp_path,tmp_path/'analysis',replay)
+    group=result['stage']['w10_price_quote']
+    assert group['addition_counts']=={'FIRST_EXIT_OR_GAP_ALREADY_TRIGGERED':1}
+    assert group['controls']['staged']['net']==(0 if censored else 20.)
+    assert group['controls']['staged']['missing']==int(censored)
+
+
+def test_gamma_box_sign_is_an_assumption_and_unsigned_walls_ignore_sign(research):
+    points=[dict(strike=k,call_gamma_oi=100 if k in (7475,7525) else 2,put_gamma_oi=1)
+            for k in range(7400,7601,5)]
+    profile=dict(status='available',strike_profile=points)
+    box=research._gamma_box(profile,7500)
+    assert (box['lower'],box['upper'])==(7475,7525)
+    assert box['proxy_regime']=='PIN_PROXY'
+    assert box['dealer_sign']==box['actual_regime']==box['term_structure']=='UNKNOWN'
+    swapped=dict(profile,strike_profile=[dict(strike=p['strike'],call_gamma_oi=p['put_gamma_oi'],put_gamma_oi=p['call_gamma_oi']) for p in points])
+    assert research._gamma_box(swapped,7500)['status']=='NO_TWO_WALLS'
+    unsigned=research._gamma_box(swapped,7500,'unsigned')
+    assert (unsigned['lower'],unsigned['upper'])==(7475,7525)
+    points[21]['put_gamma_oi']=3
+    assert research._gamma_box(profile,7500)['proxy_regime']=='TRANSITION_PROXY'
+
+
+def test_gamma_wall_first_touch_does_not_count_unvisited_or_missing_as_defended(research):
+    start=research._at(DAY,9,45)
+    path={start+timedelta(minutes=i+1):v for i,v in enumerate([7490,7499,7506,7490])}
+    result=research._gamma_wall_reaction(path,start,start+timedelta(minutes=4),7500,'upper')
+    assert result['status']=='BREACH'
+    assert result['resolved_at']==start+timedelta(minutes=3)
+    untouched=research._gamma_wall_reaction(path,start,start+timedelta(minutes=4),7525,'upper')
+    assert untouched['status']=='NO_TOUCH'
+    del path[start+timedelta(minutes=3)]
+    assert research._gamma_wall_reaction(path,start,start+timedelta(minutes=4),7500,'upper')['status']=='GAP_AFTER_TOUCH'
+
+
+def test_gamma_box_research_does_not_infer_expiry_dominance_from_observed_contracts(research,tmp_path):
+    at=research._at(DAY,9,45)-timedelta(seconds=5)
+    rows=[leg(0,7500,at,instrument_id='index:SPX')]
+    for expiry in (DAY,DAY+timedelta(days=1)):
+        rows.append(leg(0,10.,at,instrument_id=f'option:SPX:SPXW:{expiry:%Y%m%d}:7500:C',
+                        expiry=expiry,trading_class='SPXW',open_interest=100))
+    _write_lake(tmp_path/'data',rows)
+    output=tmp_path/'box'
+    research.research_gamma_boxes(tmp_path/'data',output,DAY,DAY)
+    maturity=json.loads((output/'maturities.json').read_text())[0]
+    assert maturity['observed_expiries']==[['20260805',1],['20260806',1]]
+    assert maturity['dominance']=='UNKNOWN'
+    summary=json.loads((output/'summary.json').read_text())
+    assert summary['signed_proxy']['resolved']==0
+    assert summary['signed_proxy']['rejection_rate'] is None
