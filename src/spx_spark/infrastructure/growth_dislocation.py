@@ -18,6 +18,8 @@ from spx_spark.analytics.growth_dislocation import (
     POLICY_VERSION,
     apply_crowding,
     candidate_sort_key,
+    core_display_row,
+    new_core_member,
     price_features,
     price_location_52w,
     priority_sort_key,
@@ -667,7 +669,7 @@ def _apply_core_pool(
 
     if not initialized and complete_daily:
         for symbol, row in sorted(candidates.items()):
-            members[symbol] = _new_core_member(row, at=at_label, reason="BOOTSTRAP")
+            members[symbol] = new_core_member(row, at=at_label, reason="BOOTSTRAP")
             added.append({"symbol": symbol, "reason": "BOOTSTRAP"})
         initialized = True
         entry_streaks.clear()
@@ -727,7 +729,7 @@ def _apply_core_pool(
             if count < CORE_ENTRY_CONFIRMATIONS:
                 entry_streaks[symbol] = count
                 continue
-            members[symbol] = _new_core_member(
+            members[symbol] = new_core_member(
                 candidates[symbol],
                 at=at_label,
                 reason="TWO_COMPLETE_DAILY_PASSES",
@@ -748,7 +750,7 @@ def _apply_core_pool(
         dict(row) for row in core.get("top_opportunities", []) if isinstance(row, Mapping)
     ]
     displayed_top = [
-        _core_display_row(
+        core_display_row(
             member=members.get(str(row.get("symbol")), {}),
             stored=row,
             current=candidates.get(str(row.get("symbol"))),
@@ -759,7 +761,7 @@ def _apply_core_pool(
         for row in stored_top
     ]
     core_rows = [
-        _core_display_row(
+        core_display_row(
             member=member,
             stored=_mapping(member.get("snapshot")),
             current=candidates.get(symbol),
@@ -836,21 +838,6 @@ def _mapping_records(value: Any) -> dict[str, dict[str, Any]]:
     }
 
 
-def _new_core_member(row: Mapping[str, Any], *, at: str, reason: str) -> dict[str, Any]:
-    return {
-        "symbol": str(row["symbol"]),
-        "lifecycle_status": "CORE_ACTIVE",
-        "pause_reason": None,
-        "entered_at": at,
-        "entry_reason": reason,
-        "last_eligible_at": at,
-        "last_complete_observed_at": at,
-        "exit_streak": 0,
-        "exit_reason": None,
-        "snapshot": dict(row),
-    }
-
-
 def _core_exit_signal(
     *,
     symbol: str,
@@ -878,48 +865,6 @@ def _core_exit_signal(
         return "LEAPS_DEPTH_LOST", False
     return None, False
 
-
-def _core_display_row(
-    *,
-    member: Mapping[str, Any],
-    stored: Mapping[str, Any],
-    current: Mapping[str, Any] | None,
-    warming: Mapping[str, Any] | None,
-    observation: Mapping[str, Any] | None,
-    quality_complete: bool,
-) -> dict[str, Any]:
-    row = dict(current or stored)
-    if current is not None:
-        today_state = str(current.get("state") or "WATCH")
-    elif warming is not None or not quality_complete:
-        today_state = "STALE"
-    else:
-        today_state = "PAUSED"
-    row.update(
-        {
-            "core_status": member.get("lifecycle_status", "CORE_PAUSED"),
-            "today_state": today_state,
-            "pause_reason": member.get("pause_reason"),
-            "entry_reason": member.get("entry_reason"),
-            "entered_at": member.get("entered_at"),
-            "exit_streak": int(member.get("exit_streak") or 0),
-            "exit_reason": member.get("exit_reason"),
-        }
-    )
-    if current is None and observation is not None:
-        for key in (
-            "price_location_52w",
-            "market_cap",
-            "dividend_yield",
-            "ivp_13w",
-            "ivp_26w",
-            "ivp_52w",
-        ):
-            if observation.get(key) is not None:
-                row[key] = observation[key]
-    if warming is not None:
-        row["data_quality_reasons"] = warming.get("data_quality_reasons", [])
-    return row
 
 def _candidate_row(
     *,
