@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
@@ -191,13 +191,23 @@ def scan_once(
         )
         document["added_symbols"] = added_symbols
         document["exited_symbols"] = exited_symbols
+        strict_added = sorted(current_symbols - previous_symbols) if complete else []
+        document["strict_added_symbols"] = strict_added
         fingerprint = _material_fingerprint(document)
         document["material_fingerprint"] = fingerprint
         atomic_write_json_secure(latest_path, document)
         notification: EnqueueResult | None = None
-        should_notify = mode == "daily" or bool(added_symbols)
+        should_notify = mode == "daily" or bool(added_symbols) or bool(strict_added)
         if should_notify and notification_settings is not None:
             title, text = render_notification(document)
+            _, feishu_text = render_notification(document, discoveries=True)
+            # New intraday discovery events belong only to Feishu. Existing daily
+            # routing and its legacy text remain unchanged.
+            delivery_settings = notification_settings
+            if mode != "daily" and not added_symbols:
+                delivery_settings = replace(
+                    notification_settings, bark_enabled=False, bark_friend_enabled=False,
+                )
             slot_at = ny.replace(second=0, microsecond=0).astimezone(timezone.utc)
             envelope = NotificationEnvelope(
                 event_id=_notification_id(mode, slot_at, fingerprint),
@@ -208,12 +218,12 @@ def scan_once(
                 expires_at=slot_at + timedelta(hours=4),
             )
             notification = enqueue(
-                notification_settings,
+                delivery_settings,
                 envelope,
                 title=title,
                 text=text,
                 friend=False,
-                feishu_text=text,
+                feishu_text=feishu_text,
                 enqueued_at=at,
             )
         state["schema_version"] = STATE_SCHEMA_VERSION
@@ -406,11 +416,14 @@ def _build_document(
                 "max_option_dte": chain.max_dte,
             }
         )
+        contract_rejections: dict[str, int] = {}
         target = select_target_leaps(
             chain.contracts,
             policy,
             spot=quote.last,
+            rejection_counts=contract_rejections,
         )
+        membership_observations[member.symbol]["contract_rejection_counts"] = contract_rejections
         if target is None:
             reason = "target_leaps_hard_filter" if chain.contracts else "target_leaps_missing"
             membership_observations[member.symbol]["screen_reason"] = reason
@@ -1041,7 +1054,9 @@ def _candidate_row(
     }
     return row, sorted(set(reasons))
 
-def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
+def render_notification(
+    document: Mapping[str, Any], *, discoveries: bool = False,
+) -> tuple[str, str]:
     mode = str(document.get("mode") or "rth")
     title = "Growth Dislocation LEAPS · 日报" if mode == "daily" else "Growth Dislocation LEAPS · 状态更新"
     counts = _mapping(document.get("counts"))
@@ -1110,6 +1125,43 @@ def render_notification(document: Mapping[str, Any]) -> tuple[str, str]:
         lines.append(
             "| — | WATCH | — | — | — | — | — | 当前无 Active 严格候选；Core Pool 成员见上表 | — | — | — | — | — | — | — | — |"
         )
+    if discoveries:
+        core_symbols = {row["symbol"] for row in document.get("core_pool", [])}
+        fresh = sorted(
+            (row for row in document.get("all_candidates", []) if row["symbol"] not in core_symbols),
+            key=priority_sort_key,
+        )
+        lines.extend([
+            "\n## 本轮严格候选 · 待 Core Pool 确认\n",
+            f"扫描时间：{document.get('generated_at', '—')}",
+            "本轮新增：" + (", ".join(document.get("strict_added_symbols", [])) or "无"),
+            "待确认不代表数据未完成；Core Pool 仍需连续两个完整交易日日报通过。",
+            "| Symbol | State | 52W位置 | IVP 52W | Market Cap |",
+            "|---|---|---:|---:|---:|",
+        ])
+        for row in fresh:
+            lines.append(
+                f"| {row['symbol']} | {row['state']} | {_pct(row.get('price_location_52w'))} "
+                f"| {_pct(row.get('ivp_52w'))} | {_market_cap(row.get('market_cap'))} |"
+            )
+        if not fresh:
+            lines.append("| — | 本轮无待确认严格候选 | — | — | — |")
+        lines.append("\n合约筛选未通过（每份合约记录第一个失败条件）：")
+        reason_labels = {
+            "dte_out_of_range": "期限不符",
+            "delta_missing_or_out_of_range": "Delta缺失或不符",
+            "bid_ask_invalid_or_spread_above_limit": "买卖报价无效或价差过宽",
+            "iv_missing_or_above_limit": "IV缺失或超过上限",
+            "open_interest_below_limit": "持仓量不足",
+            "extrinsic_invalid_or_above_limit": "时间价值无效或过高",
+        }
+        for row in document.get("membership_observations", []):
+            reasons = row.get("contract_rejection_counts")
+            if row.get("screen_reason") == "target_leaps_hard_filter" and reasons:
+                lines.append(f"- {row['symbol']}：" + ", ".join(
+                    f"{reason_labels.get(reason, reason)}={count:.2f}"
+                    for reason, count in sorted(reasons.items())
+                ))
     return title, "\n".join(lines)
 
 

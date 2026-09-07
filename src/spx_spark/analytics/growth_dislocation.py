@@ -55,23 +55,33 @@ def select_target_leaps(
     policy: GrowthDislocationSettings,
     *,
     spot: float | None = None,
+    rejection_counts: dict[str, int] | None = None,
 ) -> Any | None:
     eligible: list[Any] = []
+    def reject(reason: str) -> None:
+        if rejection_counts is not None:
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
     for contract in contracts:
         if not policy.min_leaps_dte <= int(contract.dte) <= policy.max_leaps_dte:
+            reject("dte_out_of_range")
             continue
         if contract.delta is None or not (
             policy.target_delta_min <= float(contract.delta) <= policy.target_delta_max
         ):
+            reject("delta_missing_or_out_of_range")
             continue
         spread = spread_mid_ratio(contract.bid, contract.ask)
         if spread is None or spread > policy.max_leaps_spread_mid:
+            reject("bid_ask_invalid_or_spread_above_limit")
             continue
         if contract.volatility is None or not (
             0.0 < float(contract.volatility) <= policy.max_current_leaps_iv
         ):
+            reject("iv_missing_or_above_limit")
             continue
         if int(contract.open_interest) < policy.min_target_leaps_open_interest:
+            reject("open_interest_below_limit")
             continue
         if spot is not None:
             value_ratio = extrinsic_value_ratio(
@@ -81,6 +91,7 @@ def select_target_leaps(
                 ask=float(contract.ask),
             )
             if value_ratio is None or value_ratio > policy.max_extrinsic_value_ratio:
+                reject("extrinsic_invalid_or_above_limit")
                 continue
         eligible.append(contract)
     if not eligible:

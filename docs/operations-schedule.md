@@ -192,7 +192,9 @@ run has completed without provider-wide errors or request exhaustion.
 - RTH: 09:30, 10:30, ..., 15:30 ET on exchange trading days. These scans refresh
   WATCH / ARMED / TRIGGER and data quality only; they never change Core Pool
   membership or its stored Top Opportunities ordering and do not queue a
-  membership-change push.
+  membership-change push. A complete scan that discovers new strict candidates
+  queues a Feishu-only discovery update, independently of Core Pool admission.
+  Partial scans do not advance the discovery baseline or trigger discovery updates.
 - Daily: 20:00 ET on exchange trading days. One summary is queued even when the
   material table is unchanged. Only a complete daily scan may bootstrap, add,
   pause, reactivate, or exit a Core Pool member.
@@ -265,6 +267,11 @@ run has completed without provider-wide errors or request exhaustion.
   rerank Core members by the same 52-week dislocation priority; RTH and partial
   scans preserve membership and ordering. These lifecycle states remain research
   workflow controls, not an order signal.
+- Feishu additionally lists all current strict candidates awaiting Core Pool
+  admission, ordered by 52-week priority. Contract rejection summaries count the
+  first failed condition per fetched contract (DTE, delta, quote/spread, IV, OI,
+  or extrinsic value); they do not claim the full listed chain was retrieved.
+  Existing Bark report text and delivery schedule remain unchanged.
 - RSI recovery affects `FinalScore` only. `WATCH / ARMED / TRIGGER` is determined
   from positive 5-day sector relative strength and close above MA10: either one
   makes a symbol `ARMED`, while both make it `TRIGGER`. Growth quality, convexity,

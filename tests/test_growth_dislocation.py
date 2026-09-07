@@ -16,6 +16,7 @@ from spx_spark.analytics.growth_dislocation import (
     select_target_leaps,
 )
 from spx_spark.ibkr.adapter import IvPercentileSnapshot
+from spx_spark.config import NotificationSettings
 from spx_spark.infrastructure.growth_dislocation import (
     Universe,
     UniverseMember,
@@ -315,6 +316,9 @@ def test_target_leaps_rejects_wide_contract_before_selection() -> None:
     )
 
     assert select_target_leaps([wide, tight], _policy()) is tight
+    reasons: dict[str, int] = {}
+    assert select_target_leaps([wide], _policy(), rejection_counts=reasons) is None
+    assert reasons == {"bid_ask_invalid_or_spread_above_limit": 1}
 
 
 def test_target_leaps_prefers_target_delta_before_tighter_spread() -> None:
@@ -454,6 +458,9 @@ def test_rth_scanner_updates_today_state_without_changing_core_membership(
     deliveries: list[NotificationEnvelope] = []
 
     def enqueue(_settings, envelope, **_kwargs):
+        assert not _settings.bark_enabled
+        assert not _settings.bark_friend_enabled
+        assert "TEST" in _kwargs["feishu_text"]
         deliveries.append(envelope)
         return SimpleNamespace(accepted=True, outcome="pending")
 
@@ -465,7 +472,7 @@ def test_rth_scanner_updates_today_state_without_changing_core_membership(
         universe=_universe(),
         data_root=tmp_path,
         iv_percentile_fetcher=_ivp_fetcher,
-        notification_settings=SimpleNamespace(),  # type: ignore[arg-type]
+        notification_settings=NotificationSettings.from_env(),
         enqueue=enqueue,  # type: ignore[arg-type]
     )
     # Contract IV changes the material fingerprint, but the existing symbol is
@@ -479,7 +486,7 @@ def test_rth_scanner_updates_today_state_without_changing_core_membership(
         universe=_universe(),
         data_root=tmp_path,
         iv_percentile_fetcher=_ivp_fetcher,
-        notification_settings=SimpleNamespace(),  # type: ignore[arg-type]
+        notification_settings=NotificationSettings.from_env(),
         enqueue=enqueue,  # type: ignore[arg-type]
     )
 
@@ -499,10 +506,15 @@ def test_rth_scanner_updates_today_state_without_changing_core_membership(
     assert first.document["added_symbols"] == []
     assert first.document["core_pool_status"] == "BOOTSTRAP_PENDING"
     assert first.document["core_top_opportunities"] == []
+    assert first.document["strict_added_symbols"] == ["TEST"]
+    _, legacy = render_notification(first.document)
+    _, feishu = render_notification(first.document, discoveries=True)
+    assert "| TEST |" not in legacy
+    assert "| TEST |" in feishu
     assert first.document["material_fingerprint"] != second.document["material_fingerprint"]
     assert second.document["added_symbols"] == []
     assert second.notification is None
-    assert deliveries == []
+    assert len(deliveries) == 1
     assert (tmp_path / "latest" / "growth_dislocation_leaps.json").is_file()
 
 
@@ -728,7 +740,7 @@ def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Pa
         universe=_universe(),
         data_root=tmp_path,
         iv_percentile_fetcher=_ivp_fetcher,
-        notification_settings=SimpleNamespace(),  # type: ignore[arg-type]
+        notification_settings=NotificationSettings.from_env(),
         enqueue=enqueue,  # type: ignore[arg-type]
     )
     scan_once(
@@ -743,7 +755,7 @@ def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Pa
         enqueue=enqueue,  # type: ignore[arg-type]
     )
 
-    assert len(deliveries) == 1
+    assert len(deliveries) == 2
     assert all(envelope.kind == "growth_dislocation_scan" for envelope in deliveries)
     document = scan_once(
         now=NOW.replace(hour=20, minute=0),
