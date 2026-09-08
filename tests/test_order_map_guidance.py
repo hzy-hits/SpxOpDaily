@@ -850,7 +850,7 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "20Δ/10宽 7680/7690/7810/7820" in sections.desk_view
+    assert "20Δ档/10宽 7680/7690/7810/7820" in sections.desk_view
     assert "贷记 9.00" in sections.desk_view
     assert "翼宽比 90%" in sections.desk_view
     assert "等待跨式扩张→收缩" in sections.desk_view
@@ -888,7 +888,7 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
     assert "7750/7745" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
-    assert "20Δ/10宽 · 仅观察：5–20Δ 卖权铁鹰缺少带 delta 的新鲜报价" in sections.desk_view
+    assert "Δ档位未知/翼宽未知 · 仅观察：5–20Δ 卖权铁鹰缺少带 delta 的新鲜报价" in sections.desk_view
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 
@@ -1683,3 +1683,27 @@ def test_status_llm_reason_validation_rejects_authority_or_multiline_changes() -
     assert not status_explanation_output_valid("原因  新结构仍在确认\n买入 Put")
     assert not status_explanation_output_valid("原因  EXECUTION_ELIGIBLE=YES")
     assert not status_explanation_output_valid("原因  建议限价开仓")
+
+
+@pytest.mark.parametrize("target,width", [(0.15, 10), (0.175, 15), (0.20, 20)])
+def test_iron_condor_desk_reports_selected_delta_tier_and_width(target, width) -> None:
+    from copy import deepcopy
+
+    from spx_spark.application.order_map.desk_strategy_view import compact_iron_condor_desk_line
+
+    decision = {
+        "decision_type": "NO_TRADE",
+        "action_authority": "none",
+        "iron_condor_map": {
+            "status": "ready",
+            "short_abs_delta": target,
+            "wing_width": width,
+            "strikes": [7650 - width, 7650, 7730, 7730 + width],
+            "quote": {"credit": 2.15},
+        },
+    }
+    before = deepcopy(decision)
+    rendered = compact_iron_condor_desk_line({}, decision)
+    assert f"{target * 100:g}Δ档/{width:g}宽" in rendered
+    assert f"{7650 - width}/7650/7730/{7730 + width}" in rendered
+    assert decision == before

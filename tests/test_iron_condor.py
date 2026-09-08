@@ -1150,7 +1150,7 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
     assert "NO TRADE" in sections.desk_view
     assert "扫描赢家已推送" not in sections.desk_view
     assert "无过门赢家" not in sections.desk_view
-    assert "20Δ/10宽 7680/7690/7810/7820" in sections.desk_view
+    assert "20Δ档/10宽 7680/7690/7810/7820" in sections.desk_view
     assert "贷记 2.40" in sections.desk_view
     assert "翼宽比 24%" in sections.desk_view
     assert "价格仍单边 3.7 ATR（需≤1.25）" in sections.desk_view

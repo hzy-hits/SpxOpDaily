@@ -314,9 +314,19 @@ def compact_iron_condor_desk_line(
         credit = finite_float(quote.get("credit"))
         credit_fraction = finite_float(economics.get("credit_fraction_of_width"))
         width = finite_float(economics.get("width_points"))
+        if width is None:
+            width = finite_float(map_structure.get("wing_width"))
         if credit_fraction is None and credit is not None and width is not None and width > 0.0:
             credit_fraction = credit / width
-        details = [f"20Δ/10宽 {strikes}" if strikes else "20Δ/10宽"]
+        target_delta = finite_float(map_structure.get("short_abs_delta"))
+        delta_label = (
+            f"{100 * target_delta:g}Δ档"
+            if target_delta is not None and 0 < target_delta <= 1
+            else "Δ档位未知"
+        )
+        width_label = f"{width:g}宽" if width is not None and width > 0 else "翼宽未知"
+        structure_label = f"{delta_label}/{width_label}"
+        details = [f"{structure_label} {strikes}" if strikes else structure_label]
         if credit is not None:
             details.append(f"贷记 {credit:.2f}")
         if credit_fraction is not None:
