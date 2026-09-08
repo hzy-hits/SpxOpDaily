@@ -144,7 +144,7 @@ def test_option_history_is_a_compact_rolling_feature_projection() -> None:
             "put_walls": [{"strike": 6450.0, "open_interest": 8000}],
             "large_unused_payload": list(range(100)),
         },
-        volatility={"atm_straddle_mid": 22.0, "atm_iv_0dte": 0.14, "unused": 1},
+        volatility={"atm_strike": 6500.0, "atm_straddle_mid": 22.0, "atm_iv_0dte": 0.14, "unused": 1},
         concentration={"unused": list(range(100))},
         density={"median": 6500.0, "p10": 6460.0, "p90": 6540.0, "unused": 1},
         l1=L1MicrostructureFrame(
@@ -162,11 +162,23 @@ def test_option_history_is_a_compact_rolling_feature_projection() -> None:
     assert len(history) == 1
     assert history[0]["structure"]["call_walls"] == [{"strike": 6550.0}]
     assert history[0]["volatility"] == {
+        "atm_strike": 6500.0,
         "atm_straddle_mid": 22.0,
         "atm_iv_0dte": 0.14,
     }
     assert history[0]["l1"]["metrics"] == {"spread_p50_bps": 120.0}
     assert "concentration" not in history[0]
+
+    front = SimpleNamespace(
+        atm_strike=6500.0, atm_straddle_mid=19.8, atm_iv=0.13,
+        put_skew_25d=0.02, call_skew_25d=-0.01, expected_move_points=20,
+    )
+    now = at + timedelta(minutes=15)
+    result = option_volatility_features(front, None, history=history, now=now)
+    assert result["atm_straddle_decay_15m"] == pytest.approx(0.1)
+    front.atm_strike = 6505.0
+    changed = option_volatility_features(front, None, history=history, now=now)
+    assert changed["atm_straddle_decay_15m"] is None
 
 
 def test_normalized_future_quote_exposes_only_specific_contract_identity() -> None:

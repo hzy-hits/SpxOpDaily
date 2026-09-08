@@ -707,7 +707,7 @@ def _compact_option_history_frame(payload: dict[str, Any]) -> dict[str, Any]:
         "structure": compact_structure,
         "volatility": {
             key: volatility.get(key)
-            for key in ("atm_straddle_mid", "atm_iv_0dte")
+            for key in ("atm_strike", "atm_straddle_mid", "atm_iv_0dte")
             if key in volatility
         },
         "density": {
