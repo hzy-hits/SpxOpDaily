@@ -39,9 +39,12 @@ def recover_notification_delivery_tasks() -> None:
 
 @huey.periodic_task(crontab(minute="*/5", strict=True))
 def macro_calendar_refresh() -> None:
+    from spx_spark.config import StorageSettings
     from spx_spark.macro_event_calendar import refresh_macro_events_if_due
 
-    refresh_macro_events_if_due(_settings.data_root, now=datetime.now(tz=timezone.utc))
+    refresh_macro_events_if_due(
+        StorageSettings.from_env().data_root, now=datetime.now(tz=timezone.utc)
+    )
 
 
 @huey.periodic_task(crontab(minute="30", hour="23", strict=True))

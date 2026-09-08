@@ -83,7 +83,9 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
             if bias in {"偏多", "偏空"}
             else "不做 · 市场偏向中性/未定"
         )
-    primary = humanize_strategy_reason(reasons[0]) if reasons else "暂无明确阻断原因"
+    primary = humanize_strategy_reason(
+        reasons[0], event=_mapping(_mapping(decision.get("market_facts")).get("event"))
+    ) if reasons else "暂无明确阻断原因"
     if center_confirming:
         count = int(finite_float(pin.get("center_confirmation_count")) or 0)
         required = int(finite_float(pin.get("center_confirmation_required")) or 0)
@@ -274,7 +276,9 @@ def _gth_scan_desk_view(
             else quality_reason_text(quality_reasons[0])
         )
     elif reasons:
-        primary = humanize_strategy_reason(reasons[0])
+        primary = humanize_strategy_reason(
+            reasons[0], event=_mapping(_mapping(decision.get("market_facts")).get("event"))
+        )
     else:
         primary = "1 分钟报价持续重算 5–50 点价差与 5–20Δ 10 点翼宽铁鹰"
     candidate = _mapping(decision.get("candidate"))
@@ -511,7 +515,7 @@ def compact_gth_no_trade_sections(
         location=location,
         structure=structure,
         primary_path=primary_path,
-        alternative_path="无持仓；新结构形成后重算",
+        alternative_path="本次无新入场建议；已有仓位需独立管理",
         targets="无交易目标",
         execution="PAUSED · 等待 GTH 报价自动恢复" if provider_conflict else sections.execution,
         data_quality=data_quality,
@@ -556,7 +560,9 @@ def strategy_reason_line(payload: Mapping[str, Any]) -> str | None:
     if strategy_candidate_is_watchable(payload, decision):
         return f"原因  已给出人工候选：{strategy_candidate_label(candidate)}"
     reasons = [str(reason) for reason in _mapping(decision.get("why_not")).get("reasons") or ()]
-    primary = humanize_strategy_reason(reasons[0]) if reasons else "尚无支持交易的候选"
+    primary = humanize_strategy_reason(
+        reasons[0], event=_mapping(_mapping(decision.get("market_facts")).get("event"))
+    ) if reasons else "尚无支持交易的候选"
     return f"原因  {primary}"
 
 
@@ -571,8 +577,16 @@ def humanize_strategy_type(strategy_type: str) -> str:
     }.get(str(strategy_type or "").upper(), str(strategy_type or "候选").replace("_", " "))
 
 
-def humanize_strategy_reason(reason: str) -> str:
+def humanize_strategy_reason(
+    reason: str, *, event: Mapping[str, Any] | None = None,
+) -> str:
     token = str(reason or "").strip()
+    if token == "macro_entry_not_authorized" and event:
+        if event.get("state") == "unavailable":
+            return "宏观日历覆盖不可用，暂停新建议"
+        if event.get("state") == "pre_event":
+            name = _mapping(event.get("active_event")).get("name")
+            return f"宏观事件前窗口禁止新建议：{name}" if name else "宏观事件前窗口禁止新建议"
     exact = {
         "level_source_not_confirmed": "尚未出现确认的价格触发（墙位/翻区未接受或拒绝）",
         "level_source_formal_signal_absent": "旧 formal signal 未形成，不能当作入场依据",
@@ -665,7 +679,7 @@ def humanize_strategy_reason(reason: str) -> str:
         "surface_shape_low_snr": "曲面信号噪声比偏低（仅研究）",
         "pricing_not_authorized": "定价未授权，不能当作可执行候选",
         "spx_price_unavailable": "触发坐标不可用（RTH 需现金 SPX；GTH 需期权隐含或 ES 折算）",
-        "macro_entry_not_authorized": "宏观事件窗口禁止新建议",
+        "macro_entry_not_authorized": "宏观门未授权，需核对事件状态与日历覆盖",
         "rth_environment_inputs_unavailable": "VIX1D、ATM、跨式衰减或广度输入不足",
         "rth_range_structure_environment_not_balanced": "波动尚未收缩到平衡环境，不做铁鹰/位置蝶",
         "rth_directional_environment_not_expanding": "剩余日内风险未确认扩张，不授权方向价差",

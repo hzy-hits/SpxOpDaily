@@ -1707,3 +1707,44 @@ def test_iron_condor_desk_reports_selected_delta_tier_and_width(target, width) -
     assert f"{target * 100:g}Δ档/{width:g}宽" in rendered
     assert f"{7650 - width}/7650/7730/{7730 + width}" in rendered
     assert decision == before
+
+
+@pytest.mark.parametrize("state,expected", [
+    ("unavailable", "日历覆盖不可用"),
+    ("pre_event", "事件前窗口"),
+])
+def test_macro_desk_reason_distinguishes_missing_calendar_from_event(state, expected) -> None:
+    from spx_spark.application.order_map.desk_strategy_view import strategy_reason_line
+
+    payload = _payload()
+    payload["strategy_decision"] = {
+        "decision_type": "NO_TRADE",
+        "action_authority": "none",
+        "why_not": {"reasons": ["macro_entry_not_authorized"]},
+        "market_facts": {"event": {"state": state, "entry_allowed": False}},
+    }
+    assert expected in strategy_reason_line(payload)
+
+
+def test_gth_no_trade_does_not_assert_account_is_flat() -> None:
+    from dataclasses import dataclass
+
+    from spx_spark.application.order_map.desk_strategy_view import compact_gth_no_trade_sections
+
+    @dataclass
+    class Sections:
+        location: str = "SPX"
+        structure: str = "walls"
+        primary_path: str = "下一触发  接受"
+        alternative_path: str = ""
+        targets: str = ""
+        execution: str = "observe"
+        data_quality: str = ""
+
+    payload = _payload()
+    payload["market_session"] = "gth"
+    payload["strategy_decision"] = {"decision_type": "NO_TRADE", "position_status": "UNKNOWN"}
+    payload["level_decision"] = {"session_mode": "gth"}
+    result = compact_gth_no_trade_sections(payload, Sections(), quality_reasons=())
+    assert "无持仓" not in result.alternative_path
+    assert "已有仓位需独立管理" in result.alternative_path

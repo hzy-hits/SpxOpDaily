@@ -208,3 +208,42 @@ def test_migrations_build_only_planned_operational_tables_and_check_status(
                 "payload_json, payload_sha256, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ("bad", "bad", "test", "test", "test", "test", "{}", "bad", "typo"),
             )
+
+
+def test_macro_worker_refresh_reaches_strategy_reader_with_separate_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    from spx_spark.config import StorageSettings
+    from spx_spark.macro_event_clock import macro_event_state
+
+    market_root = tmp_path / "market"
+    monkeypatch.setenv("MARKET_DATA_DATA_ROOT", str(market_root))
+    (tmp_path / "operational").mkdir()
+    jobs = load_jobs(tmp_path / "operational", monkeypatch)
+    now = datetime.now(timezone.utc)
+    seed = tmp_path / "macro.toml"
+    seed.write_text("events = []\n")
+    root = StorageSettings.from_env().data_root
+    assert macro_event_state(now, path=seed, data_root=root)["entry_allowed"] is False
+
+    def fetch(*, now):
+        return {name: {
+            "refreshed_at": now.isoformat(),
+            "coverage_start": (now - timedelta(days=1)).isoformat(),
+            "coverage_end": (now + timedelta(days=1)).isoformat(),
+            "events": [{"id": "test-cpi", "name": "CPI", "impact": "high",
+                        "release_at": (now + timedelta(hours=2)).isoformat()}],
+        } for name in ("ff_thisweek", "fomc_html")}
+
+    monkeypatch.setattr("spx_spark.macro_event_calendar.fetch_allowlisted_macro_events", fetch)
+    jobs.macro_calendar_refresh.call_local()
+    checked_at = datetime.now(timezone.utc)
+    state = macro_event_state(checked_at, path=seed, data_root=root)
+    assert state["entry_allowed"] is True
+    assert state["coverage"]["status"] == "covered"
+    pre_event = macro_event_state(checked_at + timedelta(minutes=100), path=seed, data_root=root)
+    assert pre_event["mode"] == "pre_event"
+    assert pre_event["entry_allowed"] is False
+    assert not (tmp_path / "operational" / "runtime" / "macro_events.auto.json").exists()
