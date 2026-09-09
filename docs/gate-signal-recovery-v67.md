@@ -34,16 +34,20 @@
 
 ## 验证结果
 
-- 最终全量 Python：3400 passed（2 条现有第三方弃用提醒）。
+- 最终全量 Python：3401 passed（2 条现有第三方弃用提醒）。
 - 最后门禁/行情/架构定向检查：230 passed。
 - Ruff、Import Linter（2 contracts）、git diff --check 通过。
 - Rust fmt、clippy（-D warnings）、workspace 全 targets/features tests 通过。
-- 生产文件新增/删除 0/0；生产代码（含关键路径修复）+122/-60，净 +62 行；依赖、配置键、服务/timer、数据库/表新增删除全部 0。删除旧 Pin LOOK 否决、无条件环境方向关闭与无条件缺数据兜底逻辑；保留真正的稳定 Pin、执行报价、事件和结构风险门。
+- 生产文件新增/删除 0/0；生产代码（含关键路径修复）+125/-67，净 +58 行；依赖、配置键、服务/timer、数据库/表新增删除全部 0。删除旧 Pin LOOK 否决、无条件环境方向关闭与无条件缺数据兜底逻辑；保留真正的稳定 Pin、执行报价、事件和结构风险门。
 
 ## 生产补充：展示回放阻塞决策
 
-生产日志确认旧版本一次 market_features 周期耗时 570,183ms，其中 strategy_build 567,989ms。NO_TRADE 分支仍同步调用铁鹰展示路径，且方向赢家也附带未选中铁鹰回放。删除 NO_TRADE 的此调用及单调用包装函数；方向赢家仅计算自身所需路径，已授权铁鹰保留既有路径。该改动不绕过候选 veto、不增加 Worker/服务，只取消主流程没有授权用途的额外计算。
+生产日志确认旧版本一次 market_features 周期耗时 570,183ms，其中 strategy_build 567,989ms。NO_TRADE 分支仍同步调用铁鹰展示路径，且方向赢家也附带未选中铁鹰回放。删除 NO_TRADE 的此调用及单调用包装函数；方向/蝶式赢家仅计算自身授权所需路径；铁鹰路径原本仅挂展示、不参与其授权，故也不再在主决策内计算。该改动不绕过候选 veto、不增加 Worker/服务，只取消主流程没有授权用途的额外计算。
 
 当前 GTH 同时存在 IBKR 10197 competing live session，采集端必须退让；不能把代码部署完成表述为实时期权数据恢复。
 
 关键路径修复定向检查 196 passed；桌图/表述检查 212 passed；删除旧包装函数后模型集成检查 6 passed。
+
+生产新版本已观测 market_features 周期 802.618ms、strategy_build 296.133ms，并输出新的 NO_TRADE；该时刻 GTH 缺 IBKR 行情，与此前 568 秒样本市场输入不同，不作为严格配对性能基准。
+
+末次生产表达修复：当 ES 路径正常而期权帧/L1 缺失时，entry_state 使用 quality.reasons 判断 INSUFFICIENT_DATA；无 front expiry frame 输出明确 option_frame_unavailable。末次行情/门禁/人读检查 294 passed。

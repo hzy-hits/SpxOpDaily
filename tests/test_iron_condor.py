@@ -1231,8 +1231,23 @@ def test_no_trade_does_not_wait_for_advisory_iron_condor_history(monkeypatch, tm
                         lambda payload, latest, at: facts)
     def unavailable_lake(*args, **kwargs):
         raise OSError("historical research storage unavailable")
-    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.attach_iron_condor_path_distribution", unavailable_lake)
+    monkeypatch.setattr("spx_spark.application.order_map.path_distribution.attach_iron_condor_path_distribution", unavailable_lake)
     decision = build_strategy_decision(_payload(), _rth_state(), RTH_NOW, data_root=tmp_path)
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["regime"]["entry_state"] == "INSUFFICIENT_DATA"
     assert decision["iron_condor_map"]
+
+
+def test_authorized_iron_condor_survives_advisory_lake_failure(monkeypatch, tmp_path) -> None:
+    from spx_spark.application.order_map.strategy_edge_model import apply_strategy_edge_authority
+    facts = _rth_facts()
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+                        lambda payload, latest, at: facts)
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select._accepted_session_cards", lambda _: ())
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.apply_strategy_edge_authority", apply_strategy_edge_authority)
+    def unavailable_lake(*args, **kwargs):
+        raise OSError("advisory historical storage unavailable")
+    monkeypatch.setattr("spx_spark.application.order_map.path_distribution.attach_iron_condor_path_distribution", unavailable_lake)
+    decision = build_strategy_decision(_payload(), _rth_state(), RTH_NOW, data_root=tmp_path)
+    assert decision["decision_type"] == "IRON_CONDOR", decision["why_not"]
+    assert decision["automatic_ordering"] is False

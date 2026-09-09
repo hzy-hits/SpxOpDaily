@@ -409,6 +409,7 @@ def option_volatility_features(
             "atm_iv_0dte": None,
             "atm_straddle_mid": None,
             "atm_straddle_decay_15m": None,
+            "atm_straddle_decay_status": {"status": "unavailable", "reason": "option_frame_unavailable"},
             "atm_iv_1dte": None,
             "put_skew_25d_0dte": None,
             "call_skew_25d_0dte": None,

@@ -33,7 +33,6 @@ from spx_spark.application.order_map.iron_condor import (
     iron_condor_session_state,
 )
 from spx_spark.application.order_map.path_distribution import (
-    attach_iron_condor_path_distribution,
     attach_path_distribution,
 )
 from spx_spark.application.order_map.strategy_edge_model import (
@@ -483,6 +482,7 @@ def _entry_state(
     rank: RankResult,
 ) -> str:
     reason_set = {str(reason) for reason in reasons}
+    reason_set.update(str(reason) for reason in _map(facts.get("quality")).get("reasons") or ())
     if reason_set & {
         "direction_valid_but_entry_too_late",
         "es_volume_momentum_too_late",
@@ -748,19 +748,13 @@ def _attach_winner_path_distributions(
             probability_settings=probability_settings,
             now=now,
         )
-    # Only an authorized IC needs its advisory path here. Unselected maps
-    # must not block decisions on historical lake scans. Winner veto stays above.
+    # IC map paths are advisory, not authorization inputs. Keep lake scans
+    # off the live path; required directional/butterfly winner veto stays above.
     shadows = [dict(row) for row in passed[1:3]]
     return (
         winner,
         shadows,
-        attach_iron_condor_path_distribution(
-            iron_condor_map,
-            facts,
-            data_root=data_root,
-            probability_settings=probability_settings,
-            now=now,
-        ) if str(first.get("strategy_type") or "") == IRON_CONDOR_TYPE else dict(iron_condor_map),
+        dict(iron_condor_map),
     )
 
 

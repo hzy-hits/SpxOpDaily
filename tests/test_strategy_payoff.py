@@ -5580,6 +5580,8 @@ def test_ready_market_without_setup_is_waiting_not_missing_data() -> None:
     facts = {"capabilities": {"path": {"ready": True}}}
     assert _entry_state(facts, ["es_volume_not_elevated"], [], rank) == "WAITING_FOR_TRIGGER"
     assert _entry_state(facts, ["es_volume_momentum_unevaluable"], [], rank) == "INSUFFICIENT_DATA"
+    facts["quality"] = {"reasons": ["option_frame_not_ready", "option_l1_not_ready"]}
+    assert _entry_state(facts, ["entries_not_explicitly_allowed"], [], rank) == "INSUFFICIENT_DATA"
 
 
 def test_mixed_environment_does_not_claim_directional_permission_is_closed() -> None:
