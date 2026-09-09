@@ -144,7 +144,8 @@ def test_option_history_is_a_compact_rolling_feature_projection() -> None:
             "put_walls": [{"strike": 6450.0, "open_interest": 8000}],
             "large_unused_payload": list(range(100)),
         },
-        volatility={"atm_strike": 6500.0, "atm_straddle_mid": 22.0, "atm_iv_0dte": 0.14, "unused": 1},
+        volatility={"atm_strike": 6500.0, "atm_straddle_mid": 22.0, "atm_iv_0dte": 0.14,
+                    "straddles_by_strike": {"6505": {"mid": 23.0, "provider": "schwab"}}, "unused": 1},
         concentration={"unused": list(range(100))},
         density={"median": 6500.0, "p10": 6460.0, "p90": 6540.0, "unused": 1},
         l1=L1MicrostructureFrame(
@@ -165,6 +166,7 @@ def test_option_history_is_a_compact_rolling_feature_projection() -> None:
         "atm_strike": 6500.0,
         "atm_straddle_mid": 22.0,
         "atm_iv_0dte": 0.14,
+        "straddles_by_strike": {"6505": {"mid": 23.0, "provider": "schwab"}},
     }
     assert history[0]["l1"]["metrics"] == {"spread_p50_bps": 120.0}
     assert "concentration" not in history[0]
@@ -1782,3 +1784,31 @@ def _option_quote(
         bid_size=10,
         ask_size=10,
     )
+
+
+def test_straddle_decay_survives_atm_roll_using_same_contract_quotes() -> None:
+    now = datetime(2026, 9, 8, 17, 0, tzinfo=UTC)
+    front = SimpleNamespace(expiry="20260908", atm_strike=7695.0,
+        atm_straddle_mid=18.0, atm_iv=0.13, put_skew_25d=0.02,
+        call_skew_25d=-0.01, expected_move_points=20)
+    history = [{"as_of": (now-timedelta(minutes=15)).isoformat(),
+        "front_expiry": "20260908", "volatility": {
+            "atm_strike": 7690.0, "atm_straddle_mid": 17.0,
+            "straddles_by_strike": {"7695": {"mid": 20.0, "provider": "schwab"}}}}]
+    current = {"7695": {"mid": 18.0, "provider": "schwab"}}
+    result = option_volatility_features(front, None, history=history, now=now, straddles=current)
+    assert result["atm_straddle_decay_15m"] == pytest.approx(0.1)
+    assert result["atm_straddle_decay_status"]["status"] == "ready"
+    current["7695"]["provider"] = "ibkr"
+    changed = option_volatility_features(front, None, history=history, now=now, straddles=current)
+    assert changed["atm_straddle_decay_15m"] is None
+    assert changed["atm_straddle_decay_status"]["reason"] == "provider_changed"
+    current["7695"]["provider"] = "schwab"
+    history[0]["front_expiry"] = "20260907"
+    expired = option_volatility_features(front, None, history=history, now=now, straddles=current)
+    assert expired["atm_straddle_decay_status"]["reason"] == "expiry_changed"
+    history[0]["front_expiry"] = "20260908"
+    history[0]["as_of"] = (now-timedelta(minutes=30)).isoformat()
+    gap = option_volatility_features(front, None, history=history, now=now, straddles=current)
+    assert gap["atm_straddle_decay_15m"] is None
+    assert gap["atm_straddle_decay_status"]["reason"] == "history_gap"

@@ -65,7 +65,31 @@ def build_option_structure_frame(
             last_usable_frame,
             now=now,
         )
-    volatility = option_volatility_features(front, next_expiry, history=history, now=now)
+    # Keep same-contract comparisons available when the nearest ATM strike changes.
+    # Each pair still needs two fresh quotes from one provider.
+    straddles: dict[str, dict[str, Any]] = {}
+    if front is not None:
+        pairs: dict[tuple[float, str], dict[OptionRight, Quote]] = defaultdict(dict)
+        for quote in _select_hot_quotes(
+            _fresh_front_quotes(state, expiry=front.expiry, now=now, policy=policy),
+            underlier=front.atm_strike, limit=policy.hot_option_limit,
+        ):
+            if quote.instrument.strike is not None:
+                pairs[(quote.instrument.strike, quote.provider.value)][quote.instrument.right] = quote
+        for (strike, provider), pair in pairs.items():
+            if set(pair) != {OptionRight.CALL, OptionRight.PUT}:
+                continue
+            sources = sorted(quote_source_at(q) for q in pair.values())
+            if sources[-1] > now or (sources[-1] - sources[0]).total_seconds() > policy.provider_sync_tolerance_seconds:
+                continue
+            straddles[f"{strike:g}"] = {
+                "mid": sum(float(q.mid) for q in pair.values()),
+                "provider": provider,
+            }
+    volatility = option_volatility_features(
+        front, next_expiry, history=history, now=now, straddles=straddles,
+    )
+    volatility["straddles_by_strike"] = straddles
     if front is not None:
         atm_quotes = [quote for quote in _fresh_front_quotes(
             state, expiry=front.expiry, now=now, policy=policy,
@@ -378,6 +402,7 @@ def option_volatility_features(
     *,
     history: list[dict[str, Any]],
     now: datetime,
+    straddles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if front is None:
         return {
@@ -413,16 +438,50 @@ def option_volatility_features(
         ),
         "term_gap": _difference(current_iv, next_expiry.atm_iv if next_expiry else None),
     }
-    prior_straddle = _history_value(
-        history, now=now, minutes=15, section="volatility", key="atm_straddle_mid"
-    )
-    if _history_value(history, now=now, minutes=15, section="volatility", key="atm_strike") != front.atm_strike:
-        prior_straddle = None
-    result["atm_straddle_decay_15m"] = (
+    target = as_utc(now) - timedelta(minutes=15)
+    comparable = [row for row in history if (at := _parse_at(row.get("as_of"))) is not None and at <= target]
+    prior_frame = max(comparable, key=lambda row: row["as_of"]) if comparable else {}
+    prior_vol = prior_frame.get("volatility") or {}
+    prior_straddle = None
+    reason = "history_unavailable"
+    comparison_method = None
+    if prior_frame:
+        prior_at = _parse_at(prior_frame.get("as_of"))
+        expiry = getattr(front, "expiry", None)
+        if prior_at is not None and (target - prior_at).total_seconds() > 90:
+            reason = "history_gap"
+        elif expiry is not None and prior_frame.get("front_expiry") != expiry:
+            reason = "expiry_changed"
+        elif straddles is not None:
+            strike_key = f"{front.atm_strike:g}"
+            current_pair = straddles.get(strike_key) or {}
+            prior_pair = (prior_vol.get("straddles_by_strike") or {}).get(strike_key) or {}
+            if not current_pair or not prior_pair:
+                reason = "same_contract_quotes_unavailable"
+            elif current_pair.get("provider") != prior_pair.get("provider"):
+                reason = "provider_changed"
+            else:
+                prior_straddle = _number(prior_pair.get("mid"))
+                current_straddle = _number(current_pair.get("mid"))
+                comparison_method = "same_expiry_strike_provider"
+        elif _number(prior_vol.get("atm_strike")) == front.atm_strike:
+            prior_straddle = _number(prior_vol.get("atm_straddle_mid"))
+            comparison_method = "same_atm_strike"
+        else:
+            reason = "atm_strike_changed"
+    decay = (
         (prior_straddle - current_straddle) / prior_straddle
-        if prior_straddle and current_straddle is not None
+        if prior_straddle is not None and prior_straddle > 0 and current_straddle is not None
         else None
     )
+    result["atm_straddle_decay_15m"] = decay
+    result["atm_straddle_decay_status"] = {
+        "status": "ready" if decay is not None else "unavailable",
+        "reason": None if decay is not None else reason,
+        "method": comparison_method,
+        "comparison_at": prior_frame.get("as_of"),
+        "strike": front.atm_strike,
+    }
     for minutes in (5, 15, 60):
         prior = _history_value(
             history,
@@ -707,7 +766,7 @@ def _compact_option_history_frame(payload: dict[str, Any]) -> dict[str, Any]:
         "structure": compact_structure,
         "volatility": {
             key: volatility.get(key)
-            for key in ("atm_strike", "atm_straddle_mid", "atm_iv_0dte")
+            for key in ("atm_strike", "atm_straddle_mid", "atm_iv_0dte", "straddles_by_strike")
             if key in volatility
         },
         "density": {

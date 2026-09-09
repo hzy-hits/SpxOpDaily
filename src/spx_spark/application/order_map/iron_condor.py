@@ -593,6 +593,16 @@ def iron_condor_session_state(
     previous = _map(payload.get("previous_strategy_decision"))
     previous_facts = _map(previous.get("market_facts"))
     previous_state = _map(previous_facts.get(HUMAN_SESSION_STATE_KEY))
+    # A pre-v67 rejected scan may have locked before the environment was ready.
+    # Preserve an actually selected legacy IC, but do not inherit rejected scans.
+    legacy_rejected_lock = (
+        session_mode == "rth"
+        and previous.get("policy_version") != "strategy_policy.bootstrap.v67"
+        and previous.get("decision_type") != IRON_CONDOR_TYPE
+        and previous_state.get("environment_qualified_at_lock") is not True
+    )
+    if legacy_rejected_lock:
+        previous_state = {}
     if (
         str(previous.get("session_date") or previous_facts.get("session_date") or "")
         == session_date
@@ -601,7 +611,7 @@ def iron_condor_session_state(
     ):
         return {**previous_state, "carried_forward": True}
 
-    current_state = _map(facts.get(HUMAN_SESSION_STATE_KEY))
+    current_state = {} if legacy_rejected_lock else _map(facts.get(HUMAN_SESSION_STATE_KEY))
     if (
         current_state.get("status") == "eligible"
         and str(current_state.get("session_mode") or "rth").lower() == session_mode
@@ -628,6 +638,7 @@ def iron_condor_session_state(
         return {
             **base,
             "status": "eligible",
+            "environment_qualified_at_lock": True,
             "attempted_at": _utc(now).isoformat(),
             "candidate_id": candidate.get("candidate_id"),
             "strikes": list(candidate.get("strikes") or ()),
@@ -667,6 +678,12 @@ def _qualifies_for_human_candidate_lock(
 ) -> bool:
     if candidate.get("manual_authority_eligible") is not True:
         return False
+    if str(candidate.get("session_mode") or "").lower() == "rth":
+        environment = _map(facts.get("rth_environment"))
+        if environment.get("state") not in {
+            "VOL_CONTRACTION_BALANCE", "EXPANSION_TO_CONTRACTION",
+        }:
+            return False
     if abs((_number(candidate.get("short_abs_delta")) or 0.0) - HUMAN_SHORT_DELTA) > 1e-9:
         return False
     economics = _map(candidate.get("economics"))

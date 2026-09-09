@@ -434,8 +434,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v66"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v66"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v67"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v67"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -1208,3 +1208,17 @@ def test_surface_penalty_is_counted_once_through_candidate_and_ranker(monkeypatc
     candidate = decision["candidate"]
     assert candidate["surface_decision_modifier"] == -0.03
     assert candidate["selection_score"] == pytest.approx(candidate["selection_score_base"] - 0.03, abs=1e-4)
+
+
+def test_mixed_environment_does_not_lock_out_later_qualifying_iron_condor() -> None:
+    facts = _rth_facts()
+    facts["rth_environment"] = {"state": "MIXED_UNCONFIRMED", "status": "ready"}
+    rows = enumerate_iron_condor_candidates(_payload(), facts, _rth_state(), now=RTH_NOW, policy=StrategyPolicy())
+    assert rows
+    first = iron_condor_session_state(_payload(), facts, rows, now=RTH_NOW)
+    assert first["status"] == "waiting"
+    payload = {"previous_strategy_decision": {"session_date": facts["session_date"],
+        "market_facts": {"iron_condor_session_state": first}}}
+    facts["rth_environment"] = {"state": "VOL_CONTRACTION_BALANCE", "status": "ready"}
+    second = iron_condor_session_state(payload, facts, rows, now=RTH_NOW+timedelta(minutes=1))
+    assert second["status"] == "eligible"

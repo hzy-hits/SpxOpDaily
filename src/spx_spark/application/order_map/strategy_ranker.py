@@ -594,7 +594,7 @@ def _vertical_hard_gates(
                         "terminal_state": regime.get("terminal_state"),
                         "pin_grade": _map(regime.get("pin")).get("grade"),
                     },
-                    "threshold": "pin_look_or_trade_blocks_rth_vertical",
+                    "threshold": "stable_pin_blocks_rth_vertical",
                 }
             ],
         )
@@ -784,7 +784,7 @@ def _preaverage_vertical_hard_gates(
             {
                 "gate": "directional_spread_blocked_by_pin_watch",
                 "actual": regime.get("terminal_state"),
-                "threshold": "pin_look_or_trade_blocks_rth_vertical",
+                "threshold": "stable_pin_blocks_rth_vertical",
             }
         )
     long_strike, short_strike = _number(long.get("strike")), _number(short.get("strike"))

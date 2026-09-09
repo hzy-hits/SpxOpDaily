@@ -38,7 +38,7 @@ _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
 _ES_VOLUME_MOMENTUM_SETUP = "ES_VOLUME_MOMENTUM"
-_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v66"
+_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v67"
 _ES_VOLUME_MOMENTUM_CONTRACT_HASH = (
     "sha256:878fb878a4fdc83b6bb5309804a5e91a0c11a9674006cab2132614645bb0799c"
 )
@@ -57,7 +57,7 @@ _IRON_CONDOR_CONTRACT_HASH = (
 _GTH_IRON_CONDOR_CONTRACT_HASH = (
     "sha256:901d69561a93d3503495210c1f49f5c35791695065c0b298470c4e554dd446ba"
 )
-_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v66"
+_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v67"
 _GTH_MINUTE_GATE_CONTRACT_HASH = (
     "sha256:a37c9ec4ae262c425965238229d80f4fa3c0e30d6ac8d35c09195a54fd88d9e0"
 )
@@ -308,22 +308,22 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v66",
+                "strategy_policy.bootstrap.v67",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _RTH_LEVEL_CONFIRMATION_SETUP: (
-                "strategy_policy.bootstrap.v66",
+                "strategy_policy.bootstrap.v67",
                 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
                 "rth_level_confirmation_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v66",
+                "strategy_policy.bootstrap.v67",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v66",
+                "strategy_policy.bootstrap.v67",
                 (
                     _GTH_IRON_CONDOR_CONTRACT_HASH
                     if str(candidate.get("session_mode") or "").lower() == "gth"

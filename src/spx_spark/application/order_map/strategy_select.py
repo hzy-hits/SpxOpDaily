@@ -496,8 +496,6 @@ def _entry_state(
         "es_volume_momentum_extended_without_fresh_break",
     }:
         return "LATE_CHASE"
-    if rows and not rank.passed:
-        return "POOR_ASYMMETRY"
     missing = {
         "spx_price_unavailable",
         "vertical_path_inputs_unavailable",
@@ -506,11 +504,16 @@ def _entry_state(
         "path_inputs_unavailable",
         "market_frame_not_ready",
     }
-    if reason_set & missing:
+    if reason_set & missing or any(
+        marker in reason for reason in reason_set
+        for marker in ("unavailable", "unevaluable", "missing", "not_ready")
+    ):
         return "INSUFFICIENT_DATA"
     if _map(_map(facts.get("capabilities")).get("path")).get("ready") is not True:
         return "INSUFFICIENT_DATA"
-    return "INSUFFICIENT_DATA"
+    if rows and not rank.passed:
+        return "CANDIDATE_REJECTED"
+    return "WAITING_FOR_TRIGGER"
 
 
 def _rejection_funnel(

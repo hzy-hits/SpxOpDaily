@@ -160,10 +160,7 @@ def build_market_fact_pack(
             _first(values.get("vwap_slope"), es.get("vwap_slope_15m_points")),
         )
     )
-    # OI-GEX is a scoring input, not a butterfly capability gate. v2 §11.4
-    # drops the gamma-alignment term when GEX quality is unavailable; Pin
-    # already fail-closes if walls/Q/VC cannot align. Missing OI must not
-    # veto an otherwise ready PIN_STABLE butterfly.
+    # Missing OI drops its scoring term; it does not veto a ready butterfly.
     structure_ready = (
         option.get("quality") == "ready" and l1.get("quality") == "ready"
     )
@@ -374,6 +371,7 @@ def build_market_fact_pack(
             ),
             "atm_straddle_mid": _number(atm_straddle_current.get("straddle_mid")),
             "atm_straddle_decay_15m": _number(volatility.get("atm_straddle_decay_15m")),
+            "atm_straddle_decay_status": dict(_map(volatility.get("atm_straddle_decay_status"))),
             "atm_straddle_gth_high": _number(atm_straddle_gth_mid.get("high")),
             "atm_straddle_gth_low": _number(atm_straddle_gth_mid.get("low")),
             "atm_straddle_gth_extrema": {**atm_straddle_gth_mid, "observations": atm_straddle_gth.get("observations")},

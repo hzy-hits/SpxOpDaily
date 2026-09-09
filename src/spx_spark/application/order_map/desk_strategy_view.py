@@ -247,10 +247,19 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
                 "RISK_EXPANSION": "风险扩张，只考虑已有触发的方向结构",
                 "EXPANSION_TO_CONTRACTION": "波动扩张失败并转为收敛，可评估平衡铁鹰",
                 "VOL_CONTRACTION_BALANCE": "波动收缩且平衡，可评估区间结构",
-                "MIXED_UNCONFIRMED": "混合未确认，暂不授权新结构",
+                "MIXED_UNCONFIRMED": "环境混合，区间结构暂缓；方向候选仍须价格确认",
                 "INSUFFICIENT_DATA": "核心输入不足，失效关闭",
             }.get(environment_state, environment_state)
         )
+        if environment.get("missing"):
+            names = {
+                "vix1d_return_15m_pct": "VIX1D 15分钟变化",
+                "atm_iv_change_5m": "ATM IV 5分钟变化",
+                "atm_iv_change_15m": "ATM IV 15分钟变化",
+                "atm_straddle_decay_15m": "跨式可比历史",
+                "breadth_above_vwap": "市场广度",
+            }
+            label += "；缺少：" + "、".join(names.get(key, key) for key in environment["missing"])
         lines.insert(0, f"RTH环境  {label}；宏观只作过滤，不产生方向")
     if advice := research_decision_advice(payload):
         lines.append(advice)

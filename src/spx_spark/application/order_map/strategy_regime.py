@@ -44,7 +44,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v66"
+    policy_version: str = "strategy_policy.bootstrap.v67"
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
     trend_max_vwap_crosses: float = 2.0
@@ -295,12 +295,10 @@ def pin_trade_center(regime: Mapping[str, Any] | None) -> float | None:
 
 
 def pin_blocks_directional_spreads(regime: Mapping[str, Any] | None) -> bool:
-    """True when a forming or stable pin forbids RTH directional debit cards."""
+    """Only a stable pin blocks direction; a LOOK is observation, not a veto."""
 
     payload = _map(regime)
-    if payload.get("terminal_state") == "PIN_STABLE":
-        return True
-    return str(_map(payload.get("pin")).get("grade") or "") == "look"
+    return payload.get("terminal_state") == "PIN_STABLE"
 
 
 def pin_watch_center(regime: Mapping[str, Any] | None) -> float | None:
@@ -423,6 +421,7 @@ def assess_rth_environment(
             "range_structures_allowed": False,
             "directional_structures_allowed": breadth_only,
             "missing": missing,
+            "straddle_comparison": dict(_map(volatility.get("atm_straddle_decay_status"))),
             "reasons": ["rth_breadth_unavailable_directional_advisory" if breadth_only else "rth_environment_core_inputs_unavailable"],
         }
 
@@ -521,7 +520,7 @@ def assess_rth_environment(
         "state": state,
         "status": "ready",
         "direction_authority": "none",
-        "directional_structures_allowed": state == "RISK_EXPANSION",
+        "directional_structures_allowed": True,
         "range_structures_allowed": state
         in {"VOL_CONTRACTION_BALANCE", "EXPANSION_TO_CONTRACTION"},
         "observed_at": decision_at.isoformat() if decision_at is not None else None,

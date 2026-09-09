@@ -857,7 +857,7 @@ def test_globex_hmm_publishes_cross_state_not_path() -> None:
     assert regime["hmm"]["reason"] == "hmm_cross_state_only_not_path"
     assert "es_path_returns_unavailable" in regime["reasons"]
     assert "hmm_index_trend" not in regime["reasons"]
-    assert regime["policy_version"] == "strategy_policy.bootstrap.v66"
+    assert regime["policy_version"] == "strategy_policy.bootstrap.v67"
 
 
 def test_gth_path_follows_es_returns_not_globex_hmm() -> None:
@@ -1146,7 +1146,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert candidate["setup_kind"] == "CLOSE_CONVERGENCE_60M"
     assert candidate["center"] == 7710.0
     assert candidate["width"] == 10.0
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v66"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v67"
     assert candidate["convergence_risk"]["n_paths"] == 51
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
@@ -1318,7 +1318,7 @@ def test_rth_vertical_is_manual_candidate_but_late_chase_is_no_trade() -> None:
     decision = build_strategy_decision(payload, _state(now), now)
 
     assert decision["schema_version"] == "strategy_decision.v2"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v66"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v67"
     assert {row["setup_kind"] for row in rows} == {"ES_VOLUME_MOMENTUM"}
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL"
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
@@ -1456,7 +1456,7 @@ def test_rth_momentum_uses_manual_fallback_only_when_model_artifact_is_missing(
     assert decision["decision_type"] == "CALL_DEBIT_VERTICAL", decision["why_not"]
     assert decision["candidate"]["setup_kind"] == "ES_VOLUME_MOMENTUM"
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v66"
+        "strategy_policy.bootstrap.v67"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["fallback_reason"] == (
         "strategy_edge_model_artifact_missing"
@@ -1677,7 +1677,7 @@ def test_rth_confirmed_level_owns_one_five_minute_vertical_without_environment_v
     assert decision["candidate"]["setup_kind"] == "RTH_LEVEL_CONFIRMATION"
     assert decision["candidate"]["economics"]["width_points"] == 15.0
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v66"
+        "strategy_policy.bootstrap.v67"
     )
     assert decision["regime"]["rth_environment"]["status"] != "ready"
     assert decision["action_authority"] == "manual"
@@ -2922,9 +2922,10 @@ def test_look_window_ten_wide_pin_outranks_failed_break_vertical() -> None:
     assert "put-failed-break" in [row["candidate_id"] for row in rank.near_misses]
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
     assert "directional_spread_blocked_by_pin_watch" in gates
+    assert "unevidenced_debit_not_human_authorized" in gates
 
 
-def test_pin_look_blocks_failed_break_vertical() -> None:
+def test_pin_look_preserves_unevidenced_setup_rejection() -> None:
     now = datetime(2026, 8, 6, 16, 38, tzinfo=timezone.utc)
     vertical = {
         "candidate_id": "put-failed-break-look",
@@ -2967,7 +2968,8 @@ def test_pin_look_blocks_failed_break_vertical() -> None:
     )
     assert rank.passed == []
     gates = [gate["gate"] for gate in rank.near_misses[0]["failed_gates"]]
-    assert "directional_spread_blocked_by_pin_watch" in gates
+    assert "directional_spread_blocked_by_pin_watch" not in gates
+    assert "unevidenced_debit_not_human_authorized" in gates
 
 
 def test_pin_migrating_does_not_authorize_failed_break_vertical() -> None:
@@ -3016,15 +3018,24 @@ def test_pin_migrating_does_not_authorize_failed_break_vertical() -> None:
     assert "unevidenced_debit_not_human_authorized" in gates
 
 
-def test_pin_blocks_directional_spreads_only_for_look_or_trade() -> None:
+def test_pin_blocks_directional_spreads_only_for_stable_pin() -> None:
     assert pin_blocks_directional_spreads({"terminal_state": "PIN_STABLE", "pin": {"grade": "stable"}})
-    assert pin_blocks_directional_spreads({"terminal_state": "NONE", "pin": {"grade": "look"}})
+    assert not pin_blocks_directional_spreads({"terminal_state": "NONE", "pin": {"grade": "look"}})
     assert not pin_blocks_directional_spreads({"terminal_state": "PIN_MIGRATING", "pin": {"grade": "migrating"}})
     assert not pin_blocks_directional_spreads({"terminal_state": "UNCERTAIN", "pin": {}})
     assert not pin_blocks_directional_spreads({"terminal_state": "NONE", "pin": {"grade": "none"}})
 
 
-def test_es_volume_momentum_authorizes_put_without_trend_or_pullback() -> None:
+@pytest.mark.parametrize("pin_observation", [False, True])
+def test_es_volume_momentum_authorizes_put_without_trend_or_pullback(monkeypatch, pin_observation) -> None:
+    if pin_observation:
+        from spx_spark.application.order_map import strategy_select
+        original = strategy_select.assess_regime
+        def with_observation(facts):
+            regime = original(facts)
+            return {**regime, "terminal_state": "NONE",
+                    "pin": {**regime["pin"], "grade": "look"}}
+        monkeypatch.setattr(strategy_select, "assess_regime", with_observation)
     now = datetime(2026, 8, 14, 14, 17, 24, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     payload.pop("call_skew_spread_shadow")
@@ -4338,7 +4349,7 @@ def test_gth_selector_evidence_uses_current_minute_authority(
         "first_touch_time_stop_net_pnl_authority_unavailable"
     ]
     assert decision["candidate"]["authorization_policy"] == (
-        "strategy_policy.bootstrap.v66"
+        "strategy_policy.bootstrap.v67"
     )
     assert decision["candidate"]["edge"]["strategy_edge"]["gate_kind"] == (
         "gth_minute_confirmation"
@@ -4446,7 +4457,7 @@ def test_europe_confirmed_trend_transition_uses_gth_minute_authority(
     assert candidate["setup_kind"] == "EUROPE_TREND_TRANSITION"
     assert candidate["source_kind"] == "gth_es_trend_transition"
     assert candidate["source_segment"] == "europe"
-    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v66"
+    assert candidate["authorization_policy"] == "strategy_policy.bootstrap.v67"
     assert candidate["evidence_status"] == "forward_unvalidated_user_override"
     assert candidate["edge"]["strategy_edge"]["gate_kind"] == (
         "gth_minute_confirmation"
@@ -5560,3 +5571,23 @@ def test_close_convergence_cannot_arm_a_trail_even_for_a_cheap_butterfly():
     assert label.exit_reason == "hard_close"
     assert label.exit_at == start + timedelta(minutes=55)
     assert label.tp_armed is False
+
+
+def test_ready_market_without_setup_is_waiting_not_missing_data() -> None:
+    from spx_spark.application.order_map.strategy_select import _entry_state
+    from spx_spark.application.order_map.strategy_ranker import RankResult
+    rank = RankResult(passed=[], near_misses=[], gate_audit=[])
+    facts = {"capabilities": {"path": {"ready": True}}}
+    assert _entry_state(facts, ["es_volume_not_elevated"], [], rank) == "WAITING_FOR_TRIGGER"
+    assert _entry_state(facts, ["es_volume_momentum_unevaluable"], [], rank) == "INSUFFICIENT_DATA"
+
+
+def test_mixed_environment_does_not_claim_directional_permission_is_closed() -> None:
+    facts = {"session": {"mode": "rth"}, "event": {"entry_allowed": True},
+        "volatility": {"vix1d_return_15m_pct": 0.001, "atm_iv_change_5m": 0.001,
+            "atm_iv_change_15m": 0.001, "atm_straddle_decay_15m": 0.001},
+        "path": {"breadth_above_vwap": 0.5}}
+    result = assess_rth_environment(facts, path_state="BALANCED", terminal_state="NONE")
+    assert result["state"] == "MIXED_UNCONFIRMED"
+    assert result["directional_structures_allowed"] is True
+    assert result["range_structures_allowed"] is False
