@@ -100,27 +100,66 @@ def update_atm_straddle_session(
         at is None or not 0 <= (observed_at - at).total_seconds() <= 30 for at in source_times
     )):
         reason = "atm_observation_source_time_unavailable"
+    if reason is None and (max(source_times) - min(source_times)).total_seconds() > 10:
+        reason = "atm_observation_source_skew"
 
     if reason is None and segment is not None:
         at = max(source_times).isoformat()
         raw_bucket = state.get(segment)
         bucket = dict(raw_bucket) if isinstance(raw_bucket, dict) else {}
+        # Each strike owns its own observed path. Switching the displayed ATM
+        # selects an existing path; it never splices prices from two contracts.
+        raw_paths = bucket.get("contract_paths") or {}
+        paths = {
+            key: dict(value) for key, value in raw_paths.items()
+            if isinstance(value, dict)
+            and (last := _time(value.get("last_observation_at"))) is not None
+            and 0 <= (observed_at - last).total_seconds() <= ATM_STRADDLE_GTH_ACTIVE_WINDOW_SECONDS
+        }
+        strike = _number(frame.volatility.get("atm_strike"))
+        providers = frame.volatility.get("atm_observation_provider") or []
+        provider = providers[0] if len(providers) == 1 else None
+        selected_key = f"{provider}:{strike:g}" if provider and strike is not None else None
+        pairs = dict(frame.volatility.get("straddles_by_strike") or {})
+        if selected_key is not None:
+            pairs[f"{strike:g}"] = {
+                "mid": current_straddle, "provider": provider,
+                "source_times": [value.isoformat() for value in source_times],
+            }
+        for pair_strike, pair in pairs.items():
+            times = [_time(value) for value in pair.get("source_times") or ()]
+            value = _number(pair.get("mid"))
+            if (value is None or value <= 0 or not pair.get("provider")
+                    or len(times) != 2 or any(t is None for t in times)):
+                continue
+            if (any(not 0 <= (observed_at - t).total_seconds() <= 30 for t in times)
+                    or (max(times) - min(times)).total_seconds() > 10):
+                continue
+            key = f"{pair['provider']}:{pair_strike}"
+            path = paths.setdefault(key, {})
+            last = _time(path.get("last_observation_at"))
+            if last is not None and int(max(times).timestamp() // 5) <= int(last.timestamp() // 5):
+                continue
+            pair_at = max(times).isoformat()
+            path["last_observation_at"] = pair_at
+            path["observations"] = int(path.get("observations") or 0) + 1
+            if segment == "gth":
+                _update_active_expansion_extrema(path, "straddle_mid", value, at=pair_at)
+        bucket["contract_paths"] = paths
+        bucket["observation_coordinate"] = [strike, providers]
         previous_at = _time(bucket.get("last_observation_at"))
         # Count at most one distinct source observation per five-second bucket.
         # Re-consuming a frame or running the process faster adds no evidence.
         if previous_at is None or int(max(source_times).timestamp() // 5) > int(previous_at.timestamp() // 5):
-            coordinate = [frame.volatility.get("atm_strike"), frame.volatility.get("atm_observation_provider")]
-            if bucket.get("observation_coordinate") != coordinate:
-                bucket = {key: value for key, value in bucket.items() if "_active_" not in key}
-                bucket.update({"observation_coordinate": coordinate, "observations": 0})
             bucket["last_observation_at"] = at
-            bucket["observations"] = int(bucket.get("observations") or 0) + 1
             _update_extrema(bucket, "straddle_mid", current_straddle, at=at)
-            if segment == "gth":
-                _update_active_expansion_extrema(bucket, "straddle_mid", current_straddle, at=at)
             _update_extrema(bucket, "atm_iv", current_atm_iv, at=at)
-            state[segment] = bucket
             state["updated_at"] = at
+        bucket = {key: value for key, value in bucket.items() if "_active_" not in key}
+        selected = paths.get(selected_key, {})
+        bucket["observations"] = int(selected.get("observations") or 0)
+        bucket.update({key: value for key, value in selected.items() if "_active_" in key})
+        state[segment] = bucket
 
     return state, _atm_straddle_session_projection(
         state,

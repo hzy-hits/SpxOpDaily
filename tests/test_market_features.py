@@ -327,6 +327,38 @@ def _atm_observation(at: datetime, straddle: float, iv: float) -> dict:
             "atm_observation_provider": ["ibkr"]}
 
 
+@pytest.mark.parametrize("stale_neighbor", [False, True])
+def test_atm_roll_uses_only_the_new_strikes_own_fresh_observations(stale_neighbor: bool) -> None:
+    start = datetime(2026, 9, 9, 1, 0, tzinfo=UTC)
+    state = {}
+    for i in range(32):
+        at = start + timedelta(seconds=5 * i)
+        switched = i == 31
+        # Both contracts expand, then contract; the displayed ATM changes only
+        # on the final observation. Their absolute prices are different.
+        neighbor_mid = 21.0 if i < 15 else (25.0 if i < 31 else 22.0)
+        neighbor_at = at - timedelta(seconds=31) if stale_neighbor and not switched else at
+        vol = _atm_observation(at, 22.0 if switched else 20.0, .12)
+        vol["atm_strike"] = 7705 if switched else 7700
+        vol["straddles_by_strike"] = {"7705": {
+            "mid": neighbor_mid, "provider": "ibkr",
+            "source_times": [neighbor_at.isoformat(), at.isoformat()],
+        }}
+        frame = SimpleNamespace(volatility=vol, quality=FrameQuality.READY, front_expiry="20260909")
+        state, projection = update_atm_straddle_session(state, frame, now=at)
+    path = projection["gth"]["straddle_mid"]
+    assert path["active_base_low"] == (22.0 if stale_neighbor else 21.0)
+    assert path["active_high"] == (22.0 if stale_neighbor else 25.0)
+    assert projection["gth"]["observations"] == (1 if stale_neighbor else 32)
+    _, repeated = update_atm_straddle_session(state, frame, now=at + timedelta(seconds=1))
+    assert repeated["gth"]["observations"] == projection["gth"]["observations"]
+    # A different provider cannot borrow the IBKR expansion history.
+    vol["atm_observation_provider"] = ["schwab"]
+    _, switched_provider = update_atm_straddle_session(state, frame, now=at)
+    assert switched_provider["gth"]["observations"] == 1
+    assert switched_provider["gth"]["straddle_mid"]["active_high"] == 22.0
+
+
 def test_atm_straddle_session_tracks_gth_and_rth_extrema_causally() -> None:
     gth_high_at = datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
     base = OptionStructureFrame(

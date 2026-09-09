@@ -597,7 +597,7 @@ def iron_condor_session_state(
     # Preserve an actually selected legacy IC, but do not inherit rejected scans.
     legacy_rejected_lock = (
         session_mode == "rth"
-        and previous.get("policy_version") != "strategy_policy.bootstrap.v67"
+        and previous.get("policy_version") not in {"strategy_policy.bootstrap.v67", "strategy_policy.bootstrap.v68"}
         and previous.get("decision_type") != IRON_CONDOR_TYPE
         and previous_state.get("environment_qualified_at_lock") is not True
     )

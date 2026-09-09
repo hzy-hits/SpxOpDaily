@@ -85,6 +85,7 @@ def build_option_structure_frame(
             straddles[f"{strike:g}"] = {
                 "mid": sum(float(q.mid) for q in pair.values()),
                 "provider": provider,
+                "source_times": [at.isoformat() for at in sources],
             }
     volatility = option_volatility_features(
         front, next_expiry, history=history, now=now, straddles=straddles,

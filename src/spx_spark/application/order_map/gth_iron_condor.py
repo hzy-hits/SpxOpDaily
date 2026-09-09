@@ -13,9 +13,9 @@ from spx_spark.application.market_features.session_episode import (
 )
 
 GTH_EVIDENCE_CONTRACT_HASH = (
-    "sha256:901d69561a93d3503495210c1f49f5c35791695065c0b298470c4e554dd446ba"
+    "sha256:c5b321363f2f114ca4ddea9e4fb4f2183a8f8d36f37b8e28e72cd08f452b943f"
 )
-GTH_TRANSITION_VERSION = "gth_short_gamma_expansion_to_contraction.v2"
+GTH_TRANSITION_VERSION = "gth_short_gamma_expansion_to_contraction.v3"
 GTH_MAX_EXACT_QUOTE_AGE_SECONDS = 30.0
 GTH_MAX_EXACT_QUOTE_SKEW_SECONDS = 10.0
 GTH_MIN_STRADDLE_OBSERVATIONS = 30
