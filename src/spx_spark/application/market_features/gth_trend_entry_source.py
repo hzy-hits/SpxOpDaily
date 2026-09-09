@@ -67,24 +67,7 @@ def resolve_gth_manual_source(
             None,
         )
 
-    advance_event, advance_reasons = current_gth_trend_advance(
-        trend_state,
-        now=now,
-        ttl_seconds=ttl_seconds,
-        max_source_lag_seconds=max_source_lag_seconds,
-    )
-    if advance_event is not None and not advance_reasons:
-        event_id = str(advance_event["source_event_id"])
-        return "trend_advance", advance_event, event_id, ADVANCE_SOURCE_KIND, 0, [], None
-    trend_event, trend_reasons = current_gth_trend_transition(
-        trend_state,
-        now=now,
-        ttl_seconds=ttl_seconds,
-        max_source_lag_seconds=max_source_lag_seconds,
-    )
-    if trend_event is not None and not trend_reasons:
-        event_id = str(trend_event["source_event_id"])
-        return "trend", trend_event, event_id, TRANSITION_SOURCE_KIND, 0, [], None
+    # Research-only trend background must not hide an independently confirmed level.
     level_expiry = _time(level_decision.get("expires_at"))
     level_ready = bool(
         level_decision.get("formal_signal") is True
@@ -110,6 +93,25 @@ def resolve_gth_manual_source(
             [],
             None,
         )
+
+    advance_event, advance_reasons = current_gth_trend_advance(
+        trend_state,
+        now=now,
+        ttl_seconds=ttl_seconds,
+        max_source_lag_seconds=max_source_lag_seconds,
+    )
+    if advance_event is not None and not advance_reasons:
+        event_id = str(advance_event["source_event_id"])
+        return "trend_advance", advance_event, event_id, ADVANCE_SOURCE_KIND, 0, [], None
+    trend_event, trend_reasons = current_gth_trend_transition(
+        trend_state,
+        now=now,
+        ttl_seconds=ttl_seconds,
+        max_source_lag_seconds=max_source_lag_seconds,
+    )
+    if trend_event is not None and not trend_reasons:
+        event_id = str(trend_event["source_event_id"])
+        return "trend", trend_event, event_id, TRANSITION_SOURCE_KIND, 0, [], None
     if trend_event is not None:
         event_id = str(trend_event["source_event_id"])
         return (
@@ -203,20 +205,21 @@ def source_policy_fields(source_mode: str) -> dict[str, str]:
             "asia_continuation_deadline_seconds": str(
                 _ASIA_CONTINUATION_DEADLINE_SECONDS
             ),
-            "source_priority": "asia_range_then_advance_then_transition_then_level",
+            "source_priority": "asia_range_then_level_then_advance_then_transition",
         }
     if source_mode == "trend_advance":
         return {
             "directional_source": "confirmed_gth_trend_advance.v1",
-            "source_priority": "fresh_advance_then_level_then_transition",
+            "source_priority": "asia_range_then_level_then_advance_then_transition",
         }
     if source_mode == "trend":
         return {
             "directional_source": "confirmed_gth_trend_transition.v1",
-            "source_priority": "fresh_advance_then_level_then_transition",
+            "source_priority": "asia_range_then_level_then_advance_then_transition",
         }
     return {
         "directional_source": "confirmed_frozen_level_path.v2",
+        "source_priority": "asia_range_then_level_then_advance_then_transition",
         "breakout_crossing": "inside_to_outside_required",
         "breakout_extension": "outside_retest_zone_before_return_required",
         "breakout_retest": "required",

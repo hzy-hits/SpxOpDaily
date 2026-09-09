@@ -233,3 +233,5 @@ A change that increases process count, active languages, mutable stores or owner
 26. v67 起修复信号门禁和输入表达（S1/S3）：Pin LOOK 仅观察，不否决独立已授权方向价差；PIN_STABLE 仍保留方向保护，蝶式仍须原确认/价格门。RTH 铁鹰锁腿同时要求环境为 VOL_CONTRACTION_BALANCE 或 EXPANSION_TO_CONTRACTION；未获选的旧版提前锁腿不继承，实际已选铁鹰和会话次数约束保留。环境完整时方向结构字段允许继续检查，混合状态仅关闭区间结构；数据完整但无触发输出 WAITING_FOR_TRIGGER，不冒充 INSUFFICIENT_DATA。ATM 跨式比较使用近 ATM 同到期、同执行价、同 provider 两腿历史，正常 ATM 换档不再自动断开比较；源报价按现有新鲜度和同步规则筛选，历史目标前超过 90 秒、换到期、换源或缺同合约均不生成衰减，具体原因随事实传递。没有新增 setup、扩大收益保证或更改 Bark。版本验收见 docs/gate-signal-recovery-v67.md。
 
 27. v68 起（S1/S3），近ATM同到期各执行价/provider分别按真实两腿源时间积累局部压缩周期，ATM换档选取当前合约已有因果历史，不再清空所有周期，也不拼接不同执行价价格。单合约五秒最多一个新源观测、源年龄<=30秒、偏斜<=10秒；旧状态无逐合约证据则重新积累。沿用v67全部候选/管理门；v67已合格RTH锁腿继续保留。平缓收缩参数网格仅研究，未新增生产setup或放松10%扩张/8%回落门；结果与边界见docs/gth-entry-recovery-v68.md。Bark与automatic_ordering=false不变。
+
+28. v68来源优先级修复（S3）：GTH选源顺序为Asia-range已确认失败回踩、有效confirmed level、advance、transition。有效水平必须formal_signal/confirmed/quality_ok且未过期，不再被趋势背景抢占；欧洲transition与有效水平并存时亦优先水平。顺序写入现有候选policy hash，全局v68不变。平缓收缩长持有研究不得用有退出报价的子集冒充完整策略收益；见docs/gth-source-priority-recovery.md。Bark与人工-only不变。

@@ -2054,7 +2054,9 @@ def test_europe_asia_low_failed_retest_is_causal_manual_source(
     assert candidate["automatic_ordering"] is False
 
 
-def test_fresh_trend_transition_takes_priority_over_fresh_confirmed_level(
+@pytest.mark.parametrize("source", ["transition", "advance"])
+def test_confirmed_level_is_not_hidden_by_trend_background(
+    source: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_ready_market(monkeypatch, now=NOW, parity_price=7458.0, es_price=7488.0)
@@ -2063,7 +2065,7 @@ def test_fresh_trend_transition_takes_priority_over_fresh_confirmed_level(
     candidate = evaluate_gth_level_manual_candidate(
         object(),
         level,
-        trend_state=_trend_transition_state(NOW, direction="up", price=7488.0),
+        trend_state=(_trend_transition_state if source == "transition" else _trend_advance_state)(NOW, direction="up", price=7488.0),
         macro_event={"entry_allowed": True},
         now=NOW,
         policy=MarketFeatureSettings(),
@@ -2072,9 +2074,8 @@ def test_fresh_trend_transition_takes_priority_over_fresh_confirmed_level(
     )
 
     assert candidate["status"] == "manual_ready"
-    assert candidate["source_kind"] == "gth_es_trend_transition"
-    assert candidate["source_signal_id"] != level["event_id"]
-    assert candidate["path_kind"] == "trend_transition_call"
+    assert candidate["source_kind"] == "gth_confirmed_level_path"
+    assert candidate["source_signal_id"] == level["event_id"]
 
 
 def test_europe_trend_transition_preserves_segment_for_unified_selector(
@@ -2154,6 +2155,7 @@ def test_level_policy_hash_and_candidate_id_include_negative_history_veto(
             "quote_max_age_seconds": policy.gth_manual_candidate_quote_max_age_seconds,
             "ttl_seconds": policy.gth_manual_candidate_ttl_seconds,
             "directional_source": "confirmed_frozen_level_path.v2",
+            "source_priority": "asia_range_then_level_then_advance_then_transition",
             "breakout_crossing": "inside_to_outside_required",
             "breakout_extension": "outside_retest_zone_before_return_required",
             "breakout_retest": "required",
