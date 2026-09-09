@@ -258,13 +258,6 @@ def build_strategy_decision(
             )
             reasons = generation_reasons
     regime = {**regime, "entry_state": _entry_state(facts, reasons, rows, rank)}
-    iron_condor_map = _attach_iron_condor_only_paths(
-        facts,
-        iron_condor_map,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=_utc(now),
-    )
     return _with_iron_condor_map(
         _no_trade_decision(
             facts,
@@ -755,7 +748,8 @@ def _attach_winner_path_distributions(
             probability_settings=probability_settings,
             now=now,
         )
-    # First slice: winner + iron-condor map only. Shadow cards stay rank-only.
+    # Only an authorized IC needs its advisory path here. Unselected maps
+    # must not block decisions on historical lake scans. Winner veto stays above.
     shadows = [dict(row) for row in passed[1:3]]
     return (
         winner,
@@ -766,24 +760,7 @@ def _attach_winner_path_distributions(
             data_root=data_root,
             probability_settings=probability_settings,
             now=now,
-        ),
-    )
-
-
-def _attach_iron_condor_only_paths(
-    facts: Mapping[str, Any],
-    iron_condor_map: Mapping[str, Any],
-    *,
-    data_root: str | Path | None,
-    probability_settings: StrategyDistributionSettings | None,
-    now: datetime,
-) -> dict[str, Any]:
-    return attach_iron_condor_path_distribution(
-        iron_condor_map,
-        facts,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=now,
+        ) if str(first.get("strategy_type") or "") == IRON_CONDOR_TYPE else dict(iron_condor_map),
     )
 
 

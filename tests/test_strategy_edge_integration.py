@@ -256,11 +256,6 @@ def test_model_rejection_prevents_manual_authority(monkeypatch) -> None:
             rejected=[candidate],
         ),
     )
-    monkeypatch.setattr(
-        strategy_select,
-        "_attach_iron_condor_only_paths",
-        lambda *_args, **_kwargs: {},
-    )
 
     decision = strategy_select.build_strategy_decision(
         {},

@@ -1222,3 +1222,17 @@ def test_mixed_environment_does_not_lock_out_later_qualifying_iron_condor() -> N
     facts["rth_environment"] = {"state": "VOL_CONTRACTION_BALANCE", "status": "ready"}
     second = iron_condor_session_state(payload, facts, rows, now=RTH_NOW+timedelta(minutes=1))
     assert second["status"] == "eligible"
+
+
+def test_no_trade_does_not_wait_for_advisory_iron_condor_history(monkeypatch, tmp_path) -> None:
+    facts = _rth_facts()
+    facts["capabilities"]["global"] = {"ready": False, "reasons": ["market_frame_not_ready"]}
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack",
+                        lambda payload, latest, at: facts)
+    def unavailable_lake(*args, **kwargs):
+        raise OSError("historical research storage unavailable")
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.attach_iron_condor_path_distribution", unavailable_lake)
+    decision = build_strategy_decision(_payload(), _rth_state(), RTH_NOW, data_root=tmp_path)
+    assert decision["decision_type"] == "NO_TRADE"
+    assert decision["regime"]["entry_state"] == "INSUFFICIENT_DATA"
+    assert decision["iron_condor_map"]

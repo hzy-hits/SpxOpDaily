@@ -615,7 +615,7 @@ def humanize_strategy_reason(
         "trend_pullback_path_not_confirmed": "回踩成立，但趋势背景尚未确认",
         "trend_pullback_path_unevaluable": "回踩成立，但趋势向量不完整，不能评估",
         "es_volume_momentum_unavailable": "ES 量比或动量不足，不能授权短周期方向",
-        "es_volume_not_elevated": "ES 量比未放量，短周期方向不成立",
+        "es_volume_not_elevated": "ES 动量未触发：量比尚未放量",
         "es_volume_momentum_direction_flat": "ES 放量但价格方向是平的",
         "es_volume_momentum_break_reclaimed": "刚发生破位收回，当前不追同一脚动量",
         "es_volume_momentum_not_aligned": "ES 量比方向与 1 分钟/5 分钟动量不一致",
