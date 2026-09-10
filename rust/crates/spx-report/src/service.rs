@@ -51,6 +51,13 @@ impl DeskMessageWriteFailure {
     }
 
     fn projection_fallback_metadata(&self) -> Option<&ResponseMetadata> {
+        // Discard an unidentified model's output. The already validated source
+        // projection can still supply the scheduled map without model authority.
+        if self.code == ReportWriterErrorCode::UnexpectedModel {
+            return self.metadata.as_ref().filter(|metadata| {
+                (200..300).contains(&metadata.http_status) && metadata.response_model.is_some()
+            });
+        }
         let validation_failed = matches!(
             self.code,
             ReportWriterErrorCode::DeskMessageInvalidJson
@@ -816,7 +823,6 @@ mod tests {
         for code in [
             ReportWriterErrorCode::Transport,
             ReportWriterErrorCode::HttpStatus,
-            ReportWriterErrorCode::UnexpectedModel,
             ReportWriterErrorCode::RejectedFinishReason,
             ReportWriterErrorCode::MissingContent,
         ] {

@@ -235,3 +235,5 @@ A change that increases process count, active languages, mutable stores or owner
 27. v68 起（S1/S3），近ATM同到期各执行价/provider分别按真实两腿源时间积累局部压缩周期，ATM换档选取当前合约已有因果历史，不再清空所有周期，也不拼接不同执行价价格。单合约五秒最多一个新源观测、源年龄<=30秒、偏斜<=10秒；旧状态无逐合约证据则重新积累。沿用v67全部候选/管理门；v67已合格RTH锁腿继续保留。平缓收缩参数网格仅研究，未新增生产setup或放松10%扩张/8%回落门；结果与边界见docs/gth-entry-recovery-v68.md。Bark与automatic_ordering=false不变。
 
 28. v68来源优先级修复（S3）：GTH选源顺序为Asia-range已确认失败回踩、有效confirmed level、advance、transition。有效水平必须formal_signal/confirmed/quality_ok且未过期，不再被趋势背景抢占；欧洲transition与有效水平并存时亦优先水平。顺序写入现有候选policy hash，全局v68不变。平缓收缩长持有研究不得用有退出报价的子集冒充完整策略收益；见docs/gth-source-priority-recovery.md。Bark与人工-only不变。
+
+29. 2026-09-10生产故障修复（S1/S3、Phase 6冻结例外）：ATM缺行权价时输出atm_strike_unavailable，不进行数字格式化；候选路径预算耗尽清空现有passed列表并记录未评估项，不对frozen RankResult字段赋值。Rust报告在HTTP成功但模型身份不匹配时仍拒绝模型内容，复用有效、经过validate的原始Desk Map并记录unexpected_model回退原因；不改变交易权限、owner或Bark。见docs/desk-map-runtime-recovery-2026-09-10.md。

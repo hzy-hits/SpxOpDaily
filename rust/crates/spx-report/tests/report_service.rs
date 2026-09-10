@@ -362,6 +362,37 @@ fn waits_for_current_slot_then_persists_once_through_real_ledger() {
 }
 
 #[test]
+fn unexpected_model_uses_only_the_source_map_and_persists_once() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am() + TimeDelta::seconds(10);
+    let source = projection("desk-map:model-mismatch", "2026-08-04:10:00", ten_am());
+    let expected = source.message.clone();
+    write_latest(&config.projection_path, source);
+    let transport = StaticTransport::new(deepseek_response(
+        200,
+        "unrecognized-model",
+        "stop",
+        "untrusted model output",
+    ));
+    let writer = ReportWriterClient::new(config.writer.clone(), true, transport).unwrap();
+    let store = MemoryStore::default();
+    let inspector = store.clone();
+    let mut service = ReportService::open(config.clone(), true, writer, store, now).unwrap();
+    service.run_once_at(now).unwrap();
+    service.run_once_at(now + TimeDelta::seconds(1)).unwrap();
+    let intents = inspector.intents();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].message, expected);
+    let health = ReportHealth::load(&config.health_path).unwrap();
+    assert_eq!(
+        health.last_fallback_reason.as_deref(),
+        Some("unexpected_model")
+    );
+    assert_eq!(health.counters.generation_failures, 0);
+}
+
+#[test]
 fn stop_validation_failure_persists_the_validated_projection_message_once() {
     let temp = TempDir::new().unwrap();
     let config = config(&temp, true, &[5]);

@@ -235,7 +235,7 @@ def build_strategy_decision(
                     {**row, "rejection_reasons": ["path_not_evaluated_budget"]}
                     for row in rank.passed
                 )
-                rank.passed = []
+                rank.passed.clear()
         else:
             event_reason = event_settlement_generation_reason(
                 payload, now=_utc(now)

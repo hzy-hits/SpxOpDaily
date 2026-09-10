@@ -1844,3 +1844,17 @@ def test_straddle_decay_survives_atm_roll_using_same_contract_quotes() -> None:
     gap = option_volatility_features(front, None, history=history, now=now, straddles=current)
     assert gap["atm_straddle_decay_15m"] is None
     assert gap["atm_straddle_decay_status"]["reason"] == "history_gap"
+
+
+@pytest.mark.parametrize("straddles", [None, {}])
+def test_missing_atm_strike_cannot_crash_or_create_decay(straddles) -> None:
+    now = datetime(2026, 9, 9, 23, 30, tzinfo=UTC)
+    front = SimpleNamespace(expiry="20260910", atm_strike=None,
+        atm_straddle_mid=None, atm_iv=None, put_skew_25d=None,
+        call_skew_25d=None, expected_move_points=None)
+    history = [{"as_of": (now - timedelta(minutes=15)).isoformat(),
+        "front_expiry": "20260910", "volatility": {"atm_strike": None,
+        "atm_straddle_mid": 20.0}}]
+    result = option_volatility_features(front, None, history=history, now=now, straddles=straddles)
+    assert result["atm_straddle_decay_15m"] is None
+    assert result["atm_straddle_decay_status"]["reason"] == "atm_strike_unavailable"

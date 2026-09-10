@@ -447,7 +447,9 @@ def option_volatility_features(
     prior_straddle = None
     reason = "history_unavailable"
     comparison_method = None
-    if prior_frame:
+    if _number(front.atm_strike) is None:
+        reason = "atm_strike_unavailable"
+    elif prior_frame:
         prior_at = _parse_at(prior_frame.get("as_of"))
         expiry = getattr(front, "expiry", None)
         if prior_at is not None and (target - prior_at).total_seconds() > 90:

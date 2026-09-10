@@ -72,17 +72,19 @@ def test_unrelated_exemption_cannot_free_an_opposite_candidate_from_direction_lo
     assert apply_winner_stick([opposite, independent], lock, session_mode="rth")[0] == [independent]
 
 
-def test_path_veto_evaluates_next_candidate_and_records_first_rejection(monkeypatch):
+@pytest.mark.parametrize("budget_exhausted", [False, True])
+def test_path_veto_evaluates_next_candidate_and_records_first_rejection(monkeypatch, budget_exhausted):
     from spx_spark.application.order_map import strategy_select
     now = datetime(2026, 8, 7, 15, tzinfo=timezone.utc)
     payload = _decision_payload(now)
     original = build_strategy_decision(payload, _state(now), now)["candidate"]
     candidates = [{**deepcopy(original), "candidate_id": name, "opportunity_id": name,
                    "selection_score": score, "selection_score_base": score}
-                  for name, score in (("adverse", .9), ("acceptable", .5))]
+                  for name, score in ((("adverse", .9), ("second", .8), ("third", .7), ("unexamined", .6))
+                                    if budget_exhausted else (("adverse", .9), ("acceptable", .5)))]
     monkeypatch.setattr(strategy_select, "enumerate_candidates", lambda *a, **k: candidates)
     def paths(candidate, *args, **kwargs):
-        if candidate["opportunity_id"] == "adverse":
+        if budget_exhausted or candidate["opportunity_id"] == "adverse":
             return {**candidate, "evidence_status": "forward_unvalidated_user_override", "edge": {
                 **candidate.get("edge", {}), "path_distribution": {"p90_net_pnl": -1,
                     "risk_objective": {"status": "available", "n_sessions": 25,
@@ -90,7 +92,12 @@ def test_path_veto_evaluates_next_candidate_and_records_first_rejection(monkeypa
         return candidate
     monkeypatch.setattr(strategy_select, "attach_path_distribution", paths)
     decision = build_strategy_decision(payload, _state(now), now)
-    assert decision["candidate"]["opportunity_id"] == "acceptable"
+    if budget_exhausted:
+        assert decision["decision_type"] == "NO_TRADE"
+        assert any(row.get("candidate_id") == "unexamined" and "path_not_evaluated_budget" in row.get("rejection_reasons", [])
+                   for row in decision["rejection_funnel"]["candidate_evaluations"])
+    else:
+        assert decision["candidate"]["opportunity_id"] == "acceptable"
     assert any(row.get("candidate_id") == "adverse" and "forward_path_distribution_veto" in row.get("rejection_reasons", [])
                for row in decision["rejection_funnel"]["candidate_evaluations"])
 
