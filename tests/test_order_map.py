@@ -6573,3 +6573,24 @@ def test_candidate_card_exposes_evidence_and_separate_quote_deadline() -> None:
     assert "前向未验证" in _strategy_card_title(candidate)
     assert "报价有效截至 23:01" in text
     assert "观点有效至 23:05" in text
+
+
+@pytest.mark.parametrize("mode,age,expected", [
+    ("rth", 60, None), ("rth", 1, "flood_control_cooldown"),
+    ("gth", 60, "flood_control_iron_condor_session_cap"),
+])
+def test_ic_daily_cap_removed_only_for_rth_preserving_cooldown(monkeypatch, mode, age, expected):
+    from spx_spark.application.order_map.delivery import _flood_control_block
+    from spx_spark.config import NotificationSettings
+    now = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    prior = tuple({
+        "decision_id": f"prior:{i}", "decision_at": now-timedelta(minutes=age+i),
+        "opportunity_id": f"prior-opportunity:{i}", "direction": "NEUTRAL",
+        "setup_kind": "IRON_CONDOR_DELTA", "session_mode": mode,
+    } for i in range(3))
+    monkeypatch.setattr("spx_spark.infrastructure.operational_db.recent_selected_strategy_cards", lambda **k: prior)
+    monkeypatch.setattr("spx_spark.application.order_map.delivery.notification_event_exists", lambda *a: True)
+    candidate = {"setup_kind": "IRON_CONDOR_DELTA", "direction": "NEUTRAL", "opportunity_id": "new"}
+    decision = {"session_date":"2026-08-20", "decision_id":"new", "market_facts":{"session":{"mode":mode}}}
+    result = _flood_control_block(decision, candidate, NotificationSettings.from_env(), now=now)
+    assert (result["outcome"] if result else None) == expected

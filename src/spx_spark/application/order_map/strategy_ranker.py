@@ -1463,7 +1463,7 @@ def _iron_condor_hard_gates(
             }
         )
     authority = _map(facts.get("iron_condor_authority"))
-    if session_mode in {"rth", "gth"} and authority.get("status") != "ready":
+    if session_mode == "gth" and authority.get("status") != "ready":
         gates.append(
             {
                 "gate": "iron_condor_session_authority_unavailable",
@@ -1472,7 +1472,7 @@ def _iron_condor_hard_gates(
             }
         )
     accepted_count = _number(authority.get("accepted_count"))
-    if session_mode in {"rth", "gth"} and accepted_count is not None and accepted_count >= 1:
+    if session_mode == "gth" and accepted_count is not None and accepted_count >= 1:
         gates.append(
             {
                 "gate": "iron_condor_session_cap",
@@ -1577,7 +1577,7 @@ def _iron_condor_hard_gates(
             }
         )
     session_state = _map(facts.get(HUMAN_SESSION_STATE_KEY))
-    if session_state.get("status") == "eligible":
+    if session_mode == "gth" and session_state.get("status") == "eligible":
         locked_candidate_id = str(session_state.get("candidate_id") or "")
         if locked_candidate_id and candidate.get("candidate_id") != locked_candidate_id:
             gates.append(

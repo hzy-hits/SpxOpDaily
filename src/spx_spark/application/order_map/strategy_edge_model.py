@@ -38,7 +38,7 @@ _WALL_HAZARD_CONTRACT_HASH = (
     "sha256:ff0e0d1204b97af334ec3d65679bc0dcfdb9e4b3084912e650af6caef05494a2"
 )
 _ES_VOLUME_MOMENTUM_SETUP = "ES_VOLUME_MOMENTUM"
-_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v68"
+_ES_VOLUME_MOMENTUM_POLICY = "strategy_policy.bootstrap.v69"
 _ES_VOLUME_MOMENTUM_CONTRACT_HASH = (
     "sha256:878fb878a4fdc83b6bb5309804a5e91a0c11a9674006cab2132614645bb0799c"
 )
@@ -52,12 +52,12 @@ _CLOSE_CONVERGENCE_CONTRACT_HASH = (
 )
 _IRON_CONDOR_SETUP = "IRON_CONDOR_DELTA"
 _IRON_CONDOR_CONTRACT_HASH = (
-    "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
+    "sha256:bf857053b1d7d85f32adacdf479a18242ab38ded8e7b8bb59e52082505ef223e"
 )
 _GTH_IRON_CONDOR_CONTRACT_HASH = (
     "sha256:c5b321363f2f114ca4ddea9e4fb4f2183a8f8d36f37b8e28e72cd08f452b943f"
 )
-_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v68"
+_GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v69"
 _GTH_MINUTE_GATE_CONTRACT_HASH = (
     "sha256:a37c9ec4ae262c425965238229d80f4fa3c0e30d6ac8d35c09195a54fd88d9e0"
 )
@@ -308,22 +308,22 @@ def apply_strategy_edge_authority(
                 "preaverage_policy_authority_invalid",
             ),
             _WALL_HAZARD_SETUP: (
-                "strategy_policy.bootstrap.v68",
+                "strategy_policy.bootstrap.v69",
                 _WALL_HAZARD_CONTRACT_HASH,
                 "wall_hazard_policy_authority_invalid",
             ),
             _RTH_LEVEL_CONFIRMATION_SETUP: (
-                "strategy_policy.bootstrap.v68",
+                "strategy_policy.bootstrap.v69",
                 _RTH_LEVEL_CONFIRMATION_CONTRACT_HASH,
                 "rth_level_confirmation_policy_authority_invalid",
             ),
             _CLOSE_CONVERGENCE_SETUP: (
-                "strategy_policy.bootstrap.v68",
+                "strategy_policy.bootstrap.v69",
                 _CLOSE_CONVERGENCE_CONTRACT_HASH,
                 "close_convergence_policy_authority_invalid",
             ),
             _IRON_CONDOR_SETUP: (
-                "strategy_policy.bootstrap.v68",
+                "strategy_policy.bootstrap.v69",
                 (
                     _GTH_IRON_CONDOR_CONTRACT_HASH
                     if str(candidate.get("session_mode") or "").lower() == "gth"

@@ -478,8 +478,8 @@ def test_strategy_decision_always_attaches_iron_condor_map(monkeypatch) -> None:
 
     decision = build_strategy_decision(_payload(), _state(NOW), NOW)
 
-    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v68"
-    assert decision["policy_version"] == "strategy_policy.bootstrap.v68"
+    assert StrategyPolicy().policy_version == "strategy_policy.bootstrap.v69"
+    assert decision["policy_version"] == "strategy_policy.bootstrap.v69"
     assert decision["decision_type"] == "NO_TRADE"
     assert decision["action_authority"] == "none"
     assert decision["candidate"] is None
@@ -810,7 +810,7 @@ def test_gth_human_iron_condor_accepts_10_second_bbo_skew_but_rejects_more() -> 
     assert rejected == []
 
 
-def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
+def test_rth_human_iron_condor_uses_schwab_per_side_delta_after_1100() -> None:
     from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     at_1100 = datetime(2026, 8, 13, 15, 0, tzinfo=timezone.utc)
@@ -858,7 +858,7 @@ def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
         now=after_window,
         policy=StrategyPolicy(),
     )
-    assert later[0]["manual_authority_eligible"] is False
+    assert later[0]["manual_authority_eligible"] is True
 
 
 def test_rth_iron_condor_gamma_risk_uses_signed_four_leg_gamma() -> None:
@@ -957,7 +957,7 @@ def test_rth_human_iron_condor_does_not_fall_back_to_ibkr_delta_map() -> None:
     ) == []
 
 
-def test_rth_iron_condor_locks_first_qualifying_candidate_id() -> None:
+def test_rth_iron_condor_does_not_inherit_first_candidate_lock() -> None:
     facts = _rth_facts()
     facts["iron_condor_session_state"] = {
         "status": "eligible",
@@ -993,7 +993,7 @@ def test_rth_iron_condor_locks_first_qualifying_candidate_id() -> None:
     )
 
     assert ranked.passed == []
-    assert "iron_condor_session_candidate_locked" in ranked.near_misses[0][
+    assert "iron_condor_session_candidate_locked" not in ranked.near_misses[0][
         "rejection_reasons"
     ]
 
@@ -1129,7 +1129,7 @@ def test_rth_iron_condor_surface_warning_does_not_poison_session(
     assert first_state["surface_gate"]["blocking"] is False
     assert second["decision_type"] == "IRON_CONDOR", second["why_not"]
     assert second_state["status"] == "eligible"
-    assert second_state["carried_forward"] is True
+    assert second_state["carried_forward"] is False
 
 
 def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
@@ -1275,3 +1275,30 @@ def test_authorized_iron_condor_survives_advisory_lake_failure(monkeypatch, tmp_
     decision = build_strategy_decision(_payload(), _rth_state(), RTH_NOW, data_root=tmp_path)
     assert decision["decision_type"] == "IRON_CONDOR", decision["why_not"]
     assert decision["automatic_ordering"] is False
+
+
+@pytest.mark.parametrize("hour,minute,eligible", [(13,29,False),(13,30,True),(15,1,True),(18,0,True),(19,44,True),(19,45,False)])
+def test_rth_ic_entry_clock_respects_session_and_management_exit(hour, minute, eligible):
+    now = RTH_NOW.replace(hour=hour, minute=minute)
+    rows = enumerate_iron_condor_candidates(
+        _payload(), _rth_facts(), _rth_state(now), now=now, policy=StrategyPolicy(),
+    )
+    assert bool(rows and rows[0]["manual_authority_eligible"]) is eligible
+
+
+def test_rth_second_ic_after_1100_rechecks_economics(monkeypatch, tmp_path):
+    from spx_spark.application.order_map.strategy_edge_model import apply_strategy_edge_authority
+    now = RTH_NOW.replace(hour=18)
+    facts = _rth_facts()
+    facts.update(decision_at=now.isoformat(), available_at=now.isoformat())
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack", lambda *a: facts)
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select._accepted_session_cards", lambda *a: (
+        {"setup_kind":"IRON_CONDOR_DELTA", "session_mode":"rth", "direction":"NEUTRAL", "decision_at": RTH_NOW},
+    ))
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.apply_strategy_edge_authority", apply_strategy_edge_authority)
+    for bonus, expected in ((0.75, "IRON_CONDOR"), (0.70, "NO_TRADE")):
+        decision = build_strategy_decision(_payload(), _rth_state(now, short_quote_bonus=bonus), now, data_root=tmp_path)
+        assert decision["market_facts"]["iron_condor_authority"]["accepted_count"] == 1
+        assert decision["decision_type"] == expected, decision["why_not"]
+        if expected == "NO_TRADE":
+            assert "iron_condor_credit_fraction" in decision["why_not"]["reasons"]

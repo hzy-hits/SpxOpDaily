@@ -241,3 +241,6 @@ A change that increases process count, active languages, mutable stores or owner
 30. 2026-09-10联合位置对照接入（S1/S3，v68授权合同不变）：RTH/GTH铁鹰地图新增独立P/C 10/15/20Δ、固定10点翼扫描，替换旧单一17.5Δ研究输出；严格复用各自执行源、报价/Greeks年龄与偏斜门。输出credit/width、实际delta、每侧ATM跨式/既有EM距离、过去15/60分钟ES路径和即时跨价费用。ES路径按固定一分钟源时钟重建，重复、缺口、未来到达与provider/合约切换不生成完整尺度。当前EM仍是0.85×跨式，不是sigma；trailing ES不是到退出时刻的SPX预测区间。距离阈值未校准，新增字段仅comparison_only，不新增硬门、改变固定20Δ人工赢家或扩大授权；3C超过翼宽明确提示。全量数据保留在现有strategy_decision中，桌图只摘要，无新服务/数据库/Rust wire/Bark改动。见docs/ic-credit-placement-exploration-2026-09-10.md。
 
 31. 同次上线验收补修：ES realized路径优先读取已有es_by_provider中的同源历史，正常best-quote路由切换不应破坏独立来源的证据；实际缺同源数据或换合约仍不可用。分钟采样新增判定改用分钟边界，防止上一分钟末更新导致下一分钟漏存；同分钟仍覆盖同一条。既有缺口不以重复源报价补齐，等待真实窗口完整，不新增交易门。
+
+
+32. v69（S1/S3，2026-09-11）：按用户要求取消 RTH 铁鹰每日一张、10:00–11:00 窗和整日首组锁腿。RTH 每次决策重新按当时 Schwab exact BBO/Greeks 选原 20Δ/10 点翼，入场时间为合法 RTH 且 09:30≤ET<15:45；15:45 管理退出、25%/转换23%贷记、环境及其他经济门不变。候选入队同步取消 RTH IC 专属每日上限和通用方向次数上限，保留15分钟冷却及机会幂等；不推断实际持仓。GTH 配额、锁腿与合同不变。策略版本及 RTH 证据 hash 同步更新，仍 forward-unvalidated/manual-only。Bark transport、资金流/墙位通知权限未改。蝶式11:00预测目标尚待明确，未将旧15:00模型冒充11:00模型。证据见 docs/rth-entry-contract-v69.md。

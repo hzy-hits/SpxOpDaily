@@ -44,7 +44,7 @@ __all__ = (
 
 @dataclass(frozen=True, slots=True)
 class StrategyPolicy:
-    policy_version: str = "strategy_policy.bootstrap.v68"
+    policy_version: str = "strategy_policy.bootstrap.v69"
     trend_score: float = 6.0
     trend_efficiency: float = 0.45
     trend_max_vwap_crosses: float = 2.0

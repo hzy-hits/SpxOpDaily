@@ -802,7 +802,7 @@ def _flood_control_block(
     counts = {"session_direction": session_direction, "cooldown_hits": cooldown_hits}
     if setup_kind == "IRON_CONDOR_DELTA":
         counts["iron_condor_hits"] = iron_condor_hits
-    if setup_kind == "IRON_CONDOR_DELTA" and iron_condor_hits >= 1:
+    if session_mode == "gth" and setup_kind == "IRON_CONDOR_DELTA" and iron_condor_hits >= 1:
         return {
             "accepted": False,
             "outcome": "flood_control_iron_condor_session_cap",
@@ -842,7 +842,7 @@ def _flood_control_block(
             "outcome": "flood_control_cooldown",
             "counts": counts,
         }
-    if session_direction >= DEFAULT_STRATEGY_POLICY.max_cards_per_direction_per_session:
+    if not (session_mode == "rth" and setup_kind == "IRON_CONDOR_DELTA") and session_direction >= DEFAULT_STRATEGY_POLICY.max_cards_per_direction_per_session:
         return {
             "accepted": False,
             "outcome": "flood_control_session_cap",

@@ -55,8 +55,8 @@ MAX_CREDIT_FRACTION = 0.55
 HUMAN_MAX_ATM_IV = 0.2374713681
 HUMAN_MAX_SMILE_RICHNESS = 0.0313827831
 HUMAN_SHORT_DELTA = 0.20
-HUMAN_ENTRY_START_ET = time(10, 0)
-HUMAN_ENTRY_END_ET = time(11, 0)
+HUMAN_ENTRY_START_ET = time(9, 30)
+HUMAN_ENTRY_END_ET = time(15, 45)
 HUMAN_MAX_RISK_DOLLARS = 1_000.0
 HUMAN_TAKE_PROFIT_BUYBACK_FRACTION = 0.50
 HUMAN_STOP_BUYBACK_MULTIPLE = 3.0
@@ -67,7 +67,7 @@ GAMMA_RISK_LOW_GCR10 = 0.10
 GAMMA_RISK_NORMAL_GCR10 = 0.20
 GAMMA_RISK_HOT_GCR10 = 0.30
 HUMAN_EVIDENCE_CONTRACT_HASH = (
-    "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
+    "sha256:bf857053b1d7d85f32adacdf479a18242ab38ded8e7b8bb59e52082505ef223e"
 )
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -478,15 +478,10 @@ def enumerate_iron_condor_candidates(
                 }
                 if session_mode == "gth"
                 else {
-                    "contract": "rth_20delta_fixed10_daily_first_credit25_or_expansion_to_contraction_credit23_balanced_sides_schwab_only_1000_1100_locked_surface_advisory.v6",
-                    "transition_replay_sessions": 36,
-                    "transition_resolved_trades": 18,
-                    "transition_wins": 16,
-                    "transition_mean_net_pnl_dollars": 60.00,
-                    "transition_minimum_net_pnl_dollars": -605.56,
+                    "contract": "rth_20delta_fixed10_credit25_or_transition_credit23_schwab_rth_until1545_no_daily_cap_no_lock_surface_advisory.v7",
+                    "status": "forward_unvalidated_user_override",
                     "limitations": [
-                        "same_sample_policy_search",
-                        "production_v51_environment_not_fully_reconstructable",
+                        "expanded_rth_window_and_repeat_entries_not_return_validated",
                         "credit23_boundary_uses_displayed_bbo",
                         "one_minute_stop_sampling",
                         "not_fill_probability",
@@ -544,37 +539,23 @@ def iron_condor_session_state(
     *,
     now: datetime,
 ) -> dict[str, Any]:
-    """Freeze the first qualifying candidate independently for RTH and GTH."""
+    """Keep the GTH first-candidate lock; re-evaluate RTH structures each decision."""
 
     session_date = str(facts.get("session_date") or "")
     session_mode = str(_map(facts.get("session")).get("mode") or "").lower()
     previous = _map(payload.get("previous_strategy_decision"))
     previous_facts = _map(previous.get("market_facts"))
     previous_state = _map(previous_facts.get(HUMAN_SESSION_STATE_KEY))
-    # A pre-v67 rejected scan may have locked before the environment was ready.
-    # Preserve an actually selected legacy IC, but do not inherit rejected scans.
-    legacy_rejected_lock = (
-        session_mode == "rth"
-        and previous.get("policy_version") not in {"strategy_policy.bootstrap.v67", "strategy_policy.bootstrap.v68"}
-        and previous.get("decision_type") != IRON_CONDOR_TYPE
-        and previous_state.get("environment_qualified_at_lock") is not True
-    )
-    if legacy_rejected_lock:
-        previous_state = {}
-    if (
-        str(previous.get("session_date") or previous_facts.get("session_date") or "")
-        == session_date
-        and str(previous_state.get("session_mode") or "rth").lower() == session_mode
-        and previous_state.get("status") == "eligible"
-    ):
-        return {**previous_state, "carried_forward": True}
-
-    current_state = {} if legacy_rejected_lock else _map(facts.get(HUMAN_SESSION_STATE_KEY))
-    if (
-        current_state.get("status") == "eligible"
-        and str(current_state.get("session_mode") or "rth").lower() == session_mode
-    ):
-        return dict(current_state)
+    if session_mode == "gth":
+        if (
+            str(previous.get("session_date") or previous_facts.get("session_date") or "") == session_date
+            and previous_state.get("session_mode") == "gth"
+            and previous_state.get("status") == "eligible"
+        ):
+            return {**previous_state, "carried_forward": True}
+        current_state = _map(facts.get(HUMAN_SESSION_STATE_KEY))
+        if current_state.get("session_mode") == "gth" and current_state.get("status") == "eligible":
+            return dict(current_state)
 
     base = {
         "status": "waiting",
@@ -583,7 +564,7 @@ def iron_condor_session_state(
         "contract": (
             "gth_first_expansion_to_contraction_credit25_gcr20_quote30_skew10_candidate_lock"
             if session_mode == "gth"
-            else "rth_daily_first_credit25_or_transition_credit23_candidate_lock_surface_advisory"
+            else "rth_current_credit25_or_transition_credit23_candidate_surface_advisory"
         ),
         "carried_forward": False,
     }
@@ -718,7 +699,7 @@ def _with_surface_score(
 
 def _human_entry_window_open(now: datetime) -> bool:
     local = _utc(now).astimezone(NEW_YORK).time().replace(tzinfo=None)
-    return HUMAN_ENTRY_START_ET <= local <= HUMAN_ENTRY_END_ET
+    return HUMAN_ENTRY_START_ET <= local < HUMAN_ENTRY_END_ET
 
 
 def _placement_diagnostics(
