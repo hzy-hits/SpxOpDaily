@@ -55,6 +55,18 @@ from spx_spark.storage import LatestState
 UTC = timezone.utc
 
 
+def test_minute_history_does_not_skip_a_bucket_after_a_late_previous_sample() -> None:
+    policy = MarketFeatureSettings()
+    first = datetime(2026, 8, 6, 14, 0, 59, 900000, tzinfo=UTC)
+    second = first.replace(minute=1, second=0, microsecond=100000)
+    history = merge_minute_sample([], {"at": first.isoformat()}, now=first, policy=policy)
+    history = merge_minute_sample(history, {"at": second.isoformat()}, now=second, policy=policy)
+    assert len(history) == 2
+    update = second + timedelta(seconds=5)
+    history = merge_minute_sample(history, {"at": update.isoformat()}, now=update, policy=policy)
+    assert [row["at"] for row in history] == [first.isoformat(), update.isoformat()]
+
+
 def test_realized_move_uses_fixed_causal_grid_and_keeps_drift_separate() -> None:
     at = datetime(2026, 8, 6, 14, 0, tzinfo=UTC)
     samples = []
@@ -80,12 +92,21 @@ def test_realized_move_uses_fixed_causal_grid_and_keeps_drift_separate() -> None
     assert baseline["60"]["up_excursion_points"] == 60
     assert baseline["60"]["down_excursion_points"] == 0
     assert baseline["15"]["observations"] == 16
+    import copy
+    routed = copy.deepcopy(samples)
+    for minute, row in enumerate(routed):
+        original = row["instruments"]["future:ES"]
+        other = {**original, "provider": "schwab", "price": original["price"] + 100}
+        row["es_by_provider"] = {"ibkr": original, "schwab": other}
+        if minute % 2:
+            row["instruments"] = {"future:ES": other}
+    # Normal best-quote routing must not destroy the separately captured source path.
+    assert build(routed) == baseline
     # Reconsuming the same market sources cannot manufacture observations.
     duplicates = [{**row, "at": (datetime.fromisoformat(row["at"]) + timedelta(seconds=5)).isoformat()} for row in samples]
     future = {**samples[-1], "at": (at + timedelta(minutes=1)).isoformat()}
     assert build(sorted([*samples, *duplicates, future], key=lambda row: row["at"])) == baseline
     for fault in ("gap", "frozen", "future_receipt", "provider", "contract"):
-        import copy
         altered = copy.deepcopy(samples)
         q = altered[30]["instruments"]["future:ES"]
         if fault == "gap":

@@ -397,3 +397,22 @@ def realized_move_features(
             down_excursion_points=prices[0] - min(prices),
         )
     return result
+
+
+def realized_volatility(
+    points: list[tuple[datetime, float, dict[str, Any]]],
+    *,
+    now: datetime,
+    minutes: int,
+) -> float | None:
+    window = [point for point in points if point[0] >= as_utc(now) - timedelta(minutes=minutes)]
+    if len(window) < 10:
+        return None
+    log_returns = [
+        math.log(current[1] / previous[1])
+        for previous, current in zip(window, window[1:])
+        if previous[1] > 0 and current[1] > 0
+    ]
+    if len(log_returns) < 9:
+        return None
+    return statistics.stdev(log_returns) * math.sqrt(252 * 23 * 60)

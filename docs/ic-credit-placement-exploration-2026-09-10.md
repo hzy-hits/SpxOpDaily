@@ -72,7 +72,7 @@ UTC 04:30 的同样一分钟网格仅 43/61 点，本探针不生成 realized �
 
 本轮完成联合扫描与诊断接入，未将未经校准的距离比变成入场阈值。
 
-- `market.py` 调用现有路径分析 owner `rolling_path_percentiles.py`，生成过去15/60分钟ES固定一分钟网格；输入同时检查采集时点、source/transport时间、live、合约与provider。相同source不增加独立网格点；完整网格要求16/61个不同源观测，否则不输出数值尺度。年化RV旧函数不改，避免改变其他策略。
+- `market.py` 调用现有路径分析 owner `rolling_path_percentiles.py`，生成过去15/60分钟ES固定一分钟网格；输入同时检查采集时点、source/transport时间、live、合约与provider。相同source不增加独立网格点；完整网格要求16/61个不同源观测，否则不输出数值尺度。年化RV旧函数移到同一owner，公式不改。
 - `strategy_facts.py` 将该事实带入唯一决策；`iron_condor.py` 输出主结构及候选的 `placement_diagnostics`，并在地图中保留 `placement_scan` 的9次双侧档位尝试、去重后的结构、缺报价/Greeks及实际Delta越界原因。GTH只用IBKR 30秒/10秒偏斜，RTH只用Schwab现有执行年龄/偏斜门；固定10点翼，不扩订阅。
 - `guidance.py` / `desk_strategy_view.py` 展示实际P/C Delta、两侧既有EM距离、过去60分钟波动与净位移、即时往返成本占贷记、3C超过翼宽以及扫描数量。完整网格、每侧跨式距离和成本分解保留在JSON；无法证明未来距离覆盖的地方明确“距离仅对照，未校准”。既有Rust投影不新增字段，沿用其原有正文内容入口。
 - 删除旧 `research_observations` 中单一17.5Δ、20%–23%贷记研究分支及其常量和专属测试，由本次双侧联合扫描取代。它从未拥有人工授权，删除不会取消已有交易权限；不保留无消费者的兼容字段。
@@ -92,6 +92,15 @@ UTC 04:30 的同样一分钟网格仅 43/61 点，本探针不生成 realized �
 
 行为验收覆盖独立双侧枚举、实际Delta范围、四合约双边费用、EM/RSS距离、3C超过翼宽、缺路径不伪造数值、不改变旧人工候选、GTH观察报价31秒不能进入执行报价扫描；路径测试包含重复、未来到达、报价冻结、缺口、provider/合约切换。
 
-最终全量Python：3,410 passed，2项依赖弃用提醒；Rust fmt/clippy/workspace tests、Ruff、Import Linter和diff检查通过。第一轮模块大小检查失败后，按既有owner拆回路径计算/人读说明并删除替代的研究分支，最终未新增或扩大baseline豁免。
+首次发布全量Python：3,410 passed，2项依赖弃用提醒；Rust fmt/clippy/workspace tests、Ruff、Import Linter和diff检查通过。第一轮模块大小检查失败后，按既有owner拆回路径计算/人读说明并删除替代的研究分支，最终未新增或扩大baseline豁免。
 
-生产文件修改6个，新增/删除0/0；生产净LOC +125。依赖、配置键、service/timer、数据库/表新增删除均0；移除旧17.5Δ单一研究路径及专属测试。无新模块，无扩大架构豁免。最终发布测试和实际部署证据另存同研究目录的 `deployment-verification.json`。
+首次上线验收又确认并修复两项输入问题：
+
+1. 最新ES报价会在两个provider间正常路由，但各来源的独立历史已在 `es_by_provider` 保存。路径现在优先重建当前来源的独立历史，不将路由切换误认为数据缺失；历史没有对应来源时才使用相同来源的旧selected记录，绝不拼源。
+2. `merge_minute_sample` 原来根据距上一条样本的秒数判断是否新增。上一分钟接近59.9秒更新后，下一分钟可能没有满60秒的间隔，造成漏存。改为比较分钟边界，同分钟仍只保留一条；该修复恢复采集覆盖，不放宽数据新鲜度。
+
+当时65条持久化样本同时有IBKR和Schwab各65条分源记录，selected却交替取两家；分源重建后仍发现07:00、07:41、07:52 UTC等分钟的采样缺口，不能用重复源时间补齐。旧缺口随15/60分钟窗口滚出前，可继续显示路径未完成；它不增加交易否决门。回归覆盖交替路由但分源历史齐全、跨分钟仅相隔0.2秒也应保留新分钟等场景。
+
+补修后的最终全量Python为3,411 passed（110.06秒），相关测试76项通过；原始行情接入对照重跑通过。发布日志为 `/tmp/spx-ic-placement-release-pytest.log`，分钟边界旧/新函数独立复现保存在同研究目录 `minute-boundary-reproduction.json`。
+
+生产文件修改6个，新增/删除0/0；生产净LOC +134。依赖、配置键、service/timer、数据库/表新增删除均0；移除旧17.5Δ单一研究路径及专属测试。无新模块，无扩大架构豁免。最终发布测试和实际部署证据另存同研究目录的 `deployment-verification.json`。

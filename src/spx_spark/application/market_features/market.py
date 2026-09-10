@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-import statistics
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -13,7 +12,7 @@ from spx_spark.application.market_features.market_cross_asset import (
     cross_asset_features,
     direction_confirmation,
 )
-from spx_spark.application.market_features.rolling_path_percentiles import realized_move_features
+from spx_spark.application.market_features.rolling_path_percentiles import realized_move_features, realized_volatility
 from spx_spark.application.market_features.models import (
     FrameQuality,
     MarketSessionSegment,
@@ -279,7 +278,8 @@ def merge_minute_sample(
             retained[-1] = sample
         elif (
             last_at is None
-            or (as_utc(now) - last_at).total_seconds() >= policy.sample_interval_seconds
+            or (current_minute - last_at.replace(second=0, microsecond=0)).total_seconds()
+            >= policy.sample_interval_seconds
         ):
             retained.append(sample)
     else:
@@ -355,6 +355,15 @@ def build_minute_market_frame(
     session_id = globex_session_id(now)
     session_samples = [row for row in samples if row.get("session_id") == session_id]
     es_points = _instrument_points(session_samples, "future:ES")
+    causal_latest = next((point for point in reversed(es_points) if point[0] <= now), None)
+    realized_provider = causal_latest[2].get("provider") if causal_latest else None
+    realized_samples = []
+    for row in session_samples:
+        by_provider = row.get("es_by_provider") or {}
+        quote = by_provider.get(realized_provider) or _instrument(row, "future:ES")
+        if quote and quote.get("provider") == realized_provider:
+            realized_samples.append({"at": row.get("at"), "instruments": {"future:ES": quote}})
+    realized_points = _instrument_points(realized_samples, "future:ES")
     latest = es_points[-1] if es_points else None
     price = latest[1] if latest else None
     gth_open_at = _spx_gth_open_at(session_id)
@@ -438,7 +447,7 @@ def build_minute_market_frame(
         "recent_1m_ohlc": recent_1m_ohlc,
         "realized_move": {
             str(minutes): realized_move_features(
-                es_points, now=now, minutes=minutes,
+                realized_points, now=now, minutes=minutes,
                 max_age_seconds=policy.max_quote_age_seconds,
             )
             for minutes in (15, 60)
@@ -647,25 +656,6 @@ def volatility_features(
             atm_iv - es_realized if atm_iv is not None and es_realized is not None else None
         ),
     }
-
-
-def realized_volatility(
-    points: list[tuple[datetime, float, dict[str, Any]]],
-    *,
-    now: datetime,
-    minutes: int,
-) -> float | None:
-    window = [point for point in points if point[0] >= as_utc(now) - timedelta(minutes=minutes)]
-    if len(window) < 10:
-        return None
-    log_returns = [
-        math.log(current[1] / previous[1])
-        for previous, current in zip(window, window[1:])
-        if previous[1] > 0 and current[1] > 0
-    ]
-    if len(log_returns) < 9:
-        return None
-    return statistics.stdev(log_returns) * math.sqrt(252 * 23 * 60)
 
 
 def key_level_holds(
