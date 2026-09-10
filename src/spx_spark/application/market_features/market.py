@@ -13,6 +13,7 @@ from spx_spark.application.market_features.market_cross_asset import (
     cross_asset_features,
     direction_confirmation,
 )
+from spx_spark.application.market_features.rolling_path_percentiles import realized_move_features
 from spx_spark.application.market_features.models import (
     FrameQuality,
     MarketSessionSegment,
@@ -435,6 +436,13 @@ def build_minute_market_frame(
         "trend_efficiency_180m": trend_efficiency(es_points, now=now, minutes=180),
         "pin_path_1m": list(pin_buckets.values()),
         "recent_1m_ohlc": recent_1m_ohlc,
+        "realized_move": {
+            str(minutes): realized_move_features(
+                es_points, now=now, minutes=minutes,
+                max_age_seconds=policy.max_quote_age_seconds,
+            )
+            for minutes in (15, 60)
+        },
         **swing_structure(es_points, now=now),
         "overnight_range_points": overnight_range,
         "overnight_expected_move_used": expected_move_used,

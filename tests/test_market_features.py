@@ -55,6 +55,54 @@ from spx_spark.storage import LatestState
 UTC = timezone.utc
 
 
+def test_realized_move_uses_fixed_causal_grid_and_keeps_drift_separate() -> None:
+    at = datetime(2026, 8, 6, 14, 0, tzinfo=UTC)
+    samples = []
+    for minute in range(61):
+        clock = at - timedelta(minutes=60 - minute)
+        samples.append({
+            "at": clock.isoformat(), "session_id": globex_session_id(at),
+            "instruments": {"future:ES": {
+                "price": 7700 + minute, "provider": "ibkr", "contract_identity": "ES:202609",
+                "quality": "live", "source_at": clock.isoformat(), "transport_at": clock.isoformat(),
+            }},
+        })
+
+    def build(rows):
+        return build_minute_market_frame(
+            rows, now=at, expected_move_points=40, atm_iv=0.18,
+            structural_levels={}, volume_baselines={}, policy=MarketFeatureSettings(),
+        ).es["realized_move"]
+
+    baseline = build(samples)
+    assert baseline["60"]["rss_points"] == pytest.approx(60 ** 0.5)
+    assert baseline["60"]["net_move_points"] == 60
+    assert baseline["60"]["up_excursion_points"] == 60
+    assert baseline["60"]["down_excursion_points"] == 0
+    assert baseline["15"]["observations"] == 16
+    # Reconsuming the same market sources cannot manufacture observations.
+    duplicates = [{**row, "at": (datetime.fromisoformat(row["at"]) + timedelta(seconds=5)).isoformat()} for row in samples]
+    future = {**samples[-1], "at": (at + timedelta(minutes=1)).isoformat()}
+    assert build(sorted([*samples, *duplicates, future], key=lambda row: row["at"])) == baseline
+    for fault in ("gap", "frozen", "future_receipt", "provider", "contract"):
+        import copy
+        altered = copy.deepcopy(samples)
+        q = altered[30]["instruments"]["future:ES"]
+        if fault == "gap":
+            del altered[30]
+        elif fault == "frozen":
+            q["source_at"] = samples[29]["instruments"]["future:ES"]["source_at"]
+        elif fault == "future_receipt":
+            q["transport_at"] = (at + timedelta(seconds=1)).isoformat()
+        elif fault == "provider":
+            q["provider"] = "schwab"
+        else:
+            q["contract_identity"] = "ES:202612"
+        observed = build(altered)["60"]
+        assert observed["status"] == "unavailable", fault
+        assert "rss_points" not in observed, fault
+
+
 def test_persisted_market_sample_keeps_features_but_drops_unused_bbo_fields() -> None:
     at = datetime(2026, 8, 27, 14, 0, tzinfo=UTC)
     raw = {

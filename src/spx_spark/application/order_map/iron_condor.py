@@ -66,11 +66,6 @@ GAMMA_RISK_VERSION = "iron_condor_gamma_risk.v1"
 GAMMA_RISK_LOW_GCR10 = 0.10
 GAMMA_RISK_NORMAL_GCR10 = 0.20
 GAMMA_RISK_HOT_GCR10 = 0.30
-RESEARCH_SHORT_DELTA = 0.175
-RESEARCH_MIN_CREDIT_FRACTION = 0.20
-RESEARCH_MAX_CREDIT_FRACTION = 0.23
-RESEARCH_MIN_SIDE_CREDIT_SHARE = 0.25
-RESEARCH_EVIDENCE_VERSION = "iron_condor_17_5d_fixed10_credit20_23_shadow.v1"
 HUMAN_EVIDENCE_CONTRACT_HASH = (
     "sha256:2a8a220ed3dee489ccb2373954ade3cdf2a5390f46ee3e9e46d6871299e2e680"
 )
@@ -84,6 +79,7 @@ def build_iron_condor_map(
     *,
     now: datetime,
     policy: StrategyPolicy,
+    include_placement_scan: bool = True,
 ) -> dict[str, Any]:
     """Return the current 5–20Δ short / 10-wide iron condor, even when not tradable."""
 
@@ -159,85 +155,46 @@ def build_iron_condor_map(
         }
         for row in ranked_variants
     ]
-    research = (
-        _structure_for_short_delta(
-            latest,
-            expiry,
-            spot=spot,
-            short_abs_delta=RESEARCH_SHORT_DELTA,
-            now=now,
-            session_policy=session_policy,
-            providers=providers,
+    primary["placement_diagnostics"] = _placement_diagnostics(primary, facts, session_mode)
+    if include_placement_scan:
+        # Reuse the exact execution source/age contract, not map fallback quotes.
+        scan_policy = replace(
+            policy, iron_condor_wing_width=WING_WIDTH,
+            quote_max_age_seconds=(GTH_MAX_EXACT_QUOTE_AGE_SECONDS if session_mode == "gth" else policy.quote_max_age_seconds),
+            quote_max_skew_seconds=(GTH_MAX_EXACT_QUOTE_SKEW_SECONDS if session_mode == "gth" else policy.quote_max_skew_seconds),
         )
-        if session_mode == "rth"
-        else None
-    )
-    observation: dict[str, Any] = {
-        "version": RESEARCH_EVIDENCE_VERSION,
-        "decision_effect": "record_only",
-        "manual_authority_eligible": False,
-        "automatic_ordering": False,
-        "target_short_abs_delta": RESEARCH_SHORT_DELTA,
-        "wing_width": WING_WIDTH,
-        "credit_fraction_band": [
-            RESEARCH_MIN_CREDIT_FRACTION,
-            RESEARCH_MAX_CREDIT_FRACTION,
-        ],
-    }
-    if research is None:
-        observation.update(
-            status="unavailable",
-            reason=(
-                "iron_condor_research_quotes_unavailable"
-                if session_mode == "rth"
-                else "iron_condor_research_rth_only"
-            ),
-        )
-    else:
-        research_quote = _map(research.get("quote"))
-        research_economics = _map(research.get("economics"))
-        put_long, put_short, call_short, call_long = (
-            _map(research.get(name))
-            for name in ("put_long", "put_short", "call_short", "call_long")
-        )
-        research_credit = _number(research_quote.get("credit"))
-        research_credit_fraction = _number(
-            research_economics.get("credit_fraction_of_width")
-        )
-        side_credits = (
-            (_number(put_short.get("bid")) or 0.0)
-            - (_number(put_long.get("ask")) or 0.0),
-            (_number(call_short.get("bid")) or 0.0)
-            - (_number(call_long.get("ask")) or 0.0),
-        )
-        research_side_share = (
-            min(side_credits) / research_credit
-            if research_credit is not None and research_credit > 0
-            else None
-        )
-        qualified = bool(
-            research_credit_fraction is not None
-            and RESEARCH_MIN_CREDIT_FRACTION
-            <= research_credit_fraction
-            <= RESEARCH_MAX_CREDIT_FRACTION
-            and research_side_share is not None
-            and research_side_share >= RESEARCH_MIN_SIDE_CREDIT_SHARE
-        )
-        observation.update(
-            status="qualified" if qualified else "outside_observation_band",
-            put_short_abs_delta=round(abs(_number(put_short.get("delta")) or 0.0), 8),
-            call_short_abs_delta=round(abs(_number(call_short.get("delta")) or 0.0), 8),
-            wing_width=research.get("wing_width"),
-            strikes=list(research.get("strikes") or ()),
-            quote=dict(research_quote),
-            economics=dict(research_economics),
-            minimum_side_credit_share=(
-                round(research_side_share, 8)
-                if research_side_share is not None
-                else None
-            ),
-        )
-    primary["research_observations"] = [observation]
+        scan_rows, attempted, seen = [], [], set()
+        for put_delta in (0.10, 0.15, 0.20):
+            for call_delta in (0.10, 0.15, 0.20):
+                row = _structure_for_short_delta(
+                    latest, expiry, spot=spot, short_abs_delta=put_delta,
+                    call_short_abs_delta=call_delta, now=now, session_policy=scan_policy,
+                    providers=(Provider.IBKR,) if session_mode == "gth" else (Provider.SCHWAB,),
+                )
+                attempt = {"put_target_delta": put_delta, "call_target_delta": call_delta}
+                if row is None:
+                    attempted.append({**attempt, "status": "quotes_or_greeks_unavailable"})
+                    continue
+                placement = _placement_diagnostics(row, facts, session_mode)
+                if any(placement[side]["abs_delta"] < 0.10 for side in ("put", "call")):
+                    attempted.append({**attempt, "status": "outside_actual_delta_band"})
+                    continue
+                strikes = tuple(row["strikes"])
+                if strikes in seen:
+                    attempted.append({**attempt, "status": "duplicate_structure", "strikes": list(strikes)})
+                    continue
+                seen.add(strikes)
+                attempted.append({**attempt, "status": "quoted", "strikes": list(strikes)})
+                scan_rows.append({
+                    **attempt, "strikes": list(strikes), "wing_width": WING_WIDTH,
+                    "quote": row["quote"], "economics": row["economics"],
+                    "placement_diagnostics": placement,
+                })
+        primary["placement_scan"] = {
+            "decision_effect": "comparison_only", "automatic_ordering": False,
+            "selection_status": "distance_thresholds_not_validated",
+            "attempts": attempted, "structures": scan_rows,
+        }
     return primary
 
 
@@ -250,7 +207,7 @@ def enumerate_iron_condor_candidates(
     policy: StrategyPolicy,
 ) -> list[dict[str, Any]]:
     structure = build_iron_condor_map(
-        payload, facts, latest, now=now, policy=policy
+        payload, facts, latest, now=now, policy=policy, include_placement_scan=False
     )
     if structure.get("status") != "ready":
         return []
@@ -466,6 +423,7 @@ def enumerate_iron_condor_candidates(
                 else None
             ),
             "gamma_risk": gamma_risk,
+            "placement_diagnostics": _placement_diagnostics(structure, facts, session_mode),
             "gth_transition": gth_transition,
             "wing_width": WING_WIDTH,
             "quote_valid_until": quote_valid.isoformat() if quote_valid else now.isoformat(),
@@ -763,6 +721,54 @@ def _human_entry_window_open(now: datetime) -> bool:
     return HUMAN_ENTRY_START_ET <= local <= HUMAN_ENTRY_END_ET
 
 
+def _placement_diagnostics(
+    structure: Mapping[str, Any], facts: Mapping[str, Any], session_mode: str,
+) -> dict[str, Any]:
+    """Uncalibrated distances and executable costs; no new entry authority."""
+    volatility = _map(facts.get("volatility"))
+    realized = _map(_map(facts.get("path")).get("realized_move"))
+    em, straddle = (_number(volatility.get(key)) for key in ("expected_move_points", "atm_straddle_mid"))
+    quote, economics = _map(structure.get("quote")), _map(structure.get("economics"))
+    credit = float(quote["credit"])
+    width = float(economics["width_points"])
+    spot = float(structure["spot"])
+    pl, ps, cs, cl = (_map(structure.get(key)) for key in ("put_long", "put_short", "call_short", "call_long"))
+    put_credit, call_credit = float(ps["bid"]) - float(pl["ask"]), float(cs["bid"]) - float(cl["ask"])
+    buyback = float(ps["ask"]) - float(pl["bid"]) + float(cs["ask"]) - float(cl["bid"])
+    management = IRON_CONDOR_MANAGEMENT_POLICY if session_mode == "gth" else RTH_IRON_CONDOR_MANAGEMENT_POLICY
+    fees = management.fees_per_leg_per_side * 4 * 2 / 100.0
+    entry_contract = human_iron_condor_entry_contract({"session_mode": session_mode}, facts)
+    minimum_credit = float(entry_contract["minimum_credit_fraction"])
+    minimum_share = _number(entry_contract.get("minimum_side_credit_share"))
+    side_share = min(put_credit, call_credit) / credit
+    sides = {}
+    for side, leg, distance in (("put", ps, spot - float(structure["strikes"][1])), ("call", cs, float(structure["strikes"][2]) - spot)):
+        sides[side] = {
+            "abs_delta": abs(float(leg["delta"])), "distance_points": distance,
+            "distance_legacy_em": distance / em if em is not None and em > 0 else None,
+            "distance_atm_straddle": distance / straddle if straddle is not None and straddle > 0 else None,
+            "distance_trailing_rss": {
+                window: distance / scale if row.get("status") == "ready" and (scale := _number(row.get("rss_points"))) is not None and scale > 0 else None
+                for window in ("15", "60") for row in [_map(realized.get(window))]
+            },
+        }
+    return {
+        "decision_effect": "comparison_only", "distance_thresholds_validated": False,
+        "implied_scale": "legacy_0.85_atm_straddle_to_expiry_not_sigma",
+        "realized_scale": "trailing_ES_points_not_forward_SPX_interval",
+        "realized_move": dict(realized), **sides,
+        "credit_fraction": credit / width, "minimum_credit_fraction": minimum_credit,
+        "credit_band_pass": minimum_credit - 1e-9 <= credit / width <= MAX_CREDIT_FRACTION,
+        "minimum_side_credit_share": side_share,
+        "side_balance_pass": minimum_share is None or side_share + 1e-9 >= minimum_share,
+        "immediate_buyback_points": buyback, "round_trip_cross_points": buyback - credit,
+        "round_trip_fees_points": fees,
+        "round_trip_cost_fraction_of_credit": (buyback - credit + fees) / credit,
+        "stop_buyback_within_width": HUMAN_STOP_BUYBACK_MULTIPLE * credit <= width,
+        "hard_exit_et": management.hard_exit_et,
+    }
+
+
 def _short_deltas(policy: StrategyPolicy) -> tuple[float, ...]:
     configured = tuple(policy.iron_condor_short_deltas or PREFERRED_SHORT_DELTAS)
     return configured or PREFERRED_SHORT_DELTAS
@@ -777,12 +783,14 @@ def _structure_for_short_delta(
     now: datetime,
     session_policy: StrategyPolicy,
     providers: Sequence[Provider],
+    call_short_abs_delta: float | None = None,
 ) -> dict[str, Any] | None:
     width = float(session_policy.iron_condor_wing_width or WING_WIDTH)
     strikes = _ten_wide_from_short_delta(
         latest,
         expiry,
         short_abs_delta=short_abs_delta,
+        call_short_abs_delta=call_short_abs_delta,
         width=width,
         now=now,
         policy=session_policy,
@@ -888,6 +896,7 @@ def _ten_wide_from_short_delta(
     now: datetime,
     policy: StrategyPolicy,
     providers: Sequence[Provider],
+    call_short_abs_delta: float | None = None,
 ) -> tuple[float, float, float, float] | None:
     put_short = nearest_abs_delta_strike(
         latest,
@@ -906,13 +915,13 @@ def _ten_wide_from_short_delta(
         latest,
         expiry,
         "C",
-        target_abs_delta=short_abs_delta,
+        target_abs_delta=call_short_abs_delta if call_short_abs_delta is not None else short_abs_delta,
         now=now,
         policy=policy,
         providers=providers,
         max_distance=SHORT_DELTA_TOLERANCE,
         min_abs_delta=SHORT_DELTA_MIN,
-        max_abs_delta=min(short_abs_delta, SHORT_DELTA_MAX),
+        max_abs_delta=min(call_short_abs_delta if call_short_abs_delta is not None else short_abs_delta, SHORT_DELTA_MAX),
         max_greeks_age_seconds=policy.quote_max_age_seconds,
     )
     if put_short is None or call_short is None:

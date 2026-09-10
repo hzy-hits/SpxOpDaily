@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
-from spx_spark.application.order_map.guidance import price_action_playbook_text
+from spx_spark.application.order_map.guidance import iron_condor_placement_text, price_action_playbook_text
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.state import current_session_is_gth
 from spx_spark.application.order_map.strategy_regime import (
@@ -401,6 +401,9 @@ def compact_iron_condor_desk_line(
         else:
             wait = "仅观察：等待跨式扩张→收缩"
         details.append(wait)
+        placement_text = iron_condor_placement_text(map_structure)
+        if placement_text:
+            details.append(placement_text)
         return " · ".join(details)
 
     structure = candidate
@@ -409,7 +412,8 @@ def compact_iron_condor_desk_line(
     delta = finite_float(structure.get("short_abs_delta"))
     delta_text = f"{delta * 100:.0f}Δ" if delta is not None else "逐边≤20Δ"
     credit_text = f" · 贷记 {credit:.2f}" if credit is not None else ""
-    return f"{delta_text}/10宽 {strikes}{credit_text} · 人工候选已另发"
+    placement_text = iron_condor_placement_text(structure)
+    return f"{delta_text}/10宽 {strikes}{credit_text} · 人工候选已另发" + (f" · {placement_text}" if placement_text else "")
 
 
 def research_decision_advice(payload: Mapping[str, Any]) -> str | None:
@@ -948,6 +952,9 @@ def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
     )
     if loss is not None:
         line += f" 最大亏损 {loss:g}"
+    placement_text = iron_condor_placement_text(structure)
+    if placement_text:
+        line += f" · {placement_text}"
     path_text = path_distribution_desk_text(_mapping(structure.get("path_distribution")))
     if path_text:
         return f"{line} · {path_text}"

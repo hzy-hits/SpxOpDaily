@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Mapping
 
+from spx_spark.analytics.options.pricing import finite_float
+
 
 STATUS_BRIEF_SYSTEM_PROMPT = "\n".join(
     (
@@ -598,3 +600,38 @@ def _mapping(value: object) -> Mapping[str, Any]:
 
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
+
+
+def iron_condor_placement_text(structure: Mapping[str, Any]) -> str:
+    placement = _mapping(structure.get("placement_diagnostics"))
+    if not placement:
+        return ""
+    put, call = (_mapping(placement.get(side)) for side in ("put", "call"))
+    details = []
+    deltas = [finite_float(side.get("abs_delta")) for side in (put, call)]
+    if all(value is not None for value in deltas):
+        details.append(f"实际P/C {100 * deltas[0]:.1f}/{100 * deltas[1]:.1f}Δ")
+    distances = [finite_float(side.get("distance_legacy_em")) for side in (put, call)]
+    if all(value is not None for value in distances):
+        details.append(f"短腿距 {distances[0]:.2f}/{distances[1]:.2f} EM（非σ）")
+    realized = _mapping(_mapping(placement.get("realized_move")).get("60"))
+    rss, drift = finite_float(realized.get("rss_points")), finite_float(realized.get("net_move_points"))
+    if realized.get("status") == "ready" and rss is not None and drift is not None:
+        details.append(f"过去60m ES波动/净移 {rss:.1f}/{drift:+.1f}pt")
+    else:
+        details.append("过去60m路径不完整")
+    cost = finite_float(placement.get("round_trip_cost_fraction_of_credit"))
+    if cost is not None:
+        details.append(f"即时往返成本/贷记 {cost:.0%}")
+    if placement.get("stop_buyback_within_width") is False:
+        details.append("3C止损超过翼宽")
+    scan = _mapping(structure.get("placement_scan"))
+    if scan:
+        rows = scan.get("structures") or ()
+        credit_passed = sum(
+            _mapping(row.get("placement_diagnostics")).get("credit_band_pass") is True
+            for row in rows if isinstance(row, Mapping)
+        )
+        details.append(f"联合扫描{len(rows)}组，贷记门{credit_passed}组")
+    details.append("距离仅对照，未校准")
+    return "；".join(details)

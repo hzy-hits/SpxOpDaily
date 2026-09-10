@@ -342,6 +342,7 @@ def build_market_fact_pack(
             "return_5m_points": _number(es.get("return_5m_points")),
             "return_60m_points": _number(es.get("return_60m_points")),
             "atr_5m": atr,
+            "realized_move": dict(_map(es.get("realized_move"))),
             "pin_path_spx": [
                 float(value) - basis for value in es.get("pin_path_1m") or ()
                 if isinstance(value, int | float) and basis is not None

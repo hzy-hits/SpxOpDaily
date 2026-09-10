@@ -237,3 +237,5 @@ A change that increases process count, active languages, mutable stores or owner
 28. v68来源优先级修复（S3）：GTH选源顺序为Asia-range已确认失败回踩、有效confirmed level、advance、transition。有效水平必须formal_signal/confirmed/quality_ok且未过期，不再被趋势背景抢占；欧洲transition与有效水平并存时亦优先水平。顺序写入现有候选policy hash，全局v68不变。平缓收缩长持有研究不得用有退出报价的子集冒充完整策略收益；见docs/gth-source-priority-recovery.md。Bark与人工-only不变。
 
 29. 2026-09-10生产故障修复（S1/S3、Phase 6冻结例外）：ATM缺行权价时输出atm_strike_unavailable，不进行数字格式化；候选路径预算耗尽清空现有passed列表并记录未评估项，不对frozen RankResult字段赋值。Rust报告在HTTP成功但模型身份不匹配时仍拒绝模型内容，复用有效、经过validate的原始Desk Map并记录unexpected_model回退原因；不改变交易权限、owner或Bark。见docs/desk-map-runtime-recovery-2026-09-10.md。
+
+30. 2026-09-10联合位置对照接入（S1/S3，v68授权合同不变）：RTH/GTH铁鹰地图新增独立P/C 10/15/20Δ、固定10点翼扫描，替换旧单一17.5Δ研究输出；严格复用各自执行源、报价/Greeks年龄与偏斜门。输出credit/width、实际delta、每侧ATM跨式/既有EM距离、过去15/60分钟ES路径和即时跨价费用。ES路径按固定一分钟源时钟重建，重复、缺口、未来到达与provider/合约切换不生成完整尺度。当前EM仍是0.85×跨式，不是sigma；trailing ES不是到退出时刻的SPX预测区间。距离阈值未校准，新增字段仅comparison_only，不新增硬门、改变固定20Δ人工赢家或扩大授权；3C超过翼宽明确提示。全量数据保留在现有strategy_decision中，桌图只摘要，无新服务/数据库/Rust wire/Bark改动。见docs/ic-credit-placement-exploration-2026-09-10.md。

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import math
 import statistics
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
+
+
+from spx_spark.marketdata import as_utc
 
 
 ROLLING_PATH_WINDOW_BARS = 6
@@ -334,3 +339,61 @@ def _datetime(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
+def realized_move_features(
+    points: list[tuple[datetime, float, dict[str, Any]]],
+    *, now: datetime, minutes: int, max_age_seconds: float,
+) -> dict[str, Any]:
+    """Past ES movement on a causal minute grid, not a forward risk estimate."""
+    end = as_utc(now).replace(second=0, microsecond=0)
+    start = end - timedelta(minutes=minutes)
+    ordered = sorted(
+        (point for point in points if start - timedelta(seconds=max_age_seconds) <= point[0] <= end),
+        key=lambda point: point[0],
+    )
+    times = [point[0] for point in ordered]
+    prices: list[float] = []
+    identities: set[tuple[str, str]] = set()
+    sources: set[datetime] = set()
+    for minute in range(minutes + 1):
+        clock = start + timedelta(minutes=minute)
+        index = bisect_right(times, clock) - 1
+        if index < 0:
+            continue
+        _, price, quote = ordered[index]
+        source = _datetime(quote.get("source_at"))
+        received = _datetime(quote.get("transport_at"))
+        provider, contract = quote.get("provider"), quote.get("contract_identity")
+        if (
+            source is None or received is None or not provider or not contract
+            or quote.get("quality") != "live" or not math.isfinite(price) or price <= 0
+            or not 0 <= (clock - source).total_seconds() <= max_age_seconds
+            or not 0 <= (clock - received).total_seconds() <= max_age_seconds
+            or source in sources
+        ):
+            continue
+        sources.add(source)
+        identities.add((str(provider), str(contract)))
+        prices.append(price)
+    result: dict[str, Any] = {
+        "status": "unavailable", "reason": "minute_grid_incomplete",
+        "coordinate": "ES_points_proxy", "horizon": "trailing_not_forward",
+        "window_minutes": minutes, "grid_start": start.isoformat(),
+        "grid_end": end.isoformat(), "observations": len(prices),
+        "required_observations": minutes + 1,
+    }
+    if len(identities) > 1:
+        result["reason"] = "provider_or_contract_changed"
+    elif len(prices) == minutes + 1:
+        increments = [right - left for left, right in zip(prices, prices[1:])]
+        result.update(
+            status="ready", reason=None,
+            provider=next(iter(identities))[0], contract_identity=next(iter(identities))[1],
+            rss_points=math.sqrt(sum(value * value for value in increments)),
+            net_move_points=prices[-1] - prices[0],
+            range_points=max(prices) - min(prices),
+            up_excursion_points=max(prices) - prices[0],
+            down_excursion_points=prices[0] - min(prices),
+        )
+    return result

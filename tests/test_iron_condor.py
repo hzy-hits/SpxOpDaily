@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from spx_spark.analytics.options.strategy_payoff import (
     conservative_iron_condor_bbo,
     iron_condor_economics,
@@ -32,6 +34,64 @@ NOW = datetime(2026, 8, 13, 4, 30, tzinfo=timezone.utc)
 RTH_NOW = datetime(2026, 8, 13, 14, 0, tzinfo=timezone.utc)
 EXPIRY = "20260813"
 SPOT = 7750.0
+
+
+def test_placement_scan_compares_independent_sides_and_reports_cost_without_authority() -> None:
+    facts = _rth_facts()
+    facts["volatility"]["atm_straddle_mid"] = 40 / 0.85
+    facts["path"]["realized_move"] = {"60": {
+        "status": "ready", "rss_points": 10.0, "net_move_points": 30.0,
+    }}
+    kwargs = dict(now=RTH_NOW, policy=StrategyPolicy())
+    payload = {"option_structure_frame": {"front_expiry": EXPIRY}}
+    structure = build_iron_condor_map(payload, facts, _rth_state(), **kwargs)
+    scan = structure["placement_scan"]
+    assert len(scan["attempts"]) == 9
+    assert len({tuple(row["strikes"]) for row in scan["structures"]}) == len(scan["structures"])
+    assert any(row["put_target_delta"] != row["call_target_delta"] for row in scan["structures"])
+    for row in scan["structures"]:
+        diagnostic = row["placement_diagnostics"]
+        assert diagnostic["decision_effect"] == "comparison_only"
+        assert diagnostic["distance_thresholds_validated"] is False
+        assert diagnostic["round_trip_fees_points"] == pytest.approx(0.1056)
+        assert diagnostic["credit_fraction"] == pytest.approx(row["quote"]["credit"] / 10)
+        for side in ("put", "call"):
+            assert 0.10 <= diagnostic[side]["abs_delta"] <= 0.20
+            distance = diagnostic[side]["distance_points"]
+            assert diagnostic[side]["distance_legacy_em"] == pytest.approx(distance / 40)
+            assert diagnostic[side]["distance_trailing_rss"]["60"] == pytest.approx(distance / 10)
+    # New evidence cannot change the existing human entry geometry or authorization.
+    candidate = enumerate_iron_condor_candidates(payload, facts, _rth_state(), **kwargs)[0]
+    facts["path"]["realized_move"]["60"]["rss_points"] = 10000.0
+    changed = enumerate_iron_condor_candidates(payload, facts, _rth_state(), **kwargs)[0]
+    assert {k: v for k, v in candidate.items() if k != "placement_diagnostics"} == {
+        k: v for k, v in changed.items() if k != "placement_diagnostics"
+    }
+
+
+def test_placement_scan_exposes_unreachable_stop_and_missing_realized_input() -> None:
+    from spx_spark.application.order_map.desk_strategy_view import iron_condor_desk_line
+    structure = build_iron_condor_map(
+        {"option_structure_frame": {"front_expiry": EXPIRY}}, _rth_facts(),
+        _rth_state(short_quote_bonus=1.8), now=RTH_NOW, policy=StrategyPolicy(),
+    )
+    diagnostic = structure["placement_diagnostics"]
+    assert diagnostic["credit_fraction"] > 1 / 3
+    assert diagnostic["stop_buyback_within_width"] is False
+    assert diagnostic["put"]["distance_trailing_rss"]["60"] is None
+    text = iron_condor_desk_line(structure)
+    assert "3C" in text
+    assert "未校准" in text
+
+
+def test_gth_placement_scan_uses_execution_quote_age_not_map_quote_age() -> None:
+    structure = build_iron_condor_map(
+        {"option_structure_frame": {"front_expiry": EXPIRY}}, _facts(),
+        _gth_state(NOW - timedelta(seconds=31)), now=NOW, policy=StrategyPolicy(),
+    )
+    assert structure["status"] == "ready"  # Existing map permits older observation quotes.
+    assert structure["placement_scan"]["structures"] == []
+    assert all(row["status"] == "quotes_or_greeks_unavailable" for row in structure["placement_scan"]["attempts"])
 
 
 def _option(
@@ -102,7 +162,6 @@ def _rth_state(
     now: datetime = RTH_NOW,
     *,
     short_quote_bonus: float = 0.75,
-    research_short_quote_bonus: float = 0.0,
 ) -> LatestState:
     rows = []
     for quote in _quotes(now, with_greeks=True):
@@ -111,17 +170,7 @@ def _rth_state(
             (right == "P" and quote.instrument.strike == 7690.0)
             or (right == "C" and quote.instrument.strike == 7810.0)
         )
-        research_short = (
-            (right == "P" and quote.instrument.strike == 7685.0)
-            or (right == "C" and quote.instrument.strike == 7815.0)
-        )
-        bonus = (
-            short_quote_bonus
-            if rich_short
-            else research_short_quote_bonus
-            if research_short
-            else 0.0
-        )
+        bonus = short_quote_bonus if rich_short else 0.0
         rows.append(
             replace(
                 quote,
@@ -337,13 +386,8 @@ def test_gth_always_computes_ten_wide_5_20_delta_iron_condor_from_one_minute_quo
     assert structure["surface_decision_modifier"] <= 0.0
     assert structure["surface_attribution"]["authority"] == "structure_risk_only"
     assert [row["short_abs_delta"] for row in structure["variants"]] == [0.10, 0.15, 0.20]
-    observation = structure["research_observations"][0]
-    assert observation["version"] == "iron_condor_17_5d_fixed10_credit20_23_shadow.v1"
-    assert observation["decision_effect"] == "record_only"
-    assert observation["manual_authority_eligible"] is False
-    assert observation["target_short_abs_delta"] == 0.175
-    assert observation["wing_width"] == 10.0
-    assert observation["automatic_ordering"] is False
+    assert structure["placement_scan"]["decision_effect"] == "comparison_only"
+    assert structure["placement_scan"]["automatic_ordering"] is False
     assert abs(structure["put_short"]["delta"]) <= 0.20
     assert abs(structure["call_short"]["delta"]) <= 0.20
     assert rows
@@ -815,26 +859,6 @@ def test_rth_human_iron_condor_uses_schwab_per_side_delta_until_1100() -> None:
         policy=StrategyPolicy(),
     )
     assert later[0]["manual_authority_eligible"] is False
-
-
-def test_rth_17_5_delta_observation_is_qualified_but_never_authorized() -> None:
-    structure = build_iron_condor_map(
-        _payload(),
-        _rth_facts(),
-        _rth_state(research_short_quote_bonus=0.6),
-        now=RTH_NOW,
-        policy=StrategyPolicy(),
-    )
-
-    observation = structure["research_observations"][0]
-    assert observation["status"] == "qualified"
-    assert observation["strikes"] == [7675.0, 7685.0, 7815.0, 7825.0]
-    assert observation["put_short_abs_delta"] == 0.175
-    assert observation["call_short_abs_delta"] == 0.175
-    assert observation["minimum_side_credit_share"] == 0.5
-    assert observation["manual_authority_eligible"] is False
-    assert observation["automatic_ordering"] is False
-    assert 0.175 not in [row["short_abs_delta"] for row in structure["variants"]]
 
 
 def test_rth_iron_condor_gamma_risk_uses_signed_four_leg_gamma() -> None:
