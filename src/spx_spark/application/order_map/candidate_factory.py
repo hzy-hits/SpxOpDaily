@@ -9,10 +9,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from spx_spark.analytics.options.pricing import usable_delta
+from spx_spark.analytics.greeks.black_scholes import bs_price
+from spx_spark.analytics.options.pricing import usable_delta, time_to_expiry_years
 from spx_spark.analytics.options.strategy_payoff import (
     CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
-    butterfly_payoff,
     butterfly_economics,
     conservative_butterfly_bbo,
     conservative_vertical_bbo,
@@ -48,7 +48,7 @@ WALL_BREAKOUT_HAZARD = "WALL_BREAKOUT_HAZARD"
 RTH_LEVEL_CONFIRMATION = "RTH_LEVEL_CONFIRMATION"
 CLOSE_CONVERGENCE_60M = "CLOSE_CONVERGENCE_60M"
 EUROPE_TREND_TRANSITION = "EUROPE_TREND_TRANSITION"
-CLOSE_CONVERGENCE_CONTRACT_HASH = "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
+CLOSE_CONVERGENCE_CONTRACT_HASH = "sha256:5a335c5a83a878cee63b8f44199bae0dab1584f93852308d94bdbb6b5014470f"
 _EXPIRED_GTH_REASONS = {
     "source_signal_expired",
     "strategy_event_expired",
@@ -936,6 +936,16 @@ def _close_convergence_butterflies(
         or evidence.get("feature_version") != CLOSE_CONVERGENCE_FEATURE_VERSION
     ):
         return []
+    target_at = _time(evidence.get("target_at"))
+    as_of = _time(evidence.get("as_of"))
+    trained = str(evidence.get("trained_through_date") or "")
+    if target_at is None or as_of is None or not 0 <= (now-as_of).total_seconds() < 60 or target_at-as_of != timedelta(minutes=60) or not trained or trained >= str(facts.get("session_date") or ""):
+        return []
+    tau_entry = time_to_expiry_years(expiry, as_of=now)
+    tau_target = time_to_expiry_years(expiry, as_of=target_at)
+    spot = _number(_map(facts.get("spot")).get("spx"))
+    if spot is None or spot <= 0:
+        return []
     training_sessions = int(_number(evidence.get("training_sessions")) or 0)
     rows: list[dict[str, Any]] = []
     for width in policy.close_convergence_widths:
@@ -977,15 +987,16 @@ def _close_convergence_butterflies(
             fees = (
                 CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY.fees_per_leg_per_side * 4 * 2 / 100.0
             )
+            legs = row["legs"]
+            if any((_number(leg.get("implied_vol")) or 0) <= 0 for leg in legs):
+                continue
+            model_entry = sum(q * bs_price(spot, leg["strike"], leg["implied_vol"], tau_entry, right) for q, leg in zip((1,-2,1), legs))
             pnl_paths = [
-                butterfly_payoff(
-                    settlement,
-                    center=center,
-                    width=width,
-                    net_debit=debit,
-                )
-                - fees
-                for settlement in quantiles
+                min(width, max(0.0, float(quote["bid"]) + sum(
+                    q * bs_price(level, leg["strike"], leg["implied_vol"], tau_target, right)
+                    for q, leg in zip((1,-2,1), legs)
+                ) - model_entry)) - debit - fees
+                for level in quantiles
             ]
             risk = risk_adjusted_cvar_objective(
                 pnl_paths,
@@ -1003,6 +1014,8 @@ def _close_convergence_butterflies(
                     sum(value > 0.0 for value in pnl_paths) / len(pnl_paths), 6
                 ),
                 "selection_rule": "max_risk_objective_across_10_15_20_C_P",
+                "valuation": "entry_bid_anchored_sticky_iv_at_target_not_expiry_payoff",
+                "target_at": target_at.isoformat(),
                 "policy_choice": "best_available_structure",
             }
             row["selection_score"] = float(risk["objective_points"])

@@ -587,16 +587,16 @@ def test_butterfly_path_charges_four_contracts_at_hard_close() -> None:
     assert result["p50_pnl_points"] == pytest.approx(max(0.4 + delta, 0) - 0.8 - 0.1056, abs=1e-6)
 
 
-def test_close_convergence_fallback_covers_1555_and_rejects_short_path(tmp_path: Path) -> None:
+def test_close_convergence_fallback_covers_1600_and_rejects_short_path(tmp_path: Path) -> None:
     from spx_spark.application.market_features.physical_followthrough import PhysicalSpotPath
 
     now = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     candidate = {**_call_butterfly(), "setup_kind": "CLOSE_CONVERGENCE_60M"}
     _write_session(tmp_path, "2026-08-05", start_et=time(9, 30), prices=[7750.0] * 391)
     complete = estimate_path_distribution(candidate, _facts(now=now), now=now, data_root=tmp_path, probability_settings=None)
-    assert complete["horizon_minutes"] == 55
+    assert complete["horizon_minutes"] == 60
     assert complete["hard_close_rate"] == 1.0
-    assert complete["median_hold_minutes"] == 55
+    assert complete["median_hold_minutes"] == 60
     short = estimate_path_distribution(
         candidate, _facts(now=now), now=now, data_root=None, probability_settings=None,
         paths=(PhysicalSpotPath(date(2026, 8, 5), 900, (7750.0,) * 46, True),),
@@ -625,4 +625,4 @@ def test_partial_final_minute_uses_exact_exit_clock(tmp_path: Path) -> None:
     _write_session(tmp_path, "2026-08-05", start_et=time(9, 30), prices=[7750.0] * 391)
     result = estimate_path_distribution(candidate, _facts(now=now), now=now, data_root=tmp_path, probability_settings=None)
     assert result["hard_close_rate"] == 1.0
-    assert result["median_hold_minutes"] == round(55 - 37 / 60, 3)
+    assert result["median_hold_minutes"] == round(60 - 37 / 60, 3)

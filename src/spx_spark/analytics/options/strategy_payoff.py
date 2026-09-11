@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -83,15 +83,13 @@ PIN_BUTTERFLY_MANAGEMENT_POLICY = ManagementPolicy(
     time_stop_minutes=None,
     hard_exit_et="15:45",
 )
-# The 60-minute physical-close lane was validated against exact 15:55 ET
-# conservative combo bids. Earlier exits materially changed the result, so it
-# has its own frozen hold policy and no intrahour premium/trail stop.
+# Rolling distribution: exit on the frozen target clock, with no intrahour trail.
 CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY = ManagementPolicy(
-    policy_version="management_policy.close_convergence.hold_1555.v2",
+    policy_version="management_policy.rolling_convergence.target_60m.v3",
     profit_arm_return_on_debit=None,
     premium_stop_fraction=None,
-    time_stop_minutes=None,
-    hard_exit_et="15:55",
+    time_stop_minutes=60,
+    hard_exit_et="16:00",
 )
 
 
@@ -673,6 +671,12 @@ def management_policy_for_candidate(candidate: Mapping[str, Any] | None) -> Mana
 
     row = candidate or {}
     if str(row.get("setup_kind") or "") == "CLOSE_CONVERGENCE_60M":
+        evidence = row.get("close_convergence")
+        if isinstance(evidence, Mapping) and evidence.get("target_at"):
+            target = datetime.fromisoformat(str(evidence["target_at"]))
+            if target.tzinfo is None:
+                raise ValueError("convergence target requires an aware timestamp")
+            return replace(CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY, hard_exit_et=target.astimezone(NEW_YORK).strftime("%H:%M"))
         return CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY
     if str(row.get("setup_kind") or "") == "STABLE_PIN":
         return PIN_BUTTERFLY_MANAGEMENT_POLICY

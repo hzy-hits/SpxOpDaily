@@ -65,6 +65,7 @@ def build_strategy_decision(
     payload: Mapping[str, Any], latest: LatestState, now: datetime, *,
     data_root: str | Path | None = None,
     probability_settings: StrategyDistributionSettings | None = None,
+    background_models: bool = False,
 ) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
     facts["strategy_distribution_settings"] = asdict(probability_settings) if probability_settings else None
@@ -82,6 +83,7 @@ def build_strategy_decision(
                 data_root,
                 now=_utc(now),
                 trading_date=trading_date,
+                nonblocking=background_models,
             ).to_dict()
     regime = assess_regime(facts)
     facts["rth_environment"] = dict(

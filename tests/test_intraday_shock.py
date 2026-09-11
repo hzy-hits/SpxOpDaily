@@ -240,12 +240,12 @@ def test_opposite_flow_divergence_bypasses_other_direction_cooldown() -> None:
 
 
 def test_captured_net_premium_divergence_fails_closed_on_low_tape_coverage() -> None:
-    state, alerts = _run_net_premium_divergence_path(volume_step=20.0)
+    state, alerts = _run_net_premium_divergence_path(volume_step=25.0)
 
     assert alerts == []
     tape = state["captured_net_premium_divergence"]
     assert isinstance(tape, dict)
-    assert float(tape["coverage"]) < 0.10
+    assert float(tape["coverage"]) < 0.05
 
 
 def test_captured_flow_tracks_strike_buy_sell_and_unknown_without_bto_labels() -> None:
@@ -986,3 +986,12 @@ def test_same_minute_shocks_get_distinct_event_ids(tmp_path) -> None:
         "spx_shock:20260710:down:143226",
         "spx_shock:20260710:down:143241",
     ]
+
+
+@pytest.mark.parametrize("step,passes", [(20.0, True), (20.1, False), (15.0, True)])
+def test_flow_coverage_five_percent_boundary_retains_exit_only_authority(step, passes):
+    state, alerts = _run_net_premium_divergence_path(volume_step=step)
+    assert bool(alerts) is passes
+    for alert in alerts:
+        assert alert.audit_context["new_entry_eligible"] is False
+        assert alert.audit_context["automatic_ordering"] is False

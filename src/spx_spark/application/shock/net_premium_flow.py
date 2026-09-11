@@ -25,12 +25,12 @@ from spx_spark.marketdata import (
 
 _ET = ZoneInfo("America/New_York")
 _FLOW_STATE_KEY = "captured_net_premium_divergence"
-_POLICY_VERSION = "captured_option_flow.v4"
+_POLICY_VERSION = "captured_option_flow.v5"
 _FLOW_IMAGE_URL = "https://spx.zh3nyu.com/flow/latest.png"
 _LOOKBACK_MINUTES = 15
 _CONFIRM_MINUTES = 5
 _COOLDOWN_SECONDS = 15 * 60
-_MIN_COVERAGE = 0.10
+_MIN_COVERAGE = 0.05
 _MEDIUM_COVERAGE = 0.15
 _MAX_INSIDE_SHARE = 0.50
 _MAX_QUOTE_AGE_SECONDS = 15.0

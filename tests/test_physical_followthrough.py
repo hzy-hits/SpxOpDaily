@@ -25,7 +25,7 @@ def test_close_convergence_clock_fails_closed_before_quote_lake_scan(
 ) -> None:
     estimate = estimate_physical_close_convergence(
         tmp_path,
-        now=datetime(2026, 8, 6, 18, 59, 59, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 6, 14, 59, 59, tzinfo=timezone.utc),
         trading_date=date(2026, 8, 6),
     )
 
@@ -34,9 +34,11 @@ def test_close_convergence_clock_fails_closed_before_quote_lake_scan(
     assert estimate.training_sessions == 0
 
 
-def test_close_convergence_uses_prior_sessions_and_frozen_1500_prefix(
+@pytest.mark.parametrize("hour", [15, 17, 19])
+def test_close_convergence_uses_prior_sessions_and_matched_hour_prefix(
     monkeypatch,
     tmp_path: Path,
+    hour: int,
 ) -> None:
     history = (
         "2026-07-13",
@@ -71,6 +73,7 @@ def test_close_convergence_uses_prior_sessions_and_frozen_1500_prefix(
         available_at: datetime,
         complete: bool,
         allow_partial: bool = False,
+        horizon_end: datetime | None = None,
     ):
         del quote_root, allow_partial
         calls.append((session_date, available_at, complete))
@@ -79,7 +82,8 @@ def test_close_convergence_uses_prior_sessions_and_frozen_1500_prefix(
             if session_date.isoformat() in history
             else len(history)
         )
-        minute = np.arange(390, dtype=float)
+        length = int((horizon_end - physical_close_convergence.DEFAULT_MARKET_CALENDAR.session(session_date).open_at).total_seconds() / 60)
+        minute = np.arange(length, dtype=float)
         spx = (
             7600.0
             + position * 1.5
@@ -89,7 +93,7 @@ def test_close_convergence_uses_prior_sessions_and_frozen_1500_prefix(
         es = spx + 25.0 + np.cos(minute / 23.0 + position * 0.1)
         return physical_close_convergence._CloseSessionPath(
             session_date=session_date,
-            epoch_seconds=np.arange(390, dtype=np.int64),
+            epoch_seconds=np.arange(length, dtype=np.int64),
             spx=spx,
             es=es,
             spx_coverage=1.0,
@@ -103,7 +107,7 @@ def test_close_convergence_uses_prior_sessions_and_frozen_1500_prefix(
     )
     estimate = estimate_physical_close_convergence(
         tmp_path,
-        now=datetime(2026, 8, 6, 19, 0, 30, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 6, hour, 0, 30, tzinfo=timezone.utc),
         trading_date=date(2026, 8, 6),
     )
 
@@ -116,10 +120,7 @@ def test_close_convergence_uses_prior_sessions_and_frozen_1500_prefix(
     assert all(session_date < date(2026, 8, 6) for session_date, _, _ in calls[:-1])
     assert calls[-1] == (
         date(2026, 8, 6),
-        physical_close_convergence.DEFAULT_MARKET_CALENDAR.session(
-            date(2026, 8, 6)
-        ).close_at
-        - timedelta(minutes=60),
+        datetime(2026, 8, 6, hour, 0, tzinfo=timezone.utc),
         False,
     )
 
@@ -346,3 +347,32 @@ def test_terminal_range_bootstrap_is_prior_day_and_session_weighted(tmp_path: Pa
     assert estimate.effective_sample_count == 2.0
     assert estimate.probability == pytest.approx(0.5)
     assert estimate.historical_sessions == ("2026-08-03", "2026-08-04")
+
+
+def test_rolling_model_preparation_does_not_block_decision_thread(monkeypatch, tmp_path):
+    from concurrent.futures import Future
+    pending = Future()
+    monkeypatch.setattr(physical_close_convergence, "_CLOSE_FUTURE", pending)
+    at = datetime(2026, 9, 10, 15, 0, tzinfo=timezone.utc)
+    result = estimate_physical_close_convergence(tmp_path, now=at, trading_date=at.date(), nonblocking=True)
+    assert result.status == "unavailable"
+    assert result.reason_codes == ("close_convergence_model_preparing",)
+    assert result.target_at == at + timedelta(minutes=60)
+    assert not pending.done()
+
+
+def test_rolling_prediction_does_not_use_current_future_suffix():
+    from dataclasses import replace
+    model = physical_close_convergence
+    def path(day, shift):
+        x = np.arange(150, dtype=float)
+        spx = 7600 + .02*x + np.sin(x/9 + shift)
+        return model._CloseSessionPath(day, x.astype(np.int64), spx, spx+20, 1.0, 1.0)
+    history = [path(date(2026,8,i), i/10) for i in range(1,16)]
+    current = path(date(2026,8,17), 1.7)
+    original, _ = model._close_online_pool_distribution(history, current)
+    future_spx, future_es = current.spx.copy(), current.es.copy()
+    future_spx[90:] = 1e9
+    future_es[90:] = 1.0
+    changed, _ = model._close_online_pool_distribution(history, replace(current, spx=future_spx, es=future_es))
+    np.testing.assert_array_equal(original, changed)

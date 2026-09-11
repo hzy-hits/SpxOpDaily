@@ -49,7 +49,7 @@ def test_v44_close_convergence_manual_authority_is_explicitly_unvalidated(
         "setup_kind": "CLOSE_CONVERGENCE_60M",
         "authorization_policy": "strategy_policy.bootstrap.v69",
         "evidence_contract_hash": (
-            "sha256:095333c301d7317da804792c243002c4dd36116e982970ee391b1c4dbd926732"
+            "sha256:5a335c5a83a878cee63b8f44199bae0dab1584f93852308d94bdbb6b5014470f"
         ),
         "evidence_status": "forward_unvalidated_user_override",
         "close_convergence": {"status": "ready", "training_sessions": 28},

@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1111,17 +1112,19 @@ def test_unconfirmed_pin_stays_no_trade_without_butterfly_candidates() -> None:
     assert decision["why_not"]["reasons"][0] == "butterfly_center_confirming"
 
 
+@pytest.mark.parametrize("hour", [15,17,19])
 def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     monkeypatch,
     tmp_path: Path,
+    hour: int,
 ) -> None:
-    now = datetime(2026, 8, 6, 19, 0, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 6, hour, 0, 30, tzinfo=timezone.utc)
     payload = _pin_payload(now)
     payload.pop("previous_strategy_decision")
     estimate = PhysicalCloseConvergenceEstimate(
         status="ready",
-        as_of=datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc),
-        target_at=datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc),
+        as_of=datetime(2026, 8, 6, hour, 0, tzinfo=timezone.utc),
+        target_at=datetime(2026, 8, 6, hour + 1, 0, tzinfo=timezone.utc),
         horizon_minutes=60,
         center=7710.0,
         center_probability=0.31,
@@ -1143,7 +1146,7 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
 
     decision = build_strategy_decision(
         payload,
-        _pin_state(now),
+        replace(_pin_state(now), quotes=tuple(replace(q, greeks=OptionGreeks(implied_vol=0.20)) for q in _pin_state(now).quotes), best_quotes=tuple(replace(q, greeks=OptionGreeks(implied_vol=0.20)) for q in _pin_state(now).best_quotes)),
         now,
         data_root=tmp_path,
     )
@@ -1158,6 +1161,9 @@ def test_close_convergence_produces_one_manual_butterfly_without_pin_authority(
     assert decision["action_authority"] == "manual"
     assert decision["execution"]["automatic_ordering"] is False
 
+
+    assert candidate["convergence_risk"]["valuation"] == "entry_bid_anchored_sticky_iv_at_target_not_expiry_payoff"
+    assert management_policy_for_candidate(candidate).hard_exit_et == f"{hour-3:02}:00"
 
 def test_low_snr_strike_surface_is_explained_without_strategy_authority() -> None:
     cases: list[tuple[str, datetime, dict[str, object], LatestState]] = []
@@ -5435,12 +5441,12 @@ def test_pin_butterfly_policy_holds_past_default_time_and_premium_stop() -> None
     assert default.policy_version == "management_policy.v2"
 
 
-def test_close_convergence_policy_holds_without_intrahour_stop_until_1555() -> None:
+def test_close_convergence_policy_holds_without_intrahour_stop_until_target() -> None:
     start = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     marks = [
         PolicyMark(at=start + timedelta(minutes=5), combo_bid=0.20),
         PolicyMark(at=start + timedelta(minutes=45), combo_bid=1.80),
-        PolicyMark(at=start + timedelta(minutes=55), combo_bid=1.20),
+        PolicyMark(at=start + timedelta(minutes=60), combo_bid=1.20),
     ]
 
     label = simulate_management_policy(
@@ -5452,8 +5458,8 @@ def test_close_convergence_policy_holds_without_intrahour_stop_until_1555() -> N
     )
 
     assert label.exit_reason == "hard_close"
-    assert label.exit_at == start + timedelta(minutes=55)
-    assert label.policy_version == "management_policy.close_convergence.hold_1555.v2"
+    assert label.exit_at == start + timedelta(minutes=60)
+    assert label.policy_version == "management_policy.rolling_convergence.target_60m.v3"
     assert management_policy_for_candidate(
         {"setup_kind": "CLOSE_CONVERGENCE_60M"}
     ) == CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY
@@ -5573,10 +5579,10 @@ def test_close_convergence_cannot_arm_a_trail_even_for_a_cheap_butterfly():
     label = simulate_management_policy([
         PolicyMark(start + timedelta(minutes=10), 1.2),
         PolicyMark(start + timedelta(minutes=11), 0.7),
-        PolicyMark(start + timedelta(minutes=55), 1.0),
+        PolicyMark(start + timedelta(minutes=60), 1.0),
     ], entry_ask=0.1, entry_at=start, leg_count=4, policy=CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY)
     assert label.exit_reason == "hard_close"
-    assert label.exit_at == start + timedelta(minutes=55)
+    assert label.exit_at == start + timedelta(minutes=60)
     assert label.tp_armed is False
 
 
@@ -5600,3 +5606,18 @@ def test_mixed_environment_does_not_claim_directional_permission_is_closed() -> 
     assert result["state"] == "MIXED_UNCONFIRMED"
     assert result["directional_structures_allowed"] is True
     assert result["range_structures_allowed"] is False
+
+
+@pytest.mark.parametrize("hour", [15, 17, 19])
+def test_rolling_butterfly_exit_is_frozen_target_not_entry_plus_hour(hour):
+    at = datetime(2026, 9, 10, hour, 0, tzinfo=timezone.utc)
+    target = at + timedelta(minutes=60)
+    candidate = {"setup_kind":"CLOSE_CONVERGENCE_60M", "close_convergence":{"target_at":target.isoformat()}}
+    policy = management_policy_for_candidate(candidate)
+    label = simulate_management_policy(
+        [PolicyMark(at+timedelta(minutes=55), 0.5), PolicyMark(target, 1.1)],
+        entry_ask=1.0, entry_at=at+timedelta(seconds=30), leg_count=4, policy=policy,
+    )
+    assert label.exit_reason == "hard_close"
+    assert label.exit_at == target
+    assert label.policy_pnl_points == pytest.approx(0.1 - 0.1056)

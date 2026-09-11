@@ -1,9 +1,10 @@
-"""Causal 60-minute physical SPX close-convergence distribution."""
+"""Causal rolling 60-minute physical SPX distribution from 11:00 ET."""
 
 from __future__ import annotations
 
 import json
 import math
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -15,26 +16,30 @@ from sklearn.linear_model import Ridge
 
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
-CLOSE_CONVERGENCE_MODEL_VERSION = "physical_close_online_pool_60m.v1"
-CLOSE_CONVERGENCE_FEATURE_VERSION = "raw_spx_es_prefix_suffix_60m.v1"
+CLOSE_CONVERGENCE_MODEL_VERSION = "physical_rolling_online_pool_60m.v2"
+CLOSE_CONVERGENCE_FEATURE_VERSION = "raw_spx_es_clock_matched_60m.v2"
 CLOSE_CONVERGENCE_HORIZON_MINUTES = 60
 CLOSE_CONVERGENCE_MIN_TRAINING_SESSIONS = 15
 CLOSE_CONVERGENCE_MONTE_CARLO_DRAWS = 2_000
 CLOSE_CONVERGENCE_QUANTILE_COUNT = 51
 _CLOSE_CONVERGENCE_WINDOW_DAYS = 45
-_CLOSE_CONVERGENCE_WINDOW_SECONDS = 180
+_CLOSE_CONVERGENCE_START_MINUTES_FROM_OPEN = 90
 _CLOSE_STUDENT_T_DEGREES_OF_FREEDOM = 5.0
 _CLOSE_FUNCTIONAL_RANK = 2
 _CLOSE_FUNCTIONAL_RIDGE_ALPHA = 10.0
 _CLOSE_ONLINE_POOL_SHRINKAGE = 0.20
 _CLOSE_RNG_SEED = 20260822
 _CLOSE_MIN_COVERAGE = 0.95
+_CLOSE_RAW_CACHE: dict[tuple, list] = {}
+_CLOSE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rolling-convergence")
+_CLOSE_FUTURE: Future | None = None
+_CLOSE_FUTURE_KEY: tuple | None = None
 
 
 
 @dataclass(frozen=True, slots=True)
 class PhysicalCloseConvergenceEstimate:
-    """Causal physical SPX close distribution at the frozen 60-minute clock."""
+    """Physical SPX target distribution for a frozen minute plus 60 minutes."""
 
     status: str
     as_of: datetime
@@ -59,6 +64,7 @@ class PhysicalCloseConvergenceEstimate:
             "as_of": self.as_of.isoformat(),
             "target_at": self.target_at.isoformat(),
             "horizon_minutes": self.horizon_minutes,
+            "target_kind": "forward_60m",
             "center": self.center,
             "center_probability": self.center_probability,
             "q10": self.q10,
@@ -102,34 +108,53 @@ def estimate_physical_close_convergence(
     *,
     now: datetime,
     trading_date: date,
+    nonblocking: bool = False,
 ) -> PhysicalCloseConvergenceEstimate:
-    """Estimate the 16:00 SPX distribution from raw causal SPX/ES paths.
+    """Estimate the next-hour SPX distribution from raw causal SPX/ES paths.
 
-    The estimator is deliberately clock-frozen. It can become ready only in
-    the first three minutes after 15:00 ET, and every training session is
-    strictly earlier than ``trading_date``. Production receives 51 terminal
-    quantiles rather than the full Monte Carlo draw matrix.
+    From 11:00 ET, freeze the latest complete minute and predict the next 60
+    minutes. Historical prefixes and outcomes use the same session-relative
+    clock; only earlier sessions train the distribution.
     """
 
+    global _CLOSE_FUTURE, _CLOSE_FUTURE_KEY
     now_utc = now.astimezone(timezone.utc)
     session = DEFAULT_MARKET_CALENDAR.session(trading_date)
-    target_at = session.close_at if session is not None else now_utc
-    anchor = target_at - timedelta(minutes=CLOSE_CONVERGENCE_HORIZON_MINUTES)
+    anchor = now_utc.replace(second=0, microsecond=0)
+    target_at = anchor + timedelta(minutes=CLOSE_CONVERGENCE_HORIZON_MINUTES)
     if session is None:
         return _close_unavailable(
             now=now_utc,
             target_at=target_at,
             reason="close_convergence_session_unavailable",
         )
-    if not anchor <= now_utc < anchor + timedelta(seconds=_CLOSE_CONVERGENCE_WINDOW_SECONDS):
+    if anchor < session.open_at + timedelta(minutes=_CLOSE_CONVERGENCE_START_MINUTES_FROM_OPEN) or target_at > session.close_at:
         return _close_unavailable(
             now=now_utc,
             target_at=target_at,
             reason="close_convergence_clock_closed",
         )
     cache_key = (str(Path(data_root).expanduser().resolve()), trading_date, anchor)
+    if len(_CLOSE_READY_CACHE) > 2:
+        _CLOSE_READY_CACHE.clear()
     if cached := _CLOSE_READY_CACHE.get(cache_key):
         return cached
+    if nonblocking:
+        if _CLOSE_FUTURE is not None and _CLOSE_FUTURE.done():
+            completed = _CLOSE_FUTURE
+            _CLOSE_FUTURE = None
+            try:
+                result = completed.result()
+                if _CLOSE_FUTURE_KEY == cache_key and result.as_of == anchor:
+                    return result
+            except (OSError, ValueError, RuntimeError, duckdb.Error):
+                return _close_unavailable(now=anchor, target_at=target_at, reason="close_convergence_model_unavailable")
+        if _CLOSE_FUTURE is None:
+            _CLOSE_FUTURE_KEY = cache_key
+            _CLOSE_FUTURE = _CLOSE_EXECUTOR.submit(
+                estimate_physical_close_convergence, data_root, now=now, trading_date=trading_date,
+            )
+        return _close_unavailable(now=anchor, target_at=target_at, reason="close_convergence_model_preparing")
 
     quote_root = Path(data_root).expanduser() / "lake" / "quotes" / "schema=v1"
     earliest = trading_date - timedelta(days=_CLOSE_CONVERGENCE_WINDOW_DAYS)
@@ -157,7 +182,7 @@ def estimate_physical_close_convergence(
     historical: list[_CloseSessionPath] = []
     current: _CloseSessionPath | None = None
     try:
-        connection = duckdb.connect()
+        connection = duckdb.connect(config={"threads": 2, "memory_limit": "1GB"})
         try:
             for session_date in prior_dates:
                 historical_session = DEFAULT_MARKET_CALENDAR.session(session_date)
@@ -169,6 +194,7 @@ def estimate_physical_close_convergence(
                     session_date=session_date,
                     available_at=historical_session.close_at,
                     complete=True,
+                    horizon_end=historical_session.open_at + (target_at - session.open_at),
                 )
                 if path is not None:
                     historical.append(path)
@@ -179,6 +205,7 @@ def estimate_physical_close_convergence(
                 available_at=anchor,
                 complete=False,
                 allow_partial=True,
+                horizon_end=target_at,
             )
         finally:
             connection.close()
@@ -195,6 +222,7 @@ def estimate_physical_close_convergence(
         data_root=Path(data_root).expanduser(),
         trading_date=trading_date,
         available_at=anchor,
+        horizon_end=target_at,
     )
     if current is None or len(historical) < CLOSE_CONVERGENCE_MIN_TRAINING_SESSIONS:
         return _close_unavailable(
@@ -293,6 +321,7 @@ def _load_close_session_path(
     available_at: datetime,
     complete: bool,
     allow_partial: bool = False,
+    horizon_end: datetime | None = None,
 ) -> _CloseSessionPath | None:
     session = DEFAULT_MARKET_CALENDAR.session(session_date)
     if session is None:
@@ -301,7 +330,10 @@ def _load_close_session_path(
     files = [str(path) for path in sorted(day_root.glob("hour=*/quotes.parquet"))]
     if not files:
         return None
-    rows = connection.execute(
+    raw_key = (str(day_root), available_at, tuple((f, Path(f).stat().st_mtime_ns, Path(f).stat().st_size) for f in files))
+    rows = _CLOSE_RAW_CACHE.get(raw_key) if complete else None
+    if rows is None:
+        rows = connection.execute(
         """
         WITH filtered AS (
           SELECT received_at, source_at, instrument_id, effective_price
@@ -330,10 +362,14 @@ def _load_close_session_path(
             session.open_at.astimezone(timezone.utc),
             available_at.astimezone(timezone.utc),
         ],
-    ).fetchall()
+        ).fetchall()
+        if complete:
+            if len(_CLOSE_RAW_CACHE) >= 64:
+                _CLOSE_RAW_CACHE.pop(next(iter(_CLOSE_RAW_CACHE)))
+            _CLOSE_RAW_CACHE[raw_key] = rows
     timeline = np.arange(
         int(session.open_at.timestamp()) + 60,
-        int(session.close_at.timestamp()) + 1,
+        int((horizon_end or session.close_at).timestamp()) + 1,
         60,
         dtype=np.int64,
     )
@@ -381,6 +417,7 @@ def _merge_close_current_state(
     data_root: Path,
     trading_date: date,
     available_at: datetime,
+    horizon_end: datetime | None = None,
 ) -> _CloseSessionPath | None:
     """Overlay the live in-process samples on the last compacted Parquet prefix."""
 
@@ -390,7 +427,7 @@ def _merge_close_current_state(
     if base is None:
         timeline = np.arange(
             int(session.open_at.timestamp()) + 60,
-            int(session.close_at.timestamp()) + 1,
+            int((horizon_end or session.close_at).timestamp()) + 1,
             60,
             dtype=np.int64,
         )

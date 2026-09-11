@@ -27,7 +27,6 @@ from scipy.optimize import brentq
 from spx_spark.analytics.greeks.black_scholes import bs_delta, bs_gamma, bs_price
 
 from spx_spark.analytics.options.strategy_payoff import (
-    CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
     DEFAULT_MANAGEMENT_POLICY,
     ManagementPolicy,
     PolicyMark,
@@ -38,6 +37,15 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 
 UTC = timezone.utc
 ET = ZoneInfo("America/New_York")
+# Frozen historical study: a production rolling-policy upgrade must not relabel it.
+CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY = ManagementPolicy(
+    policy_version="management_policy.close_convergence.hold_1555.v2",
+    profit_arm_return_on_debit=None,
+    premium_stop_fraction=None,
+    time_stop_minutes=None,
+    hard_exit_et="15:55",
+    fees_per_leg_per_side=1.32,
+)
 CONTRACT = {
     "input": "normalized broker quote lake only",
     "option_clock": "quote_time required, never trade_time/received_at as BBO time",

@@ -730,6 +730,7 @@ def run(
         action_now,
         data_root=storage.data_root,
         probability_settings=app.strategy_distribution,
+        background_models=True,
     )
     finish_research_component("strategy_build")
     finish_stage("research_and_strategy")
