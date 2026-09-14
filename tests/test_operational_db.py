@@ -15,12 +15,41 @@ from spx_spark.infrastructure.operational_db import (
     OperationalDecisionConflict,
     persist_strategy_decision,
     persist_strategy_shadow_candidates,
+    recent_selected_strategy_cards,
     read_due_strategy_observations,
     read_strategy_decisions,
 )
 
 
 NOW = datetime(2026, 8, 7, 14, 5, tzinfo=timezone.utc)
+
+
+def test_session_card_query_does_not_scan_other_sessions(tmp_path: Path) -> None:
+    import sqlalchemy as sa
+
+    database = _migrate(tmp_path)
+    persist_strategy_decision(_candidate(), database_path=database)
+    # Populate unrelated sessions, including large payloads like real decisions.
+    with sqlite3.connect(database) as connection:
+        connection.execute("""WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<3000)
+            INSERT INTO decisions (decision_id,session_date,strategy_name,strategy_version,
+                decision_at,available_at,status,action,side,attributes_json,created_at)
+            SELECT 'old:'||x,'2026-08-06','strategy_signal_engine_v2','v1',
+                '2026-08-06','2026-08-06','selected','WAIT','none',json_object('padding',hex(zeroblob(1000))),
+                '2026-08-06' FROM n""")
+
+    def bound_work(connection, cursor, statement, parameters, context, many):
+        if "SELECT" in statement and "decisions" in statement:
+            # A session lookup must not execute enough VM steps to scan all history.
+            connection.connection.driver_connection.set_progress_handler(lambda: 1, 2000)
+
+    sa.event.listen(sa.Engine, "before_cursor_execute", bound_work)
+    try:
+        cards = recent_selected_strategy_cards(session_date="2026-08-07", database_path=database)
+        assert [row["decision_id"] for row in cards] == ["strategy:call-vertical"]
+        assert recent_selected_strategy_cards(session_date="2026-08-08", database_path=database) == ()
+    finally:
+        sa.event.remove(sa.Engine, "before_cursor_execute", bound_work)
 
 
 def _migrate(root: Path) -> Path:

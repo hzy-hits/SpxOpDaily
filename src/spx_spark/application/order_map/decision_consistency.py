@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 import hashlib
 import json
 
+from spx_spark.application.order_map.strategy_regime import DEFAULT_STRATEGY_POLICY
+
 
 def committed_strategy_decision(decision: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
     """Validate the frozen Core export without recomputing it from latest features."""
@@ -15,6 +17,9 @@ def committed_strategy_decision(decision: Mapping[str, Any], *, now: datetime) -
         available = datetime.fromisoformat(str(decision.get("available_at") or decision["decision_at"]))
         decided = datetime.fromisoformat(str(decision["decision_at"]))
         if available.tzinfo is None or decided.tzinfo is None or max(available, decided) > now.astimezone(timezone.utc):
+            return {}
+        # Publication time cannot renew the frozen decision's five-minute scope.
+        if (now - decided).total_seconds() >= DEFAULT_STRATEGY_POLICY.opportunity_ttl_seconds:
             return {}
     except (KeyError, ValueError, TypeError):
         return {}

@@ -113,6 +113,15 @@ def test_frozen_decision_manifest_detects_mutated_quotes():
     assert committed_strategy_decision(mutated, now=now) == {}
 
 
+@pytest.mark.parametrize("age", [299, 300, 1800])
+def test_committed_decision_age_uses_decision_not_publication_clock(age):
+    from spx_spark.application.order_map.decision_consistency import committed_strategy_decision
+    now = datetime(2026, 9, 14, 14, tzinfo=timezone.utc)
+    decision = {"decision_at": (now - timedelta(seconds=age)).isoformat(),
+                "available_at": now.isoformat(), "decision_type": "NO_TRADE"}
+    assert bool(committed_strategy_decision(decision, now=now)) == (age < 300)
+
+
 def test_rth_environment_separates_expansion_balance_and_missing_data() -> None:
     facts = {
         "session": {"mode": "rth"},

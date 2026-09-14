@@ -469,13 +469,12 @@ def build_order_payload_with_retry(
     _attach_strategy_trigger_coordinate(payload, state, now=evaluation_now)
     # Core owns the final decision. The report renders its committed export;
     # changing latest market projections must not create another authorization.
-    decision = committed_strategy_decision(
-        load_json(Path(storage_settings.data_root) / "latest" / "strategy_decision.json"), now=evaluation_now,
-    )
+    raw_decision = load_json(Path(storage_settings.data_root) / "latest" / "strategy_decision.json")
+    decision = committed_strategy_decision(raw_decision, now=evaluation_now)
     payload["strategy_decision"] = decision
     payload["strategy_decision_reference"] = {
-        "decision_id": decision.get("decision_id"),
-        "decision_at": decision.get("decision_at"),
+        "decision_id": raw_decision.get("decision_id"),
+        "decision_at": raw_decision.get("decision_at"),
         "source": "core_committed_decision" if decision else "unavailable",
     }
     return payload

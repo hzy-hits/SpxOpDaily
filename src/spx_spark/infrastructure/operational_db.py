@@ -343,15 +343,15 @@ def recent_selected_strategy_cards(
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     with _engine(str(path)).begin() as connection:
         rows = connection.execute(
-            sa.select(
-                decisions.c.decision_id,
-                decisions.c.decision_at,
-                decisions.c.attributes_json,
-            ).where(
-                decisions.c.strategy_name == "strategy_signal_engine_v2",
-                decisions.c.session_date == session_date,
-                decisions.c.status == "selected",
-            )
+            # Without this existing index SQLite scans every historical strategy
+            # payload (13 GB in production) before filtering the requested session.
+            sa.text(
+                "SELECT decision_id, decision_at, attributes_json "
+                "FROM decisions INDEXED BY ix_decisions_session "
+                "WHERE strategy_name = 'strategy_signal_engine_v2' "
+                "AND session_date = :session_date AND status = 'selected'"
+            ),
+            {"session_date": session_date},
         ).mappings().all()
     cards: list[dict[str, object]] = []
     for row in rows:

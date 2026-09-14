@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
@@ -146,6 +146,10 @@ def build_desk_message_sections(
         execution=_execution_line(payload, projection, guidance).removeprefix("Execution  "),
         data_quality=_data_quality_line(payload, projection).removeprefix("Data Quality  "),
     )
+    if "strategy:decision_unavailable" in projection.quality_reasons:
+        return replace(sections, desk_view="暂停新建议 · 策略决策缺失、过期或校验失败",
+                       execution="PAUSED · 等待 Core 更新有效决策", targets="无有效交易目标",
+                       alternative_path="已有仓位需独立管理，不能沿用旧策略结论")
     return compact_gth_no_trade_sections(payload, sections, quality_reasons=projection.quality_reasons)
 
 
@@ -182,6 +186,8 @@ def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:
         decision,
         invalid_phase=invalid_phase,
     )
+    if "strategy:decision_unavailable" in quality_reasons:
+        return DeskMapProjection(DeskStage.PAUSED, phase, "none", "none", "", None, quality, quality_reasons)
     intent_ready, manual_ready, current_plan = _current_ready_sources(
         decision,
         intent,
@@ -971,7 +977,8 @@ def _data_quality(
     *,
     invalid_phase: bool = False,
 ) -> tuple[str, tuple[str, ...]]:
-    reasons: list[str] = []
+    reasons = (["strategy:decision_unavailable"]
+               if _mapping(payload.get("strategy_decision_reference")).get("source") == "unavailable" else [])
     if (
         current_session_is_gth(payload, decision)
         and _gth_provider_block_reason(payload) == "ibkr_competing_session"
@@ -988,17 +995,13 @@ def _data_quality(
 
     market = _mapping(payload.get("minute_market_frame"))
     market_quality = str(market.get("quality") or "").lower()
-    if not market:
-        reasons.append("market_frame:unavailable")
-    elif not market_quality:
+    if not market or not market_quality:
         reasons.append("market_frame:unavailable")
     elif market_quality != "ready":
         reasons.append(f"market_frame:{market_quality}")
     frame = _mapping(payload.get("option_structure_frame"))
     frame_quality = str(frame.get("quality") or "").lower()
-    if not frame:
-        reasons.append("option_frame:unavailable")
-    elif not frame_quality:
+    if not frame or not frame_quality:
         reasons.append("option_frame:unavailable")
     elif frame_quality != "ready":
         reasons.append(f"option_frame:{frame_quality}")
@@ -1006,9 +1009,7 @@ def _data_quality(
     structure = _mapping(frame.get("structure"))
     l1 = _mapping(frame.get("l1"))
     l1_quality = str(l1.get("quality") or "").lower()
-    if not l1:
-        reasons.append("option_l1:unavailable")
-    elif not l1_quality:
+    if not l1 or not l1_quality:
         reasons.append("option_l1:unavailable")
     elif l1_quality != "ready":
         reasons.append(f"option_l1:{l1_quality}")

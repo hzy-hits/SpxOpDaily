@@ -27,6 +27,23 @@ from spx_spark.application.order_map.status_explanation import (
 NOW = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("session", ["rth", "gth"])
+def test_fresh_quotes_cannot_restore_unavailable_committed_strategy(session):
+    payload = _payload()
+    payload["strategy_decision"] = {}
+    payload["strategy_decision_reference"] = {"source": "unavailable", "decision_at": (NOW - timedelta(minutes=30)).isoformat()}
+    payload["session_mode"] = session
+    projection = build_desk_map_projection(payload)
+    assert projection.stage.value == "PAUSED"
+    assert projection.data_quality == "DEGRADED"
+    assert projection.direction == "none"
+    assert "strategy:decision_unavailable" in projection.quality_reasons
+    sections = build_desk_message_sections(payload, NOW if session == "rth" else NOW - timedelta(hours=5))
+    assert "PAUSED" in sections.execution
+    assert "READY" not in sections.data_quality
+    assert "7550" not in sections.targets
+
+
 def _payload() -> dict[str, object]:
     return {
         "expiry": "20260715",

@@ -994,9 +994,10 @@ def test_order_payload_retry_rebuilds_after_stale_candidate_refresh(
     assert payload["strategy_decision_reference"]["source"] == "unavailable"
 
 
-def test_report_reuses_committed_decision_when_current_market_context_changes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("decision_age_seconds", [0, 299, 300, 1800])
+def test_report_reuses_committed_decision_when_current_market_context_changes(monkeypatch, tmp_path, decision_age_seconds):
     now = datetime(2026, 7, 7, 6, tzinfo=timezone.utc)
-    committed = {"decision_id": "core:one", "decision_at": now.isoformat(),
+    committed = {"decision_id": "core:one", "decision_at": (now - timedelta(seconds=decision_age_seconds)).isoformat(),
                  "available_at": now.isoformat(), "decision_type": "NO_TRADE", "candidate": None,
                  "why_not": {"reasons": ["frozen_reason"]}}
     latest = tmp_path / "latest"
@@ -1004,8 +1005,9 @@ def test_report_reuses_committed_decision_when_current_market_context_changes(mo
     (latest / "strategy_decision.json").write_text(json.dumps(committed))
     state = make_candidate_retry_state(state_now=now, candidate_quote_at=now, vix=25)
     payload, _, _ = run_candidate_retry(monkeypatch, tmp_path, [state], now=now)
-    assert payload["strategy_decision"] == committed
+    assert payload["strategy_decision"] == (committed if decision_age_seconds < 300 else {})
     assert payload["strategy_decision_reference"]["decision_id"] == "core:one"
+    assert payload["strategy_decision_reference"]["decision_at"] == committed["decision_at"]
 
 
 def test_strategy_decision_rejects_future_fact_frames() -> None:
