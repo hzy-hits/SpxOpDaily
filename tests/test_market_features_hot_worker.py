@@ -212,47 +212,6 @@ def test_direct_one_shot_refuses_to_overlap_the_hot_owner(
     assert output["lock_path"] == str(lock_path)
 
 
-def test_core_worker_holds_the_embedded_shock_owner_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    feature_lock = tmp_path / "feature.lock"
-    shock_lock = tmp_path / "shock.lock"
-
-    monkeypatch.setattr(
-        hot_worker,
-        "load_app_settings",
-            lambda: SimpleNamespace(
-                market_features=SimpleNamespace(
-                    interval_seconds=5,
-                    sample_interval_seconds=60,
-                )
-            ),
-    )
-    monkeypatch.setattr(
-        hot_worker,
-        "StorageSettings",
-        SimpleNamespace(
-            from_env=lambda: SimpleNamespace(data_root=str(tmp_path)),
-        ),
-    )
-
-    def cycle(*_args, **_kwargs) -> int:
-        contender = hot_worker.ProcessLock(shock_lock)
-        with pytest.raises(hot_worker.ProcessLockUnavailable):
-            contender.acquire()
-        return 0
-
-    monkeypatch.setattr(hot_worker, "run_market_features_cycle", cycle)
-
-    assert hot_worker.run_with_stop(
-        stop_event=FakeStopEvent(FakeClock()),
-        lock_path=feature_lock,
-        additional_lock_path=shock_lock,
-        max_cycles=1,
-    ) == 0
-
-
 def test_direct_market_features_main_uses_the_shared_owner_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -280,12 +239,10 @@ def test_cycle_forwards_frames_to_the_core_callback(
     from spx_spark.application.market_features import service
 
     observed: list[tuple[dict[str, object], dict[str, object]]] = []
-    snapshots: list[tuple[object, object]] = []
 
-    def run(argv, *, on_frames, on_analytical_snapshot, state_cache) -> int:
+    def run(argv, *, on_frames, state_cache) -> int:
         assert argv == []
         assert state_cache == {"sentinel": True}
-        on_analytical_snapshot("latest-state", "options-map")
         on_frames({"frame_id": "market:1"}, {"frame_id": "options:1"})
         return 0
 
@@ -293,13 +250,11 @@ def test_cycle_forwards_frames_to_the_core_callback(
 
     result = hot_worker.run_market_features_cycle(
         lambda market, options: observed.append((dict(market), dict(options))),
-        on_analytical_snapshot=lambda latest, options: snapshots.append((latest, options)),
         emit_json=False,
         state_cache={"sentinel": True},
     )
 
     assert result == 0
-    assert snapshots == [("latest-state", "options-map")]
     assert observed == [({"frame_id": "market:1"}, {"frame_id": "options:1"})]
 
 

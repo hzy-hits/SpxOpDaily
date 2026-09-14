@@ -141,12 +141,11 @@ from spx_spark.infrastructure.operational_db import (
 )
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.marketdata import as_utc
-from spx_spark.analytics.options.models import OptionsMap
 from spx_spark.options_map import build_options_map, group_spxw_option_quotes
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
-from spx_spark.storage import LatestState, LatestStateStore
+from spx_spark.storage import LatestStateStore
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -161,7 +160,6 @@ def run(
     now: datetime | None = None,
     action_clock: Callable[[], datetime] | None = None,
     on_frames: Callable[[Mapping[str, object], Mapping[str, object]], None] | None = None,
-    on_analytical_snapshot: Callable[[LatestState, OptionsMap], None] | None = None,
     app_settings: AppSettings | None = None,
     storage_settings: StorageSettings | None = None,
     state_cache: dict[str, object] | None = None,
@@ -267,8 +265,6 @@ def run(
     )
     exposure_map = build_exposure_map(latest, grouped_quotes=grouped_quotes)
     finish_state_component("option_analytics")
-    if on_analytical_snapshot is not None:
-        on_analytical_snapshot(latest, options_map)
     option_history = _dict_list(persisted.get("option_history"))
     option_frame, contracts = build_option_structure_frame(
         latest,

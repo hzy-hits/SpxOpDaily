@@ -83,11 +83,6 @@ async def main() -> None:
     feature_runner = partial(
         market_features_hot_worker.run_with_stop,
         on_frames=_regime_publisher(),
-        on_analytical_snapshot=partial(
-            intraday_shock_hot_worker.run_embedded_intraday_shock_cycle,
-            app_settings=app_settings, storage_settings=storage, emit_json=False),
-        additional_lock_path=str(settings.core_lock_root /
-                                 intraday_shock_hot_worker.LOCK_FILE_NAME),
         # The market-feature service now emits one bounded timing summary,
         # rather than serializing the full decision payload into journald.
         emit_json=True,
@@ -103,6 +98,10 @@ async def main() -> None:
             tasks.create_task(_run_owner("market_features_hot_worker", partial(
                 feature_runner, stop_event=stop_event, lock_path=str(
                     settings.core_lock_root / market_features_hot_worker.LOCK_FILE_NAME)), shutdown))
+            tasks.create_task(_run_owner("intraday_shock_hot_worker", partial(
+                intraday_shock_hot_worker.run_with_stop, stop_event=stop_event,
+                lock_path=str(settings.core_lock_root / intraday_shock_hot_worker.LOCK_FILE_NAME),
+                app_settings=app_settings, emit_json=False), shutdown))
             if runtime.provider_failover_enabled:
                 tasks.create_task(_run_periodic(
                     "provider_failover", partial(

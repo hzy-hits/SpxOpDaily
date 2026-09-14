@@ -995,3 +995,37 @@ def test_flow_coverage_five_percent_boundary_retains_exit_only_authority(step, p
     for alert in alerts:
         assert alert.audit_context["new_entry_eligible"] is False
         assert alert.audit_context["automatic_ordering"] is False
+
+
+@pytest.mark.parametrize('direction', ['BEARISH', 'BULLISH'])
+@pytest.mark.parametrize('fault', [None, 'gap', 'coverage', 'unknown'])
+def test_flow_nonconfirmation_is_observation_without_exit_or_entry(direction, fault):
+    state = empty_monitor_state('2026-07-10')
+    start = datetime(2026, 7, 10, 14, 0, 5, tzinfo=UTC)
+    alerts = []
+    prices = [100.0] * 16 + [101, 103, 102, 101, 100]
+    for i, price in enumerate(prices):
+        if fault == 'gap' and i == 10:
+            continue
+        at = start + timedelta(minutes=i)
+        strong_size = 4 if i < 16 else 2
+        sizes = (strong_size, 1) if direction == 'BEARISH' else (1, strong_size)
+        quotes = tuple(replace(_captured_trade_quote(right=right, at=at,
+                      volume=100 + i * (1000 if fault == 'coverage' else 5),
+                      last=1.1 if fault == 'unknown' else 1.2), last_size=size)
+                       for right, size in zip(('C', 'P'), sizes))
+        state, emitted = advance_captured_option_flow(
+            state, sample(at, price if direction == 'BEARISH' else 200-price, price+50,
+                          provider=Provider.SCHWAB.value), quotes=quotes, decision_at=at,
+            session_date='2026-07-10')
+        alerts.extend(emitted)
+    snapshot = state['captured_net_premium_divergence']['snapshot']
+    warning = snapshot['exhaustion']
+    assert alerts == []
+    assert warning['authority'] == 'observation_only'
+    if fault:
+        assert warning['status'] == 'unavailable'
+    else:
+        assert warning['status'] == 'observed'
+        assert warning['direction'] == direction
+        assert snapshot['divergence'] == 'NONE'

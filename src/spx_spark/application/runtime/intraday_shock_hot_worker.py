@@ -5,11 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 import threading
-import time
 from collections.abc import Callable
-from datetime import datetime, timezone
 from functools import partial
-from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,7 +23,6 @@ from spx_spark.application.runtime.market_features_hot_worker import (
 )
 from spx_spark.config import StorageSettings
 from spx_spark.settings import AppSettings, load_app_settings
-from spx_spark.state_io import atomic_write_json_secure
 
 if TYPE_CHECKING:
     from spx_spark.analytics.options.models import OptionsMap
@@ -34,7 +30,6 @@ if TYPE_CHECKING:
 
 
 LOCK_FILE_NAME = "spx-spark-intraday-shock-hot-worker.lock"
-_EMBEDDED_CYCLES = count(1)
 
 
 def default_lock_path() -> Path:
@@ -63,63 +58,6 @@ def run_intraday_shock_cycle(
     if storage_settings is not None:
         kwargs["storage_settings"] = storage_settings
     return service.run(["--json"] if emit_json else [], **kwargs)
-
-
-def run_embedded_intraday_shock_cycle(
-    latest_state: LatestState,
-    options_map: OptionsMap,
-    *,
-    app_settings: AppSettings,
-    storage_settings: StorageSettings,
-    interval_seconds: float = 5.0,
-    emit_json: bool = False,
-) -> None:
-    """Run shock first inside one feature tick while retaining its own lease."""
-
-    cycle_number = next(_EMBEDDED_CYCLES)
-    started_at = datetime.now(tz=timezone.utc)
-    started_monotonic = time.monotonic()
-    error: str | None = None
-    raised: Exception | None = None
-    exit_code = 1
-    try:
-        exit_code = run_intraday_shock_cycle(
-            emit_json=emit_json,
-            latest_state=latest_state,
-            options_map=options_map,
-            app_settings=app_settings,
-            storage_settings=storage_settings,
-        )
-    except Exception as exc:  # noqa: BLE001 - preserve failure in the lease
-        raised = exc
-        error = f"{type(exc).__name__}:{exc}"
-    finished_at = datetime.now(tz=timezone.utc)
-    duration_seconds = max(time.monotonic() - started_monotonic, 0.0)
-    event = {
-        "schema_version": 1,
-        "task": "intraday_shock_hot_worker",
-        "event": "cycle_finished",
-        "cycle": cycle_number,
-        "ok": exit_code == 0 and error is None,
-        "exit_code": exit_code,
-        "error": error,
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-        "duration_ms": duration_seconds * 1000.0,
-        "interval_seconds": interval_seconds,
-        "overrun_ms": max(duration_seconds - interval_seconds, 0.0) * 1000.0,
-        "consecutive_failures": 0 if exit_code == 0 and error is None else 1,
-        "execution_mode": "embedded_direct_call",
-    }
-    atomic_write_json_secure(
-        Path(storage_settings.data_root) / "latest" / "intraday_shock_hot_worker.lease.json",
-        event,
-    )
-    print_event(event)
-    if raised is not None:
-        raise RuntimeError(error) from raised
-    if exit_code != 0:
-        raise RuntimeError(f"intraday shock exited with status {exit_code}")
 
 
 def run_locked_intraday_shock_once(

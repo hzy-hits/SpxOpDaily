@@ -25,7 +25,7 @@ from spx_spark.marketdata import (
 
 _ET = ZoneInfo("America/New_York")
 _FLOW_STATE_KEY = "captured_net_premium_divergence"
-_POLICY_VERSION = "captured_option_flow.v5"
+_POLICY_VERSION = "captured_option_flow.v6"
 _FLOW_IMAGE_URL = "https://spx.zh3nyu.com/flow/latest.png"
 _LOOKBACK_MINUTES = 15
 _CONFIRM_MINUTES = 5
@@ -512,7 +512,8 @@ def _desk_summary(snapshot: dict[str, object]) -> str:
         return "0DTE捕获流 unavailable"
     quality = str(rolling.get("quality") or "unavailable")
     if quality in {"unavailable", "low_coverage"}:
-        return f"0DTE捕获流 unavailable（覆盖 {_number(rolling.get('coverage')):.0%}）"
+        return (f"0DTE捕获流 unavailable（覆盖 {_number(rolling.get('coverage')):.1%}，"
+                f"未分类占捕获成交 {_number(rolling.get('inside_share')):.1%}）")
     bullish = strikes.get("bullish_top") if isinstance(strikes, dict) else None
     bearish = strikes.get("bearish_top") if isinstance(strikes, dict) else None
     return (
@@ -749,15 +750,9 @@ def advance_captured_option_flow(
     raw_tape = state.get(_FLOW_STATE_KEY)
     tape = dict(raw_tape) if isinstance(raw_tape, dict) else {}
     raw_minutes = tape.get("minutes")
-    minutes = (
-        {
-            str(key): _new_aggregate(value, with_strikes=True)
-            for key, value in raw_minutes.items()
-            if isinstance(value, dict)
-        }
-        if isinstance(raw_minutes, dict)
-        else {}
-    )
+    raw_minutes = raw_minutes if isinstance(raw_minutes, dict) else {}
+    minutes = {str(key): _new_aggregate(value, with_strikes=True)
+               for key, value in raw_minutes.items() if isinstance(value, dict)}
     seen = _decode_seen_options(tape.get("seen_options"))
     session = _new_aggregate(tape.get("session"), with_strikes=True)
     session.setdefault("started_at", decision_at.isoformat())
@@ -787,18 +782,10 @@ def advance_captured_option_flow(
             if isinstance(prior_volume_raw, int | float) and prior_volume_raw >= 0
             else None
         )
-        volume_delta = (
-            max(float(volume) - prior_volume, 0.0)
-            if volume is not None and prior_volume is not None
-            else 0.0
-        )
+        volume_delta = max(volume - prior_volume, 0.0) if volume is not None and prior_volume is not None else 0.0
         fingerprint = _last_trade_fingerprint(quote)
         previous_fingerprint = str(prior.get("fingerprint") or "") if prior else ""
-        seen[instrument_id] = {
-            "received_at": received_iso,
-            "volume": volume,
-            "fingerprint": fingerprint,
-        }
+        seen[instrument_id] = {"received_at": received_iso, "volume": volume, "fingerprint": fingerprint}
         quote_bucket = _bucket(minutes, received_at)
         _record_volume(quote_bucket, volume_delta=volume_delta)
         _record_volume(session, volume_delta=volume_delta)
@@ -807,18 +794,9 @@ def advance_captured_option_flow(
             continue
         trade_at = as_utc(quote.trade_time) if quote.trade_time is not None else None
         trade_lag = (received_at - trade_at).total_seconds() if trade_at is not None else math.inf
-        if (
-            trade_lag < 0
-            or trade_lag > _MAX_TRADE_LAG_SECONDS
-            or quote.bid is None
-            or quote.ask is None
-            or quote.last is None
-            or quote.last_size is None
-            or quote.bid < 0
-            or quote.ask <= quote.bid
-            or quote.last <= 0
-            or quote.last_size <= 0
-        ):
+        # A non-null fingerprint already requires positive last and last_size.
+        if (not 0 <= trade_lag <= _MAX_TRADE_LAG_SECONDS or quote.bid is None
+                or quote.ask is None or quote.bid < 0 or quote.ask <= quote.bid):
             continue
         side = (
             "buy" if quote.last >= quote.ask else "sell" if quote.last <= quote.bid else "unknown"
@@ -880,6 +858,9 @@ def advance_captured_option_flow(
         (window[index][0] - window[index - 1][0]).total_seconds() == 60
         for index in range(1, len(window))
     )
+    snapshot["exhaustion"] = {"status": "unavailable" if not contiguous else "not_detected",
+                              "reason": "history_gap" if not contiguous else None,
+                              "authority": "observation_only"}
     if contiguous and _START_ET <= signal_time_et <= _END_ET:
         prior, recent = window[:_LOOKBACK_MINUTES], window[_LOOKBACK_MINUTES:]
         previous_flow = _summary(_combine([row for _, row in prior[-5:]]), minutes=5)
@@ -892,6 +873,27 @@ def advance_captured_option_flow(
         current_spx = _number(recent[-1][1].get("spx"))
         recent_imbalance = _number(recent_flow.get("flow_imbalance"))
         previous_imbalance = _number(previous_flow.get("flow_imbalance"))
+        # Non-confirmation can precede a sign reversal; it never authorizes exit/entry.
+        exhaustion = snapshot["exhaustion"]
+        if not (_usable(previous_flow) and _usable(recent_flow)):
+            exhaustion.update(status="unavailable", reason="flow_quality_insufficient")
+        else:
+            weakening = (
+                "BEARISH" if recent_high > prior_high and current_spx < recent_high
+                and 0 < recent_imbalance <= previous_imbalance - _IMBALANCE_THRESHOLD
+                and 0 < recent_flow["directional_net"] < previous_flow["directional_net"]
+                else "BULLISH" if recent_low < prior_low and current_spx > recent_low
+                and 0 > recent_imbalance >= previous_imbalance + _IMBALANCE_THRESHOLD
+                and 0 > recent_flow["directional_net"] > previous_flow["directional_net"] else None
+            )
+            if weakening:
+                exhaustion.update(status="observed", direction=weakening,
+                                  signal_at=completed_minute.isoformat(),
+                                  previous_net=previous_flow["directional_net"], recent_net=recent_flow["directional_net"],
+                                  current_spx=current_spx, extreme_spx=recent_high if weakening == "BEARISH" else recent_low,
+                                  previous_imbalance=previous_imbalance, recent_imbalance=recent_imbalance)
+                snapshot["desk_summary"] += (" · 冲高回落、看涨资金跟随减弱（观察）" if weakening == "BEARISH"
+                                             else " · 下探回升、看跌资金跟随减弱（观察）")
         bearish = (
             _usable(recent_flow)
             and recent_high > prior_high

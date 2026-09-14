@@ -247,3 +247,5 @@ A change that increases process count, active languages, mutable stores or owner
 
 
 33. v69同批用户确认（2026-09-11，S1/S3）：资金背离可分类成交量覆盖门从10%降至5%，其余20分钟连续观察、成交去重、新高/低后反向确认、报价/成交延迟及退出/减仓-only权限不变，流状态版本v5。原始半小时170,353条Schwab流记录检查表明重复快照不扩大成交量增量；5秒消费最后快照会损失可分类成交，不能把低覆盖当作不存在背离。`CLOSE_CONVERGENCE_60M`名称保留但模型改为rolling v2：自11:00 ET起按最新完整分钟预测其后60分钟，目标不得超过当日收盘，历史只用先前交易日相同开盘偏移的前缀及60分钟后缀。首次准备使用单个后台线程，未就绪仅该模型不可用，不阻塞Core；缓存仅内存。蝶式10/15/20点C/P按目标时刻剩余期限及入场冻结IV估值，包含跨价和四份合约双边费用，不以提前到期收益冒充退出价格。管理v3改为目标时刻退出，无固定15:55或小时内TP/SL/trail；仍人工-only、forward-unvalidated、automatic_ordering=false，其他价格/风险/宏观门保留。Bark传输不变。详见docs/rolling-butterfly-flow-v69.md。
+
+34. 2026-09-14 资金流漏识别恢复（S1/S3，运行故障例外）：Core 内现有 intraday shock runner 独立持锁运行，不再嵌在 market_features 周期或由其代持锁，避免慢策略拖停资金流观察。captured_option_flow.v6 增加窗口价格创新高/低而同方向净流减弱的 observation_only 提示，两个流窗口仍须通过原覆盖/unknown门；不创建新候选、反向入场或离场权限。原离场提醒合同及 Bark 不变；见 docs/flow-exhaustion-recovery-2026-09-14.md。
