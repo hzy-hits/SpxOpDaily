@@ -251,3 +251,5 @@ A change that increases process count, active languages, mutable stores or owner
 34. 2026-09-14 资金流漏识别恢复（S1/S3，运行故障例外）：Core 内现有 intraday shock runner 独立持锁运行，不再嵌在 market_features 周期或由其代持锁，避免慢策略拖停资金流观察。captured_option_flow.v6 增加窗口价格创新高/低而同方向净流减弱的 observation_only 提示，两个流窗口仍须通过原覆盖/unknown门；不创建新候选、反向入场或离场权限。原离场提醒合同及 Bark 不变；见 docs/flow-exhaustion-recovery-2026-09-14.md。
 
 35. 2026-09-15 RTH换月/尾盘性能修复（S1/S3、Phase 6生产故障例外）：不同来源ES月份不同时，在各自新鲜度通过后RTH优先Schwab、其他时段优先IBKR；已知选中合约不因另一来源月份不同拒收，真实合约切换仍清空旧窗口，未知合约冲突仍拒收。会话授权查询仅投影必要字段，同次检查按机会去重且不跨次缓存；收益观察分钟历史仅缓存两版价格边界，避免保留64版完整诊断。Bark与策略权限不变，性能改善不冒充全天恢复；见docs/rth-rollover-latency-repair-2026-09-15.md。
+
+36. 2026-09-15 ES自动换月生命周期修复（S3）：IBKR collector在连接前及健康会话循环中按已有自动季度规则刷新ES/MES月份，显式IBKR_ES_EXPIRY/IBKR_MES_EXPIRY仍优先。月份变化使健康状态失效，复用原teardown/reconnect重新订阅，不重启Gateway、不绕过10197退避或新鲜度/基差门。修复启动时月份被长期进程永久冻结的问题，不新增ES通道；见docs/es-live-rollover-2026-09-15.md。

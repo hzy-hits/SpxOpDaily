@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from typing import Any
 
 from spx_spark.ibkr.farm_health import (
     TWS_CONNECTIVITY_LOST_CODES,
     TWS_CONNECTIVITY_RESTORED_CODES,
 )
+from spx_spark.config import env_str, next_equity_futures_month
 from spx_spark.ibkr.option_replan import OptionReplanController
 from spx_spark.ibkr.stream import deps as stream_deps
 from spx_spark.ibkr.stream.capacity_tracker import active_market_data_lines
@@ -34,6 +36,23 @@ write_snapshot = stream_deps.write_snapshot
 
 
 class SessionOps:
+    def refresh_futures_month(self) -> bool:
+        """Refresh automatic futures expiry; explicit deployment pins win."""
+        automatic = next_equity_futures_month()
+        previous = self.ibkr_settings
+        current = replace(
+            previous,
+            es_expiry=env_str("IBKR_ES_EXPIRY", automatic) or automatic,
+            mes_expiry=env_str("IBKR_MES_EXPIRY", automatic) or automatic,
+        )
+        if current == previous:
+            return False
+        self.ibkr_settings = current
+        log_event({"task": "ibkr_stream", "event": "futures_contract_rollover",
+                   "previous_es": previous.es_expiry, "es_expiry": current.es_expiry,
+                   "previous_mes": previous.mes_expiry, "mes_expiry": current.mes_expiry})
+        return True
+
     def _on_error(self, req_id: int, error_code: int, message: str, contract: Any) -> None:
         subscription_lane = getattr(self, "subscription_lane_by_req_id", {}).get(req_id)
         if subscription_lane is None:

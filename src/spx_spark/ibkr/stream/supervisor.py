@@ -145,6 +145,7 @@ class StreamRuntime:
                 continue
 
             try:
+                self.collector.refresh_futures_month()
                 self.collector.open_session()
             except Exception as exc:  # noqa: BLE001
                 delay = self.reconnect.next_delay()
@@ -432,6 +433,12 @@ class StreamRuntime:
                     policy_blocked=False,
                     reason=reason,
                 )
+                if self.collector.refresh_futures_month():
+                    self._publish_health(
+                        data_plane_healthy=False, policy_blocked=False,
+                        reason="futures rollover; awaiting new-contract fresh flush",
+                    )
+                    return False  # Existing finally tears down before subscribing anew.
                 next_flush_at = flush_started_at + flush_interval
                 continue
 

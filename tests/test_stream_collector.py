@@ -1734,6 +1734,9 @@ def test_established_but_unhealthy_sessions_keep_reconnect_backoff(monkeypatch) 
         def connection_required(self) -> bool:
             return True
 
+        def refresh_futures_month(self) -> bool:
+            return False
+
         def open_session(self) -> None:
             self.opens += 1
 

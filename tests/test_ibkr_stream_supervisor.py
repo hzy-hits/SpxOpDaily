@@ -10,6 +10,7 @@ import spx_spark.ibkr.stream.supervisor as supervisor_module
 from spx_spark.application.market_features.provider_entry_control import (
     gth_ibkr_entry_control,
 )
+from spx_spark.config import IbkrSettings
 from spx_spark.ibkr.stream.health import persist_stream_health
 from spx_spark.ibkr.stream.models import parse_conflict_overlay
 from spx_spark.ibkr.stream.session_ops import SessionOps
@@ -42,6 +43,7 @@ class FakeIb:
 class FakeCollector(SessionOps):
     def __init__(self, clock: FakeClock, *, disconnect_after_flushes: int = 1) -> None:
         self.clock = clock
+        self.ibkr_settings = IbkrSettings.from_env()
         self.ib = FakeIb(clock)
         self.errors: list[IbkrError] = []
         self.subscription_rejection_sequence = 0
@@ -850,3 +852,32 @@ def test_session_loop_picks_up_overlay_edit_without_rebuild(
     assert runtime.session_loop() is True
     assert runtime.competing_session_circuit.recovery_seconds == 2.0
     assert any(event.get("event") == "conflict_overlay_reloaded" for event in events)
+
+
+def test_running_session_rolls_month_without_failure_backoff(monkeypatch):
+    from dataclasses import replace
+    import spx_spark.ibkr.stream.session_ops as session_ops
+
+    monkeypatch.delenv("IBKR_ES_EXPIRY", raising=False)
+    monkeypatch.delenv("IBKR_MES_EXPIRY", raising=False)
+    monkeypatch.setattr(session_ops, "next_equity_futures_month", lambda: "202612")
+    collector = FakeCollector(FakeClock(), disconnect_after_flushes=100)
+    collector.ibkr_settings = replace(collector.ibkr_settings, es_expiry="202609", mes_expiry="202609")
+    runtime, _ = make_runtime(monkeypatch, collector)
+    assert runtime.session_loop() is False
+    assert collector.ibkr_settings.es_expiry == "202612"
+    assert collector.ibkr_settings.mes_expiry == "202612"
+    assert collector.flush_times  # The established healthy lifecycle was used.
+
+
+def test_explicit_futures_pin_survives_automatic_rollover(monkeypatch):
+    from dataclasses import replace
+    import spx_spark.ibkr.stream.session_ops as session_ops
+
+    monkeypatch.setenv("IBKR_ES_EXPIRY", "202609")
+    monkeypatch.setenv("IBKR_MES_EXPIRY", "202609")
+    monkeypatch.setattr(session_ops, "next_equity_futures_month", lambda: "202612")
+    collector = FakeCollector(FakeClock())
+    collector.ibkr_settings = replace(collector.ibkr_settings, es_expiry="202609", mes_expiry="202609")
+    assert collector.refresh_futures_month() is False
+    assert collector.ibkr_settings.es_expiry == "202609"
