@@ -31,6 +31,7 @@ from spx_spark.application.order_map.candidate_factory import (
 )
 from spx_spark.application.order_map.gth_iron_condor import (
     GTH_EVIDENCE_CONTRACT_HASH,
+    GTH_ENTRY_CONTRACT_VERSION,
     GTH_MAX_EXACT_QUOTE_AGE_SECONDS,
     GTH_MAX_EXACT_QUOTE_SKEW_SECONDS,
     gth_iron_condor_gate_failures,
@@ -379,7 +380,7 @@ def enumerate_iron_condor_candidates(
             "strategy_type": IRON_CONDOR_TYPE,
             "setup_kind": IRON_CONDOR_DELTA,
             "setup_state": (
-                "GTH_EXPANSION_TO_CONTRACTION"
+                f"GTH_{str(gth_transition.get('entry_kind') or 'expansion_to_contraction').upper()}"
                 if session_mode == "gth" and human_window_open
                 else "ENTRY_WINDOW_OPEN"
             ),
@@ -435,7 +436,7 @@ def enumerate_iron_condor_candidates(
             else f"rth_{quote.get('provider')}_iron_condor",
             "session_mode": session_mode,
             "geometry_source": (
-                "gth_20delta_fixed10_transition_iron_condor"
+                "gth_20delta_fixed10_convergence_iron_condor"
                 if session_mode == "gth" and human_window_open
                 else "rth_20delta_fixed10_iron_condor"
                 if session_mode == "rth" and human_window_open
@@ -468,7 +469,7 @@ def enumerate_iron_condor_candidates(
             },
             "production_evidence": (
                 {
-                    "contract": "gth_20delta_fixed10_local_expansion_to_contraction_ibkr_gcr20_credit25_balanced_tp50_sl200_clear1230_quote30_skew10.v3",
+                    "contract": GTH_ENTRY_CONTRACT_VERSION,
                     "status": "forward_unvalidated_user_override",
                     "limitations": [
                         "atm_straddle_is_short_gamma_pressure_proxy_not_dealer_inventory",
@@ -562,7 +563,7 @@ def iron_condor_session_state(
         "session_date": session_date,
         "session_mode": session_mode,
         "contract": (
-            "gth_first_expansion_to_contraction_credit25_gcr20_quote30_skew10_candidate_lock"
+            "gth_first_expansion_or_smooth_convergence_credit25_gcr20_quote30_skew10_candidate_lock"
             if session_mode == "gth"
             else "rth_current_credit25_or_transition_credit23_candidate_surface_advisory"
         ),

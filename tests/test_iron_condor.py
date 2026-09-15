@@ -1333,12 +1333,51 @@ def test_gth_map_explains_independent_input_price_and_quote_failures():
 
 
 
-def test_smooth_convergence_is_visible_without_authorizing_unverified_setup():
+def test_user_authorized_smooth_convergence_does_not_require_expansion():
     facts = _gth_transition_facts()
     facts["volatility"]["atm_straddle_gth_low"] = 29.0
     transition = gth_iron_condor_transition(facts, now=NOW)
-    assert transition["smooth_convergence"] == {"status": "observed", "decision_effect": "observation_only"}
-    assert transition["status"] == "waiting"
-    assert "gth_transition_expansion_too_small" in transition["reasons"]
+    assert transition["smooth_convergence"] == {"status": "observed", "decision_effect": "gth_iron_condor_gate"}
+    assert transition["status"] == "qualified"
+    assert transition["entry_kind"] == "smooth_convergence"
+    assert "gth_transition_expansion_too_small" in transition["expansion_reasons"]
     facts["path"]["atr_5m"] = None
     assert gth_iron_condor_transition(facts, now=NOW)["smooth_convergence"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("fault", [None, "iv_rising", "missing_history", "conflict", "credit24", "stale"])
+def test_authorized_smooth_gth_uses_unified_candidate_and_preserves_execution_gates(monkeypatch, tmp_path, fault):
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
+    facts = _gth_transition_facts()
+    for key in list(facts["volatility"]):
+        if key.startswith("atm_straddle_gth_") and key != "atm_straddle_gth_observations":
+            facts["volatility"].pop(key)
+    state = _gth_state()
+    if fault == "iv_rising":
+        facts["volatility"]["atm_iv_change_5m"] = .001
+    elif fault == "missing_history":
+        facts["path"]["atr_5m"] = None
+    elif fault == "conflict":
+        facts["capabilities"]["global"].update(ready=False, provider_advice_allowed=False, reasons=["ibkr_competing_session"])
+        facts["quality"] = {"status": "unavailable", "reasons": ["ibkr_competing_session"]}
+    elif fault == "credit24":
+        quotes = tuple(replace(q, bid=q.bid-.05, ask=q.ask-.05)
+                       if q.instrument.strike in (7690, 7810) else q for q in state.quotes)
+        state = LatestState(created_at=NOW, as_of=NOW, quotes=quotes, best_quotes=quotes)
+    elif fault == "stale":
+        state = _gth_state(NOW-timedelta(seconds=31))
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack", lambda *a, **k: facts)
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select._accepted_session_cards", lambda *a, **k: ())
+    decision = build_strategy_decision(_payload(), state, NOW, data_root=tmp_path)
+    if fault:
+        assert decision["decision_type"] == "NO_TRADE", decision
+    else:
+        candidate = decision["candidate"]
+        assert decision["decision_type"] == "IRON_CONDOR", decision["why_not"]
+        assert decision["action_authority"] == "manual" and decision["automatic_ordering"] is False
+        assert candidate["setup_state"] == "GTH_SMOOTH_CONVERGENCE"
+        assert candidate["gth_transition"]["entry_kind"] == "smooth_convergence"
+        assert candidate["evidence_status"] == "forward_unvalidated_user_override"
+        assert candidate["management_plan"]["hard_exit_et"] == "12:30"
+        text = _render_strategy_candidate(decision, candidate)
+        assert "平缓收敛" in text and "先扩张" not in text

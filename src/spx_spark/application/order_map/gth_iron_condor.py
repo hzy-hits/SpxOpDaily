@@ -1,4 +1,4 @@
-"""GTH expansion-to-contraction evidence for the manual iron-condor contract."""
+"""GTH expansion/retracement or smooth-convergence manual iron-condor evidence."""
 
 from __future__ import annotations
 
@@ -13,9 +13,10 @@ from spx_spark.application.market_features.session_episode import (
 )
 
 GTH_EVIDENCE_CONTRACT_HASH = (
-    "sha256:c5b321363f2f114ca4ddea9e4fb4f2183a8f8d36f37b8e28e72cd08f452b943f"
+    "sha256:b1595a3f43250b7f4da72dfd94784c0f5dc328c6c4dff12180f1bb63d670ffb3"
 )
-GTH_TRANSITION_VERSION = "gth_short_gamma_expansion_to_contraction.v3"
+GTH_TRANSITION_VERSION = "gth_short_gamma_expansion_or_smooth_convergence.v4"
+GTH_ENTRY_CONTRACT_VERSION = 'gth_20delta_fixed10_expansion_or_smooth_decay3_iv_nonrising_move125_obs30_ibkr_gcr20_credit25_balanced_tp50_sl200_clear1230_quote30_skew10.v4'
 GTH_MAX_EXACT_QUOTE_AGE_SECONDS = 30.0
 GTH_MAX_EXACT_QUOTE_SKEW_SECONDS = 10.0
 GTH_MIN_STRADDLE_OBSERVATIONS = 30
@@ -31,7 +32,7 @@ GTH_MAX_GCR10 = 0.20
 def gth_iron_condor_transition(
     facts: Mapping[str, Any], *, now: datetime
 ) -> dict[str, Any]:
-    """Detect a causal GTH vol expansion that has started to contract."""
+    """Detect authorized expansion/retracement or smooth-convergence evidence."""
 
     now = _utc(now)
     session_mode = str(_map(facts.get("session")).get("mode") or "").lower()
@@ -145,15 +146,21 @@ def gth_iron_condor_transition(
     if move_atr is not None and move_atr > GTH_MAX_ABS_15M_MOVE_ATR:
         reasons.append("gth_transition_price_not_balanced")
 
-    smooth_inputs = (decay_15m, iv_change_5m, iv_change_15m, move_atr)
+    smooth_inputs = (current, decay_15m, iv_change_5m, iv_change_15m, move_atr)
     smooth_status = "unavailable"
     if session_mode == "gth" and observations >= GTH_MIN_STRADDLE_OBSERVATIONS and None not in smooth_inputs:
         smooth_status = "observed" if (
-            decay_15m >= GTH_MIN_STRADDLE_DECAY_15M and iv_change_5m <= 0
+            current > 0 and decay_15m >= GTH_MIN_STRADDLE_DECAY_15M and iv_change_5m <= 0
             and iv_change_15m <= 0 and move_atr <= GTH_MAX_ABS_15M_MOVE_ATR
         ) else "not_observed"
+    entry_kind = "expansion_to_contraction" if not reasons else "smooth_convergence" if smooth_status == "observed" else None
+    expansion_reasons = reasons
+    if entry_kind == "smooth_convergence":
+        reasons = []
     return {
-        "smooth_convergence": {"status": smooth_status, "decision_effect": "observation_only"},
+        "entry_kind": entry_kind,
+        "expansion_reasons": expansion_reasons,
+        "smooth_convergence": {"status": smooth_status, "decision_effect": "gth_iron_condor_gate"},
         "schema_version": GTH_TRANSITION_VERSION,
         "status": "qualified" if not reasons else "waiting",
         "decision_effect": "gth_iron_condor_gate",

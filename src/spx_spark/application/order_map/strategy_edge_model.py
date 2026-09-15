@@ -22,6 +22,7 @@ from typing import Any
 
 from spx_spark.analytics.options.strategy_payoff import management_policy_for_candidate
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.application.order_map.gth_iron_condor import GTH_EVIDENCE_CONTRACT_HASH
 from spx_spark.application.order_map.surface_path_distribution import SUPERSEDED_PATH_METHODS
 
 
@@ -53,9 +54,6 @@ _CLOSE_CONVERGENCE_CONTRACT_HASH = (
 _IRON_CONDOR_SETUP = "IRON_CONDOR_DELTA"
 _IRON_CONDOR_CONTRACT_HASH = (
     "sha256:bf857053b1d7d85f32adacdf479a18242ab38ded8e7b8bb59e52082505ef223e"
-)
-_GTH_IRON_CONDOR_CONTRACT_HASH = (
-    "sha256:c5b321363f2f114ca4ddea9e4fb4f2183a8f8d36f37b8e28e72cd08f452b943f"
 )
 _GTH_MINUTE_GATE_POLICY = "strategy_policy.bootstrap.v69"
 _GTH_MINUTE_GATE_CONTRACT_HASH = (
@@ -325,7 +323,7 @@ def apply_strategy_edge_authority(
             _IRON_CONDOR_SETUP: (
                 "strategy_policy.bootstrap.v69",
                 (
-                    _GTH_IRON_CONDOR_CONTRACT_HASH
+                    GTH_EVIDENCE_CONTRACT_HASH
                     if str(candidate.get("session_mode") or "").lower() == "gth"
                     else _IRON_CONDOR_CONTRACT_HASH
                 ),

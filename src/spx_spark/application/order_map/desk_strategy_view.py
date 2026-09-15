@@ -364,7 +364,7 @@ def compact_iron_condor_desk_line(
             return " · ".join(details)
 
         if _mapping(transition.get("smooth_convergence")).get("status") == "observed":
-            details.append("平缓收敛已观察（不等于扩张回落入场）")
+            details.append("平缓收敛波动/位移条件满足")
         reasons = {str(reason) for reason in transition.get("reasons") or ()}
         waits = []
         move_atr = finite_float(transition.get("move_15m_atr"))
@@ -647,7 +647,7 @@ def humanize_strategy_reason(
         "iron_condor_session_authority_unavailable": "铁鹰当日推送账本不可用，失效关闭",
         "iron_condor_session_cap": "本 GTH 会话铁鹰候选配额已用",
         "iron_condor_entry_window_closed": "RTH 铁鹰须在开盘后、15:45 ET 管理退出前入场",
-        "gth_iron_condor_transition_unconfirmed": "GTH 跨式尚未完成扩张转收缩",
+        "gth_iron_condor_transition_unconfirmed": "GTH 扩张回落与平缓收敛均未确认",
         "gth_iron_condor_ibkr_quote_required": "GTH 铁鹰缺少 IBKR 四腿新鲜报价",
         "gth_iron_condor_gamma_risk_unavailable": "GTH 铁鹰四腿 Gamma 缺失或陈旧",
         "gth_iron_condor_gamma_risk_hot": "GTH 铁鹰的 10 点 Gamma/贷记风险过热",

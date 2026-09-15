@@ -334,7 +334,12 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             contraction = _finite_number(
                 transition.get("straddle_contraction_from_high_fraction")
             )
-            if expansion is not None and contraction is not None:
+            if transition.get("entry_kind") == "smooth_convergence":
+                decay = _finite_number(transition.get("straddle_decay_15m"))
+                move = _finite_number(transition.get("move_15m_atr"))
+                if decay is not None and move is not None:
+                    transition_line = f"GTH 平缓收敛：15m跨式衰减 {decay:.1%}，5/15m IV不升，位移 {move:.2f} ATR（人工试验，前向未验证）"
+            elif expansion is not None and contraction is not None:
                 transition_line = (
                     f"GTH 波动：跨式先扩张 {expansion:.1%}、后从峰值收缩 "
                     f"{contraction:.1%}（不是 dealer 持仓推断）"
