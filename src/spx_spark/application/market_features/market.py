@@ -127,6 +127,13 @@ def normalized_market_sample(
         )
         if quote is not None:
             es_by_provider[provider.value] = normalized_quote(quote)
+    # Roll weeks can expose two legitimate maturities. Choose a source, never
+    # alternate contracts merely because one provider updated milliseconds later.
+    identities = {q["contract_identity"] for q in es_by_provider.values() if q["contract_identity"]}
+    if len(identities) > 1:
+        preferred = "schwab" if session_segment(now, policy=policy) == "rth" else "ibkr"
+        if preferred in es_by_provider:
+            instruments["future:ES"] = es_by_provider[preferred]
     return {
         "at": now.isoformat(),
         "session_id": globex_session_id(now),

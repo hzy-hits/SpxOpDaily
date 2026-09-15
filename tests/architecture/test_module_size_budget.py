@@ -18,7 +18,6 @@ OVERSIZED_MODULE_LINE_BASELINE = {
     "application/shock/gth_dip.py": 1001,
     "data_platform/research/regime_hmm_calibration.py": 2060,
     "infrastructure/growth_dislocation.py": 1414,
-    "infrastructure/operational_db.py": 1007,
     "options_map/render.py": 1358,
     "settings/loader.py": 1005,
 }

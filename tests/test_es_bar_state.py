@@ -605,7 +605,7 @@ def test_unknown_contract_observation_makes_mixed_bar_partial() -> None:
     assert mixed["quality"] == "partial"
 
 
-def test_cross_provider_contract_conflict_rejects_until_sources_align() -> None:
+def test_known_selected_rollover_resets_without_waiting_for_other_provider() -> None:
     start = datetime(2026, 9, 17, 13, 30, tzinfo=UTC)
     state = advance_es_bar_state(
         {},
@@ -621,9 +621,9 @@ def test_cross_provider_contract_conflict_rejects_until_sources_align() -> None:
 
     rejected = advance_es_bar_state(state, conflict, now=conflict_at)
 
-    assert rejected["contract_identity"] == "ES:202609"
-    assert rejected["current_bar"]["close"] == 6500.0
-    assert rejected["diagnostics"]["last_rejection"] == "es_contract_identity_provider_conflict"
+    assert rejected["contract_identity"] == "ES:202612"
+    assert rejected["current_bar"]["close"] == 6520.0
+    assert rejected["diagnostics"]["contract_reset_from"] == "ES:202609"
 
     aligned_at = conflict_at + timedelta(seconds=5)
     aligned = sample(aligned_at, 6521.0, contract_identity="ES:202612")
@@ -634,7 +634,7 @@ def test_cross_provider_contract_conflict_rejects_until_sources_align() -> None:
     rolled = advance_es_bar_state(rejected, aligned, now=aligned_at)
 
     assert rolled["contract_identity"] == "ES:202612"
-    assert rolled["current_bar"]["open"] == 6521.0
+    assert rolled["current_bar"]["open"] == 6520.0
     assert rolled["diagnostics"]["contract_reset_from"] == "ES:202609"
 
 
@@ -660,3 +660,15 @@ def test_late_start_cannot_be_labeled_complete_even_with_many_samples() -> None:
     assert bar["sample_count"] == 24
     assert bar["leading_edge_gap_seconds"] == 180.0
     assert bar["quality"] == "partial"
+
+
+def test_unknown_selected_identity_still_rejects_conflicting_sources():
+    at = datetime(2026, 9, 14, 14, 0, tzinfo=UTC)
+    incoming = sample(at, 7600.0, contract_identity=None)
+    incoming["es_by_provider"] = {
+        "schwab": {"contract_identity": "ES:202612"},
+        "ibkr": {"contract_identity": "ES:202609"},
+    }
+    state = advance_es_bar_state({}, incoming, now=at)
+    assert state["diagnostics"]["last_rejection"] == "es_contract_identity_provider_conflict"
+    assert not state.get("current_bar")

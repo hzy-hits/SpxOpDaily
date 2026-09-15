@@ -1927,3 +1927,25 @@ def test_missing_atm_strike_cannot_crash_or_create_decay(straddles) -> None:
     result = option_volatility_features(front, None, history=history, now=now, straddles=straddles)
     assert result["atm_straddle_decay_15m"] is None
     assert result["atm_straddle_decay_status"]["reason"] == "atm_strike_unavailable"
+
+
+@pytest.mark.parametrize("hour,expected", [(14, "schwab"), (8, "ibkr")])
+@pytest.mark.parametrize("fresher", [Provider.SCHWAB, Provider.IBKR])
+def test_rollover_selects_session_source_despite_update_order(hour, expected, fresher):
+    at = datetime(2026, 9, 14, hour, 0, tzinfo=UTC)
+    quotes = tuple(
+        Quote(
+            instrument=InstrumentId.future("ES", expiry=expiry), provider=provider,
+            received_at=at, last_update_at=at,
+            quote_time=at if provider == fresher else at - timedelta(seconds=1),
+            quality=MarketDataQuality.LIVE, bid=price-1, ask=price+1,
+        )
+        for provider, expiry, price in (
+            (Provider.SCHWAB, "202612", 7650), (Provider.IBKR, "202609", 7600)
+        )
+    )
+    result = normalized_market_sample(
+        LatestState(at, at, quotes, quotes), now=at, policy=MarketFeatureSettings()
+    )
+    assert result["instruments"]["future:ES"]["provider"] == expected
+    assert len(result["es_by_provider"]) == 2

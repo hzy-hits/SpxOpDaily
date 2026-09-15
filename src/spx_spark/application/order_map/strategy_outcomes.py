@@ -262,7 +262,7 @@ def _invalidation_breach(
     }
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=2)
 def _load_spx_minute_session(
     path_text: str, _mtime_ns: int, _size: int
 ) -> tuple[tuple[datetime, Mapping[str, Any]], ...]:
@@ -280,7 +280,12 @@ def _load_spx_minute_session(
         minute = _time(row.get("minute")) if row else None
         if minute is None:
             continue
-        rows.append((minute, row))
+        # The file changes throughout the session: do not retain 64 full copies
+        # of provider diagnostics when breach checks only need price bounds.
+        selected = _map(row.get("selected"))
+        rows.append((minute, {"status": row.get("status"), "selected": {
+            key: selected.get(key) for key in ("low", "high", "price")
+        }}))
     rows.sort(key=lambda item: item[0])
     return tuple(rows)
 

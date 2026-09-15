@@ -540,3 +540,22 @@ def test_read_due_keeps_bounded_window_and_prefers_fresh_over_service_gap(
     decision_ids = {str(item["decision"]["decision_id"]) for item in due}
     assert "strategy:ancient" not in decision_ids
     assert "strategy:recent" in decision_ids
+
+
+@pytest.mark.parametrize("mode,setup,expected", [(" GTH ", "OTHER", "gth"), (None, "GTH_LEVEL", "gth"), (None, "RTH_LEVEL", "rth")])
+def test_session_card_projection_preserves_lock_inputs(tmp_path, mode, setup, expected):
+    database = _migrate(tmp_path)
+    payload = _candidate()
+    payload["candidate"].update(opportunity_id="op-1", setup_kind=setup, trigger_level=7625.0)
+    payload["market_facts"] = {"session": {"mode": mode}, "large_diagnostics": "x" * 100_000}
+    persist_strategy_decision(payload, database_path=database)
+    cards = recent_selected_strategy_cards(session_date="2026-08-07", database_path=database)
+    assert cards == ({
+        "decision_id": "strategy:call-vertical", "decision_at": NOW,
+        "opportunity_id": "op-1", "direction": "UP", "setup_kind": setup,
+        "trigger_level": 7625.0, "session_mode": expected,
+    },)
+    assert recent_selected_strategy_cards(
+        session_date="2026-08-07", database_path=database,
+        exclude_decision_id="strategy:call-vertical",
+    ) == ()

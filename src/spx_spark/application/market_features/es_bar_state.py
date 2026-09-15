@@ -51,7 +51,7 @@ def advance_es_bar_state(
     contract_identity = _contract_identity(quote)
     rejection = (
         "es_contract_identity_provider_conflict"
-        if _provider_contract_identity_conflict(sample)
+        if _provider_contract_identity_conflict(sample) and contract_identity is None
         else _rejection_reason(
             source_at=source_at,
             price=price,

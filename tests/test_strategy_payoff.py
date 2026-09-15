@@ -5630,3 +5630,21 @@ def test_rolling_butterfly_exit_is_frozen_target_not_entry_plus_hour(hour):
     assert label.exit_reason == "hard_close"
     assert label.exit_at == target
     assert label.policy_pnl_points == pytest.approx(0.1 - 0.1056)
+
+
+def test_acceptance_filter_checks_each_identity_once_but_refreshes_next_call():
+    from spx_spark.application.order_map.strategy_ranker import outbox_accepted_strategy_cards
+
+    rows = [{"opportunity_id": "a", "decision_at": i} for i in range(100)]
+    calls = []
+    accepted = set()
+
+    def exists(identity):
+        calls.append(identity)
+        return identity in accepted
+
+    assert outbox_accepted_strategy_cards(rows, event_exists=exists) == ()
+    assert calls == ["a:ready"]
+    accepted.add("a:ready")
+    assert outbox_accepted_strategy_cards(rows, event_exists=exists) == (rows[-1],)
+    assert calls == ["a:ready", "a:ready"]

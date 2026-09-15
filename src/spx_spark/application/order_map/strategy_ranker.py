@@ -194,19 +194,16 @@ def outbox_accepted_strategy_cards(
     must not lock the desk or consume quota.
     """
 
-    accepted: dict[str, dict[str, Any]] = {}
+    latest: dict[str, dict[str, Any]] = {}
     for row in rows:
         row_opportunity = str(row.get("opportunity_id") or "")
         if not row_opportunity or row_opportunity == exclude_opportunity_id:
             continue
-        known = accepted.get(row_opportunity)
-        if known is not None:
-            if row["decision_at"] > known["decision_at"]:
-                accepted[row_opportunity] = dict(row)
-            continue
-        if event_exists(f"{row_opportunity}:ready"):
-            accepted[row_opportunity] = dict(row)
-    return tuple(accepted.values())
+        known = latest.get(row_opportunity)
+        if known is None or row["decision_at"] > known["decision_at"]:
+            latest[row_opportunity] = dict(row)
+    # Negative results must also be checked once per opportunity in this call.
+    return tuple(row for opportunity, row in latest.items() if event_exists(f"{opportunity}:ready"))
 
 
 def apply_winner_stick(

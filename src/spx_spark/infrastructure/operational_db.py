@@ -346,7 +346,9 @@ def recent_selected_strategy_cards(
             # Without this existing index SQLite scans every historical strategy
             # payload (13 GB in production) before filtering the requested session.
             sa.text(
-                "SELECT decision_id, decision_at, attributes_json "
+                "SELECT decision_id, decision_at, json_extract(attributes_json, "
+                "'$.candidate.opportunity_id', '$.candidate.direction', '$.candidate.setup_kind', "
+                "'$.candidate.trigger_level', '$.market_facts.session.mode') AS card_fields "
                 "FROM decisions INDEXED BY ix_decisions_session "
                 "WHERE strategy_name = 'strategy_signal_engine_v2' "
                 "AND session_date = :session_date AND status = 'selected'"
@@ -357,35 +359,20 @@ def recent_selected_strategy_cards(
     for row in rows:
         if exclude_decision_id and str(row["decision_id"]) == exclude_decision_id:
             continue
-        payload = json.loads(row["attributes_json"])
-        candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
-        trigger = candidate.get("trigger_level")
+        opportunity, direction, setup, trigger, mode = json.loads(row["card_fields"])
+        mode = str(mode or "").strip().lower()
         cards.append(
             {
                 "decision_id": str(row["decision_id"]),
                 "decision_at": _time(row["decision_at"], "decision_at"),
-                "opportunity_id": str(candidate.get("opportunity_id") or ""),
-                "direction": str(candidate.get("direction") or ""),
-                "setup_kind": str(candidate.get("setup_kind") or ""),
+                "opportunity_id": str(opportunity or ""),
+                "direction": str(direction or ""),
+                "setup_kind": str(setup or ""),
                 "trigger_level": float(trigger) if isinstance(trigger, (int, float)) else None,
-                "session_mode": _strategy_card_session_mode(payload, candidate),
+                "session_mode": mode if mode in {"gth", "rth"} else ("gth" if str(setup or "").startswith("GTH_") else "rth"),
             }
         )
     return tuple(cards)
-
-
-def _strategy_card_session_mode(
-    payload: Mapping[str, object], candidate: Mapping[str, object]
-) -> str:
-    facts = payload.get("market_facts") if isinstance(payload.get("market_facts"), dict) else {}
-    session = facts.get("session") if isinstance(facts, dict) and isinstance(facts.get("session"), dict) else {}
-    mode = str(session.get("mode") or "").strip().lower()
-    if mode in {"gth", "rth"}:
-        return mode
-    setup = str(candidate.get("setup_kind") or "")
-    if setup.startswith("GTH_"):
-        return "gth"
-    return "rth"
 
 
 def read_due_strategy_observations(
