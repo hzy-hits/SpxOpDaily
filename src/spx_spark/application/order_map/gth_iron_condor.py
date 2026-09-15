@@ -122,7 +122,7 @@ def gth_iron_condor_transition(
         reasons.append("gth_transition_volatility_inputs_unavailable")
     if peak_base_low is None or peak_base_low_at is None:
         reasons.append("gth_transition_expansion_basis_unavailable")
-    if None in {impulse_15m, atr_5m}:
+    if move_atr is None:
         reasons.append("gth_transition_path_inputs_unavailable")
     if (
         high_at is not None
@@ -142,10 +142,18 @@ def gth_iron_condor_transition(
         reasons.append("gth_transition_atm_iv_5m_not_contracting")
     if iv_change_15m is None or iv_change_15m > 0.0:
         reasons.append("gth_transition_atm_iv_15m_not_contracting")
-    if move_atr is None or move_atr > GTH_MAX_ABS_15M_MOVE_ATR:
+    if move_atr is not None and move_atr > GTH_MAX_ABS_15M_MOVE_ATR:
         reasons.append("gth_transition_price_not_balanced")
 
+    smooth_inputs = (decay_15m, iv_change_5m, iv_change_15m, move_atr)
+    smooth_status = "unavailable"
+    if session_mode == "gth" and observations >= GTH_MIN_STRADDLE_OBSERVATIONS and None not in smooth_inputs:
+        smooth_status = "observed" if (
+            decay_15m >= GTH_MIN_STRADDLE_DECAY_15M and iv_change_5m <= 0
+            and iv_change_15m <= 0 and move_atr <= GTH_MAX_ABS_15M_MOVE_ATR
+        ) else "not_observed"
     return {
+        "smooth_convergence": {"status": smooth_status, "decision_effect": "observation_only"},
         "schema_version": GTH_TRANSITION_VERSION,
         "status": "qualified" if not reasons else "waiting",
         "decision_effect": "gth_iron_condor_gate",

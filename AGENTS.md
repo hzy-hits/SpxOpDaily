@@ -255,3 +255,5 @@ A change that increases process count, active languages, mutable stores or owner
 36. 2026-09-15 ES自动换月生命周期修复（S3）：IBKR collector在连接前及健康会话循环中按已有自动季度规则刷新ES/MES月份，显式IBKR_ES_EXPIRY/IBKR_MES_EXPIRY仍优先。月份变化使健康状态失效，复用原teardown/reconnect重新订阅，不重启Gateway、不绕过10197退避或新鲜度/基差门。修复启动时月份被长期进程永久冻结的问题，不新增ES通道；见docs/es-live-rollover-2026-09-15.md。
 
 37. 2026-09-15 热路径数据合同收口（Phase 5 P5-1/S6、Phase 3 P3-2故障修复、S1/S3）：会话授权从既有decisions表的五个普通小字段和覆盖索引读取，每次决策内复用、跨决策重读；禁止热查询回读研究JSON。Alembic 0004先迁移并回填，再启动新writer，切换期间停止Core而保留券商采集。SPX历史解码与联合曲面历史索引共用单个有界后台准备线程，Pin复用同一历史；必要历史未完成不得授权候选，不把后台化说成进程资源隔离。管理回放统一signed liquidation cash flow，信用结构回补为负，PnL=入场现金流+平仓现金流−合约费用，删除2C人工坐标；TP/SL、期限、Bark与人工-only不变。详见docs/hot-path-data-contracts-2026-09-15.md。
+
+38. 2026-09-15 GTH收敛诊断修复（S1/S3）：价格位移或ATR缺失/非正时仅判历史不可用，不声称价格单边。平缓收敛按既有3%跨式衰减、5/15m IV不升、1.25ATR位移与观测数单独输出observation_only，不要求先扩张，亦不授权新入场。桌图同时展示波动、位移、贷记与报价独立阻断，原扩张回落合同不变。欧盘原始IBKR对照及缺口见docs/gth-convergence-diagnostics-2026-09-15.md；GTH蝶式未因移动RTH时钟获得授权，Bark不变。

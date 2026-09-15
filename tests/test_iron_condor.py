@@ -1177,7 +1177,7 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
     assert "20Δ档/10宽 7680/7690/7810/7820" in sections.desk_view
     assert "贷记 2.40" in sections.desk_view
     assert "翼宽比 24%" in sections.desk_view
-    assert "价格仍单边 3.7 ATR（需≤1.25）" in sections.desk_view
+    assert "3.68 ATR>1.25" in sections.desk_view
     assert "研究建议" not in sections.desk_view
     assert "策略状态·铁鹰" not in sections.structure
     assert "扫描中 · 仅人工候选可做" in sections.execution
@@ -1302,3 +1302,43 @@ def test_rth_second_ic_after_1100_rechecks_economics(monkeypatch, tmp_path):
         assert decision["decision_type"] == expected, decision["why_not"]
         if expected == "NO_TRADE":
             assert "iron_condor_credit_fraction" in decision["why_not"]["reasons"]
+
+
+@pytest.mark.parametrize("field,value", [("impulse_15m_points", None), ("atr_5m", None), ("atr_5m", 0)])
+def test_missing_price_scale_is_unknown_not_observed_trend(field, value):
+    facts = _gth_transition_facts()
+    facts["path"][field] = value
+    transition = gth_iron_condor_transition(facts, now=NOW)
+    assert transition["status"] == "waiting"
+    assert "gth_transition_path_inputs_unavailable" in transition["reasons"]
+    assert "gth_transition_price_not_balanced" not in transition["reasons"]
+
+
+def test_gth_map_explains_independent_input_price_and_quote_failures():
+    from spx_spark.application.order_map.desk_strategy_view import compact_iron_condor_desk_line
+    decision = {"iron_condor_map": {
+        "status": "ready", "strikes": [7535, 7545, 7635, 7645], "wing_width": 10,
+        "quote": {"credit": 2.4, "source_skew_seconds": 12},
+        "placement_diagnostics": {"minimum_credit_fraction": .25},
+        "gth_transition": {"status": "waiting", "move_15m_atr": None,
+            "straddle_decay_15m": -.0387, "atm_iv_change_15m": .001,
+            "reasons": ["gth_transition_path_inputs_unavailable", "gth_transition_price_not_balanced",
+                        "gth_transition_straddle_not_decaying", "gth_transition_atm_iv_15m_not_contracting"]}}}
+    line = compact_iron_condor_desk_line({}, decision)
+    assert "价格历史不完整" in line
+    assert "单边" not in line
+    assert "-3.9%" in line and "IV仍上升" in line
+    assert "24.0%<25%" in line
+    assert "四腿时差12.0s>10s" in line
+
+
+
+def test_smooth_convergence_is_visible_without_authorizing_unverified_setup():
+    facts = _gth_transition_facts()
+    facts["volatility"]["atm_straddle_gth_low"] = 29.0
+    transition = gth_iron_condor_transition(facts, now=NOW)
+    assert transition["smooth_convergence"] == {"status": "observed", "decision_effect": "observation_only"}
+    assert transition["status"] == "waiting"
+    assert "gth_transition_expansion_too_small" in transition["reasons"]
+    facts["path"]["atr_5m"] = None
+    assert gth_iron_condor_transition(facts, now=NOW)["smooth_convergence"]["status"] == "unavailable"

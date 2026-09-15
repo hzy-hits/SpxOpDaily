@@ -6,6 +6,11 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
+from spx_spark.application.order_map.gth_iron_condor import (
+    GTH_MAX_ABS_15M_MOVE_ATR, GTH_MAX_EXACT_QUOTE_AGE_SECONDS,
+    GTH_MAX_EXACT_QUOTE_SKEW_SECONDS, GTH_MIN_EXPANSION_FRACTION,
+    GTH_MIN_CONTRACTION_FROM_HIGH_FRACTION, GTH_MIN_STRADDLE_DECAY_15M,
+)
 from spx_spark.application.order_map.guidance import iron_condor_placement_text, price_action_playbook_text
 from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
 from spx_spark.application.order_map.state import current_session_is_gth
@@ -358,49 +363,46 @@ def compact_iron_condor_desk_line(
             )
             return " · ".join(details)
 
+        if _mapping(transition.get("smooth_convergence")).get("status") == "observed":
+            details.append("平缓收敛已观察（不等于扩张回落入场）")
         reasons = {str(reason) for reason in transition.get("reasons") or ()}
-        if "gth_transition_price_not_balanced" in reasons:
-            move_atr = finite_float(transition.get("move_15m_atr"))
-            wait = (
-                f"仅观察：价格仍单边 {move_atr:.1f} ATR（需≤1.25）"
-                if move_atr is not None
-                else "仅观察：价格仍单边，等恢复平衡"
-            )
-        elif reasons & {
-            "gth_transition_volatility_inputs_unavailable",
-            "gth_transition_expansion_basis_unavailable",
-            "gth_transition_path_inputs_unavailable",
-            "gth_transition_observations_insufficient",
-        }:
-            wait = "仅观察：扩张–收缩输入尚不完整"
-        elif "gth_transition_expansion_too_small" in reasons:
-            expansion = finite_float(transition.get("straddle_expansion_fraction"))
-            wait = (
-                f"仅观察：跨式仅扩张 {expansion:.1%}（需≥10%）"
-                if expansion is not None
-                else "仅观察：等待跨式扩张"
-            )
-        elif "gth_transition_peak_age_outside_window" in reasons:
-            wait = "仅观察：跨式峰值确认中"
-        elif reasons & {
-            "gth_transition_contraction_too_small",
-            "gth_transition_straddle_not_decaying",
-            "gth_transition_atm_iv_5m_not_contracting",
-            "gth_transition_atm_iv_15m_not_contracting",
-        }:
-            contraction = finite_float(
-                transition.get("straddle_contraction_from_high_fraction")
-            )
-            wait = (
-                f"仅观察：从峰值仅收缩 {contraction:.1%}（需≥8%）"
-                if contraction is not None
-                else "仅观察：等待跨式与 IV 收缩"
-            )
-        elif transition.get("status") == "qualified":
-            wait = "仅观察：收缩已确认，等待四腿赔率/风控过门"
-        else:
-            wait = "仅观察：等待跨式扩张→收缩"
-        details.append(wait)
+        waits = []
+        move_atr = finite_float(transition.get("move_15m_atr"))
+        if "gth_transition_path_inputs_unavailable" in reasons or (
+            "gth_transition_price_not_balanced" in reasons and move_atr is None
+        ):
+            waits.append("价格历史不完整，无法判断平衡")
+        elif "gth_transition_price_not_balanced" in reasons:
+            waits.append(f"价格位移 {move_atr:.2f} ATR>{GTH_MAX_ABS_15M_MOVE_ATR:g}")
+        if reasons & {"gth_transition_volatility_inputs_unavailable", "gth_transition_expansion_basis_unavailable",
+                      "gth_transition_observations_insufficient", "gth_transition_extrema_order_invalid"}:
+            waits.append("波动历史证据不完整")
+        for reason, field, label, minimum in (
+            ("gth_transition_expansion_too_small", "straddle_expansion_fraction", "局部扩张", GTH_MIN_EXPANSION_FRACTION),
+            ("gth_transition_contraction_too_small", "straddle_contraction_from_high_fraction", "峰后收缩", GTH_MIN_CONTRACTION_FROM_HIGH_FRACTION),
+            ("gth_transition_straddle_not_decaying", "straddle_decay_15m", "15m衰减", GTH_MIN_STRADDLE_DECAY_15M),
+        ):
+            value = finite_float(transition.get(field))
+            if reason in reasons and value is not None:
+                waits.append(f"{label}{value:.1%}<{minimum:.0%}")
+        if reasons & {"gth_transition_atm_iv_5m_not_contracting", "gth_transition_atm_iv_15m_not_contracting"}:
+            rising = [str(m) for m in (5, 15)
+                      if (finite_float(transition.get(f"atm_iv_change_{m}m")) or 0) > 0]
+            if rising:
+                waits.append("/".join(rising) + "m IV仍上升")
+        if "gth_transition_peak_age_outside_window" in reasons:
+            waits.append("峰值时间未满足")
+        minimum_credit = finite_float(_mapping(map_structure.get("placement_diagnostics")).get("minimum_credit_fraction"))
+        if credit_fraction is not None and minimum_credit is not None and credit_fraction < minimum_credit - 1e-9:
+            waits.append(f"贷记/翼宽{credit_fraction:.1%}<{minimum_credit:.0%}")
+        for field, limit, label in (("max_quote_age_seconds", GTH_MAX_EXACT_QUOTE_AGE_SECONDS, "报价年龄"),
+                                    ("source_skew_seconds", GTH_MAX_EXACT_QUOTE_SKEW_SECONDS, "四腿时差")):
+            value = finite_float(quote.get(field))
+            if value is not None and value > limit:
+                waits.append(f"{label}{value:.1f}s>{limit:g}s")
+        details.append("仅观察：" + "；".join(waits) if waits else
+                       "仅观察：收缩已确认，等待其他候选门" if transition.get("status") == "qualified" else
+                       "仅观察：等待跨式扩张→收缩")
         placement_text = iron_condor_placement_text(map_structure)
         if placement_text:
             details.append(placement_text)
