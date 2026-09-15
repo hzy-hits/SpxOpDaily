@@ -28,6 +28,7 @@ from spx_spark.analytics.options.strategy_payoff import (
 )
 from spx_spark.iv_surface import IvSurfaceExpiry, IvSurfaceSnapshot, snapshot_from_dict
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+from spx_spark.application.market_features.physical_followthrough import HistoryPreparation
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 JOINT_SURFACE_METHOD = "joint_spot_surface_management_policy.v2"
@@ -94,12 +95,7 @@ def load_joint_surface_paths(
     now: datetime,
     horizon_minutes: int,
 ) -> tuple[tuple[JointSurfacePath, ...], str]:
-    """Load prior-session five-minute spot/surface paths without future leakage.
-
-    Historical surface files and the same-clock path library are immutable for
-    the active decision minute.  Refreshing them once per minute keeps this
-    explanation-only overlay off the five-second decision hot path.
-    """
+    """Load causal paths; live callers prepare historical indexes off-thread."""
 
     if data_root is None or horizon_minutes <= 0:
         return (), "unavailable"
@@ -123,6 +119,13 @@ def load_joint_surface_paths(
     # backfill arriving during this minute becomes visible next minute, never
     # retroactively to an earlier decision in the same minute.
     available_before = now_utc.replace(second=0, microsecond=0)
+    if facts.get("history_preparation_nonblocking"):
+        history_cutoff = available_before.replace(
+            minute=(available_before.minute // SURFACE_HISTORY_REFRESH_MINUTES)
+            * SURFACE_HISTORY_REFRESH_MINUTES,
+        )
+        key = (str(root), trading_date.isoformat(), settings.window_days, history_cutoff.isoformat())
+        _SURFACE_HISTORY.get(key, lambda: _historical_surface_minute_index(*key), nonblocking=True)
     return _load_joint_surface_paths_for_minute(
         str(root),
         trading_date.isoformat(),
@@ -188,7 +191,10 @@ def _load_joint_surface_paths_for_minute(
     return tuple(paths[-MAX_PATHS:]), "same_session_clock_5m" if paths else "unavailable"
 
 
-@lru_cache(maxsize=16)
+_SURFACE_HISTORY = HistoryPreparation()
+
+
+@lru_cache(maxsize=2)
 def _historical_surface_minute_index(
     root_text: str,
     trading_date_text: str,
@@ -304,7 +310,7 @@ def estimate_joint_debit_distribution(
     scale, scale_reason = _path_scale(paths, facts=facts, horizon_minutes=horizon_minutes)
     model0 = _model_mid(priced_legs, spot=spot, expiry=expiry, now=now)
     entry_credit = entry if policy.entry_side == "credit" else None
-    joint = _joint_combo_bid_matrix(
+    joint = _joint_liquidation_value_matrix(
         paths,
         legs=priced_legs,
         candidate=candidate,
@@ -318,7 +324,7 @@ def estimate_joint_debit_distribution(
         entry_credit=entry_credit,
         horizon_end=horizon_end,
     )
-    sticky = _sticky_combo_bid_matrix(
+    sticky = _sticky_liquidation_value_matrix(
         paths,
         legs=priced_legs,
         expiry=expiry,
@@ -399,7 +405,7 @@ def estimate_joint_iron_condor_distribution(
         return None
     scale, scale_reason = _path_scale(paths, facts=facts, horizon_minutes=horizon)
     model0 = _model_mid(priced_legs, spot=spot, expiry=expiry, now=now)
-    joint = _joint_combo_bid_matrix(
+    joint = _joint_liquidation_value_matrix(
         paths,
         legs=priced_legs,
         candidate=candidate,
@@ -413,7 +419,7 @@ def estimate_joint_iron_condor_distribution(
         entry_credit=entry,
         horizon_end=horizon_end,
     )
-    sticky = _sticky_combo_bid_matrix(
+    sticky = _sticky_liquidation_value_matrix(
         paths,
         legs=priced_legs,
         expiry=expiry,
@@ -511,7 +517,7 @@ def _surface_coordinate(
     )
 
 
-def _joint_combo_bid_matrix(
+def _joint_liquidation_value_matrix(
     paths: Sequence[JointSurfacePath],
     *,
     legs: Sequence[Mapping[str, Any]],
@@ -565,10 +571,10 @@ def _joint_combo_bid_matrix(
         model += float(leg["quantity"]) * _bs_price_np(
             spots, strike, iv, taus, str(leg["right"])
         )
-    return _to_combo_bid(model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots)
+    return _to_liquidation_values(model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots)
 
 
-def _sticky_combo_bid_matrix(
+def _sticky_liquidation_value_matrix(
     paths: Sequence[JointSurfacePath],
     *,
     legs: Sequence[Mapping[str, Any]],
@@ -602,10 +608,10 @@ def _sticky_combo_bid_matrix(
             taus,
             str(leg["right"]),
         )
-    return _to_combo_bid(model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots)
+    return _to_liquidation_values(model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots)
 
 
-def _to_combo_bid(
+def _to_liquidation_values(
     model: np.ndarray,
     *,
     model0: float,
@@ -614,15 +620,12 @@ def _to_combo_bid(
     spots: np.ndarray,
 ) -> dict[str, np.ndarray]:
     # Model values carry the signed quantities (+1/-1/-1/+1 for credit).
-    # A more negative position value means a larger buyback liability.
     if entry_credit is not None:
         buyback_cost = np.maximum(close_seed - (model - model0), 0.0)
-        # PolicyMark uses an entry-relative value; this is not a market bid
-        # and must remain negative when buyback exceeds twice the credit.
-        policy_marks = 2.0 * entry_credit - buyback_cost
+        liquidation_values = -buyback_cost
     else:
-        policy_marks = np.maximum(close_seed + (model - model0), 0.0)
-    return {"spots": spots, "bids": policy_marks}
+        liquidation_values = np.maximum(close_seed + (model - model0), 0.0)
+    return {"spots": spots, "liquidation_values": liquidation_values}
 
 
 def _simulate(
@@ -646,18 +649,18 @@ def _simulate(
         "time_stop": 0,
     }
     horizon_end = policy_mark_horizon_end(now, policy, session_date=session_date)
-    for index in range(len(combo["bids"])):
+    for index in range(len(combo["liquidation_values"])):
         projected = tuple(float(value) for value in combo["spots"][index])
         if invalidation is not None and invalidation(projected):
             counters["invalidation"] += 1
         marks = [
             PolicyMark(min(now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES), horizon_end), float(bid))
-            for offset, bid in enumerate(combo["bids"][index])
+            for offset, bid in enumerate(combo["liquidation_values"][index])
         ]
         label = simulate_management_policy(
             marks,
-            entry_ask=entry,
-            leg_count=leg_count,
+            entry_price=entry,
+            contract_count=leg_count,
             entry_at=now,
             policy=policy,
             session_date=session_date,

@@ -65,7 +65,7 @@ IRON_CONDOR_MANAGEMENT_POLICY = ManagementPolicy(
 # The user-authorized RTH contract buys the package back at half the entry
 # credit, stops when buyback liability reaches 3x entry credit (a 200% pre-fee
 # loss on collected credit), and otherwise exits at 15:45 ET. Credit marks are
-# signed position liquidation values: 2x entry credit minus buyback liability.
+# signed position liquidation values: negative buyback liability.
 RTH_IRON_CONDOR_MANAGEMENT_POLICY = ManagementPolicy(
     policy_version="management_policy.iron_condor.tp50_sl200_hold1545.v2",
     premium_stop_fraction=None,
@@ -95,15 +95,10 @@ CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY = ManagementPolicy(
 
 @dataclass(frozen=True, slots=True)
 class PolicyMark:
-    """Debit: signed executable combo bid. Credit: 2*entry_credit - buyback_cost.
-
-    The credit value is an entry-relative policy coordinate, not a quote;
-    negative values are valid. A debit combo can also cost cash to close when
-    leg spreads exceed its value. Fees count contracts, including leg quantities.
-    """
+    """Cash received on closing the position in points; a buyback is negative."""
 
     at: datetime
-    combo_bid: float
+    liquidation_value: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +111,7 @@ class PolicyLabel:
     policy_pnl_points: float | None
     exit_reason: str
     exit_at: datetime | None
-    exit_bid: float | None
+    exit_liquidation_value: float | None
     quote_gap_seconds_max: float
     policy_version: str
     fees_points: float
@@ -548,8 +543,8 @@ def _utc(value: datetime) -> datetime:
 def simulate_management_policy(
     marks: Sequence[PolicyMark | Mapping[str, Any]],
     *,
-    entry_ask: float,
-    leg_count: int,
+    entry_price: float,
+    contract_count: int,
     entry_at: datetime,
     policy: ManagementPolicy = DEFAULT_MANAGEMENT_POLICY,
     session_date: date | None = None,
@@ -560,10 +555,10 @@ def simulate_management_policy(
     Fees are charged in dollars and converted to index points at $100/point.
     """
 
-    if not math.isfinite(entry_ask) or entry_ask <= 0:
-        raise ValueError("entry_ask must be finite and positive")
-    if not math.isfinite(leg_count) or leg_count <= 0 or int(leg_count) != leg_count:
-        raise ValueError("leg_count must be a positive integer contract count")
+    if not math.isfinite(entry_price) or entry_price <= 0:
+        raise ValueError("entry_price must be finite and positive")
+    if not math.isfinite(contract_count) or contract_count <= 0 or int(contract_count) != contract_count:
+        raise ValueError("contract_count must be a positive integer contract count")
     start = _utc(entry_at)
     rows = [_coerce_mark(item) for item in marks]
     rows = sorted(
@@ -574,12 +569,13 @@ def simulate_management_policy(
         ),
         key=lambda row: row.at,
     )
-    fees_dollars = policy.fees_per_leg_per_side * float(leg_count) * 2.0
+    entry_cashflow = entry_price if policy.entry_side == "credit" else -entry_price
+    fees_dollars = policy.fees_per_leg_per_side * float(contract_count) * 2.0
     fees_points = fees_dollars / 100.0
-    arm_level = (entry_ask * (1.0 + policy.profit_arm_return_on_debit)
+    arm_level = (entry_price * (1.0 + policy.profit_arm_return_on_debit)
                  if policy.profit_arm_return_on_debit is not None else None)
     stop_level = (
-        entry_ask * policy.premium_stop_fraction
+        entry_price * policy.premium_stop_fraction
         if policy.premium_stop_fraction is not None and policy.premium_stop_fraction > 0
         else None
     )
@@ -590,7 +586,7 @@ def simulate_management_policy(
         else None
     )
 
-    peak = entry_ask
+    peak = entry_price
     armed = False
     time_to_arm: float | None = None
     mfe = 0.0
@@ -598,7 +594,7 @@ def simulate_management_policy(
     gap_max = 0.0
     previous_at = start
     exit_at: datetime | None = None
-    exit_bid: float | None = None
+    exit_value: float | None = None
     exit_reason = "marks_exhausted"
 
     if hard_exit <= start:
@@ -610,46 +606,46 @@ def simulate_management_policy(
             exit_reason = "quote_gap"
             break
         previous_at = mark.at
-        pnl = mark.combo_bid - entry_ask
+        pnl = entry_cashflow + mark.liquidation_value
         mfe = max(mfe, pnl)
         mae = min(mae, pnl)
         if mark.at >= hard_exit:
-            exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "hard_close"
+            exit_at, exit_value, exit_reason = mark.at, mark.liquidation_value, "hard_close"
             break
         if policy.entry_side == "credit":
-            buyback_cost = 2.0 * entry_ask - mark.combo_bid
+            buyback_cost = -mark.liquidation_value
             take_profit = policy.credit_take_profit_fraction
             stop_loss = policy.credit_stop_loss_multiple
-            if take_profit is not None and take_profit > 0 and buyback_cost <= entry_ask * (1 - take_profit) + POLICY_PRICE_EPSILON:
+            if take_profit is not None and take_profit > 0 and buyback_cost <= entry_price * (1 - take_profit) + POLICY_PRICE_EPSILON:
                 armed = True
                 time_to_arm = (mark.at - start).total_seconds()
-                exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "profit_take"
+                exit_at, exit_value, exit_reason = mark.at, mark.liquidation_value, "profit_take"
                 break
-            if stop_loss is not None and stop_loss > 0 and buyback_cost >= entry_ask * (1 + stop_loss) - POLICY_PRICE_EPSILON:
-                exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "stop_loss"
+            if stop_loss is not None and stop_loss > 0 and buyback_cost >= entry_price * (1 + stop_loss) - POLICY_PRICE_EPSILON:
+                exit_at, exit_value, exit_reason = mark.at, mark.liquidation_value, "stop_loss"
                 break
             continue
         if time_stop_at is not None and mark.at >= time_stop_at:
-            exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "time_stop"
+            exit_at, exit_value, exit_reason = mark.at, mark.liquidation_value, "time_stop"
             break
-        if stop_level is not None and mark.combo_bid <= stop_level + POLICY_PRICE_EPSILON:
-            exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "premium_stop"
+        if stop_level is not None and mark.liquidation_value <= stop_level + POLICY_PRICE_EPSILON:
+            exit_at, exit_value, exit_reason = mark.at, mark.liquidation_value, "premium_stop"
             break
-        if not armed and arm_level is not None and mark.combo_bid >= arm_level - POLICY_PRICE_EPSILON:
+        if not armed and arm_level is not None and mark.liquidation_value >= arm_level - POLICY_PRICE_EPSILON:
             armed = True
             time_to_arm = (mark.at - start).total_seconds()
-            peak = mark.combo_bid
+            peak = mark.liquidation_value
             continue
         if armed:
-            peak = max(peak, mark.combo_bid)
+            peak = max(peak, mark.liquidation_value)
             trail = peak * policy.trail_after_arm_fraction
             if policy.trail_floor_is_entry_debit:
-                trail = max(trail, entry_ask)
-            if mark.combo_bid < trail - POLICY_PRICE_EPSILON:
-                exit_at, exit_bid, exit_reason = mark.at, mark.combo_bid, "trail"
+                trail = max(trail, entry_price)
+            if mark.liquidation_value < trail - POLICY_PRICE_EPSILON:
+                exit_at, exit_value, exit_reason = mark.at, mark.liquidation_value, "trail"
                 break
 
-    policy_pnl = (exit_bid - entry_ask - fees_points) if exit_bid is not None else None
+    policy_pnl = (entry_cashflow + exit_value - fees_points) if exit_value is not None else None
     return PolicyLabel(
         tp_armed=armed,
         tp_before_stop=armed and exit_reason in {"profit_take", "trail", "hard_close", "time_stop"},
@@ -659,7 +655,7 @@ def simulate_management_policy(
         policy_pnl_points=round(policy_pnl, 6) if policy_pnl is not None else None,
         exit_reason=exit_reason,
         exit_at=exit_at,
-        exit_bid=round(exit_bid, 6) if exit_bid is not None else None,
+        exit_liquidation_value=round(exit_value, 6) if exit_value is not None else None,
         quote_gap_seconds_max=round(gap_max, 3),
         policy_version=policy.policy_version,
         fees_points=round(fees_points, 6),
@@ -710,16 +706,16 @@ def _coerce_mark(value: PolicyMark | Mapping[str, Any]) -> PolicyMark:
     if isinstance(value, PolicyMark):
         if value.at.tzinfo is None:
             raise ValueError("policy mark time must be timezone-aware")
-        if not math.isfinite(value.combo_bid):
+        if not math.isfinite(value.liquidation_value):
             raise ValueError("policy mark must be finite")
-        return PolicyMark(at=_utc(value.at), combo_bid=float(value.combo_bid))
+        return PolicyMark(at=_utc(value.at), liquidation_value=float(value.liquidation_value))
     at = value.get("at")
-    bid = value.get("combo_bid")
+    bid = value.get("liquidation_value")
     if not isinstance(at, datetime) or at.tzinfo is None:
         raise ValueError("policy mark requires timezone-aware at")
     if not isinstance(bid, (int, float)) or not math.isfinite(bid):
-        raise ValueError("policy mark requires finite numeric combo_bid")
-    return PolicyMark(at=_utc(at), combo_bid=float(bid))
+        raise ValueError("policy mark requires finite numeric liquidation_value")
+    return PolicyMark(at=_utc(at), liquidation_value=float(bid))
 
 
 def _hard_exit_at(

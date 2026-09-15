@@ -7,12 +7,14 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.density import summarize_strike_surface_shape
 from spx_spark.analytics.options.strategy_payoff import management_policy_for_candidate
+from spx_spark.application.market_features.physical_followthrough import HistoryPreparing
 from spx_spark.application.market_features.physical_close_convergence import (
     estimate_physical_close_convergence,
 )
@@ -61,13 +63,29 @@ from spx_spark.settings.strategy_distribution import StrategyDistributionSetting
 from spx_spark.storage import LatestState
 
 
+_SESSION_CARDS = ContextVar("session_cards", default=None)
+
 def build_strategy_decision(
     payload: Mapping[str, Any], latest: LatestState, now: datetime, *,
     data_root: str | Path | None = None,
     probability_settings: StrategyDistributionSettings | None = None,
     background_models: bool = False,
 ) -> dict[str, Any]:
+    token = _SESSION_CARDS.set({})
+    try:
+        return _build_strategy_decision(payload, latest, now, data_root=data_root,
+            probability_settings=probability_settings, background_models=background_models)
+    finally:
+        _SESSION_CARDS.reset(token)
+
+def _build_strategy_decision(
+    payload: Mapping[str, Any], latest: LatestState, now: datetime, *,
+    data_root: str | Path | None = None,
+    probability_settings: StrategyDistributionSettings | None = None,
+    background_models: bool = False,
+) -> dict[str, Any]:
     facts = build_market_fact_pack(payload, latest, now)
+    facts["history_preparation_nonblocking"] = background_models
     facts["strategy_distribution_settings"] = asdict(probability_settings) if probability_settings else None
     facts["iron_condor_authority"] = _iron_condor_session_authority(facts)
     facts[HUMAN_SESSION_STATE_KEY] = iron_condor_session_state(
@@ -198,6 +216,8 @@ def build_strategy_decision(
                     winner,
                     policy=DEFAULT_STRATEGY_POLICY,
                 )
+                if winner.get("history_preparation_pending"):
+                    path_rejected = {**winner, "rejection_reasons": [winner["history_preparation_pending"]]}
                 if path_rejected:
                     rank = RankResult(
                         passed=rank.passed[1:],
@@ -743,13 +763,16 @@ def _attach_winner_path_distributions(
     if str(first.get("strategy_type") or "") == IRON_CONDOR_TYPE:
         winner = first
     else:
-        winner = attach_path_distribution(
-            first,
-            facts,
-            data_root=data_root,
-            probability_settings=probability_settings,
-            now=now,
-        )
+        try:
+            winner = attach_path_distribution(
+                first,
+                facts,
+                data_root=data_root,
+                probability_settings=probability_settings,
+                now=now,
+            )
+        except HistoryPreparing as exc:
+            winner = {**first, "history_preparation_pending": str(exc)}
     # IC map paths are advisory, not authorization inputs. Keep lake scans
     # off the live path; required directional/butterfly winner veto stays above.
     shadows = [dict(row) for row in passed[1:3]]
@@ -878,6 +901,15 @@ def _injected_direction_lock(raw: object) -> GthDirectionLock | None:
 
 
 def _accepted_session_cards(session_date: str):
+    cache = _SESSION_CARDS.get()
+    if cache is None:
+        return _load_accepted_session_cards(session_date)
+    if session_date not in cache:
+        cache[session_date] = _load_accepted_session_cards(session_date)
+    return cache[session_date]
+
+
+def _load_accepted_session_cards(session_date: str):
     # Unit tests pin this flag and must not read the host operational sqlite.
     isolated = os.getenv("SPX_SPARK_DISABLE_RUNTIME_OVERRIDES", "").strip().lower()
     if isolated in {"1", "true", "yes"}:

@@ -597,7 +597,7 @@ def _package_path(row, events, end: datetime, age: float, skew: float):
     if quote is not None and _depth(row["legs"], row["quantities"], liquidate=True):
         marks.append(
             PolicyMark(
-                start, quote[1] + (2 * row["entry_price"] if row["family"] == "condor" else 0)
+                start, quote[1]
             )
         )
     merged = heapq.merge(*(events.get(i, []) for i in ids), key=lambda leg: leg["received_at"])
@@ -613,7 +613,7 @@ def _package_path(row, events, end: datetime, age: float, skew: float):
             if quote is not None and _depth(
                 [book.get(i) for i in ids], row["quantities"], liquidate=True
             ):
-                value = quote[1] + (2 * row["entry_price"] if row["family"] == "condor" else 0)
+                value = quote[1]
                 marks.append(PolicyMark(previous, value))
         previous = at
         prior = book.get(leg["instrument_id"])
@@ -629,7 +629,7 @@ def _package_path(row, events, end: datetime, age: float, skew: float):
         if quote is not None and _depth(
             [book.get(i) for i in ids], row["quantities"], liquidate=True
         ):
-            value = quote[1] + (2 * row["entry_price"] if row["family"] == "condor" else 0)
+            value = quote[1]
             marks.append(PolicyMark(previous, value))
     return marks
 
@@ -666,8 +666,8 @@ def _label(row, events, exit_chain, *, day, mode, age, skew):
         )
     label = simulate_management_policy(
         marks,
-        entry_ask=entry,
-        leg_count=sum(abs(q) for q in row["quantities"]),
+        entry_price=entry,
+        contract_count=sum(abs(q) for q in row["quantities"]),
         entry_at=row["entry_at"],
         policy=policy,
         session_date=day,
@@ -691,9 +691,9 @@ def _label(row, events, exit_chain, *, day, mode, age, skew):
     }
     if family == "butterfly":
         result.update(mfe_points=None, mae_points=None)
-    if label.exit_bid is not None:
+    if label.exit_liquidation_value is not None:
         result["cash_exit_points"] = (
-            2 * entry - label.exit_bid if family == "condor" else label.exit_bid
+            -label.exit_liquidation_value if family == "condor" else label.exit_liquidation_value
         )
         expected = (
             entry - result["cash_exit_points"]
@@ -784,8 +784,8 @@ def _attribute(con, files, rows, events, path, day, mode, age, skew, exit_chain)
                 )
         label = simulate_management_policy(
             marks,
-            entry_ask=entry,
-            leg_count=sum(abs(q) for q in row["quantities"]),
+            entry_price=entry,
+            contract_count=sum(abs(q) for q in row["quantities"]),
             entry_at=row["entry_at"],
             policy=alternative,
             session_date=day,
@@ -1816,8 +1816,8 @@ def validate_directional_signal(data_root, output, start, end, providers, *, ent
                         if quote is not None and _depth(legs, row['quantities'], liquidate=True):
                             timed_marks = sorted([m for m in marks if m.at!=deadline]
                                                  +[PolicyMark(deadline, quote[1])], key=lambda m:m.at)
-                        label = simulate_management_policy(timed_marks, entry_ask=row['entry_price'],
-                                    leg_count=2, entry_at=row['entry_at'], policy=policy,
+                        label = simulate_management_policy(timed_marks, entry_price=row['entry_price'],
+                                    contract_count=2, entry_at=row['entry_at'], policy=policy,
                                     session_date=day, max_quote_gap_seconds=60)
                         row.update(asdict(label))
                         row['status'] = ('COMPLETE_EXIT' if label.policy_pnl_points is not None else
@@ -1962,12 +1962,12 @@ def _managed_research_exit(row, marks, exit_chain, deadline, policy, *, pure_hol
     quote = _cash_quote(legs, row['quantities'], deadline, 15, 2)
     timed = [m for m in marks if m.at <= deadline]
     if quote is not None and _depth(legs, row['quantities'], liquidate=True):
-        value = quote[1]+(2*row['entry_price'] if row['family']=='condor' else 0)
+        value = quote[1]
         timed = [m for m in timed if m.at != deadline]+[PolicyMark(deadline, value)]
     if pure_hold:
         timed = [m for m in timed if m.at == deadline]
-    label = simulate_management_policy(timed, entry_ask=row['entry_price'],
-                entry_at=row['entry_at'], leg_count=sum(abs(q) for q in row['quantities']),
+    label = simulate_management_policy(timed, entry_price=row['entry_price'],
+                entry_at=row['entry_at'], contract_count=sum(abs(q) for q in row['quantities']),
                 policy=policy, session_date=deadline.astimezone(ET).date(),
                 max_quote_gap_seconds=None if pure_hold else 60)
     pnl = label.policy_pnl_points
@@ -2256,8 +2256,8 @@ def _action_exit_label(row, marks, intent, deadline, *, quote_management=False, 
     if quote_management:
         policy = RTH_IRON_CONDOR_MANAGEMENT_POLICY if row['family']=='condor' else DEFAULT_MANAGEMENT_POLICY
         policy = replace(policy, hard_exit_et=deadline.astimezone(ET).strftime('%H:%M'))
-        baseline = simulate_management_policy(marks, entry_ask=row['entry_price'], entry_at=row['entry_at'],
-            leg_count=sum(abs(q) for q in row['quantities']), policy=policy,
+        baseline = simulate_management_policy(marks, entry_price=row['entry_price'], entry_at=row['entry_at'],
+            contract_count=sum(abs(q) for q in row['quantities']), policy=policy,
             session_date=deadline.astimezone(ET).date(), max_quote_gap_seconds=60)
         if baseline.exit_at is not None and baseline.exit_at < stop['at']:
             stop = {'at':baseline.exit_at, 'reason':baseline.exit_reason, 'censored':False}
@@ -2282,9 +2282,9 @@ def _action_exit_label(row, marks, intent, deadline, *, quote_management=False, 
         return {**result, 'exit_action_at':action, 'status':'EXIT_BBO_UNAVAILABLE'}
     fees = sum(abs(q) for q in row['quantities'])*2*1.32/100
     return {**result, 'exit_action_at':action, 'status':'COMPLETE_EXIT', 'exit_at':fill.at,
-            'exit_bid':fill.combo_bid, 'fees_points':fees,
-            'cash_exit_points':2*row['entry_price']-fill.combo_bid if row['family']=='condor' else fill.combo_bid,
-            'pnl_usd':100*(fill.combo_bid-row['entry_price']-fees)}
+            'exit_liquidation_value':fill.liquidation_value, 'fees_points':fees,
+            'cash_exit_points':-fill.liquidation_value if row['family']=='condor' else fill.liquidation_value,
+            'pnl_usd':100*(fill.liquidation_value+(row['entry_price'] if row['family']=='condor' else -row['entry_price'])-fees)}
 
 
 def _raw_spx_bars(con, files, day):
@@ -2787,7 +2787,7 @@ def explore_price_exits(data_root, output, start, end, providers, *, signal_filt
                         legs=[exit_books[action].get((leg['strike'],leg['right'])) for leg in row['legs']]
                         quote=_cash_quote(legs,row['quantities'],action,15,2)
                         if quote is not None and _depth(legs,row['quantities'],liquidate=True):
-                            value=quote[1]+(2*row['entry_price'] if row['family']=='condor' else 0)
+                            value=quote[1]
                             timed=sorted([m for m in marks if m.at!=action]+[PolicyMark(action,value)],key=lambda m:m.at)
                     row.update(_action_exit_label(row,timed,intent,deadline,quote_management=quote_management,latency_seconds=exit_latency_seconds))
                 results.append(row)
@@ -3260,7 +3260,7 @@ def research_regime_transitions(data_root,output,raw_replay_root):
                 cash=_cash_quote(legs,row['quantities'],action,15,2)
                 marks=_package_path(row,events,action+timedelta(seconds=60),15,2)
                 if cash is not None and _depth(legs,row['quantities'],liquidate=True):
-                    value=cash[1]+(2*row['entry_price'] if row['family']=='condor' else 0)
+                    value=cash[1]
                     marks=sorted([m for m in marks if m.at!=action]+[PolicyMark(action,value)],key=lambda m:m.at)
                 intent=dict(at=out['transition_at'],reason='regime_transition',censored=False)
                 alternative=_action_exit_label(row,marks,intent,_at(d,15,59) if row['family']=='butterfly' else _at(d,15,45))
@@ -3316,7 +3316,7 @@ def _analog_cash_scenario(row,current_path,old_path,old_at,at,chain,forward,ivs,
         model=sum(q*bs_price(forward+quote_spot-spot,leg['strike'],iv,remaining,leg['right']) for q,leg,iv in zip(quantities,legs,projected,strict=True))
         mid=mid0+model-model0
         mid=max(-row['width'],min(0.,mid)) if credit else max(0.,min(row['width'],mid))
-        return PolicyMark(clock,mid-half_spread+(2*premium if credit else 0))
+        return PolicyMark(clock,mid-half_spread)
     marks=[mark(synthetic['entry_at'])]+[mark(t) for t in path if at<t<=end]
     intent=_mechanism_exit_intent(synthetic,path,end)
     if credit:
@@ -3708,7 +3708,7 @@ def analyze_strategy_adaptations(data_root, output, replay_root):
                                 cash = _cash_quote(exits, q, action, 15, 2)
                                 if cash is not None and _depth(exits, q, liquidate=True):
                                     marks = [x for x in marks if x.at != action] + [
-                                        PolicyMark(action, 2 * credit + cash[1])
+                                        PolicyMark(action, cash[1])
                                     ]
                             label = _action_exit_label(combined, marks, intent, deadline)
                             stage = dict(

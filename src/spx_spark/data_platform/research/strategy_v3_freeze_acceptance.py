@@ -668,7 +668,7 @@ def _label_candidate(
 ) -> dict[str, Any] | None:
     from spx_spark.data_platform.research.strategy_policy_backfill import (
         _candidate_legs,
-        _combo_bid_marks,
+        _liquidation_marks,
         _entry_price,
     )
 
@@ -681,7 +681,7 @@ def _label_candidate(
     provider = str(legs[0].get("provider") or "schwab")
     session = date.fromisoformat(session_date)
     policy = management_policy_for_candidate(candidate)
-    marks = _combo_bid_marks(
+    marks = _liquidation_marks(
         store,
         legs=legs,
         provider=provider,
@@ -699,8 +699,8 @@ def _label_candidate(
         return None
     label = simulate_management_policy(
         marks,
-        entry_ask=entry_ask,
-        leg_count=sum(abs(int(leg["quantity"])) for leg in legs),
+        entry_price=entry_ask,
+        contract_count=sum(abs(int(leg["quantity"])) for leg in legs),
         entry_at=decision_at,
         policy=policy,
         session_date=session,
@@ -736,7 +736,7 @@ def _label_candidate(
         "policy_pnl_points": label.policy_pnl_points,
         "exit_reason": label.exit_reason,
         "exit_at": label.exit_at.isoformat() if label.exit_at else None,
-        "exit_bid": label.exit_bid,
+        "exit_liquidation_value": label.exit_liquidation_value,
         "quote_gap_seconds_max": label.quote_gap_seconds_max,
         "fees_points": label.fees_points,
         "known_bias": "pass_b_rebuilds_candidates_from_facts_plus_quote_lake_seed",

@@ -175,7 +175,7 @@ def test_recent_trade_or_receipt_does_not_certify_option_bbo_age(tmp_path):
 
 
 def test_frozen_arrival_invalidates_carried_bbo_until_that_leg_recovers(tmp_path):
-    from spx_spark.data_platform.research.strategy_policy_backfill import _combo_bid_marks
+    from spx_spark.data_platform.research.strategy_policy_backfill import _liquidation_marks
 
     rows = []
     for seconds, strike in ((0, 7550), (0, 7565), (1, 7550), (1, 7565), (2, 7565), (3, 7550), (3, 7565)):
@@ -191,7 +191,7 @@ def test_frozen_arrival_invalidates_carried_bbo_until_that_leg_recovers(tmp_path
     _write_quote_partition(tmp_path, provider="schwab", rows=rows)
     store = QuoteStore(tmp_path)
     try:
-        marks = _combo_bid_marks(store, legs=[
+        marks = _liquidation_marks(store, legs=[
             {"expiry": str(EXPIRY), "strike": 7550, "right": "C", "quantity": 1},
             {"expiry": str(EXPIRY), "strike": 7565, "right": "C", "quantity": -1},
         ], provider="schwab", start=DECISION_AT, end=DECISION_AT+timedelta(seconds=4))

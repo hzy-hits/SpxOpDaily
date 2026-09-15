@@ -5365,13 +5365,13 @@ def _opportunity(opportunity_id: str, pnl: tuple[float, float, float, float]) ->
 def test_management_policy_arms_then_trails() -> None:
     start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
     marks = [
-        PolicyMark(at=start + timedelta(minutes=1), combo_bid=1.2),
-        PolicyMark(at=start + timedelta(minutes=2), combo_bid=1.6),  # arm at 1.5
-        PolicyMark(at=start + timedelta(minutes=3), combo_bid=1.8),
-        PolicyMark(at=start + timedelta(minutes=4), combo_bid=1.2),  # trail below peak*0.75=1.35 but floor=entry
+        PolicyMark(at=start + timedelta(minutes=1), liquidation_value=1.2),
+        PolicyMark(at=start + timedelta(minutes=2), liquidation_value=1.6),  # arm at 1.5
+        PolicyMark(at=start + timedelta(minutes=3), liquidation_value=1.8),
+        PolicyMark(at=start + timedelta(minutes=4), liquidation_value=1.2),  # trail below peak*0.75=1.35 but floor=entry
     ]
     label = simulate_management_policy(
-        marks, entry_ask=1.0, leg_count=3, entry_at=start
+        marks, entry_price=1.0, contract_count=3, entry_at=start
     )
     assert label.tp_armed is True
     assert label.time_to_arm_seconds == pytest.approx(120.0)
@@ -5383,11 +5383,11 @@ def test_management_policy_arms_then_trails() -> None:
 def test_management_policy_premium_stop_before_arm() -> None:
     start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
     marks = [
-        PolicyMark(at=start + timedelta(minutes=1), combo_bid=0.8),
-        PolicyMark(at=start + timedelta(minutes=2), combo_bid=0.4),
+        PolicyMark(at=start + timedelta(minutes=1), liquidation_value=0.8),
+        PolicyMark(at=start + timedelta(minutes=2), liquidation_value=0.4),
     ]
     label = simulate_management_policy(
-        marks, entry_ask=1.0, leg_count=2, entry_at=start
+        marks, entry_price=1.0, contract_count=2, entry_at=start
     )
     assert label.tp_armed is False
     assert label.exit_reason == "premium_stop"
@@ -5397,16 +5397,16 @@ def test_management_policy_premium_stop_before_arm() -> None:
 def test_rth_iron_condor_policy_takes_half_credit_and_stops_at_true_200pct_loss() -> None:
     start = datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc)
     take_profit = simulate_management_policy(
-        [PolicyMark(at=start + timedelta(minutes=5), combo_bid=3.0)],
-        entry_ask=2.0,
-        leg_count=4,
+        [PolicyMark(at=start + timedelta(minutes=5), liquidation_value=-1.0)],
+        entry_price=2.0,
+        contract_count=4,
         entry_at=start,
         policy=RTH_IRON_CONDOR_MANAGEMENT_POLICY,
     )
     stop = simulate_management_policy(
-        [PolicyMark(at=start + timedelta(minutes=5), combo_bid=-2.0)],
-        entry_ask=2.0,
-        leg_count=4,
+        [PolicyMark(at=start + timedelta(minutes=5), liquidation_value=-6.0)],
+        entry_price=2.0,
+        contract_count=4,
         entry_at=start,
         policy=RTH_IRON_CONDOR_MANAGEMENT_POLICY,
     )
@@ -5423,20 +5423,20 @@ def test_rth_iron_condor_policy_takes_half_credit_and_stops_at_true_200pct_loss(
 def test_pin_butterfly_policy_holds_past_default_time_and_premium_stop() -> None:
     start = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)  # 15:00 ET
     marks = [
-        PolicyMark(at=start + timedelta(minutes=5), combo_bid=0.40),
-        PolicyMark(at=start + timedelta(minutes=25), combo_bid=0.80),
-        PolicyMark(at=start + timedelta(minutes=35), combo_bid=1.60),
-        PolicyMark(at=start + timedelta(minutes=40), combo_bid=1.80),
-        PolicyMark(at=start + timedelta(minutes=44), combo_bid=1.20),
-        PolicyMark(at=start + timedelta(minutes=45), combo_bid=1.10),
+        PolicyMark(at=start + timedelta(minutes=5), liquidation_value=0.40),
+        PolicyMark(at=start + timedelta(minutes=25), liquidation_value=0.80),
+        PolicyMark(at=start + timedelta(minutes=35), liquidation_value=1.60),
+        PolicyMark(at=start + timedelta(minutes=40), liquidation_value=1.80),
+        PolicyMark(at=start + timedelta(minutes=44), liquidation_value=1.20),
+        PolicyMark(at=start + timedelta(minutes=45), liquidation_value=1.10),
     ]
     default = simulate_management_policy(
-        marks, entry_ask=1.0, leg_count=3, entry_at=start
+        marks, entry_price=1.0, contract_count=3, entry_at=start
     )
     pin = simulate_management_policy(
         marks,
-        entry_ask=1.0,
-        leg_count=3,
+        entry_price=1.0,
+        contract_count=3,
         entry_at=start,
         policy=PIN_BUTTERFLY_MANAGEMENT_POLICY,
     )
@@ -5453,15 +5453,15 @@ def test_pin_butterfly_policy_holds_past_default_time_and_premium_stop() -> None
 def test_close_convergence_policy_holds_without_intrahour_stop_until_target() -> None:
     start = datetime(2026, 8, 6, 19, 0, tzinfo=timezone.utc)
     marks = [
-        PolicyMark(at=start + timedelta(minutes=5), combo_bid=0.20),
-        PolicyMark(at=start + timedelta(minutes=45), combo_bid=1.80),
-        PolicyMark(at=start + timedelta(minutes=60), combo_bid=1.20),
+        PolicyMark(at=start + timedelta(minutes=5), liquidation_value=0.20),
+        PolicyMark(at=start + timedelta(minutes=45), liquidation_value=1.80),
+        PolicyMark(at=start + timedelta(minutes=60), liquidation_value=1.20),
     ]
 
     label = simulate_management_policy(
         marks,
-        entry_ask=1.0,
-        leg_count=4,
+        entry_price=1.0,
+        contract_count=4,
         entry_at=start,
         policy=CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
     )
@@ -5495,13 +5495,13 @@ def test_management_policy_for_candidate_keeps_verticals_on_v2() -> None:
 def test_default_debit_policy_does_not_time_stop_at_twenty_minutes() -> None:
     start = datetime(2026, 8, 6, 14, 0, tzinfo=timezone.utc)
     marks = [
-        PolicyMark(at=start + timedelta(minutes=10), combo_bid=1.05),
-        PolicyMark(at=start + timedelta(minutes=20), combo_bid=1.08),
-        PolicyMark(at=start + timedelta(minutes=40), combo_bid=1.10),
-        PolicyMark(at=start + timedelta(minutes=345), combo_bid=1.12),
+        PolicyMark(at=start + timedelta(minutes=10), liquidation_value=1.05),
+        PolicyMark(at=start + timedelta(minutes=20), liquidation_value=1.08),
+        PolicyMark(at=start + timedelta(minutes=40), liquidation_value=1.10),
+        PolicyMark(at=start + timedelta(minutes=345), liquidation_value=1.12),
     ]
     label = simulate_management_policy(
-        marks, entry_ask=1.0, leg_count=2, entry_at=start
+        marks, entry_price=1.0, contract_count=2, entry_at=start
     )
     assert label.exit_reason == "hard_close"
     assert label.exit_at == start + timedelta(minutes=345)
@@ -5516,12 +5516,12 @@ def test_management_policy_pnl_bounded_by_path(entry: float, peak_mult: float) -
     start = datetime(2026, 8, 7, 18, 0, tzinfo=timezone.utc)
     peak = entry * peak_mult
     marks = [
-        PolicyMark(at=start + timedelta(minutes=1), combo_bid=entry * 1.1),
-        PolicyMark(at=start + timedelta(minutes=2), combo_bid=peak),
-        PolicyMark(at=start + timedelta(minutes=3), combo_bid=entry * 0.9),
+        PolicyMark(at=start + timedelta(minutes=1), liquidation_value=entry * 1.1),
+        PolicyMark(at=start + timedelta(minutes=2), liquidation_value=peak),
+        PolicyMark(at=start + timedelta(minutes=3), liquidation_value=entry * 0.9),
     ]
     label = simulate_management_policy(
-        marks, entry_ask=entry, leg_count=2, entry_at=start
+        marks, entry_price=entry, contract_count=2, entry_at=start
     )
     fees = label.fees_points
     assert label.mae_points <= 0.0 <= label.mfe_points
@@ -5545,8 +5545,8 @@ def test_policy_report_excludes_censored_labels_and_does_not_infer_promotion() -
 def test_observation_end_is_not_a_completed_exit(policy) -> None:
     start = datetime(2026, 8, 6, 14, 30, tzinfo=timezone.utc)
     label = simulate_management_policy(
-        [PolicyMark(start + timedelta(minutes=1), 1.0)],
-        entry_ask=1.0, leg_count=4, entry_at=start, policy=policy,
+        [PolicyMark(start + timedelta(minutes=1), -1.0 if policy.entry_side == "credit" else 1.0)],
+        entry_price=1.0, contract_count=4, entry_at=start, policy=policy,
     )
     assert label.exit_reason == "marks_exhausted"
     assert label.exit_at is None
@@ -5557,7 +5557,7 @@ def test_gap_before_stop_cannot_prove_a_completed_trade() -> None:
     start = datetime(2026, 8, 6, 14, 30, tzinfo=timezone.utc)
     label = simulate_management_policy(
         [PolicyMark(start, 1.0), PolicyMark(start + timedelta(minutes=5), 0.3)],
-        entry_ask=1.0, leg_count=2, entry_at=start, max_quote_gap_seconds=60,
+        entry_price=1.0, contract_count=2, entry_at=start, max_quote_gap_seconds=60,
     )
     assert label.exit_reason == "quote_gap"
     assert label.policy_pnl_points is None
@@ -5569,7 +5569,7 @@ def test_exact_premium_stop_survives_leg_sum_roundoff(entry, liquidation):
     start = datetime(2026, 8, 10, 17, tzinfo=timezone.utc)
     first = start + timedelta(seconds=5)
     label = simulate_management_policy([PolicyMark(first, liquidation)],
-                                      entry_ask=entry, leg_count=4, entry_at=start)
+                                      entry_price=entry, contract_count=4, entry_at=start)
     assert label.exit_reason == "premium_stop"
     assert label.exit_at == first
     assert label.policy_pnl_points == pytest.approx(-entry / 2 - 0.1056)
@@ -5580,7 +5580,7 @@ def test_nonfinite_marks_cannot_be_completed_pnl(value):
     start = datetime(2026, 8, 10, 19, 44, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="finite"):
         simulate_management_policy([PolicyMark(start + timedelta(minutes=1), value)],
-                                   entry_ask=1.0, leg_count=4, entry_at=start)
+                                   entry_price=1.0, contract_count=4, entry_at=start)
 
 
 def test_close_convergence_cannot_arm_a_trail_even_for_a_cheap_butterfly():
@@ -5589,7 +5589,7 @@ def test_close_convergence_cannot_arm_a_trail_even_for_a_cheap_butterfly():
         PolicyMark(start + timedelta(minutes=10), 1.2),
         PolicyMark(start + timedelta(minutes=11), 0.7),
         PolicyMark(start + timedelta(minutes=60), 1.0),
-    ], entry_ask=0.1, entry_at=start, leg_count=4, policy=CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY)
+    ], entry_price=0.1, entry_at=start, contract_count=4, policy=CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY)
     assert label.exit_reason == "hard_close"
     assert label.exit_at == start + timedelta(minutes=60)
     assert label.tp_armed is False
@@ -5625,7 +5625,7 @@ def test_rolling_butterfly_exit_is_frozen_target_not_entry_plus_hour(hour):
     policy = management_policy_for_candidate(candidate)
     label = simulate_management_policy(
         [PolicyMark(at+timedelta(minutes=55), 0.5), PolicyMark(target, 1.1)],
-        entry_ask=1.0, entry_at=at+timedelta(seconds=30), leg_count=4, policy=policy,
+        entry_price=1.0, entry_at=at+timedelta(seconds=30), contract_count=4, policy=policy,
     )
     assert label.exit_reason == "hard_close"
     assert label.exit_at == target
@@ -5648,3 +5648,29 @@ def test_acceptance_filter_checks_each_identity_once_but_refreshes_next_call():
     accepted.add("a:ready")
     assert outbox_accepted_strategy_cards(rows, event_exists=exists) == (rows[-1],)
     assert calls == ["a:ready", "a:ready"]
+
+
+def test_pending_history_cannot_authorize_candidate(monkeypatch):
+    from spx_spark.application.order_map import strategy_select
+    from spx_spark.application.market_features.physical_followthrough import HistoryPreparing
+    now = datetime(2026, 8, 7, 15, tzinfo=timezone.utc)
+    def pending(*args, **kwargs):
+        raise HistoryPreparing("history_preparation_pending")
+    monkeypatch.setattr(strategy_select, "attach_path_distribution", pending)
+    decision = build_strategy_decision(_decision_payload(now), _state(now), now)
+    assert decision["decision_type"] == "NO_TRADE"
+    assert any("history_preparation_pending" in row.get("rejection_reasons", [])
+               for row in decision["rejection_funnel"]["candidate_evaluations"])
+
+
+def test_session_metadata_snapshot_is_reused_only_within_decision(monkeypatch):
+    from spx_spark.application.order_map import strategy_select
+    loads = []
+    def load(day):
+        loads.append(day)
+        return []
+    monkeypatch.setattr(strategy_select, "_load_accepted_session_cards", load)
+    now = datetime(2026, 8, 7, 15, tzinfo=timezone.utc)
+    for expected in (1, 2):
+        build_strategy_decision(_decision_payload(now), _state(now), now)
+        assert len(loads) == expected

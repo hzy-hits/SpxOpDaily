@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -22,6 +24,45 @@ FEATURE_SET_VERSION = "direction_thesis_level_time_bucket.v2"
 CALIBRATION_VERSION = "uncalibrated_weighted_beta_interval.v2"
 NEW_YORK = ZoneInfo("America/New_York")
 PIN_CLOCK_WINDOW_MINUTES = 30
+
+_HISTORY_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-prepare")
+
+
+class HistoryPreparing(RuntimeError):
+    """The exact causal history snapshot has not finished preparation."""
+
+
+class HistoryPreparation:
+    """One in-flight build and one ready snapshot; never queue every decision."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._future = None
+        self._key = None
+        self._ready_key = None
+        self._ready = None
+
+    def get(self, key, build, *, nonblocking=False):
+        if not nonblocking:
+            return build()
+        with self._lock:
+            if self._future is not None and self._future.done():
+                future, completed_key = self._future, self._key
+                self._future = None
+                try:
+                    self._ready = future.result()
+                except Exception as exc:
+                    raise HistoryPreparing("history_preparation_failed") from exc
+                self._ready_key = completed_key
+            if self._ready_key == key:
+                return self._ready
+            if self._future is None:
+                self._key = key
+                self._future = _HISTORY_EXECUTOR.submit(build)
+            raise HistoryPreparing("history_preparation_pending")
+
+
+_SPOT_HISTORY = HistoryPreparation()
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +253,7 @@ def estimate_physical_terminal_range(
     current_spot: float,
     lower_level: float,
     upper_level: float,
+    nonblocking: bool = False,
 ) -> PhysicalFollowThroughEstimate:
     """Estimate a causal same-clock terminal-range probability for a pin candidate.
 
@@ -235,23 +277,16 @@ def estimate_physical_terminal_range(
     local_now = now.astimezone(NEW_YORK)
     query_minute = local_now.hour * 60 + local_now.minute
     horizon_minutes = horizon_seconds // 60
-    earliest = trading_date - timedelta(days=window_days)
     session_rates: list[float] = []
     raw_samples = raw_successes = 0
     sessions: list[str] = []
-    root = Path(features_root) / "spx_standardized_samples"
-    for path in sorted(root.glob("date=*/events.jsonl")):
-        partition = _partition_date(path)
-        if partition is None or partition < earliest or partition >= trading_date:
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        prices = dict(_load_standardized_session(
-            str(path), stat.st_mtime_ns, stat.st_size,
-            now.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat(),
-        ))
+    unavailable_reason = "physical_terminal_range_samples_unavailable"
+    try:
+        prepared = _prepared_sessions(features_root, now=now, trading_date=trading_date,
+                                      window_days=window_days, nonblocking=nonblocking)
+    except HistoryPreparing as exc:
+        prepared, unavailable_reason = [], str(exc)
+    for partition, prices in prepared:
         outcomes = []
         for minute, start in prices.items():
             if abs(minute - query_minute) > PIN_CLOCK_WINDOW_MINUTES:
@@ -281,7 +316,7 @@ def estimate_physical_terminal_range(
             horizon_seconds=horizon_seconds,
             trained_through_date=None,
             cohort="same_clock_terminal_range",
-            reason_codes=("physical_terminal_range_samples_unavailable",),
+            reason_codes=(unavailable_reason,),
         )
 
     weighted_successes = sum(session_rates)
@@ -329,6 +364,7 @@ def load_physical_spot_paths(
     clock_window_minutes: int = PIN_CLOCK_WINDOW_MINUTES,
     minimum_same_clock: int = 30,
     max_paths: int = 4000,
+    nonblocking: bool = False,
 ) -> tuple[tuple[PhysicalSpotPath, ...], str]:
     """Return causal 1-minute SPX windows from completed prior sessions.
 
@@ -345,24 +381,11 @@ def load_physical_spot_paths(
         raise ValueError("physical spot-path settings must be positive")
 
     query_minute = _new_york_minute(now)
-    earliest = trading_date - timedelta(days=window_days)
     same_clock: list[PhysicalSpotPath] = []
     all_paths: list[PhysicalSpotPath] = []
-    root = Path(features_root) / "spx_standardized_samples"
-    for path in sorted(root.glob("date=*/events.jsonl")):
-        partition = _partition_date(path)
-        if partition is None or partition < earliest or partition >= trading_date:
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        prices = dict(_load_standardized_session(
-            str(path), stat.st_mtime_ns, stat.st_size,
-            now.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat(),
-        ))
-        if not prices:
-            continue
+    sessions = _prepared_sessions(features_root, now=now, trading_date=trading_date,
+                                  window_days=window_days, nonblocking=nonblocking)
+    for partition, prices in sessions:
         for start in prices:
             window = tuple(prices.get(start + offset) for offset in range(horizon_minutes + 1))
             if any(value is None for value in window):
@@ -395,6 +418,7 @@ def load_iron_condor_clearing_paths(
     window_days: int,
     open_minute: int = RTH_OPEN_MINUTE,
     clear_minute: int = IRON_CONDOR_CLEAR_MINUTE,
+    nonblocking: bool = False,
 ) -> tuple[tuple[ClearingSpotPath, ...], str]:
     """Return one overnight-gap + RTH-to-12:30 path per completed session.
 
@@ -414,23 +438,8 @@ def load_iron_condor_clearing_paths(
     query_minute = _new_york_minute(now)
     if query_minute >= clear_minute and open_minute <= query_minute <= 16 * 60:
         return (), "past_clearing_window"
-    earliest = trading_date - timedelta(days=window_days)
-    sessions: list[tuple[date, dict[int, float]]] = []
-    root = Path(features_root) / "spx_standardized_samples"
-    for path in sorted(root.glob("date=*/events.jsonl")):
-        partition = _partition_date(path)
-        if partition is None or partition < earliest or partition >= trading_date:
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        loaded = dict(_load_standardized_session(
-            str(path), stat.st_mtime_ns, stat.st_size,
-            now.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat(),
-        ))
-        if loaded:
-            sessions.append((partition, loaded))
+    sessions = _prepared_sessions(features_root, now=now, trading_date=trading_date,
+                                  window_days=window_days, nonblocking=nonblocking)
     if not sessions:
         return (), "unavailable"
 
@@ -481,40 +490,56 @@ def _new_york_minute(value: datetime) -> int:
     return local.hour * 60 + local.minute
 
 
+def _prepared_sessions(features_root, *, now, trading_date, window_days, nonblocking):
+    root = Path(features_root) / "spx_standardized_samples"
+    earliest = trading_date - timedelta(days=window_days)
+    files = []
+    for path in sorted(root.glob("date=*/events.jsonl")):
+        partition = _partition_date(path)
+        if partition is None or not earliest <= partition < trading_date:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        files.append((partition, str(path), stat.st_mtime_ns, stat.st_size))
+    key = tuple(files)
+    prepared = _SPOT_HISTORY.get(
+        key, lambda: tuple((day, _standardized_rows(path, mtime, size))
+                           for day, path, mtime, size in key), nonblocking=nonblocking,
+    )
+    cutoff = now.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    return [(day, prices) for day, rows in prepared
+            if (prices := {minute: price for minute, price, available in rows if available <= cutoff})]
+
+
 @lru_cache(maxsize=64)
-def _load_standardized_session(
-    path_text: str, _mtime_ns: int, _size: int, available_before_text: str
-) -> tuple[tuple[int, float], ...]:
-    """Return only rows whose source and arrival times precede the decision."""
-
-    available_before = datetime.fromisoformat(available_before_text)
-
-    prices: dict[int, float] = {}
+def _standardized_rows(path_text, _mtime_ns, _size):
+    """Decode each file version once; availability filtering stays per decision."""
+    prices = []
     try:
-        lines = Path(path_text).read_text(encoding="utf-8").splitlines()
+        stream = Path(path_text).open(encoding="utf-8")
     except OSError:
         return ()
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, Mapping) or row.get("status") != "selected":
-            continue
-        selected = row.get("selected")
-        if not isinstance(selected, Mapping):
-            continue
-        price = _finite(selected.get("price"))
-        minute = _timestamp(row.get("minute"))
-        if price is None or minute is None:
-            continue
-        arrival = _timestamp(row.get("available_at") or row.get("created_at") or row.get("observed_at"))
-        # Legacy rows without an arrival timestamp cannot establish as-of availability.
-        if arrival is None or max(minute, arrival) > available_before:
-            continue
-        local = minute.astimezone(NEW_YORK)
-        prices[local.hour * 60 + local.minute] = price
-    return tuple(sorted(prices.items()))
+    with stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, Mapping) or row.get("status") != "selected":
+                continue
+            selected = row.get("selected")
+            if not isinstance(selected, Mapping):
+                continue
+            price = _finite(selected.get("price"))
+            minute = _timestamp(row.get("minute"))
+            arrival = _timestamp(row.get("available_at") or row.get("created_at") or row.get("observed_at"))
+            if price is None or minute is None or arrival is None:
+                continue
+            local = minute.astimezone(NEW_YORK)
+            prices.append((local.hour * 60 + local.minute, price, max(minute, arrival)))
+    return tuple(prices)
 
 
 def _features(direction: str, thesis: str, level_kind: str, observed_at: datetime) -> list[float]:

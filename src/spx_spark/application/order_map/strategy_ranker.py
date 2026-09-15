@@ -1775,6 +1775,7 @@ def _candidate_probability_evidence(
         current_spot=float(spot),
         lower_level=float(lower),
         upper_level=float(upper),
+        nonblocking=bool(facts.get("history_preparation_nonblocking")),
     )
     if estimate.probability is None or estimate.interval_low is None:
         return {}, {}, ["pin_physical_probability_unavailable"]

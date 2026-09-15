@@ -247,7 +247,7 @@ def test_existing_notification_rows_survive_forward_upgrade(tmp_path: Path) -> N
         ).fetchall() == [("event", "delivered")]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone()[0] == "0003_strategy_due_index"
+        ).fetchone()[0] == "0004_session_card_cover"
         assert "ix_decisions_strategy_decision_at" in {
             row[1] for row in connection.execute("PRAGMA index_list(decisions)")
         }
@@ -559,3 +559,41 @@ def test_session_card_projection_preserves_lock_inputs(tmp_path, mode, setup, ex
         session_date="2026-08-07", database_path=database,
         exclude_decision_id="strategy:call-vertical",
     ) == ()
+
+
+def test_session_query_reads_only_covering_index(tmp_path):
+    database = _migrate(tmp_path)
+    payload = _candidate()
+    payload["padding"] = "x" * 1_000_000
+    persist_strategy_decision(payload, database_path=database)
+    with sqlite3.connect(database) as connection:
+        root = connection.execute("SELECT rootpage FROM sqlite_master WHERE name='decisions'").fetchone()[0]
+        program = connection.execute("""EXPLAIN SELECT decision_id,decision_at,
+            card_opportunity,card_direction,card_setup,card_trigger,card_mode
+            FROM decisions INDEXED BY ix_decisions_session_card
+            WHERE strategy_name='strategy_signal_engine_v2'
+            AND status='selected' AND session_date='2026-08-07'""").fetchall()
+        table_cursors = {row[2] for row in program if row[1] == "OpenRead" and row[3] == root}
+        assert not any(row[1] == "Column" and row[2] in table_cursors for row in program)
+        assert not any(row[1] in {"Function", "PureFunc"} and "json_extract" in str(row[5]) for row in program)
+    assert len(recent_selected_strategy_cards(session_date="2026-08-07", database_path=database)) == 1
+
+
+def test_session_projection_migration_preserves_existing_records(tmp_path):
+    _alembic(tmp_path, "0003_strategy_due_index")
+    database = tmp_path / "spx.sqlite"
+    payload = {"candidate": {"opportunity_id": "old-opportunity", "direction": "UP",
+                             "setup_kind": "GTH_LEVEL", "trigger_level": 7500.5},
+               "market_facts": {"session": {"mode": "gth"}}}
+    with sqlite3.connect(database) as connection:
+        connection.execute("""INSERT INTO decisions
+            (decision_id,session_date,strategy_name,strategy_version,decision_at,
+             available_at,status,action,side,attributes_json,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            ("legacy", "2026-08-07", "strategy_signal_engine_v2", "v1", NOW.isoformat(),
+             NOW.isoformat(), "selected", "wait", "up", json.dumps(payload), NOW.isoformat()))
+    _alembic(tmp_path, "head")
+    cards = recent_selected_strategy_cards(session_date="2026-08-07", database_path=database)
+    assert cards == ({"decision_id": "legacy", "decision_at": NOW,
+                      "opportunity_id": "old-opportunity", "direction": "UP",
+                      "setup_kind": "GTH_LEVEL", "trigger_level": 7500.5, "session_mode": "gth"},)

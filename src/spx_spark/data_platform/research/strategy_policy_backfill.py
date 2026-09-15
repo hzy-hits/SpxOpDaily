@@ -117,13 +117,12 @@ def _label_decision(
     )
     if end <= entry_at:
         return {**base, "label_status": "SESSION_ERROR", "exit_reason": "session_error"}
-    marks = _combo_bid_marks(
+    marks = _liquidation_marks(
         store,
         legs=legs,
         provider=provider,
         start=entry_at,
         end=end + timedelta(seconds=REPLAY_MAX_QUOTE_GAP_SECONDS),
-        entry_credit=entry_ask if policy.entry_side == "credit" else None,
         max_quote_age_seconds=float(_map(candidate.get("management_plan")).get(
             "management_quote_max_age_seconds") or 15),
         max_source_skew_seconds=float(_map(candidate.get("management_plan")).get(
@@ -133,8 +132,8 @@ def _label_decision(
         return {**base, "label_status": "QUOTE_GAP", "mark_count": 0}
     label = simulate_management_policy(
         marks,
-        entry_ask=entry_ask,
-        leg_count=sum(abs(int(leg["quantity"])) for leg in legs),
+        entry_price=entry_ask,
+        contract_count=sum(abs(int(leg["quantity"])) for leg in legs),
         entry_at=entry_at,
         policy=policy,
         session_date=session,
@@ -174,29 +173,27 @@ def _label_decision(
         "policy_pnl_points": label.policy_pnl_points,
         "exit_reason": label.exit_reason,
         "exit_at": label.exit_at.isoformat() if label.exit_at else None,
-        "exit_bid": label.exit_bid,
+        "exit_liquidation_value": label.exit_liquidation_value,
         "quote_gap_seconds_max": label.quote_gap_seconds_max,
         "fees_points": label.fees_points,
         "known_bias": "pass_a_uses_persisted_candidate_or_nearest_shadow",
     }
 
 
-def _combo_bid_marks(
+def _liquidation_marks(
     store: QuoteStore,
     *,
     legs: Sequence[Mapping[str, Any]],
     provider: str,
     start: datetime,
     end: datetime,
-    entry_credit: float | None = None,
     max_quote_age_seconds: float = 15,
     max_source_skew_seconds: float = 2,
 ) -> list[PolicyMark]:
     quotes = _combo_quotes(store, legs=legs, provider=provider, start=start, end=end,
                            max_quote_age_seconds=max_quote_age_seconds,
                            max_source_skew_seconds=max_source_skew_seconds)
-    return [PolicyMark(at=at, combo_bid=(2 * entry_credit - max(-liquidation, 0.0)
-                                        if entry_credit is not None else liquidation))
+    return [PolicyMark(at=at, liquidation_value=liquidation)
             for at, _purchase, liquidation in quotes]
 
 

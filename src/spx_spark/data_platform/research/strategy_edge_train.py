@@ -44,7 +44,7 @@ from spx_spark.application.order_map.strategy_edge_model import (
 from spx_spark.data_platform.research.odte_level_quotes import QuoteStore
 from spx_spark.data_platform.research.strategy_policy_backfill import (
     _candidate_legs,
-    _combo_bid_marks,
+    _liquidation_marks,
     _entry_price,
 )
 
@@ -152,7 +152,7 @@ def _label_decision(
         ENTRY_EDGE_POLICY,
         session_date=session_date,
     )
-    marks = _combo_bid_marks(
+    marks = _liquidation_marks(
         store,
         legs=legs,
         provider=provider,
@@ -163,8 +163,8 @@ def _label_decision(
         return None
     label = simulate_management_policy(
         marks,
-        entry_ask=entry_ask,
-        leg_count=sum(abs(int(leg["quantity"])) for leg in legs),
+        entry_price=entry_ask,
+        contract_count=sum(abs(int(leg["quantity"])) for leg in legs),
         entry_at=decision_at,
         policy=ENTRY_EDGE_POLICY,
         session_date=session_date,

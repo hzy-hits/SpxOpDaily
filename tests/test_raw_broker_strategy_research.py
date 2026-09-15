@@ -545,8 +545,8 @@ def test_two_price_closes_exit_cannot_be_reversed_by_later_recovery(research):
 @pytest.mark.parametrize(
     "family,quantities,entry,policy_mark,expected",
     [
-        ("condor", [1, -1, -1, 1], 2.5, -2.5, -510.56),
-        ("condor", [1, -1, -1, 1], 2.5, 3.75, 114.44),
+        ("condor", [1, -1, -1, 1], 2.5, -7.5, -510.56),
+        ("condor", [1, -1, -1, 1], 2.5, -1.25, 114.44),
         ("butterfly", [1, -2, 1], 2.5, 3.75, 114.44),
     ],
 )
@@ -900,7 +900,7 @@ def test_one_sided_credit_uses_only_failed_side_and_two_contract_fees(research,r
     assert row['quantities']==[1,-1]
     row.update(entry_at=at,entry_price=row['signal_package_price'])
     intent=dict(at=at+timedelta(minutes=1),reason='price_hypothesis_failed',censored=False)
-    result=research._action_exit_label(row,[research.PolicyMark(intent['at']+timedelta(seconds=15),row['entry_price'])],
+    result=research._action_exit_label(row,[research.PolicyMark(intent['at']+timedelta(seconds=15),-row['entry_price'])],
                                        intent,research._at(DAY,15,45))
     assert result['pnl_usd']==pytest.approx(-5.28)
 

@@ -329,7 +329,7 @@ def test_build_policy_ev_table_uses_low_sample_reason_and_legacy_censor_mapping(
 
 def test_combo_marks_do_not_hide_a_missing_leg_behind_other_leg_updates() -> None:
     from types import SimpleNamespace
-    from spx_spark.data_platform.research.strategy_policy_backfill import _combo_bid_marks
+    from spx_spark.data_platform.research.strategy_policy_backfill import _liquidation_marks
 
     start = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     def series(**kwargs):
@@ -337,7 +337,7 @@ def test_combo_marks_do_not_hide_a_missing_leg_behind_other_leg_updates() -> Non
         return [SimpleNamespace(at=start + timedelta(seconds=i), source_at=start + timedelta(seconds=i), bid=2.0, ask=2.1) for i in offsets]
     legs = [{"expiry": "20260807", "strike": strike, "right": "C", "quantity": qty}
             for strike, qty in ((7700, 1), (7715, -1))]
-    marks = _combo_bid_marks(SimpleNamespace(option_series=series), legs=legs, provider="schwab", start=start, end=start + timedelta(minutes=2))
+    marks = _liquidation_marks(SimpleNamespace(option_series=series), legs=legs, provider="schwab", start=start, end=start + timedelta(minutes=2))
     assert marks
     assert marks[-1].at == start
 
@@ -367,14 +367,14 @@ def test_credit_backfill_counts_contracts_and_triggers_real_three_credit_stop():
 def test_received_updates_do_not_rejuvenate_old_source_quotes():
     from types import SimpleNamespace
     from spx_spark.data_platform.research.odte_level_signals import OptionTick
-    from spx_spark.data_platform.research.strategy_policy_backfill import _combo_bid_marks
+    from spx_spark.data_platform.research.strategy_policy_backfill import _liquidation_marks
     legs = [{"expiry": "20260807", "strike": strike, "right": "C", "quantity": qty}
             for strike, qty in ((7700, 1), (7715, -1))]
     def series(**kwargs):
         return [OptionTick(NOW + timedelta(seconds=i), 2, 2.1, 2.05,
                            NOW if kwargs["strike"] == 7715 else NOW + timedelta(seconds=i))
                 for i in range(0, 601, 5)]
-    marks = _combo_bid_marks(SimpleNamespace(option_series=series), legs=legs, provider="schwab",
+    marks = _liquidation_marks(SimpleNamespace(option_series=series), legs=legs, provider="schwab",
                             start=NOW, end=NOW + timedelta(minutes=10))
     assert len(marks) == 1  # the other source is already five seconds away on update two
 
@@ -393,16 +393,16 @@ def test_incomplete_labels_keep_the_research_denominator():
 
 def test_preentry_fresh_quote_can_seed_a_mark_but_late_arrival_cannot():
     from spx_spark.data_platform.research.odte_level_signals import OptionTick
-    from spx_spark.data_platform.research.strategy_policy_backfill import _candidate_legs, _combo_bid_marks
+    from spx_spark.data_platform.research.strategy_policy_backfill import _candidate_legs, _liquidation_marks
     legs = _candidate_legs(_decision()["candidate"])
     def series(**query):
         received = NOW - timedelta(seconds=1) if query["strike"] == 7730 else NOW + timedelta(seconds=5)
         return [OptionTick(received, 8 if query["strike"] == 7730 else 3, 8.2 if query["strike"] == 7730 else 3.2,
                            None, NOW - timedelta(seconds=2))]
-    marks = _combo_bid_marks(SimpleNamespace(option_series=series), legs=legs, provider="schwab",
+    marks = _liquidation_marks(SimpleNamespace(option_series=series), legs=legs, provider="schwab",
                             start=NOW, end=NOW + timedelta(seconds=10))
     assert [mark.at for mark in marks] == [NOW + timedelta(seconds=5)]
-    assert marks[0].combo_bid == pytest.approx(4.8)
+    assert marks[0].liquidation_value == pytest.approx(4.8)
 
 
 def test_negative_executable_liquidation_is_a_cash_cost_not_a_zero_exit():
@@ -412,7 +412,7 @@ def test_negative_executable_liquidation_is_a_cash_cost_not_a_zero_exit():
         bid, ask = (3, 3.1) if query["strike"] == 7730 else (3.1, 3.2)
         return [OptionTick(NOW, bid, ask, None, NOW)]
     label = _label_decision(_decision(), store=SimpleNamespace(option_series=series), lookforward_minutes=20)
-    assert label["exit_bid"] == -0.2
+    assert label["exit_liquidation_value"] == -0.2
     assert label["policy_pnl_points"] == pytest.approx(-5.3 - 0.2 - 0.0528)
 
 

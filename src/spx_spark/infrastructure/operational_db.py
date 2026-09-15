@@ -65,6 +65,8 @@ decisions = sa.Table(
     sa.Column("reason", sa.Text()),
     sa.Column("gamma_regime", sa.Text()),
     sa.Column("attributes_json", sa.Text(), nullable=False),
+    *(sa.Column(name, sa.Text()) for name in ("card_opportunity", "card_direction", "card_setup", "card_mode")),
+    sa.Column("card_trigger", sa.Float()),
     sa.Column("created_at", sa.Text(), nullable=False),
 )
 decision_legs = sa.Table(
@@ -144,12 +146,7 @@ def persist_strategy_decision(
     database_path: str | Path | None = None,
     previous_decision: Mapping[str, object] | None = None,
 ) -> str | None:
-    """Atomically persist one material strategy decision and its frozen legs.
-
-    Repeated NO_TRADE observations with the same operator meaning are sampled
-    once per minute.  Selected candidates and any intra-minute regime/blocker
-    change remain immutable, full-fidelity rows.
-    """
+    """Persist immutable decisions/legs; unchanged NO_TRADE is sampled per minute."""
 
     if previous_decision is not None and _repeated_no_trade_same_minute(
         decision,
@@ -343,13 +340,12 @@ def recent_selected_strategy_cards(
     path = Path(database_path) if database_path is not None else get_settings().data_root / "spx.sqlite"
     with _engine(str(path)).begin() as connection:
         rows = connection.execute(
-            # Without this existing index SQLite scans every historical strategy
-            # payload (13 GB in production) before filtering the requested session.
+            # Stored scalar fields and a covering index keep research JSON
+            # out of session authorization reads, including a cold page cache.
             sa.text(
-                "SELECT decision_id, decision_at, json_extract(attributes_json, "
-                "'$.candidate.opportunity_id', '$.candidate.direction', '$.candidate.setup_kind', "
-                "'$.candidate.trigger_level', '$.market_facts.session.mode') AS card_fields "
-                "FROM decisions INDEXED BY ix_decisions_session "
+                "SELECT decision_id, decision_at, card_opportunity, card_direction, "
+                "card_setup, card_trigger, card_mode "
+                "FROM decisions INDEXED BY ix_decisions_session_card "
                 "WHERE strategy_name = 'strategy_signal_engine_v2' "
                 "AND session_date = :session_date AND status = 'selected'"
             ),
@@ -359,7 +355,9 @@ def recent_selected_strategy_cards(
     for row in rows:
         if exclude_decision_id and str(row["decision_id"]) == exclude_decision_id:
             continue
-        opportunity, direction, setup, trigger, mode = json.loads(row["card_fields"])
+        opportunity, direction, setup, trigger, mode = (
+            row[key] for key in ("card_opportunity", "card_direction", "card_setup", "card_trigger", "card_mode")
+        )
         mode = str(mode or "").strip().lower()
         cards.append(
             {
@@ -395,11 +393,7 @@ def read_due_strategy_observations(
         raise ValueError("strategy observation window must be positive")
     observed_at = now.astimezone(timezone.utc)
     max_horizon = max(horizons)
-    # Bound the scan so multi-day service_gap backlog cannot starve fresh marks.
-    # Lower bound = max horizon + lag + a short retention window: long enough for
-    # overdue pairs to be labeled once as service_gap, short enough that a cold
-    # start after weekend downtime cannot dump thousands of ancient rows into
-    # the live path. Fresh (uncensored) rows are preferred when applying limit.
+    # Keep a bounded overdue window so backlog cannot starve fresh observations.
     service_gap_retention_seconds = 30 * 60.0
     earliest_decision = observed_at - timedelta(
         minutes=max_horizon,
@@ -742,6 +736,11 @@ def _decision_rows(
         "side": str(candidate.get("direction") or "none").lower(),
         "reason": reason or str(_mapping(value.get("desk_view")).get("reason") or "") or None,
         "gamma_regime": str(regime.get("terminal_state") or regime.get("path_state") or "") or None,
+        "card_opportunity": str(candidate.get("opportunity_id") or "") or None,
+        "card_direction": str(candidate.get("direction") or "") or None,
+        "card_setup": str(candidate.get("setup_kind") or "") or None,
+        "card_mode": str(_mapping(_mapping(value.get("market_facts")).get("session")).get("mode") or "") or None,
+        "card_trigger": float(candidate["trigger_level"]) if isinstance(candidate.get("trigger_level"), (int, float)) else None,
         "attributes_json": _json(value),
         "created_at": now_text,
     }

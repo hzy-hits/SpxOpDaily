@@ -376,3 +376,45 @@ def test_rolling_prediction_does_not_use_current_future_suffix():
     future_es[90:] = 1.0
     changed, _ = model._close_online_pool_distribution(history, replace(current, spx=future_spx, es=future_es))
     np.testing.assert_array_equal(original, changed)
+
+
+def test_background_history_is_bounded_and_never_substitutes_old_snapshot(monkeypatch):
+    from concurrent.futures import Future
+    from spx_spark.application.market_features import physical_followthrough as module
+    import pytest
+    jobs = []
+    class Executor:
+        def submit(self, build):
+            future = Future()
+            jobs.append((future, build))
+            return future
+    monkeypatch.setattr(module, "_HISTORY_EXECUTOR", Executor())
+    preparation = module.HistoryPreparation()
+    for _ in range(10):
+        with pytest.raises(module.HistoryPreparing, match="pending"):
+            preparation.get("a", lambda: "a-data", nonblocking=True)
+    assert len(jobs) == 1
+    jobs[0][0].set_result(jobs[0][1]())
+    assert preparation.get("a", lambda: None, nonblocking=True) == "a-data"
+    with pytest.raises(module.HistoryPreparing, match="pending"):
+        preparation.get("b", lambda: "b-data", nonblocking=True)
+    assert len(jobs) == 2
+    jobs[1][0].set_exception(ValueError("broken history"))
+    with pytest.raises(module.HistoryPreparing, match="failed"):
+        preparation.get("b", lambda: "b-data", nonblocking=True)
+    assert preparation.get("a", lambda: None, nonblocking=True) == "a-data"
+
+
+def test_live_pin_probability_waits_for_prepared_history(monkeypatch, tmp_path):
+    from spx_spark.application.market_features import physical_followthrough as module
+    def pending(*args, **kwargs):
+        assert kwargs["nonblocking"] is True
+        raise module.HistoryPreparing("history_preparation_pending")
+    monkeypatch.setattr(module, "_prepared_sessions", pending)
+    estimate = module.estimate_physical_terminal_range(
+        tmp_path, now=NOW, trading_date=NOW.date(), horizon_seconds=3600,
+        window_days=30, minimum_samples=20, prior_alpha=1, prior_beta=1,
+        current_spot=7500, lower_level=7490, upper_level=7510, nonblocking=True,
+    )
+    assert estimate.probability is None
+    assert estimate.reason_codes == ("history_preparation_pending",)

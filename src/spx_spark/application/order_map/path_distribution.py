@@ -44,7 +44,7 @@ from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.surface_path_distribution import (
     JOINT_SURFACE_CLEARING_METHOD,
     JOINT_SURFACE_METHOD,
-    _to_combo_bid,
+    _to_liquidation_values,
     _risk_objective,
     _pnl_histogram,
     estimate_joint_debit_distribution,
@@ -162,6 +162,7 @@ def load_decision_spot_paths(
             horizon_minutes=horizon,
             minimum_same_clock=settings.minimum_physical_samples,
             max_paths=MAX_PATHS,
+            nonblocking=bool(facts.get("history_preparation_nonblocking")),
         )
     except ValueError:
         return (), "unavailable"
@@ -262,7 +263,7 @@ def estimate_path_distribution(
         horizon_minutes=horizon,
     )
     model0 = _model_mid(priced_legs, spot=spot, tau_years=tau0)
-    combo_bids = _combo_bid_matrix(
+    combo_bids = _liquidation_value_matrix(
         paths,
         legs=priced_legs,
         expiry=expiry,
@@ -288,13 +289,13 @@ def estimate_path_distribution(
         if invalidation is not None and invalidation(projected):
             hit_invalidation += 1
         marks = [
-            PolicyMark(at=min(now_utc + timedelta(minutes=offset), horizon_end), combo_bid=float(bid))
-            for offset, bid in enumerate(combo_bids["bids"][index])
+            PolicyMark(at=min(now_utc + timedelta(minutes=offset), horizon_end), liquidation_value=float(bid))
+            for offset, bid in enumerate(combo_bids["liquidation_values"][index])
         ]
         label = simulate_management_policy(
             marks,
-            entry_ask=entry,
-            leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
+            entry_price=entry,
+            contract_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
             entry_at=now_utc,
             policy=management_policy,
             session_date=session_date,
@@ -440,6 +441,7 @@ def estimate_iron_condor_clearing_distribution(
             now=now_utc,
             trading_date=session_date,
             window_days=settings.window_days,
+            nonblocking=bool(facts.get("history_preparation_nonblocking")),
         )
     except ValueError:
         return _unavailable("physical_spot_paths_unavailable")
@@ -448,7 +450,7 @@ def estimate_iron_condor_clearing_distribution(
     if not paths:
         return _unavailable("physical_spot_paths_unavailable")
 
-    clocks, combo_bids = _clearing_combo_bids(
+    clocks, combo_bids = _clearing_liquidation_values(
         paths,
         legs=priced_legs,
         expiry=expiry,
@@ -471,13 +473,13 @@ def estimate_iron_condor_clearing_distribution(
         if invalidation is not None and invalidation(projected):
             hit_invalidation += 1
         marks = [
-            PolicyMark(at=clock, combo_bid=float(bid))
-            for clock, bid in zip(clocks, combo_bids["bids"][index], strict=True)
+            PolicyMark(at=clock, liquidation_value=float(bid))
+            for clock, bid in zip(clocks, combo_bids["liquidation_values"][index], strict=True)
         ]
         label = simulate_management_policy(
             marks,
-            entry_ask=entry,
-            leg_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
+            entry_price=entry,
+            contract_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
             entry_at=now_utc,
             policy=IRON_CONDOR_MANAGEMENT_POLICY,
             session_date=session_date,
@@ -552,7 +554,7 @@ def estimate_iron_condor_clearing_distribution(
     }
 
 
-def _clearing_combo_bids(
+def _clearing_liquidation_values(
     paths: Sequence[ClearingSpotPath],
     *,
     legs: Sequence[Mapping[str, Any]],
@@ -601,7 +603,7 @@ def _clearing_combo_bids(
             taus,
             str(leg["right"]),
         )
-    return clocks, _to_combo_bid(
+    return clocks, _to_liquidation_values(
         model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots
     )
 
@@ -733,7 +735,7 @@ def _model_mid(legs: Sequence[Mapping[str, Any]], *, spot: float, tau_years: flo
     )
 
 
-def _combo_bid_matrix(
+def _liquidation_value_matrix(
     paths: Sequence[PhysicalSpotPath],
     *,
     legs: Sequence[Mapping[str, Any]],
@@ -766,7 +768,7 @@ def _combo_bid_matrix(
             taus,
             str(leg["right"]),
         )
-    return _to_combo_bid(
+    return _to_liquidation_values(
         model, model0=model0, close_seed=close_seed, entry_credit=entry_credit, spots=spots
     )
 

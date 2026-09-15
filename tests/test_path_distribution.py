@@ -519,20 +519,20 @@ def test_rth_iron_condor_joint_surface_replay_keeps_credit_policy(tmp_path: Path
 def test_credit_projection_preserves_economic_pnl_and_reaches_stop() -> None:
     import numpy as np
     import pytest
-    from spx_spark.application.order_map.surface_path_distribution import _to_combo_bid
+    from spx_spark.application.order_map.surface_path_distribution import _to_liquidation_values
     from spx_spark.analytics.options.strategy_payoff import (
         PolicyMark, RTH_IRON_CONDOR_MANAGEMENT_POLICY, simulate_management_policy,
     )
 
     for buyback, gross_pnl, reason in ((1.25, 1.25, "profit_take"), (7.5, -5.0, "stop_loss")):
-        combo = _to_combo_bid(
+        combo = _to_liquidation_values(
             np.array([[-2.5, -buyback]]), model0=-2.5, close_seed=2.5,
             entry_credit=2.5, spots=np.array([[7750.0, 7750.0]]),
         )
         label = simulate_management_policy(
             [PolicyMark(RTH_NOW + timedelta(minutes=i), float(mark))
-             for i, mark in enumerate(combo["bids"][0])],
-            entry_ask=2.5, leg_count=4, entry_at=RTH_NOW,
+             for i, mark in enumerate(combo["liquidation_values"][0])],
+            entry_price=2.5, contract_count=4, entry_at=RTH_NOW,
             policy=RTH_IRON_CONDOR_MANAGEMENT_POLICY,
         )
         assert label.exit_reason == reason
