@@ -1010,6 +1010,29 @@ def test_report_reuses_committed_decision_when_current_market_context_changes(mo
     assert payload["strategy_decision_reference"]["decision_at"] == committed["decision_at"]
 
 
+@pytest.mark.parametrize("initial_age,work_seconds", [(0, 2), (299, 2), (-1, 2)])
+def test_report_freezes_decision_before_work_and_rechecks_expiry(monkeypatch, tmp_path, initial_age, work_seconds):
+    import spx_spark.application.order_map.service as service
+
+    now = datetime(2026, 7, 7, 6, tzinfo=timezone.utc)
+    frozen = {"decision_id": "core:frozen", "decision_at": (now - timedelta(seconds=initial_age)).isoformat(),
+              "available_at": now.isoformat(), "decision_type": "NO_TRADE"}
+    path = tmp_path / "latest" / "strategy_decision.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(frozen))
+    state = make_candidate_retry_state(state_now=now, candidate_quote_at=now, vix=25)
+
+    def publish_during_report(*args, **kwargs):
+        service.time_module.sleep(work_seconds)
+        newer = {**frozen, "decision_id": "core:new", "decision_at": (now + timedelta(seconds=work_seconds)).isoformat()}
+        path.write_text(json.dumps(newer))
+
+    monkeypatch.setattr(service, "attach_convexity_idea_radar", publish_during_report)
+    payload, _, _ = run_candidate_retry(monkeypatch, tmp_path, [state], now=now, attempts=1)
+    assert payload["strategy_decision_reference"]["decision_id"] == "core:frozen"
+    assert payload["strategy_decision"] == (frozen if 0 <= initial_age and initial_age + work_seconds < 300 else {})
+
+
 def test_strategy_decision_rejects_future_fact_frames() -> None:
     from spx_spark.application.order_map.strategy_select import build_strategy_decision
 

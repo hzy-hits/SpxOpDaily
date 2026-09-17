@@ -21,6 +21,7 @@ from spx_spark.application.order_map.operator_status import (
 )
 from spx_spark.application.order_map.status_explanation import (
     status_explanation_output_valid,
+    operator_reason_line,
 )
 
 
@@ -42,6 +43,10 @@ def test_fresh_quotes_cannot_restore_unavailable_committed_strategy(session):
     assert "PAUSED" in sections.execution
     assert "READY" not in sections.data_quality
     assert "7550" not in sections.targets
+    reason = operator_reason_line(payload)
+    payload["level_decision"]["phase"] = "confirmed"
+    payload["trade_intent"] = {"status": "trade_ready"}
+    assert operator_reason_line(payload) == reason
 
 
 def _payload() -> dict[str, object]:

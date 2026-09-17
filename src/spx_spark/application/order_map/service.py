@@ -373,10 +373,12 @@ def build_order_payload_with_retry(
     state: LatestState | None = None
     started_at = time_module.monotonic()
     evaluation_now = now
+    raw_decision: dict[str, Any] = {}
     for attempt in range(attempts):
-        if attempt:
-            elapsed_seconds = max(time_module.monotonic() - started_at, 0.0)
-            evaluation_now = now + timedelta(seconds=elapsed_seconds)
+        # Freeze the committed decision before slow report preparation; a newer
+        # Core export must not race this attempt's knowledge cutoff.
+        raw_decision = load_json(Path(storage_settings.data_root) / "latest" / "strategy_decision.json")
+        evaluation_now = now + timedelta(seconds=max(time_module.monotonic() - started_at, 0.0))
         state = LatestStateStore(storage_settings).load(now=evaluation_now)
         payload = build_order_payload(state, now=evaluation_now, policy=policy)
         if not (_payload_is_thin(payload) or _payload_has_retryable_candidate_gap(payload)):
@@ -469,8 +471,10 @@ def build_order_payload_with_retry(
     _attach_strategy_trigger_coordinate(payload, state, now=evaluation_now)
     # Core owns the final decision. The report renders its committed export;
     # changing latest market projections must not create another authorization.
-    raw_decision = load_json(Path(storage_settings.data_root) / "latest" / "strategy_decision.json")
     decision = committed_strategy_decision(raw_decision, now=evaluation_now)
+    checked_at = now + timedelta(seconds=max(time_module.monotonic() - started_at, 0.0))
+    # Preparation cannot extend the frozen decision's authorization lifetime.
+    decision = committed_strategy_decision(decision, now=checked_at)
     payload["strategy_decision"] = decision
     payload["strategy_decision_reference"] = {
         "decision_id": raw_decision.get("decision_id"),

@@ -84,6 +84,9 @@ def humanize_operator_trigger(text: str) -> str:
 def operator_reason_line(payload: dict[str, Any]) -> str:
     """Render the one deterministic reason line shown on compact status cards."""
 
+    reference = payload.get("strategy_decision_reference") or {}
+    if reference.get("source") == "unavailable":
+        return "原因  本次报告未取得通过校验的策略决策，结构观察不能替代入场授权"
     underlier = payload.get("underlier")
     underlier = underlier if isinstance(underlier, dict) else {}
     decision = payload.get("level_decision")
