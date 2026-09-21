@@ -58,3 +58,9 @@ Complexity: two existing Python production files and one existing systemd unit
 modified; no production files added/deleted; net +123 Python LOC, unit net zero.
 No new dependency/config key/permanent service/timer/database/table/store. The
 five-second restart storm is replaced by the existing unit's 60-second backoff.
+
+Live acceptance correction: the first monitor pass reported a missing scheduled
+report and a spurious future heartbeat because a health writer updated during
+monitor reads. The evaluation clock now follows all reads/probes; a regression
+publishes a heartbeat during reads and verifies no false alert. Targeted final
+monitor/maintenance suite: 17 passed. The scheduled-report fault itself was real.

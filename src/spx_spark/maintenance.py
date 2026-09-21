@@ -765,7 +765,6 @@ def monitor_desk_pipeline(*, now=None, settings=None, notification=None, sender=
     from spx_spark.notifier.format_push import build_feishu_card
     from spx_spark.notifier.sinks import send_feishu_card
 
-    now = now or datetime.now(timezone.utc)
     settings = settings or MaintenanceSettings.from_env()
 
     def read(path):
@@ -786,6 +785,7 @@ def monitor_desk_pipeline(*, now=None, settings=None, notification=None, sender=
             delivery_active = probe.returncode == 0 and probe.stdout.strip() == "active"
         except (OSError, subprocess.TimeoutExpired):
             delivery_active = False
+    now = now or datetime.now(timezone.utc)
     faults = desk_pipeline_faults(now=now, bridge=bridge, report=report, source=source,
                                  mirrored=mirrored, delivery_active=delivery_active)
     path = disk_alert_state_path(settings)

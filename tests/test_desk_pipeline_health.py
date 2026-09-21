@@ -71,3 +71,24 @@ def test_independent_alert_retries_cooldown_and_recovery(tmp_path):
 
 def test_stopped_delivery_alerts_even_with_fresh_report():
     assert desk_pipeline_faults(**healthy(), delivery_active=False) == ["delivery_service_unavailable"]
+
+
+def test_heartbeat_published_during_reads_is_not_future(monkeypatch, tmp_path):
+    import spx_spark.maintenance as module
+    clock = [NOW]
+    later = NOW + timedelta(seconds=1)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    def read(path):
+        clock[0] = later
+        if path.name == "health.json":
+            return {"updated_at": later.isoformat(), "last_persisted_at": NOW.replace(minute=0).isoformat()}
+        return {}
+    monkeypatch.setattr(module, "datetime", Clock)
+    monkeypatch.setattr(module, "read_json_object", read)
+    result = monitor_desk_pipeline(settings=SimpleNamespace(data_root=str(tmp_path)),
+                                   health_root=tmp_path, delivery_active=True)
+    assert result["faults"] == []
+    assert not result["sent"]
