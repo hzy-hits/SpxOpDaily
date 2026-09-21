@@ -438,77 +438,78 @@ def maybe_send_disk_alert(
     itself.
     """
 
-    now = now or datetime.now(tz=timezone.utc)
-    level = report.action_level
-    result: dict[str, object] = {"level": level, "sent": False, "reason": ""}
-    if level not in DISK_ALERT_LEVELS:
-        result["reason"] = "below_degraded_threshold"
-        return result
+    with exclusive_state_lock(disk_alert_state_path(settings)):
+        now = now or datetime.now(tz=timezone.utc)
+        level = report.action_level
+        result: dict[str, object] = {"level": level, "sent": False, "reason": ""}
+        if level not in DISK_ALERT_LEVELS:
+            result["reason"] = "below_degraded_threshold"
+            return result
 
-    state_path = disk_alert_state_path(settings)
-    state = read_json_object(state_path)
-    raw_levels = state.get("levels")
-    levels = dict(raw_levels) if isinstance(raw_levels, dict) else {}
-    last_sent_raw = str(levels.get(level) or "")
-    if last_sent_raw:
-        try:
-            last_sent = datetime.fromisoformat(last_sent_raw)
-        except ValueError:
-            last_sent = None
-        if last_sent is not None:
-            if last_sent.tzinfo is None:
-                last_sent = last_sent.replace(tzinfo=timezone.utc)
-            if now - last_sent < timedelta(hours=settings.alert_cooldown_hours):
-                result["reason"] = "cooldown"
-                return result
+        state_path = disk_alert_state_path(settings)
+        state = read_json_object(state_path)
+        raw_levels = state.get("levels")
+        levels = dict(raw_levels) if isinstance(raw_levels, dict) else {}
+        last_sent_raw = str(levels.get(level) or "")
+        if last_sent_raw:
+            try:
+                last_sent = datetime.fromisoformat(last_sent_raw)
+            except ValueError:
+                last_sent = None
+            if last_sent is not None:
+                if last_sent.tzinfo is None:
+                    last_sent = last_sent.replace(tzinfo=timezone.utc)
+                if now - last_sent < timedelta(hours=settings.alert_cooldown_hours):
+                    result["reason"] = "cooldown"
+                    return result
 
-    text = (
-        f"磁盘使用率 {report.disk_used_pct:.2f}% "
-        f"({human_bytes(report.disk_used_bytes)} / {human_bytes(report.disk_total_bytes)}"
-        f"，剩余 {human_bytes(report.disk_free_bytes)})\n"
-        f"维护级别: {level}（降级阈值 {settings.degraded_pct:.0f}%，"
-        f"清理阈值 {settings.prune_pct:.0f}%）\n"
-        f"数据目录: {human_bytes(report.data_bytes)} / 预算 "
-        f"{human_bytes(report.data_budget_bytes)}\n"
-        f"待清理候选: {len(report.prune_candidates)} 个文件\n"
-        "建议: 检查数据增长来源；超过清理阈值时 weekly 维护会自动执行 prune --execute。"
-    )
-    try:
-        notification = notification or NotificationSettings.from_env()
-        dispatch = dispatch_notification(
-            notification,
-            NotificationEnvelope(
-                event_id=notification_event_id(
-                    "maintenance_disk_pressure",
-                    source="maintenance",
-                    occurred_at=now,
-                    identity=f"{level}:{now.date()}",
-                ),
-                source="maintenance",
-                kind="maintenance_disk_pressure",
-                lane="ops_transition",
-                occurred_at=now,
-            ),
-            title=f"SPX 磁盘告警: {level}",
-            text=text,
-            runner=runner,
-            attempted_at=now,
+        text = (
+            f"磁盘使用率 {report.disk_used_pct:.2f}% "
+            f"({human_bytes(report.disk_used_bytes)} / {human_bytes(report.disk_total_bytes)}"
+            f"，剩余 {human_bytes(report.disk_free_bytes)})\n"
+            f"维护级别: {level}（降级阈值 {settings.degraded_pct:.0f}%，"
+            f"清理阈值 {settings.prune_pct:.0f}%）\n"
+            f"数据目录: {human_bytes(report.data_bytes)} / 预算 "
+            f"{human_bytes(report.data_budget_bytes)}\n"
+            f"待清理候选: {len(report.prune_candidates)} 个文件\n"
+            "建议: 检查数据增长来源；超过清理阈值时 weekly 维护会自动执行 prune --execute。"
         )
-    except Exception as exc:
-        result["reason"] = f"dispatch_error: {exc}"
-        return result
+        try:
+            notification = notification or NotificationSettings.from_env()
+            dispatch = dispatch_notification(
+                notification,
+                NotificationEnvelope(
+                    event_id=notification_event_id(
+                        "maintenance_disk_pressure",
+                        source="maintenance",
+                        occurred_at=now,
+                        identity=f"{level}:{now.date()}",
+                    ),
+                    source="maintenance",
+                    kind="maintenance_disk_pressure",
+                    lane="ops_transition",
+                    occurred_at=now,
+                ),
+                title=f"SPX 磁盘告警: {level}",
+                text=text,
+                runner=runner,
+                attempted_at=now,
+            )
+        except Exception as exc:
+            result["reason"] = f"dispatch_error: {exc}"
+            return result
 
-    result["outcome"] = dispatch.outcome
-    result["delivered"] = dispatch.delivered
-    if not dispatch.delivered:
-        # No cooldown burn: an undelivered alert retries on the next pass
-        # instead of going silent for the full cooldown window.
-        result["reason"] = f"delivery_not_confirmed:{dispatch.outcome}"
+        result["outcome"] = dispatch.outcome
+        result["delivered"] = dispatch.delivered
+        if not dispatch.delivered:
+            # No cooldown burn: an undelivered alert retries on the next pass
+            # instead of going silent for the full cooldown window.
+            result["reason"] = f"delivery_not_confirmed:{dispatch.outcome}"
+            return result
+        levels[level] = now.isoformat()
+        atomic_write_json_secure(state_path, {**state, "schema_version": 1, "levels": levels})
+        result["sent"] = True
         return result
-    levels[level] = now.isoformat()
-    atomic_write_json_secure(state_path, {"schema_version": 1, "levels": levels})
-    result["sent"] = True
-    return result
 
 
 def print_disk_alert(result: dict[str, object], *, json_mode: bool) -> None:
@@ -709,3 +710,114 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# Phase 6 production repair: independent Worker -> Feishu ops path. Existing
+# maintenance state owns cooldown; no bridge, report writer or outbox dependency.
+DESK_HEARTBEAT_SECONDS = 180
+DESK_REPORT_GRACE_MINUTES = 5
+DESK_FAULT_LABELS = {
+    "bridge_heartbeat_missing": "桥接心跳缺失、陈旧或时间异常",
+    "report_heartbeat_missing": "报告服务心跳缺失、陈旧或时间异常",
+    "bridge_halted": "桥接已停止处理数据",
+    "report_halted": "报告服务已停止处理数据",
+    "desk_projection_not_forwarded": "新桌图超过三分钟未转发到报告端",
+    "scheduled_report_missing": "应到桌图超过五分钟仍未生成",
+    "delivery_service_unavailable": "投递服务未运行或无法确认状态",
+}
+
+
+def desk_pipeline_faults(*, now, bridge, report, source, mirrored, delivery_active=True):
+    from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+
+    def stamp(value):
+        try:
+            result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return result if result.tzinfo is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    faults = [] if delivery_active else ["delivery_service_unavailable"]
+    for name, health in (("bridge", bridge), ("report", report)):
+        updated = stamp(health.get("updated_at"))
+        if updated is None or not 0 <= (now - updated).total_seconds() <= DESK_HEARTBEAT_SECONDS:
+            faults.append(f"{name}_heartbeat_missing")
+        elif health.get("phase") == "halted":
+            faults.append(f"{name}_halted")
+    upstream = stamp(source.get("available_at"))
+    downstream = stamp(mirrored.get("available_at"))
+    if upstream and upstream <= now and (downstream is None or downstream < upstream):
+        if (now - upstream).total_seconds() > DESK_HEARTBEAT_SECONDS:
+            faults.append("desk_projection_not_forwarded")
+    # Evaluate the last half-hour slot whose grace has elapsed, including the
+    # last slot immediately before a session closes. Weekends create no slots.
+    due = now - timedelta(minutes=DESK_REPORT_GRACE_MINUTES)
+    slot = due.replace(minute=due.minute // 30 * 30, second=0, microsecond=0)
+    if DEFAULT_MARKET_CALENDAR.is_rth_open(slot) or DEFAULT_MARKET_CALENDAR.is_spx_gth_open(slot):
+        persisted = stamp(report.get("last_persisted_at"))
+        if persisted is None or not slot <= persisted <= now:
+            faults.append("scheduled_report_missing")
+    return sorted(faults)
+
+
+def monitor_desk_pipeline(*, now=None, settings=None, notification=None, sender=None, health_root=Path("/var/lib"), delivery_active=None):
+    """Check persisted report evidence and send ops transitions outside Rust."""
+    from spx_spark.notifier.format_push import build_feishu_card
+    from spx_spark.notifier.sinks import send_feishu_card
+
+    now = now or datetime.now(timezone.utc)
+    settings = settings or MaintenanceSettings.from_env()
+
+    def read(path):
+        try:
+            return read_json_object(path)
+        except (OSError, ValueError):
+            return {}
+
+    bridge = read(health_root / "spx-spark-bridge-shadow/health.json")
+    report = read(health_root / "spx-spark-report-shadow/health.json")
+    source = read(Path(settings.data_root) / "latest/desk_map_projection.json")
+    mirrored = read(health_root / "spx-spark-core-shadow/latest/desk-map.json").get("projection") or {}
+    if delivery_active is None:
+        import subprocess
+        try:
+            probe = subprocess.run(["systemctl", "is-active", "spx-rust-delivery.service"],
+                                   capture_output=True, text=True, timeout=5, check=False)
+            delivery_active = probe.returncode == 0 and probe.stdout.strip() == "active"
+        except (OSError, subprocess.TimeoutExpired):
+            delivery_active = False
+    faults = desk_pipeline_faults(now=now, bridge=bridge, report=report, source=source,
+                                 mirrored=mirrored, delivery_active=delivery_active)
+    path = disk_alert_state_path(settings)
+    with exclusive_state_lock(path):
+        state = read(path)
+        previous = state.get("desk_pipeline") or {}
+        last = previous.get("notified_at")
+        try:
+            recent = bool(last) and now - datetime.fromisoformat(last) < timedelta(hours=1)
+        except (ValueError, TypeError):
+            recent = False
+        was_faulted = bool(previous.get("faults"))
+        changed = faults != previous.get("faults", [])
+        if (not faults and not was_faulted) or (not changed and recent):
+            return {"faults": faults, "sent": False, "reason": "healthy_or_cooldown"}
+        title = "SPX 推送链路故障" if faults else "SPX 推送链路恢复"
+        text = ("检测时间 UTC：" + now.isoformat() + "\n" +
+                ("故障：" + "；".join(DESK_FAULT_LABELS[item] for item in faults) if faults else "桥接与应到报告检查已恢复。") +
+                "\n上游桌图：" + str(source.get("available_at")) +
+                "\n报告端投影：" + str(mirrored.get("available_at")) +
+                "\n最后报告保存：" + str(report.get("last_persisted_at")) +
+                "\n这是系统运行告警，不是交易信号；报告保存不代表手机送达。")
+        try:
+            result = (sender or send_feishu_card)(
+                notification or NotificationSettings.from_env(),
+                build_feishu_card(text, title=title, kind="status", lane="ops_transition"),
+            )
+        except Exception:
+            return {"faults": faults, "sent": False, "reason": "independent_alert_failed"}
+        if not result.ok:
+            # Do not persist transport errors: they can contain webhook URLs.
+            return {"faults": faults, "sent": False, "reason": "independent_alert_unconfirmed"}
+        state["desk_pipeline"] = {"faults": faults, "notified_at": now.isoformat()}
+        atomic_write_json_secure(path, state)
+        return {"faults": faults, "sent": True, "reason": "fault" if faults else "recovered"}

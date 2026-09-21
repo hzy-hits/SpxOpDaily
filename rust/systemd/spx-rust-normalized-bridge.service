@@ -22,7 +22,7 @@ Environment=RUST_LOG=info
 ExecStartPre=/opt/spx-spark-core-shadow/current/bin/spx-bridge check-config --config /etc/spx-spark-core-shadow/bridge.toml
 ExecStart=/opt/spx-spark-core-shadow/current/bin/spx-bridge run --config /etc/spx-spark-core-shadow/bridge.toml
 Restart=on-failure
-RestartSec=5s
+RestartSec=60s
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateNetwork=true

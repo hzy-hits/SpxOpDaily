@@ -104,3 +104,14 @@ def growth_dislocation_scan() -> None:
 
     if run() != 0:
         raise RuntimeError("growth dislocation scan failed")
+
+
+@huey.periodic_task(crontab(minute="*", strict=True), priority=20)
+def desk_pipeline_health() -> None:
+    import json
+    from spx_spark.maintenance import monitor_desk_pipeline
+
+    result = monitor_desk_pipeline()
+    print(json.dumps({"event": "desk_pipeline_health", **result}, sort_keys=True))
+    if result["reason"] in {"independent_alert_failed", "independent_alert_unconfirmed"}:
+        raise RuntimeError("Desk pipeline independent alert not confirmed")
