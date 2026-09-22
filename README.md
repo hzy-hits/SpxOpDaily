@@ -17,7 +17,7 @@ Current architecture and refactor execution documents:
 - `docs/architecture-simplification-blueprint-v1.md` - **architecture simplification baseline; authoritative for all new work.**
 - `docs/architecture-simplification-execution-plan-v1.md` - **verified facts, hard constraints, and phase task cards for the simplification refactor.**
 - `docs/strategy-signal-engine-v2.md` - **unified 0DTE strategy signal engine implementation contract (S-track).**
-- `docs/monorepo-layout.md` - current Python/Rust ownership, history, CI, and deployment boundary (Rust control plane frozen; retirement planned in Phase 6).
+- `docs/monorepo-layout.md` - current Python/Rust ownership, history, CI, and deployment boundary (Rust runtime frozen; Phase 6 retirement deferred).
 - `module-architecture.md` - enforced Python module layers and dependency rules.
 - `rust/docs/ARCHITECTURE.md` - typed Rust runtime, ledger, report, and delivery architecture.
 - `docs/refactor-architecture-acceptance-plan.md` - Python refactor evidence and acceptance specification.
@@ -25,6 +25,73 @@ Current architecture and refactor execution documents:
 - `docs/schwab-wide-chain-hot-lane-design.md` - Schwab wide-chain, 500-symbol hot lane, and IBKR validation design.
 - `docs/structure-signal-vnext.md` - event-driven Desk Map, setup lifecycle, opportunity replay, and HMM shadow contract.
 - `docs/probability-model-p-vs-q-execution-design.md` - risk-neutral versus physical probability, fill, net-PnL distribution, and formal NoTrade research design.
+
+## Current runtime overview (2026-09-22)
+
+Existing ownership: Phase 5 maintenance, Phase 6 frozen runtime, S1/S3 strategy
+and data contracts. Rust retirement and the full data-platform rewrite are
+**deferred** under the [August 8 scope decision](docs/architecture-simplification-execution-plan-v1.md).
+The diagram describes existing components, not new services.
+
+```mermaid
+flowchart TD
+    Brokers["Schwab RTH / IBKR GTH and fallback"] --> Collectors["Python collectors: source time, contract identity, NBBO"]
+    Collectors --> Raw["Original broker option and underlying history"]
+    Collectors --> Live["Normalized live state"]
+    Raw --> Research["Python research / causal replay / history preparation"]
+    Live --> Strategy["Python Core: build_strategy_decision"]
+    Research --> Strategy
+    Strategy --> Decisions["Python operational DB and final decision export"]
+    Decisions --> Candidates["Existing Python manual candidate lane"]
+    Decisions --> Desk["Python Desk Map preparation: validate frozen decision"]
+    Live --> Desk
+    Desk --> Projection["Bounded desk_map_projection.v1"]
+    Live --> Bridge["Rust normalized bridge"]
+    Projection --> Bridge
+    Bridge --> Core["Rust Core: typed readiness, latest projections, frames"]
+    Core --> Report["Rust report: GTH/RTH half-hour schedule and writer"]
+    Report --> Ledger["Rust SQLite ledger / scheduled-report outbox"]
+    Ledger --> Delivery["Rust delivery"]
+    Core -. health .-> Monitor["Existing Huey Worker: desk pipeline monitor"]
+    Report -. health and report freshness .-> Monitor
+    Projection -. forwarding lag .-> Monitor
+    Delivery -. service state .-> Monitor
+    Monitor --> Feishu["Existing direct Feishu fault / recovery alerts"]
+```
+
+- **Strategy and presentation:** Python's `build_strategy_decision` is the sole
+  human candidate authority. Reports reuse the committed result; the full
+  `strategy_decision` stays outside the frozen Rust wire contract. Rust owns
+  half-hour Desk Map scheduling/delivery, not the Python candidate lane.
+  `automatic_ordering=false` throughout.
+- **Freshness and failure visibility:** Desk preparation freezes the decision
+  before slow work and rechecks validity afterward. The existing Worker checks
+  pipeline health every minute and sends faults/recovery directly to Feishu,
+  bypassing the Rust report path. It still depends on the Worker, host and network.
+  A persisted report or running service does not prove phone delivery.
+- **Hot-path work:** Session checks use indexed scalar metadata in the existing
+  Python operational database instead of repeatedly decoding large research
+  JSON. Bounded background history preparation reduces synchronous work; missing
+  required evidence still follows the strategy's eligibility rules. This does
+  not establish that all research latency has been eliminated.
+- **Research evidence:** Replay starts from original IBKR/Schwab option and
+  underlying data, using availability timestamps. Historical strategy cards,
+  NO_TRADE and notifications must not select samples, generate PnL labels or
+  establish edge. Rust frames/ledger support operational lineage, not a
+  replacement strategy dataset. Bark remains unchanged.
+- **Product scope:** Production strategies remain primarily 0DTE manual
+  directional spreads, butterflies and authorized RTH/GTH iron condors. GTH
+  includes smooth convergence alongside expansion-to-contraction. Authorization
+  is not evidence of profitable edge. Multi-expiry broker queries and research
+  scans exist; they do not establish continuous fresh full-chain coverage through
+  Friday or a production multi-DTE strategy engine.
+
+Recent implementation and acceptance records:
+
+- [Hot-path queries, history preparation and valuation](docs/hot-path-data-contracts-2026-09-15.md)
+- [GTH smooth-convergence authorization and limits](docs/gth-smooth-entry-authorization-2026-09-15.md)
+- [Desk decision clock recovery](docs/desk-decision-clock-recovery-2026-09-17.md)
+- [Independent pipeline monitoring and recovery](docs/desk-pipeline-monitor-2026-09-21.md)
 
 ## Repository Layout
 
@@ -34,13 +101,13 @@ remain auditable under `rust/`.
 
 | Path | Runtime ownership |
 |---|---|
-| `src/spx_spark/` | Provider sessions, normalization, HMM/research, DuckDB, replay, and strategy iteration |
+| `src/spx_spark/` | Provider sessions, final strategy decisions, manual candidate lane, research/replay, and maintenance |
 | `rust/` | Strict wire/domain contracts, append-only frames, SQLite ledger, half-hour report, outbox, and delivery coordination |
 | `contracts/golden/` | Versioned cross-runtime wire examples and fail-closed fixtures |
 | `tests/` | Python application, architecture, replay, and provider tests |
 | `rust/crates/*/tests/` | Rust contract, state-machine, ledger, report, and delivery tests |
 
-Python remains the owner of Schwab/IBKR sessions and experimental models. Rust
+Python owns broker sessions, final strategy decisions, and research. Rust
 does not connect to a broker or place orders. Cross-language changes now land in
 one commit and the root CI validates both workspaces. See
 [the monorepo contract](docs/monorepo-layout.md) for the exact boundary.

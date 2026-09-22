@@ -1,41 +1,48 @@
 # SPX Spark Core architecture
 
-Status: the isolated core and normalized bridge run as Oracle system services;
-the report/delivery ownership change remains a separately verified cutover.
-Nothing is deployed merely because a config or unit exists in this repository.
+Status (2026-09-22): bridge, core, scheduled report and delivery are production
+Rust owners. Phase 6 retirement is deferred; this workspace remains frozen except
+for production-fault repairs. See the [scope decision](../../docs/architecture-simplification-execution-plan-v1.md)
+and [whole-system diagram](../../README.md#current-runtime-overview-2026-09-22).
+A checked-in unit alone does not prove deployment or runtime health.
 
 ## Objective
 
-The Rust workspace owns the production control plane: accept already-normalized
-market-data and advisory projections, build one decision-time snapshot, apply
-deterministic readiness rules, schedule the half-hour GTH/RTH Desk Map, persist
-manual-advisory and scheduled-report intents, and deliver them through one
-auditable ledger. Python retains provider SDKs and research computation, but it
-does not own report timing, report writing, outbox state or delivery after the
-report-owner switch.
+Rust accepts bounded normalized/advisory projections, applies typed readiness
+rules, and owns the half-hour GTH/RTH Desk Map schedule, report ledger and delivery.
+Python owns broker sessions, research, `build_strategy_decision`, the existing
+manual candidate lane and Desk Map source preparation. Full Python strategy
+decisions do not enter the frozen Rust wire contract. The report writer cannot
+create or authorize a trading strategy.
 
-It never places, changes, or cancels an order. The only strategy actions are
-`NO_TRADE` and `MANUAL_CANDIDATE`; `MANUAL_CANDIDATE` is an advisory for a human,
-not an executable order.
+Rust wire actions `NO_TRADE` and `MANUAL_CANDIDATE` describe manual advisories;
+they do not enumerate Python strategy structures. Neither runtime places,
+changes or cancels orders; `automatic_ordering=false` remains in force.
 
-```text
-Python provider sessions / research
-        |
-        +--> atomic normalized state --------+
-        +--> atomic research_context.v2 ------+--> spx-bridge --> spx-core
-        +--> atomic desk_map_projection.v1 ---+                    |
-                                                                   +--> latest projections
-                                                                   +--> append-only frames
-                                                                   +--> SQLite/WAL ledger
-                                                                            ^
-GTH/RTH :00/:30 ET --> spx-report --> DeepSeek full eight-section report ----+
-                                                                            |
-                                                                            v
-                                                                      spx-delivery
-
-append-only frames + ledger lineage
-        --> post-close Replay artifact --> Parquet --> Python/DuckDB/HMM research
+```mermaid
+flowchart TD
+    Data["Python normalized state / research_context.v2"] --> Bridge["spx-bridge"]
+    Decision["Python committed strategy decision"] --> Desk["Python Desk Map preparation and validity check"]
+    Desk --> Projection["desk_map_projection.v1: bounded presentation"]
+    Projection --> Bridge
+    Bridge --> Core["spx-core: typed readiness and latest projections"]
+    Core --> Frames["Append-only frames: operational replay"]
+    Core --> Report["spx-report: half-hour schedule and validated writer"]
+    Core --> Ledger["Rust SQLite/WAL ledger"]
+    Report --> Ledger
+    Ledger --> Delivery["spx-delivery"]
+    Core -. health .-> Monitor["Python Worker maintenance monitor"]
+    Report -. health and report freshness .-> Monitor
+    Delivery -. service state .-> Monitor
+    Monitor --> Feishu["Direct Feishu fault / recovery alerts"]
 ```
+
+The monitor reuses the existing Worker and maintenance state. It is independent
+of the Rust report pipeline, but not of the host, network or Worker. See
+[monitor acceptance](../../docs/desk-pipeline-monitor-2026-09-21.md).
+Original broker option/underlying history remains the causal strategy backtest
+source. Frames and ledger explain operational transitions; notifications or
+selected decisions must not define the strategy research sample.
 
 The bridge boundary is intentional. Rust does not connect directly to IB
 Gateway or Schwab. Python retains provider SDK/session ownership and writes
@@ -55,10 +62,10 @@ contains only SPX `GTH` and `RTH`; CME `Globex` metadata and the independent
 | `spx-domain` | Versioned wire types, enums, validation and canonical hashes | I/O, settings, broker SDKs |
 | `spx-bridge` | Bounded source reads, provider mapping, durable generation/sequence/pending frame, typed ACK and health | Broker SDKs, strategy generation, notifications, research |
 | `spx-core` | Unix ingress, quote book, decision snapshot, readiness, deterministic policy, health projection and append log | Network delivery, research fitting, orders |
-| `spx-ledger` | The single SQLite/WAL database, owner fencing and legal state transitions | Analytical history or provider connections |
+| `spx-ledger` | The Rust SQLite/WAL database, owner fencing and legal state transitions | Analytical history or provider connections |
 | `spx-report` | GTH/RTH `:00`/`:30` ET schedule, durable desk-map read, DeepSeek writer, full report validation and scheduled-report intent | Provider sessions, HMM fitting, trade decisions, delivery transport |
 | `spx-delivery` | Claim, atomic `InFlight` transition, rendering, transport, retry, receipts, uncertain outcome and DLQ | Strategy decisions or a second outbox database |
-| Python provider/research | Broker SDK sessions, atomic normalized/desk/research projections, post-close artifacts, Parquet, DuckDB, HMM, replay and backtests | Report schedule, live report writer, Rust ledger/outbox or notification delivery |
+| Python application | Broker sessions, strategy decisions and candidate lane, source projections, research/replay, independent maintenance alerts | Rust half-hour schedule, report writer, Rust ledger/outbox and its delivery owner |
 
 `spx-report` and `spx-delivery` each guard outbound I/O with two independent
 permissions: typed configuration and an explicit CLI flag. Checked-in examples
@@ -66,7 +73,7 @@ remain disabled and are not deployment authority.
 
 ## Half-hour Desk Map ownership
 
-Python continuously publishes one complete `desk_map_projection.v1` by atomic
+The existing Python report-preparation timer publishes one complete `desk_map_projection.v1` by atomic
 replace. The projection contains typed lifecycle, level, direction, thesis,
 quality and optional embedded `research_context.v2`, plus a deterministic
 eight-section source message. It carries `action_authority=none` and
@@ -138,7 +145,8 @@ time.
 
 ## State and durability
 
-There is exactly one mutable operational database. It contains ingress
+Within Rust there is one mutable operational ledger, separate from the existing
+Python operational database. The Rust ledger contains ingress
 idempotency, owner leases, decisions, notification events, targets, attempts,
 receipts, cancellations, DLQ state and operator actions. SQLite runs in WAL mode
 and schema constraints reject illegal states.

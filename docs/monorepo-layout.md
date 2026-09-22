@@ -1,8 +1,10 @@
 # SPX Spark monorepo contract
 
-> **状态（2026-08-07）：本文档描述的 Python/Rust 双运行时所有权是当前部署现状，不再是目标架构。**
-> Rust 控制面已冻结并按 `docs/architecture-simplification-execution-plan-v1.md` Phase 6 计划退出；
-> 任何新增职责一律落在 Python 侧，不得扩展 Rust 所有权或跨语言 contract。
+> **状态（2026-09-22）：Python/Rust 双运行时仍是当前部署边界。**
+> 按 [执行方案第 0 节](architecture-simplification-execution-plan-v1.md) 的收口决定，
+> Phase 6 Rust 退出已延期；现有 Rust 保留并冻结，仅修复生产故障。
+> 新增职责复用 Python owner，不扩展 Rust 所有权或跨语言 contract。
+> 完整运行图见 [README](../README.md#current-runtime-overview-2026-09-22)。
 
 Status: repository integration contract. This change unifies source and CI; it
 does not by itself authorize a production restart, report-owner switch, or
@@ -63,13 +65,18 @@ git ls-files rust/target  # must print nothing
 | Schwab RTH and IBKR GTH/fallback sessions | Python | GTH SPXW stays IBKR-only; RTH stays Schwab-first; the 100-line IBKR budget remains collector-owned |
 | Quote normalization and atomic mirror projections | Python | Rust consumes only bounded, typed files; it does not open broker sessions |
 | HMM, range research, DuckDB, Parquet, notebooks, replay, backtests | Python | Research may iterate quickly but has `action_authority=none` until a versioned production contract is accepted |
-| Provider/readiness/domain invariants | Rust | Unknown state, stale data, incomplete exact legs, and invalid transitions fail closed |
-| Append-only frames and operational SQLite/WAL ledger | Rust | One writer per lane; no second outbox database |
-| Half-hour report scheduling, full report validation, outbox and receipts | Rust | Network I/O still requires the existing config gate, CLI gate, and single-owner fence |
+| Final strategy decisions and manual candidate lane | Python | `build_strategy_decision` is the sole candidate authority; full decisions stay outside Rust wire contracts |
+| Desk source preparation | Python | Reuse committed strategy export, freeze before slow work and recheck expiry |
+| Pipeline fault/recovery monitor | Python Huey Worker | Existing maintenance task sends direct Feishu alerts independently of the Rust report path; host/Worker/network remain dependencies |
+| Typed bridge/core readiness invariants | Rust | Unknown state, stale data, incomplete exact legs, and invalid transitions fail closed |
+| Append-only frames and Rust operational SQLite/WAL ledger | Rust | One writer per Rust lane; distinct from the existing Python operational decision database |
+| Half-hour Desk Map scheduling, report validation, scheduled-report outbox and receipts | Rust | Network I/O still requires the existing config gate, CLI gate, and single-owner fence |
 | Real or paper order placement | Neither | Automatic ordering remains unavailable |
 
 Keeping both languages does not mean duplicating responsibilities. Python is
-the adaptable data/research plane; Rust is the small typed operational plane.
+the data, strategy and research owner; Rust retains the typed operational and
+scheduled-report path. Causal strategy replay uses original broker data with
+availability timestamps, not selected cards or notification history.
 Moving a responsibility requires a versioned contract, a single-writer switch,
 observable lineage, and an executable rollback.
 

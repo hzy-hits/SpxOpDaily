@@ -1,31 +1,49 @@
 # SPX Spark 模块架构与分层协议
 
-> **状态（2026-08-07）：本文档的分层意图继续有效；“新增模块必须同步架构登记测试”的机制将由 Import Linter 取代（执行方案 P1-4）。**
-> 见 `docs/architecture-simplification-execution-plan-v1.md`。
+> **状态（2026-09-22）：P1-4 已完成，Import Linter 已替代自研模块登记测试。**
+> 当前可执行依赖合同是 [pyproject.toml](pyproject.toml) 中的两个 Import Linter contracts，
+> 使用 `uv run lint-imports` 检查。下方旧 L0–L5 图保留为职责与迁移背景，
+> 不是仍在运行的 AST 登记规则。Phase 6 Rust 退出和 Phase 7 全面重写已延期，
+> 见 [执行方案第 0 节](docs/architecture-simplification-execution-plan-v1.md)。
+
+当前包依赖（静态方向，不代表进程或消息流）：
+
+```mermaid
+flowchart TD
+    CLI[cli] --> App[application]
+    App --> Infra[infrastructure]
+    Infra --> Pure["analytics / domain"]
+```
+
+准确禁止依赖和已接受例外以 `pyproject.toml` 为准；现有顶层 helper 未全部迁移。
+完整运行链路见 [README 架构图](README.md#current-runtime-overview-2026-09-22)：
+Python Core 拥有最终策略，报告复用其导出；Rust 保留定时桌图和对应投递；
+现有 Worker 的 `jobs.py` 调度 `maintenance.py` 独立检查桌图链路并向飞书告警。
+会话查询使用现有 Python operational DB 的索引字段；收益回放使用原始券商数据，
+策略卡和推送不作为研究样本或收益标签。
 
 当前简化补充（2026-09-05）：canonical latest 的读写直接复用 `storage.LatestStateStore`；
 无行为的 `LatestMarketProjectionStore` 子类与 infrastructure 重导出已删除。
 见 [回放与测试简化审查](docs/review-replay-correctness-and-simplification-2026-09-05.md)。
 
-范围说明：本文的分层和 module registry 只约束 `src/spx_spark/` Python
+范围说明：本文的 Python 分层说明只约束 `src/spx_spark/` Python
 应用。`rust/` 是同一 monorepo 内独立的 typed operational workspace，遵守
 `rust/AGENTS.md` 与 `rust/docs/ARCHITECTURE.md`；跨语言所有权以
 `docs/monorepo-layout.md` 为准。
 
-状态: 2026-07-12 与 pre-RTH 实施计划对齐。本文档是模块划分的权威来源；新增模块或
-import 前先对照本文分层规则与 `tests/architecture/test_module_registry.py`。
-违反分层规则或遗漏模块登记会直接挂测试。
+历史基线：以下职责清单最初在 2026-07-12 与 pre-RTH 计划对齐。
+新增或移动模块先核对现有 owner、当前 Import Linter 合同及简化执行方案。
 
-配套:
-- 守护测试: `tests/architecture/test_module_registry.py`（兼容入口
-  `tests/test_architecture.py`）
+配套：
+
+- 当前依赖检查：`uv run lint-imports`，合同位于 `pyproject.toml`
 - 验收计划: `docs/refactor-architecture-acceptance-plan.md`
 - 首个 RTH 前实施计划: `docs/pre-rth-refactor-implementation-plan.md`
 - Schwab 宽链与 hot lane: `docs/schwab-wide-chain-hot-lane-design.md`
 - 结构化信号与机会回放: `docs/structure-signal-vnext.md`
 - 进度清单: `artifacts/refactor-acceptance/inventory/report.json`
 
-## 1. 分层总览（低层在下，依赖只允许指向同层或更低层）
+## 1. 历史职责分层（当前强制合同见文首）
 
 ```
 L5 orchestration   application/*（realtime / order_map / shock / morning_map /
@@ -47,10 +65,7 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
                    domain/*, settings/*
 ```
 
-目标依赖方向见验收计划。`tests/architecture/test_module_registry.py` 的
-`LAYERS` 表必须与上表同步；**未登记生产模块必须失败**。
-
-分层规则（守护测试强制执行）:
+以下为原迁移设计规则，不能据此声称现行 Import Linter 覆盖所有旧顶层模块：
 
 1. 任何模块只能 import 同层或更低层的模块。
 2. L0 模块不得 import 任何 spx_spark 内部模块（彼此之间也不行）。
@@ -149,22 +164,21 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 | §9.2 RTH density golden | NO-GO | 缺实盘 session shadow 语料 |
 | P1-C settings | PARTIAL | import-time `runtime_value`=0；残留按文件递减预算（见 architecture test） |
 
-权威进度见 `artifacts/refactor-acceptance/inventory/report.json`。
+以上为历史验收记录；当前收口状态以简化执行方案第 0 节及各次修复验收文档为准。
 
 ## 5. 日常约定
 
-- 新模块先在 §1 / `LAYERS` 定层，再写代码；守护测试挂了不许改白名单蒙混。
+- 新增模块先确认现有 owner 无法承担，再核对当前 Import Linter 合同；不得扩大豁免蒙混过关。
 - provider 字段名知识只允许出现在对应 `*/adapter.py`。
 - 跨层共享数据结构下沉到 L0（参考 `alert_model.py` / `domain.state_machines`）。
 - analytics 纯核禁止 import `storage` / `config` / `notifier` /
   `alert_engine` / `service_loop`（见 `tests/architecture/test_pure_boundaries.py`）。
-- `runtime_value()` 新调用点禁止扩张；允许名单见
-  `tests/architecture/test_runtime_value_allowlist.py`。
+- `runtime_value()` 新调用点禁止扩张；按需清理边界见简化执行方案 P5-2。
 
 ## 6. Pre-RTH 新模块归属
 
-下列模块是首个 RTH 前计划新增的边界。文件落地时必须同步
-`tests/architecture/test_module_registry.py`，不得通过扩大例外白名单绕过依赖规则。
+下列为首个 RTH 前计划记录的模块边界，不代表仍待新增。当前修改遵守
+`pyproject.toml` 的 Import Linter 合同，不再维护已删除的模块登记测试。
 
 | 模块 | 层 | 职责 | 禁止依赖 |
 | --- | --- | --- | --- |
