@@ -92,6 +92,7 @@ Recent implementation and acceptance records:
 - [GTH smooth-convergence authorization and limits](docs/gth-smooth-entry-authorization-2026-09-15.md)
 - [Desk decision clock recovery](docs/desk-decision-clock-recovery-2026-09-17.md)
 - [Independent pipeline monitoring and recovery](docs/desk-pipeline-monitor-2026-09-21.md)
+- [Condor probability summaries and verified redundant-copy cleanup](docs/desk-condor-probabilities-and-storage-2026-09-23.md)
 
 ## Repository Layout
 

@@ -729,12 +729,11 @@ def _distribution(
         "p10_net_pnl": _dollars(p10),
         "p50_net_pnl": _dollars(p50),
         "p90_net_pnl": _dollars(p90),
+        "net_profit_rate": round(sum(pnl > 0 for pnl in pnls) / count, 4),
         "pnl_histogram": _pnl_histogram(pnls),
         "risk_objective": objective,
         "hit_invalidation_rate": (
-            None
-            if invalidation_reason is not None
-            else round(counters["invalidation"] / count, 4)
+            None if invalidation_reason is not None else round(counters["invalidation"] / count, 4)
         ),
         "tp_before_stop_rate": round(counters["tp"] / count, 4),
         "premium_stop_rate": round(counters["premium_stop"] / count, 4),

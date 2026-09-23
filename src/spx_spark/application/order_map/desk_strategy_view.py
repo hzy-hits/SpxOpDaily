@@ -6,13 +6,10 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
-from spx_spark.application.order_map.gth_iron_condor import (
-    GTH_MAX_ABS_15M_MOVE_ATR, GTH_MAX_EXACT_QUOTE_AGE_SECONDS,
-    GTH_MAX_EXACT_QUOTE_SKEW_SECONDS, GTH_MIN_EXPANSION_FRACTION,
-    GTH_MIN_CONTRACTION_FROM_HIGH_FRACTION, GTH_MIN_STRADDLE_DECAY_15M,
+from spx_spark.analytics.options.strategy_payoff import (
+    IRON_CONDOR_MANAGEMENT_POLICY, RTH_IRON_CONDOR_MANAGEMENT_POLICY,
 )
-from spx_spark.application.order_map.guidance import iron_condor_placement_text, price_action_playbook_text
-from spx_spark.application.order_map.path_distribution import path_distribution_desk_text
+from spx_spark.application.order_map.guidance import price_action_playbook_text
 from spx_spark.application.order_map.state import current_session_is_gth
 from spx_spark.application.order_map.strategy_regime import (
     pin_stable_next_step_text,
@@ -66,6 +63,8 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     )
     if gth_session:
         return _gth_scan_desk_view(payload, decision, reasons)
+    if watchable and candidate.get("strategy_type") == "IRON_CONDOR":
+        return "人工铁鹰候选 · " + iron_condor_desk_line(candidate)
     regime = _mapping(decision.get("regime"))
     pin_center = pin_watch_center(regime)
     trade_center = pin_trade_center(regime)
@@ -294,128 +293,28 @@ def _gth_scan_desk_view(
             reasons[0], event=_mapping(_mapping(decision.get("market_facts")).get("event"))
         )
     else:
-        primary = "1 分钟报价持续重算 5–50 点价差与 5–20Δ 10 点翼宽铁鹰"
+        primary = "等待合格入场条件"
     candidate = _mapping(decision.get("candidate"))
     if (
         decision.get("action_authority") == "manual"
         and str(candidate.get("strategy_type") or "").upper() == "IRON_CONDOR"
     ):
-        conclusion = f"人工铁鹰候选已另发 · {ic_line}"
+        conclusion = f"人工铁鹰候选 · {ic_line}"
     else:
         conclusion = f"NO TRADE · {primary} · 铁鹰：{ic_line}"
-    advice = research_decision_advice(payload)
-    return f"{conclusion}\n{advice}" if advice else conclusion
+    return conclusion
 
 
 def compact_iron_condor_desk_line(
     payload: Mapping[str, Any], decision: Mapping[str, Any] | None = None
 ) -> str:
-    """One-line GTH iron-condor state; the full ticket remains a separate card."""
-
+    """Display probabilities for the selected structure, otherwise the map."""
     decision = _mapping(decision or payload.get("strategy_decision"))
     candidate = _mapping(decision.get("candidate"))
-    if str(candidate.get("strategy_type") or "").upper() != "IRON_CONDOR":
-        candidate = {}
-    map_structure = _mapping(decision.get("iron_condor_map"))
-    transition = _mapping(map_structure.get("gth_transition"))
-    if not candidate:
-        nearest = _mapping(_mapping(decision.get("why_not")).get("nearest_candidate"))
-        if str(nearest.get("strategy_type") or "").upper() == "IRON_CONDOR":
-            transition = _mapping(nearest.get("gth_transition")) or transition
-        strikes = "/".join(
-            f"{value:g}"
-            for raw in map_structure.get("strikes") or ()
-            if (value := finite_float(raw)) is not None
-        )
-        quote = _mapping(map_structure.get("quote"))
-        economics = _mapping(map_structure.get("economics"))
-        credit = finite_float(quote.get("credit"))
-        credit_fraction = finite_float(economics.get("credit_fraction_of_width"))
-        width = finite_float(economics.get("width_points"))
-        if width is None:
-            width = finite_float(map_structure.get("wing_width"))
-        if credit_fraction is None and credit is not None and width is not None and width > 0.0:
-            credit_fraction = credit / width
-        target_delta = finite_float(map_structure.get("short_abs_delta"))
-        delta_label = (
-            f"{100 * target_delta:g}Δ档"
-            if target_delta is not None and 0 < target_delta <= 1
-            else "Δ档位未知"
-        )
-        width_label = f"{width:g}宽" if width is not None and width > 0 else "翼宽未知"
-        structure_label = f"{delta_label}/{width_label}"
-        details = [f"{structure_label} {strikes}" if strikes else structure_label]
-        if credit is not None:
-            details.append(f"贷记 {credit:.2f}")
-        if credit_fraction is not None:
-            details.append(f"翼宽比 {credit_fraction:.0%}")
-
-        if map_structure.get("status") != "ready" or not strikes:
-            quote_reasons = _mapping(map_structure.get("quote")).get("reasons") or ()
-            raw_reason = str(
-                map_structure.get("reason")
-                or next((reason for reason in quote_reasons if str(reason).strip()), "")
-            )
-            details.append(
-                f"仅观察：{humanize_strategy_reason(raw_reason)}"
-                if raw_reason
-                else "仅观察：当前四腿报价不完整"
-            )
-            return " · ".join(details)
-
-        if _mapping(transition.get("smooth_convergence")).get("status") == "observed":
-            details.append("平缓收敛波动/位移条件满足")
-        reasons = {str(reason) for reason in transition.get("reasons") or ()}
-        waits = []
-        move_atr = finite_float(transition.get("move_15m_atr"))
-        if "gth_transition_path_inputs_unavailable" in reasons or (
-            "gth_transition_price_not_balanced" in reasons and move_atr is None
-        ):
-            waits.append("价格历史不完整，无法判断平衡")
-        elif "gth_transition_price_not_balanced" in reasons:
-            waits.append(f"价格位移 {move_atr:.2f} ATR>{GTH_MAX_ABS_15M_MOVE_ATR:g}")
-        if reasons & {"gth_transition_volatility_inputs_unavailable", "gth_transition_expansion_basis_unavailable",
-                      "gth_transition_observations_insufficient", "gth_transition_extrema_order_invalid"}:
-            waits.append("波动历史证据不完整")
-        for reason, field, label, minimum in (
-            ("gth_transition_expansion_too_small", "straddle_expansion_fraction", "局部扩张", GTH_MIN_EXPANSION_FRACTION),
-            ("gth_transition_contraction_too_small", "straddle_contraction_from_high_fraction", "峰后收缩", GTH_MIN_CONTRACTION_FROM_HIGH_FRACTION),
-            ("gth_transition_straddle_not_decaying", "straddle_decay_15m", "15m衰减", GTH_MIN_STRADDLE_DECAY_15M),
-        ):
-            value = finite_float(transition.get(field))
-            if reason in reasons and value is not None:
-                waits.append(f"{label}{value:.1%}<{minimum:.0%}")
-        if reasons & {"gth_transition_atm_iv_5m_not_contracting", "gth_transition_atm_iv_15m_not_contracting"}:
-            rising = [str(m) for m in (5, 15)
-                      if (finite_float(transition.get(f"atm_iv_change_{m}m")) or 0) > 0]
-            if rising:
-                waits.append("/".join(rising) + "m IV仍上升")
-        if "gth_transition_peak_age_outside_window" in reasons:
-            waits.append("峰值时间未满足")
-        minimum_credit = finite_float(_mapping(map_structure.get("placement_diagnostics")).get("minimum_credit_fraction"))
-        if credit_fraction is not None and minimum_credit is not None and credit_fraction < minimum_credit - 1e-9:
-            waits.append(f"贷记/翼宽{credit_fraction:.1%}<{minimum_credit:.0%}")
-        for field, limit, label in (("max_quote_age_seconds", GTH_MAX_EXACT_QUOTE_AGE_SECONDS, "报价年龄"),
-                                    ("source_skew_seconds", GTH_MAX_EXACT_QUOTE_SKEW_SECONDS, "四腿时差")):
-            value = finite_float(quote.get(field))
-            if value is not None and value > limit:
-                waits.append(f"{label}{value:.1f}s>{limit:g}s")
-        details.append("仅观察：" + "；".join(waits) if waits else
-                       "仅观察：收缩已确认，等待其他候选门" if transition.get("status") == "qualified" else
-                       "仅观察：等待跨式扩张→收缩")
-        placement_text = iron_condor_placement_text(map_structure)
-        if placement_text:
-            details.append(placement_text)
-        return " · ".join(details)
-
-    structure = candidate
-    strikes = "/".join(f"{value:g}" for value in structure.get("strikes") or ()) or "-"
-    credit = finite_float(_mapping(structure.get("quote")).get("credit"))
-    delta = finite_float(structure.get("short_abs_delta"))
-    delta_text = f"{delta * 100:.0f}Δ" if delta is not None else "逐边≤20Δ"
-    credit_text = f" · 贷记 {credit:.2f}" if credit is not None else ""
-    placement_text = iron_condor_placement_text(structure)
-    return f"{delta_text}/10宽 {strikes}{credit_text} · 人工候选已另发" + (f" · {placement_text}" if placement_text else "")
+    if candidate.get("strategy_type") == "IRON_CONDOR":
+        # Never borrow probabilities from a different scan structure.
+        return iron_condor_desk_line(candidate)
+    return iron_condor_desk_line(_mapping(decision.get("iron_condor_map")))
 
 
 def research_decision_advice(payload: Mapping[str, Any]) -> str | None:
@@ -934,58 +833,51 @@ def _nearest_candidate_line(nearest: Mapping[str, Any], failed_gates: list[str])
 
 
 def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
-    if not structure:
-        return "5–20Δ 10宽 尚未计算"
-    strikes = [
-        f"{float(strike):g}"
-        for strike in structure.get("strikes") or ()
-        if finite_float(strike) is not None
-    ]
-    strike_text = "/".join(strikes) if strikes else "—"
-    if str(structure.get("status") or "") != "ready":
-        reason = humanize_strategy_reason(str(structure.get("reason") or "iron_condor_credit_unavailable"))
-        return f"卖{_short_delta_label(structure)} {_wing_width_label(structure)} {strike_text} · {reason}"
-    economics = _mapping(structure.get("economics"))
-    quote = _mapping(structure.get("quote"))
-    credit = finite_float(quote.get("credit")) or finite_float(economics.get("max_gain_points"))
-    credit_text = f"{credit:g}" if credit is not None else "—"
-    loss = finite_float(economics.get("max_loss_points"))
-    line = (
-        f"卖{_short_delta_label(structure)} {_wing_width_label(structure)} "
-        f"{strike_text} 贷记 {credit_text}"
+    """Management-path frequencies, not delta-implied or expiry probabilities."""
+    if not structure or structure.get("status") == "unavailable":
+        return "概率暂不可估（四腿报价未就绪）"
+    distribution = _mapping(_mapping(structure.get("edge")).get("path_distribution"))
+    if not distribution:
+        distribution = _mapping(structure.get("path_distribution"))
+    status = distribution.get("status")
+    if status == "insufficient_sample":
+        return "概率暂不可估（历史样本不足）"
+    if status != "estimated_uncalibrated":
+        return "概率暂不可估（管理路径未就绪）"
+    policies = {
+        policy.policy_version: policy
+        for policy in (IRON_CONDOR_MANAGEMENT_POLICY, RTH_IRON_CONDOR_MANAGEMENT_POLICY)
+    }
+    policy = policies.get(str(distribution.get("management_policy_version") or ""))
+    expected = {"rth": RTH_IRON_CONDOR_MANAGEMENT_POLICY, "gth": IRON_CONDOR_MANAGEMENT_POLICY}.get(
+        str(structure.get("session_mode") or "").lower()
     )
-    if loss is not None:
-        line += f" 最大亏损 {loss:g}"
-    placement_text = iron_condor_placement_text(structure)
-    if placement_text:
-        line += f" · {placement_text}"
-    path_text = path_distribution_desk_text(_mapping(structure.get("path_distribution")))
-    if path_text:
-        return f"{line} · {path_text}"
-    return line
-
-
-def _short_delta_label(structure: Mapping[str, Any]) -> str:
-    delta = finite_float(structure.get("short_abs_delta"))
-    if delta is None:
-        return "5–20Δ"
-    return f"{int(round(delta * 100))}Δ"
-
-
-def _wing_width_label(structure: Mapping[str, Any]) -> str:
-    width = finite_float(structure.get("wing_width"))
-    if width is None:
-        economics = _mapping(structure.get("economics"))
-        width = finite_float(economics.get("width_points"))
-    if width is None:
-        strikes = [
-            finite_float(strike) for strike in structure.get("strikes") or ()
-        ]
-        if len(strikes) >= 2 and strikes[0] is not None and strikes[1] is not None:
-            width = abs(strikes[1] - strikes[0])
-    if width is None:
-        return "10宽"
-    return f"{width:g}宽"
+    if (policy is None or distribution.get("hard_exit_et") != policy.hard_exit_et
+            or (expected is not None and expected != policy)):
+        return "概率暂不可估（退出规则不匹配）"
+    sessions = finite_float(distribution.get("n_sessions"))
+    probabilities = [finite_float(distribution.get(key)) for key in (
+        "net_profit_rate", "tp_before_stop_rate", "stop_loss_rate",
+    )]
+    if (sessions is None or sessions < 1 or not sessions.is_integer()
+            or any(value is None or not 0 <= value <= 1 for value in probabilities)):
+        return "概率暂不可估（统计不完整）"
+    profit, take_profit, stop = probabilities
+    if take_profit + stop > 1.0001:
+        return "概率暂不可估（退出统计不一致）"
+    profit_text, tp_text, stop_text = (
+        "<0.1%" if 0 < value < .001 else ">99.9%" if .999 < value < 1
+        else f"{value:.1%}".replace(".0%", "%")
+        for value in probabilities
+    )
+    text = (
+        f"模拟概率：费用后盈利 {profit_text} · 止盈 {tp_text} · 止损 {stop_text}"
+        f"；按现行规则最迟在对应交易日 {policy.hard_exit_et} ET 退出"
+        f"；{int(sessions)} 个历史交易日，未校准"
+    )
+    if _mapping(structure.get("placement_diagnostics")).get("stop_buyback_within_width") is False:
+        text += "；注意：3C止损价超过翼宽"
+    return text
 
 
 def _looks_like_machine_token(value: str) -> bool:

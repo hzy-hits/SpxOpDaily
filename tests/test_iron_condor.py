@@ -80,8 +80,8 @@ def test_placement_scan_exposes_unreachable_stop_and_missing_realized_input() ->
     assert diagnostic["stop_buyback_within_width"] is False
     assert diagnostic["put"]["distance_trailing_rss"]["60"] is None
     text = iron_condor_desk_line(structure)
-    assert "3C" in text
-    assert "未校准" in text
+    assert "概率暂不可估" in text
+    assert "EM" not in text
 
 
 def test_gth_placement_scan_uses_execution_quote_age_not_map_quote_age() -> None:
@@ -1174,10 +1174,10 @@ def test_gth_desk_map_shows_iron_condor_not_empty_heartbeat() -> None:
     assert "NO TRADE" in sections.desk_view
     assert "扫描赢家已推送" not in sections.desk_view
     assert "无过门赢家" not in sections.desk_view
-    assert "20Δ档/10宽 7680/7690/7810/7820" in sections.desk_view
-    assert "贷记 2.40" in sections.desk_view
-    assert "翼宽比 24%" in sections.desk_view
-    assert "3.68 ATR>1.25" in sections.desk_view
+    assert "概率暂不可估" in sections.desk_view
+    assert "Δ档" not in sections.desk_view
+    assert "翼宽比" not in sections.desk_view
+    assert "ATR" not in sections.desk_view
     assert "研究建议" not in sections.desk_view
     assert "策略状态·铁鹰" not in sections.structure
     assert "扫描中 · 仅人工候选可做" in sections.execution
@@ -1314,7 +1314,7 @@ def test_missing_price_scale_is_unknown_not_observed_trend(field, value):
     assert "gth_transition_price_not_balanced" not in transition["reasons"]
 
 
-def test_gth_map_explains_independent_input_price_and_quote_failures():
+def test_gth_map_keeps_diagnostic_data_but_does_not_present_it_as_probability():
     from spx_spark.application.order_map.desk_strategy_view import compact_iron_condor_desk_line
     decision = {"iron_condor_map": {
         "status": "ready", "strikes": [7535, 7545, 7635, 7645], "wing_width": 10,
@@ -1325,11 +1325,10 @@ def test_gth_map_explains_independent_input_price_and_quote_failures():
             "reasons": ["gth_transition_path_inputs_unavailable", "gth_transition_price_not_balanced",
                         "gth_transition_straddle_not_decaying", "gth_transition_atm_iv_15m_not_contracting"]}}}
     line = compact_iron_condor_desk_line({}, decision)
-    assert "价格历史不完整" in line
-    assert "单边" not in line
-    assert "-3.9%" in line and "IV仍上升" in line
-    assert "24.0%<25%" in line
-    assert "四腿时差12.0s>10s" in line
+    assert "概率暂不可估" in line
+    assert "%" not in line
+    assert decision["iron_condor_map"]["quote"]["source_skew_seconds"] == 12
+    assert decision["iron_condor_map"]["gth_transition"]["straddle_decay_15m"] == -.0387
 
 
 

@@ -234,7 +234,7 @@ def test_projection_is_versioned_complete_and_never_truncates_changes(tmp_path: 
     assert "dealer sign unknown" in wire["message"]["structure"]
 
 
-def test_projection_desk_view_prints_one_strategy_surface_shape_line(tmp_path: Path) -> None:
+def test_projection_keeps_raw_surface_shape_out_of_human_desk_view(tmp_path: Path) -> None:
     payload = _payload()
     payload["strategy_decision"] = {
         "market_facts": {
@@ -274,8 +274,9 @@ def test_projection_desk_view_prints_one_strategy_surface_shape_line(tmp_path: P
     )
 
     desk_view = wire["message"]["desk_view"]
-    assert desk_view.count("曲面形状") == 1
-    assert "ATM@7500/5pt · D3斜率+ · D4≈平 · SNR低" in desk_view
+    assert "曲面形状" not in desk_view
+    assert "SNR" not in desk_view
+    assert payload["strategy_decision"]["market_facts"]["structure"]["strike_differential_context"]["status"] == "ready"
 
 
 def test_gamma_or_iv_change_updates_the_projection_fingerprint(tmp_path: Path) -> None:

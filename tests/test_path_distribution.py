@@ -551,6 +551,7 @@ def test_physical_and_joint_iron_condor_lose_on_large_up_move(tmp_path: Path) ->
         paths=(PhysicalSpotPath(date(2026, 8, 5), 630, prices, True),),
     )
     assert physical["stop_loss_rate"] == 1.0
+    assert physical["net_profit_rate"] == 0.0
     assert physical["p90_net_pnl"] < -160.0
     # A jump in the same historical spot path must hurt the credit seller in
     # both the joint surface and sticky-IV engines.
@@ -565,6 +566,7 @@ def test_physical_and_joint_iron_condor_lose_on_large_up_move(tmp_path: Path) ->
         probability_settings=None,
     )
     assert joint["stop_loss_rate"] == 1.0
+    assert joint["net_profit_rate"] == 0.0
     assert joint["p90_net_pnl"] < -160.0
     assert joint["sticky_iv_baseline"]["p90_net_pnl"] < -160.0
 
@@ -626,3 +628,21 @@ def test_partial_final_minute_uses_exact_exit_clock(tmp_path: Path) -> None:
     result = estimate_path_distribution(candidate, _facts(now=now), now=now, data_root=tmp_path, probability_settings=None)
     assert result["hard_close_rate"] == 1.0
     assert result["median_hold_minutes"] == round(60 - 37 / 60, 3)
+
+
+def test_management_probability_does_not_count_break_even_as_profit(monkeypatch):
+    from dataclasses import replace
+    import spx_spark.application.order_map.path_distribution as module
+    from spx_spark.application.market_features.physical_followthrough import PhysicalSpotPath
+
+    simulate = module.simulate_management_policy
+    def break_even(*args, **kwargs):
+        return replace(simulate(*args, **kwargs), policy_pnl_points=0.0)
+    monkeypatch.setattr(module, "simulate_management_policy", break_even)
+    result = module.estimate_path_distribution(
+        _iron_condor(session_mode="rth"), _facts(now=RTH_NOW),
+        now=RTH_NOW, data_root=None, probability_settings=None,
+        paths=(PhysicalSpotPath(date(2026, 8, 5), 630, (7750.0,) * 316, True),),
+    )
+    assert result["net_profit_rate"] == 0.0
+    assert result["risk_objective"]["loss_probability"] == 0.0

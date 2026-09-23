@@ -7,7 +7,6 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
-from spx_spark.analytics.options.density import summarize_strike_surface_shape
 from spx_spark.analytics.options.pricing import finite_float
 from spx_spark.application.order_map import guidance as guidance_module
 from spx_spark.application.order_map.frozen_structure import option_structure_frame_is_live
@@ -132,8 +131,6 @@ def build_desk_message_sections(
     expiry = str(payload.get("expiry") or "-")
     expiry_text = f"{expiry[4:6]}-{expiry[6:8]}" if len(expiry) == 8 else expiry
     desk_view = _desk_view_line(payload, projection, guidance).removeprefix("Desk View  ")
-    if surface_line := _strategy_surface_shape_line(payload):
-        desk_view = f"{desk_view}\n{surface_line}"
 
     sections = DeskMessageSections(
         title=f"【SPX Desk Map · {beijing:%H:%M} · 0DTE {expiry_text} · {session.get('name_cn')}】",
@@ -152,20 +149,6 @@ def build_desk_message_sections(
                        alternative_path="已有仓位需独立管理，不能沿用旧策略结论")
     return compact_gth_no_trade_sections(payload, sections, quality_reasons=projection.quality_reasons)
 
-
-def _strategy_surface_shape_line(payload: Mapping[str, Any]) -> str | None:
-    decision = _mapping(payload.get("strategy_decision"))
-    facts = _mapping(decision.get("market_facts"))
-    structure = _mapping(facts.get("structure"))
-    context = _mapping(structure.get("strike_differential_context"))
-    if not context:
-        return None
-    shape = str(summarize_strike_surface_shape(context)["desk_line"]).strip()
-    if not shape:
-        return None
-    if shape.startswith("曲面"):
-        return f"{shape}（研究，不改结论）"
-    return f"曲面 {shape}（研究，不改结论）"
 
 
 def build_desk_map_projection(payload: Mapping[str, Any]) -> DeskMapProjection:

@@ -872,10 +872,9 @@ def test_gth_no_trade_does_not_park_a_near_miss_put_vertical() -> None:
     assert "Put 价差" not in sections.desk_view
     assert "待评估" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
-    assert "20Δ档/10宽 7680/7690/7810/7820" in sections.desk_view
-    assert "贷记 9.00" in sections.desk_view
-    assert "翼宽比 90%" in sections.desk_view
-    assert "等待跨式扩张→收缩" in sections.desk_view
+    assert "概率暂不可估" in sections.desk_view
+    assert "Δ档" not in sections.desk_view
+    assert "翼宽比" not in sections.desk_view
 
 
 def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
@@ -910,7 +909,7 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
     assert "7750/7745" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
-    assert "Δ档位未知/翼宽未知 · 仅观察：5–20Δ 卖权铁鹰缺少带 delta 的新鲜报价" in sections.desk_view
+    assert "概率暂不可估（四腿报价未就绪）" in sections.desk_view
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 
@@ -1708,7 +1707,7 @@ def test_status_llm_reason_validation_rejects_authority_or_multiline_changes() -
 
 
 @pytest.mark.parametrize("target,width", [(0.15, 10), (0.175, 15), (0.20, 20)])
-def test_iron_condor_desk_reports_selected_delta_tier_and_width(target, width) -> None:
+def test_iron_condor_desk_never_converts_delta_or_width_to_probability(target, width) -> None:
     from copy import deepcopy
 
     from spx_spark.application.order_map.desk_strategy_view import compact_iron_condor_desk_line
@@ -1726,8 +1725,9 @@ def test_iron_condor_desk_reports_selected_delta_tier_and_width(target, width) -
     }
     before = deepcopy(decision)
     rendered = compact_iron_condor_desk_line({}, decision)
-    assert f"{target * 100:g}Δ档/{width:g}宽" in rendered
-    assert f"{7650 - width}/7650/7730/{7730 + width}" in rendered
+    assert "概率暂不可估" in rendered
+    assert "%" not in rendered
+    assert "Δ" not in rendered
     assert decision == before
 
 
@@ -1770,3 +1770,63 @@ def test_gth_no_trade_does_not_assert_account_is_flat() -> None:
     result = compact_gth_no_trade_sections(payload, Sections(), quality_reasons=())
     assert "无持仓" not in result.alternative_path
     assert "已有仓位需独立管理" in result.alternative_path
+
+
+@pytest.mark.parametrize("mode,exit_et", [("gth", "12:30"), ("rth", "15:45")])
+def test_condor_desk_probabilities_follow_selected_contract_without_scan_fallback(mode, exit_et):
+    from copy import deepcopy
+    from spx_spark.analytics.options.strategy_payoff import management_policy_for_candidate
+    from spx_spark.application.order_map.desk_strategy_view import compact_iron_condor_desk_line
+
+    candidate = {"strategy_type": "IRON_CONDOR", "session_mode": mode}
+    policy = management_policy_for_candidate(candidate)
+    distribution = {
+        "status": "estimated_uncalibrated", "management_policy_version": policy.policy_version,
+        "hard_exit_et": exit_et, "n_sessions": 23,
+        "net_profit_rate": .62, "tp_before_stop_rate": .48, "stop_loss_rate": .21,
+    }
+    candidate["edge"] = {"path_distribution": distribution}
+    decision = {"candidate": candidate, "iron_condor_map": {"status": "ready",
+        "path_distribution": {**distribution, "net_profit_rate": .99}}}
+    before = deepcopy(decision)
+    text = compact_iron_condor_desk_line({}, decision)
+    assert "盈利 62%" in text and "止盈 48%" in text and "止损 21%" in text
+    assert "99%" not in text
+    assert exit_et in text and "23 个历史交易日" in text and "未校准" in text
+    assert decision == before
+    del candidate["edge"]
+    assert "概率暂不可估" in compact_iron_condor_desk_line({}, decision)
+    assert "99%" not in compact_iron_condor_desk_line({}, decision)
+
+
+@pytest.mark.parametrize("change", [
+    {"status": "insufficient_sample"}, {"status": "unavailable"},
+    {"net_profit_rate": None}, {"net_profit_rate": float("nan")},
+    {"stop_loss_rate": 1.2}, {"management_policy_version": "old"},
+    {"hard_exit_et": "16:00"}, {"n_sessions": 0},
+])
+def test_condor_desk_never_turns_missing_invalid_or_other_policy_stats_into_odds(change):
+    from spx_spark.analytics.options.strategy_payoff import RTH_IRON_CONDOR_MANAGEMENT_POLICY
+    from spx_spark.application.order_map.desk_strategy_view import iron_condor_desk_line
+
+    distribution = {
+        "status": "estimated_uncalibrated", "n_sessions": 23,
+        "management_policy_version": RTH_IRON_CONDOR_MANAGEMENT_POLICY.policy_version,
+        "hard_exit_et": "15:45", "net_profit_rate": .62,
+        "tp_before_stop_rate": .48, "stop_loss_rate": .21, **change,
+    }
+    text = iron_condor_desk_line({"status": "ready", "path_distribution": distribution})
+    assert "概率暂不可估" in text and "%" not in text
+
+
+def test_condor_desk_does_not_round_small_stop_risk_to_zero():
+    from spx_spark.analytics.options.strategy_payoff import RTH_IRON_CONDOR_MANAGEMENT_POLICY as policy
+    from spx_spark.application.order_map.desk_strategy_view import iron_condor_desk_line
+
+    text = iron_condor_desk_line({"status": "ready", "path_distribution": {
+        "status": "estimated_uncalibrated", "n_sessions": 23,
+        "management_policy_version": policy.policy_version, "hard_exit_et": policy.hard_exit_et,
+        "net_profit_rate": .9998, "tp_before_stop_rate": .9997, "stop_loss_rate": .0003,
+    }})
+    assert "止损 <0.1%" in text and "盈利 >99.9%" in text
+    assert "止损 0%" not in text and "盈利 100%" not in text
