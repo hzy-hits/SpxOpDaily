@@ -42,7 +42,7 @@ class HistoryPreparation:
         self._ready_key = None
         self._ready = None
 
-    def get(self, key, build, *, nonblocking=False):
+    def get(self, key, build, *, nonblocking=False, allow_previous=None):
         if not nonblocking:
             return build()
         with self._lock:
@@ -59,6 +59,10 @@ class HistoryPreparation:
             if self._future is None:
                 self._key = key
                 self._future = _HISTORY_EXECUTOR.submit(build)
+            # Advisory callers may reuse a bounded, matching snapshot during refresh.
+            # Authorization callers keep the default exact-key, fail-closed behavior.
+            if self._ready is not None and allow_previous is not None and allow_previous(self._ready_key, self._ready):
+                return self._ready
             raise HistoryPreparing("history_preparation_pending")
 
 

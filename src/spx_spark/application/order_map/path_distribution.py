@@ -150,7 +150,11 @@ def attach_iron_condor_path_distribution(
         try:
             preparation = (_CONDOR_WIDTH_ADVISORIES.get(structure.get("wing_width"), _CONDOR_ADVISORY)
                            if structure.get("decision_effect") == "comparison_only" else _CONDOR_ADVISORY)
-            distribution = preparation.get(key, prepare, nonblocking=True)
+            distribution = preparation.get(key, prepare, nonblocking=True, allow_previous=lambda old, value: (
+                old[:6] == key[:6] and old[-1] == key[-1]
+                and value.get("status") in {"estimated_uncalibrated", "insufficient_sample"}
+                and 0 <= (now - datetime.fromisoformat(value["probability_as_of"])).total_seconds() < CONDOR_PROBABILITY_REFRESH_SECONDS
+            ))
         except HistoryPreparing as exc:
             distribution = _unavailable(str(exc))
         return {**dict(structure), "path_distribution": distribution}
@@ -700,10 +704,8 @@ def _iron_condor_as_candidate(structure: Mapping[str, Any]) -> dict[str, Any]:
         "legs": [dict(_map(item)) for item in structure.get("legs") or ()],
         "put_short": dict(_map(structure.get("put_short"))),
         "call_short": dict(_map(structure.get("call_short"))),
-        "invalidation_spx": [
-            _number(_map(structure.get("put_short")).get("strike")),
-            _number(_map(structure.get("call_short")).get("strike")),
-        ],
+        "invalidation_spx": [_number(_map(structure.get(side)).get("strike"))
+                             for side in ("put_short", "call_short")],
     }
 
 

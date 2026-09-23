@@ -759,3 +759,49 @@ def test_condor_widths_prepare_independently_without_borrowing_probabilities(mon
     assert (a["net_profit_rate"], b["net_profit_rate"]) == (.1, .2)
     assert (a["entry_credit_basis"], b["entry_credit_basis"]) == (.8, 1.5)
     assert ready["path_distribution"] == a
+
+
+def test_condor_bucket_refresh_keeps_only_recent_same_structure_probability(monkeypatch, tmp_path):
+    import time as clock
+    from threading import Event
+    from spx_spark.application.order_map import path_distribution as module
+
+    monkeypatch.setattr(module, "_CONDOR_ADVISORY", module.HistoryPreparation())
+    started, release = Event(), Event()
+    frozen_at = RTH_NOW.replace(minute=34, second=55)
+    refresh_at = frozen_at + timedelta(seconds=10)
+    def estimate(candidate, facts, **kwargs):
+        if kwargs["now"] != frozen_at:
+            started.set()
+            assert release.wait(5)
+        return {"status": "insufficient_sample", "net_profit_rate": candidate["quote"]["credit"]}
+    monkeypatch.setattr(module, "estimate_path_distribution", estimate)
+    structure = {**_iron_condor(session_mode="rth"), "status": "ready", "provider": "schwab",
+        "expiry": EXPIRY, "strikes": [7680, 7690, 7810, 7820]}
+    def read(at):
+        return module.attach_iron_condor_path_distribution(structure, _facts(now=at), data_root=tmp_path,
+            probability_settings=None, now=at, nonblocking=True)["path_distribution"]
+    deadline = clock.monotonic() + 5
+    while (initial := read(frozen_at))["status"] == "unavailable" and clock.monotonic() < deadline:
+        clock.sleep(.01)
+    assert initial["net_profit_rate"] == .8
+    structure["quote"]["credit"] = .4
+    try:
+        assert read(refresh_at) == initial
+        assert started.wait(5)
+        assert read(refresh_at)["entry_credit_basis"] == .8
+        assert read(refresh_at)["probability_as_of"] == frozen_at.isoformat()
+        # The old result is never stretched beyond its five-minute display lifetime.
+        assert "history_preparation_pending" in read(frozen_at + timedelta(minutes=5))["reason_codes"]
+        for field, different in (("provider", "ibkr"), ("expiry", "20260807"), ("strikes", [7670, 7690, 7810, 7830])):
+            before = structure[field]
+            structure[field] = different
+            assert "history_preparation_pending" in read(refresh_at)["reason_codes"]
+            structure[field] = before
+    finally:
+        release.set()
+    deadline = clock.monotonic() + 5
+    while (updated := read(refresh_at))["entry_credit_basis"] != .4 and clock.monotonic() < deadline:
+        clock.sleep(.01)
+    assert updated["entry_credit_basis"] == .4 and updated["net_profit_rate"] == .4
+    assert updated["probability_as_of"] == refresh_at.isoformat()
