@@ -130,7 +130,8 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
             f"最近候选  {nearest_line}",
             f"下一步  {reauthorize}",
         )
-    )
+    ) + ("\n铁鹰：" + compact_iron_condor_desk_line(payload, decision)
+         if _mapping(decision.get("iron_condor_map")).get("width_comparisons") else "")
 
 
 def strategy_market_bias(decision: Mapping[str, Any]) -> str:
@@ -213,11 +214,7 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
         )
 
     if iron_condor:
-        condor_text = (
-            compact_iron_condor_desk_line(payload, decision)
-            if current_session_is_gth(payload, _mapping(payload.get("level_decision")))
-            else iron_condor_desk_line(iron_condor)
-        )
+        condor_text = compact_iron_condor_desk_line(payload, decision)
         condor_gate = next(
             (
                 row
@@ -310,16 +307,45 @@ def _gth_scan_desk_view(
 def compact_iron_condor_desk_line(
     payload: Mapping[str, Any], decision: Mapping[str, Any] | None = None
 ) -> str:
-    """Display probabilities for the selected structure, otherwise the map."""
+    """Show both quoted widths, with their own path estimates and RTH benchmark."""
     decision = _mapping(decision or payload.get("strategy_decision"))
     candidate = _mapping(decision.get("candidate"))
+    scan = _mapping(decision.get("iron_condor_map"))
+    identity = ("expiry", "strikes", "session_mode", "provider")
+    comparisons = scan.get("width_comparisons") or ()
+    if comparisons:
+        # Frozen raw-broker cash recheck: docs/condor-evidence-audit-2026-09-23.json.
+        benchmarks = {10: (29, 37, 20, -77.97379310344827, -2261.24),
+                      20: (28, 37, 23, 21.404285714285717, 599.32)}
+        lines = []
+        for row in comparisons:
+            width = finite_float(row.get("wing_width"))
+            if width not in benchmarks:
+                continue
+            selected = (decision.get("action_authority") == "manual"
+                and candidate.get("strategy_type") == "IRON_CONDOR"
+                and all(candidate.get(key) and candidate.get(key) == row.get(key) for key in identity))
+            label = "人工候选" if selected else "结构扫描"
+            credit = finite_float(_mapping(row.get("quote")).get("credit"))
+            strikes = row.get("strikes") or ()
+            legs = "四腿报价未齐"
+            if row.get("status") == "ready" and len(strikes) == 4 and credit is not None:
+                lp, sp, sc, lc = strikes
+                legs = f"买{lp:g}P/卖{sp:g}P/卖{sc:g}C/买{lc:g}C · 贷记{credit:.2f}"
+            complete, entered, wins, mean, total = benchmarks[width]
+            lines.extend((
+                f"20Δ/{width:g}点翼 · {label} · {legs}",
+                iron_condor_desk_line(row),
+                f"RTH基准：{complete}/{entered}完整退出 · 胜率{wins / complete:.1%}"
+                f" · 均值{mean:+.2f}美元 · 累计{total:+,.0f}美元",
+            ))
+        lines.append("回测基准：2026-07-06至09-04，RTH固定10:00入场；扫描不等于入场信号")
+        return "\n".join(lines)
     if candidate.get("strategy_type") == "IRON_CONDOR":
-        scan = _mapping(decision.get("iron_condor_map"))
-        identity = ("expiry", "strikes", "session_mode", "provider")
         if all(candidate.get(key) and candidate.get(key) == scan.get(key) for key in identity):
             candidate = {**candidate, "path_distribution": scan.get("path_distribution")}
         return iron_condor_desk_line(candidate)
-    return iron_condor_desk_line(_mapping(decision.get("iron_condor_map")))
+    return iron_condor_desk_line(scan)
 
 
 def research_decision_advice(payload: Mapping[str, Any]) -> str | None:

@@ -1,4 +1,4 @@
-"""Always-on 5–20Δ short-leg iron condor map with a 10-point defined-risk wing."""
+"""Iron-condor map, with independent 20Δ/10- and 20-wide desk comparisons."""
 
 from __future__ import annotations
 
@@ -98,6 +98,26 @@ def build_iron_condor_map(
         return _unavailable_map("vertical_expiry_unavailable")
     if spot is None:
         return _unavailable_map("spx_price_unavailable")
+    session_mode = "gth" if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now) else "rth"
+    comparisons = []
+    if include_placement_scan:
+        # Comparison structures use execution freshness, not the wider map allowance.
+        scan_policy = replace(
+            policy, iron_condor_wing_width=WING_WIDTH,
+            quote_max_age_seconds=(GTH_MAX_EXACT_QUOTE_AGE_SECONDS if session_mode == "gth" else policy.quote_max_age_seconds),
+            quote_max_skew_seconds=(GTH_MAX_EXACT_QUOTE_SKEW_SECONDS if session_mode == "gth" else policy.quote_max_skew_seconds),
+        )
+        for width in (10.0, 20.0):
+            row = _structure_for_short_delta(
+                latest, expiry, spot=spot, short_abs_delta=HUMAN_SHORT_DELTA, now=now,
+                session_policy=replace(scan_policy, iron_condor_wing_width=width),
+                providers=(Provider.IBKR,) if session_mode == "gth" else (Provider.SCHWAB,),
+            )
+            comparisons.append({
+                **(row or _unavailable_map("iron_condor_delta_quotes_unavailable", expiry=expiry, spot=spot)),
+                "wing_width": width, "short_abs_delta": HUMAN_SHORT_DELTA, "session_mode": session_mode,
+                "decision_effect": "comparison_only", "automatic_ordering": False,
+            })
     variants = [
         row
         for delta in _short_deltas(policy)
@@ -116,11 +136,11 @@ def build_iron_condor_map(
         and row.get("status") == "ready"
     ]
     if not variants:
-        return _unavailable_map(
+        return {**_unavailable_map(
             "iron_condor_delta_quotes_unavailable",
             expiry=expiry,
             spot=spot,
-        )
+        ), "width_comparisons": comparisons}
     ranked_variants: list[dict[str, Any]] = []
     for variant in variants:
         row = _with_surface_score(
@@ -138,10 +158,9 @@ def build_iron_condor_map(
         reverse=True,
     )
     primary = dict(ranked_variants[0])
-    session_mode = (
-        "gth" if DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now) else "rth"
-    )
     primary["session_mode"] = session_mode
+    if include_placement_scan:
+        primary["width_comparisons"] = comparisons
     if session_mode == "gth":
         primary["gth_transition"] = gth_iron_condor_transition(facts, now=now)
     primary["variants"] = [
@@ -158,12 +177,6 @@ def build_iron_condor_map(
     ]
     primary["placement_diagnostics"] = _placement_diagnostics(primary, facts, session_mode)
     if include_placement_scan:
-        # Reuse the exact execution source/age contract, not map fallback quotes.
-        scan_policy = replace(
-            policy, iron_condor_wing_width=WING_WIDTH,
-            quote_max_age_seconds=(GTH_MAX_EXACT_QUOTE_AGE_SECONDS if session_mode == "gth" else policy.quote_max_age_seconds),
-            quote_max_skew_seconds=(GTH_MAX_EXACT_QUOTE_SKEW_SECONDS if session_mode == "gth" else policy.quote_max_skew_seconds),
-        )
         scan_rows, attempted, seen = [], [], set()
         for put_delta in (0.10, 0.15, 0.20):
             for call_delta in (0.10, 0.15, 0.20):

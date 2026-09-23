@@ -802,3 +802,57 @@ def test_rust_report_owner_switch_rejects_typos(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "flase")
     with pytest.raises(ValueError, match="must be a boolean"):
         rust_report_owner_enabled()
+
+
+@pytest.mark.parametrize("mode", ["rth", "gth"])
+@pytest.mark.parametrize("wide_available", [True, False])
+def test_both_condor_widths_survive_desk_export_with_separate_quotes_and_evidence(tmp_path, mode, wide_available):
+    from spx_spark.analytics.options.strategy_payoff import management_policy_for_candidate
+    payload = _payload()
+    payload["session_mode"] = mode
+    payload["level_decision"]["session_mode"] = mode
+    policy = management_policy_for_candidate({"strategy_type": "IRON_CONDOR", "session_mode": mode})
+    comparisons = []
+    for width, credit, rate in ((10, 2.4, .7), (20, 4.8, .8)):
+        comparisons.append({
+            "status": "ready", "strategy_type": "IRON_CONDOR", "session_mode": mode,
+            "expiry": "20260804", "provider": "ibkr" if mode == "gth" else "schwab",
+            "wing_width": width, "short_abs_delta": .2,
+            "strikes": [7460 - width, 7460, 7540, 7540 + width], "quote": {"credit": credit},
+            "path_distribution": {"status": "insufficient_sample", "n_sessions": 11,
+                "net_profit_rate": rate, "tp_before_stop_rate": rate, "stop_loss_rate": 1 - rate,
+                "hard_exit_et": policy.hard_exit_et, "management_policy_version": policy.policy_version,
+                "probability_as_of": "2026-08-04T14:00:00+00:00", "entry_credit_basis": credit},
+        })
+    if not wide_available:
+        comparisons[1] = {"wing_width": 20, "status": "unavailable", "reason": "iron_condor_delta_quotes_unavailable"}
+    payload["strategy_decision"] = {"action_authority": "manual", "decision_type": "IRON_CONDOR",
+        "candidate": dict(comparisons[0]), "market_facts": {"session": {"mode": mode}},
+        "iron_condor_map": {"width_comparisons": comparisons}}
+    wire = build_desk_map_wire(payload, [], now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+        trading_date="2026-08-04", storage=_storage(tmp_path))
+    text = wire["message"]["desk_view"]
+    ten, twenty = text.split("20Δ/20点翼", 1)
+    assert "20Δ/10点翼" in ten and "人工候选" in ten
+    assert "买7450P/卖7460P/卖7540C/买7550C" in ten
+    assert "贷记2.40" in ten and "盈利 70%" in ten
+    assert "结构扫描" in twenty and "人工候选" not in twenty
+    if wide_available:
+        assert "买7440P/卖7460P/卖7540C/买7560C" in twenty
+        assert "贷记4.80" in twenty and "盈利 80%" in twenty
+    else:
+        assert "四腿报价未齐" in twenty and "历史模拟" not in twenty
+        assert "盈利 70%" not in twenty
+    audit = json.loads((Path(__file__).resolve().parents[1] / "docs/condor-evidence-audit-2026-09-23.json").read_text())
+    for part, reference in zip((ten, twenty), audit["cash_recheck"]["summaries"][:2]):
+        assert f'{reference["win_rate"]:.1%}' in part
+        assert f'{reference["mean_usd"]:+.2f}' in part
+        assert f'{reference["total_usd"]:+,.0f}' in part
+        assert f'{reference["complete"]}/37' in part
+    assert "RTH固定10:00" in text and "2026-07-06至09-04" in text
+    assert len(text.encode("utf-8")) <= 4096
+    # Both comparisons also remain visible when there is no authorized candidate.
+    payload["strategy_decision"].update(candidate=None, action_authority="none", decision_type="NO_TRADE")
+    wire = build_desk_map_wire(payload, [], now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+        trading_date="2026-08-04", storage=_storage(tmp_path))
+    assert "20Δ/10点翼" in wire["message"]["desk_view"] and "20Δ/20点翼" in wire["message"]["desk_view"]

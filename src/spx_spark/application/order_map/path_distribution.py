@@ -57,14 +57,12 @@ from spx_spark.application.order_map.surface_path_distribution import (
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
 _CONDOR_ADVISORY = HistoryPreparation()
+_CONDOR_WIDTH_ADVISORIES = {width: HistoryPreparation() for width in (10.0, 20.0)}
 CONDOR_PROBABILITY_REFRESH_SECONDS = 300
 METHOD = "physical_path_management_policy.v4"
 IRON_CONDOR_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v2"
 SUPPORTED_DEBITS = {
-    "CALL_DEBIT_VERTICAL",
-    "PUT_DEBIT_VERTICAL",
-    "CALL_BUTTERFLY",
-    "PUT_BUTTERFLY",
+    "CALL_DEBIT_VERTICAL", "PUT_DEBIT_VERTICAL", "CALL_BUTTERFLY", "PUT_BUTTERFLY",
 }
 IRON_CONDOR_TYPE = "IRON_CONDOR"
 MAX_PATHS = 4000
@@ -112,7 +110,15 @@ def attach_iron_condor_path_distribution(
     nonblocking: bool = False,
 ) -> dict[str, Any]:
     """Attach the session-specific iron-condor management distribution."""
-
+    if nonblocking and structure.get("width_comparisons"):
+        structure = {**dict(structure), "width_comparisons": [attach_iron_condor_path_distribution(
+            row, facts, data_root=data_root, probability_settings=probability_settings, now=now,
+            policy=policy, paths=paths, clock_mode=clock_mode, nonblocking=True,
+        ) for row in structure["width_comparisons"]]}
+        for row in structure["width_comparisons"]:
+            if row.get("status") == "ready" and all(row.get(k) == structure.get(k)
+                    for k in ("expiry", "provider", "strikes", "session_mode")):
+                return {**structure, "path_distribution": row["path_distribution"]}
     if str(structure.get("status") or "") != "ready":
         return {**dict(structure), "path_distribution": _unavailable("iron_condor_not_ready")}
     if nonblocking:
@@ -142,7 +148,9 @@ def attach_iron_condor_path_distribution(
             return {**result, "probability_as_of": now.isoformat(),
                     "entry_credit_basis": _map(frozen_structure.get("quote")).get("credit")}
         try:
-            distribution = _CONDOR_ADVISORY.get(key, prepare, nonblocking=True)
+            preparation = (_CONDOR_WIDTH_ADVISORIES.get(structure.get("wing_width"), _CONDOR_ADVISORY)
+                           if structure.get("decision_effect") == "comparison_only" else _CONDOR_ADVISORY)
+            distribution = preparation.get(key, prepare, nonblocking=True)
         except HistoryPreparing as exc:
             distribution = _unavailable(str(exc))
         return {**dict(structure), "path_distribution": distribution}

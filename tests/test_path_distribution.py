@@ -715,3 +715,47 @@ def test_management_probability_does_not_count_break_even_as_profit(monkeypatch)
     )
     assert result["net_profit_rate"] == 0.0
     assert result["risk_objective"]["loss_probability"] == 0.0
+
+
+def test_condor_widths_prepare_independently_without_borrowing_probabilities(monkeypatch, tmp_path):
+    import time as clock
+    from copy import deepcopy
+    from threading import Event
+    from spx_spark.application.order_map import path_distribution as module
+
+    monkeypatch.setattr(module, "_CONDOR_WIDTH_ADVISORIES", {w: module.HistoryPreparation() for w in (10., 20.)})
+    entered, release = Event(), Event()
+    def estimate(candidate, facts, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return {"status": "estimated_uncalibrated", "net_profit_rate": candidate["economics"]["width_points"] / 100}
+    monkeypatch.setattr(module, "estimate_path_distribution", estimate)
+    narrow = {**_iron_condor(session_mode="rth"), "status": "ready", "provider": "schwab",
+              "expiry": EXPIRY, "strikes": [7680, 7690, 7810, 7820], "wing_width": 10.,
+              "decision_effect": "comparison_only"}
+    wide = deepcopy(narrow)
+    wide.update(wing_width=20., strikes=[7670, 7690, 7810, 7830])
+    wide["quote"]["credit"] = 1.5
+    wide["economics"].update(width_points=20., max_loss_points=18.5, max_gain_points=1.5)
+    wide["legs"][0]["strike"], wide["legs"][3]["strike"] = 7670., 7830.
+    structure = {**narrow, "width_comparisons": [narrow, wide]}
+    def read():
+        return module.attach_iron_condor_path_distribution(structure, _facts(now=RTH_NOW),
+            data_root=tmp_path, probability_settings=None, now=RTH_NOW, nonblocking=True)
+    try:
+        pending = read()
+        assert entered.wait(5)
+        assert all("history_preparation_pending" in r["path_distribution"]["reason_codes"]
+                   for r in pending["width_comparisons"])
+    finally:
+        release.set()
+    deadline = clock.monotonic() + 5
+    while clock.monotonic() < deadline:
+        ready = read()
+        if all(r["path_distribution"]["status"] == "estimated_uncalibrated" for r in ready["width_comparisons"]):
+            break
+        clock.sleep(.01)
+    a, b = [r["path_distribution"] for r in ready["width_comparisons"]]
+    assert (a["net_profit_rate"], b["net_profit_rate"]) == (.1, .2)
+    assert (a["entry_credit_basis"], b["entry_credit_basis"]) == (.8, 1.5)
+    assert ready["path_distribution"] == a

@@ -92,6 +92,7 @@ def test_gth_placement_scan_uses_execution_quote_age_not_map_quote_age() -> None
     assert structure["status"] == "ready"  # Existing map permits older observation quotes.
     assert structure["placement_scan"]["structures"] == []
     assert all(row["status"] == "quotes_or_greeks_unavailable" for row in structure["placement_scan"]["attempts"])
+    assert all(row["status"] == "unavailable" for row in structure["width_comparisons"])
 
 
 def _option(
@@ -1285,6 +1286,7 @@ def test_live_condor_map_prepares_probabilities_without_holding_up_decision(monk
     facts = _rth_facts()
     entered, release, completed = Event(), Event(), Event()
     monkeypatch.setattr(distribution, "_CONDOR_ADVISORY", distribution.HistoryPreparation())
+    monkeypatch.setattr(distribution, "_CONDOR_WIDTH_ADVISORIES", {w: distribution.HistoryPreparation() for w in (10., 20.)})
     monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack", lambda *a: facts)
     monkeypatch.setattr("spx_spark.application.order_map.strategy_select._accepted_session_cards", lambda _: ())
     monkeypatch.setattr("spx_spark.application.order_map.strategy_select.apply_strategy_edge_authority", apply_strategy_edge_authority)
@@ -1306,6 +1308,9 @@ def test_live_condor_map_prepares_probabilities_without_holding_up_decision(monk
     finally:
         release.set()
     assert completed.wait(5)
+    # Drain the existing single-thread preparation executor before restoring the estimator.
+    from spx_spark.application.market_features.physical_followthrough import _HISTORY_EXECUTOR
+    _HISTORY_EXECUTOR.submit(lambda: None).result(timeout=5)
 
 
 @pytest.mark.parametrize("hour,minute,eligible", [(13,29,False),(13,30,True),(15,1,True),(18,0,True),(19,44,True),(19,45,False)])
@@ -1411,3 +1416,38 @@ def test_authorized_smooth_gth_uses_unified_candidate_and_preserves_execution_ga
         assert candidate["management_plan"]["hard_exit_et"] == "12:30"
         text = _render_strategy_candidate(decision, candidate)
         assert "平缓收敛" in text and "先扩张" not in text
+
+
+@pytest.mark.parametrize("mode", ["rth", "gth"])
+def test_desk_widths_use_actual_four_leg_bbo_without_expanding_authority(mode):
+    now, facts, state = (RTH_NOW, _rth_facts(), _rth_state()) if mode == "rth" else (NOW, _facts(), _gth_state())
+    structure = build_iron_condor_map(_payload(), facts, state, now=now, policy=StrategyPolicy())
+    narrow, wide = structure["width_comparisons"]
+    assert [row["wing_width"] for row in (narrow, wide)] == [10, 20]
+    assert narrow["strikes"][1:3] == wide["strikes"][1:3]
+    for row in (narrow, wide):
+        lp, sp, sc, lc = row["strikes"]
+        assert sp - lp == lc - sc == row["wing_width"]
+        expected = row["put_short"]["bid"] + row["call_short"]["bid"] - row["put_long"]["ask"] - row["call_long"]["ask"]
+        assert row["quote"]["credit"] == pytest.approx(expected)
+        assert row["economics"]["max_loss_points"] == pytest.approx(row["wing_width"] - expected)
+        assert row["decision_effect"] == "comparison_only"
+        assert row["automatic_ordering"] is False
+    assert wide["quote"]["credit"] != narrow["quote"]["credit"]
+    candidates = enumerate_iron_condor_candidates(_payload(), facts, state, now=now, policy=StrategyPolicy())
+    assert candidates and all(row["wing_width"] == 10 for row in candidates)
+
+
+@pytest.mark.parametrize("mode", ["rth", "gth"])
+@pytest.mark.parametrize("stale_strike,unavailable_index", [(7670, 1), (7680, 0)])
+def test_only_stale_width_is_removed_from_desk_scan(mode, stale_strike, unavailable_index):
+    now, facts, state = (RTH_NOW, _rth_facts(), _rth_state()) if mode == "rth" else (NOW, _facts(), _gth_state())
+    old = now - timedelta(seconds=31)
+    quotes = tuple(replace(q, received_at=old, quote_time=old)
+        if q.instrument.strike == stale_strike and str(getattr(q.instrument.right, "value", q.instrument.right)) == "P"
+        else q for q in state.quotes)
+    state = replace(state, quotes=quotes, best_quotes=quotes)
+    scan = build_iron_condor_map(_payload(), facts, state, now=now, policy=StrategyPolicy())["width_comparisons"]
+    assert scan[1 - unavailable_index]["status"] == "ready"
+    assert scan[unavailable_index]["status"] == "unavailable"
+    assert scan[unavailable_index]["quote"]["status"] == "unavailable"
