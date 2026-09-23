@@ -840,17 +840,13 @@ def _nearest_candidate_line(nearest: Mapping[str, Any], failed_gates: list[str])
 def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
     """Management-path frequencies, not delta-implied or expiry probabilities."""
     if not structure or structure.get("status") == "unavailable":
-        return "概率暂不可估（四腿报价未就绪）"
+        reason = str(structure.get("reason") or "iron_condor_four_leg_quote_unavailable")
+        return f"概率暂不可估（{humanize_strategy_reason(reason)}）"
     distribution = _mapping(_mapping(structure.get("edge")).get("path_distribution"))
     if not distribution:
         distribution = _mapping(structure.get("path_distribution"))
     status = distribution.get("status")
-    if status == "insufficient_sample":
-        sessions = finite_float(distribution.get("n_sessions"))
-        if sessions is not None and sessions >= 0 and sessions.is_integer():
-            return f"概率暂不可估（仅 {int(sessions)} 个完整历史交易日，样本不足）"
-        return "概率暂不可估（历史样本不足）"
-    if status != "estimated_uncalibrated":
+    if status not in {"estimated_uncalibrated", "insufficient_sample"}:
         reasons = distribution.get("reason_codes") or ()
         if "history_preparation_pending" in reasons:
             return "概率计算中"
@@ -884,10 +880,12 @@ def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
         for value in probabilities
     )
     text = (
-        f"模拟概率：费用后盈利 {profit_text} · 止盈 {tp_text} · 止损 {stop_text}"
+        f"历史模拟：费用后盈利 {profit_text} · 止盈 {tp_text} · 止损 {stop_text}"
         f"；按现行规则最迟在对应交易日 {policy.hard_exit_et} ET 退出"
         f"；{int(sessions)} 个历史交易日，未校准"
     )
+    if status == "insufficient_sample":
+        text += "（小样本）"
     if distribution.get("probability_as_of"):
         try:
             at = datetime.fromisoformat(str(distribution["probability_as_of"]).replace("Z", "+00:00"))

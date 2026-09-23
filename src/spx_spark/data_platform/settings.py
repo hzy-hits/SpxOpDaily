@@ -32,8 +32,8 @@ class DataPlatformSettings:
     replay_raw_delete_grace_hours: int = 24
     replay_finalize_backlog_days: int = 7
     storage_pressure_action_free_bytes: int = 30_064_771_072
-    storage_pressure_warning_free_bytes: int = 25_769_803_776
-    storage_pressure_critical_free_bytes: int = 21_474_836_480
+    storage_pressure_warning_free_bytes: int = 10_737_418_240
+    storage_pressure_critical_free_bytes: int = 10_737_418_240
 
     @classmethod
     def from_env(cls) -> "DataPlatformSettings":
@@ -118,8 +118,8 @@ class DataPlatformSettings:
             raise ValueError("replay raw delete grace must be at least 24 hours")
         if self.replay_finalize_backlog_days <= 0:
             raise ValueError("replay finalize backlog days must be positive")
-        if self.storage_pressure_critical_free_bytes < 20 * 1024**3:
-            raise ValueError("storage pressure critical threshold must be at least 20 GiB")
+        if self.storage_pressure_critical_free_bytes < 10 * 1024**3:
+            raise ValueError("storage pressure critical threshold must be at least 10 GiB")
         if not (
             self.storage_pressure_action_free_bytes
             > self.storage_pressure_warning_free_bytes

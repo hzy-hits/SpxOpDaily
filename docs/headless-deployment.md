@@ -451,10 +451,10 @@ SCHWAB_TOKEN_FILE=/srv/data/spx-spark/runtime/schwab-token.json
 Keep the repository, virtual environment, and source files under `/home/ubuntu/spx-spark`; keep raw data and runtime tokens under `/srv/data/spx-spark`.
 
 Storage pressure must be evaluated using absolute free bytes as well as a used
-percentage. The Rust frame writer reserves 20 GiB, so waiting for a 90% disk
-threshold can stop ingress first on the Oracle volume. The typed finalizer
-defaults begin artifact-gated action at 28 GiB free, escalate warning at 24 GiB
-and become critical at 20 GiB. The systemd units intentionally contain none of
+percentage. The Rust frame writer reserves 10 GiB after each append. The typed finalizer
+defaults begin artifact-gated housekeeping at 28 GiB free, but warning/critical
+states and maintenance disk alerts only apply below 10 GiB free. Earlier
+housekeeping does not restrict market ingress or strategy notifications. The systemd units intentionally contain none of
 these numbers; deployment overrides belong in `config/runtime.local.toml`.
 
 For the production Schwab callback, single-owner refresh client, Cloudflare Tunnel route,

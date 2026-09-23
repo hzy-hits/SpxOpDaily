@@ -13,6 +13,7 @@ import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import median
@@ -124,11 +125,18 @@ def attach_iron_condor_path_distribution(
                int(now.timestamp()) // CONDOR_PROBABILITY_REFRESH_SECONDS, repr(probability_settings))
         def prepare():
             try:
+                settings = probability_settings or StrategyDistributionSettings()
+                session = _session_date(frozen_facts.get("session_date"))
+                days = [day for path in (Path(data_root) / "features/iv_surface").glob("date=*")
+                        if (day := _session_date(path.name.removeprefix("date="))) is not None and session and day < session] if data_root else []
+                if days:
+                    settings = replace(settings, window_days=max(settings.window_days, (session - min(days)).days))
                 result = attach_iron_condor_path_distribution(
                     frozen_structure, frozen_facts, data_root=data_root,
-                    probability_settings=probability_settings, now=now, policy=policy,
+                    probability_settings=settings, now=now, policy=policy,
                     paths=paths, clock_mode=clock_mode,
                 )["path_distribution"]
+                result = {**result, "lookback_days": settings.window_days}
             except Exception:
                 result = _unavailable("history_preparation_failed")
             return {**result, "probability_as_of": now.isoformat(),

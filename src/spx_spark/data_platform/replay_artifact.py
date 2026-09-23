@@ -423,9 +423,9 @@ def measure_storage_pressure(
         raise ValueError("storage pressure thresholds must satisfy action > warning >= critical")
     usage = shutil.disk_usage(Path(data_root))
     free = usage.free if free_bytes_override is None else free_bytes_override
-    if free <= critical_free_bytes:
+    if free < critical_free_bytes:
         level = "critical"
-    elif free <= warning_free_bytes:
+    elif free < warning_free_bytes:
         level = "warning"
     elif free <= action_free_bytes:
         level = "action"

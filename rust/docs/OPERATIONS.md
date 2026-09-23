@@ -31,7 +31,7 @@ identity is required until a separately tested group-access contract exists.
 Oracle raw frames live under
 `/srv/data/spx-spark/rust-core-shadow/frames`, not the nearly full root
 filesystem. Before every guarded append, core verifies that the write would
-leave the configured 20 GiB reserve; an unavailable or exhausted filesystem
+leave the configured 10 GiB reserve; an unavailable or exhausted filesystem
 stops ingress instead of consuming the host's last bytes.
 `config/oracle-shadow-bridge.toml` and
 `systemd/spx-rust-normalized-bridge.service` add the read-only normalized

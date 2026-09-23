@@ -1,5 +1,6 @@
 import json
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from spx_spark.config import MaintenanceSettings, NotificationSettings
@@ -124,9 +125,9 @@ def make_report(settings: MaintenanceSettings, *, level: str) -> MaintenanceRepo
     return MaintenanceReport(
         created_at=NOW.isoformat(),
         disk_total_bytes=100 * 1024**3,
-        disk_used_bytes=87 * 1024**3,
-        disk_free_bytes=13 * 1024**3,
-        disk_used_pct=87.0,
+        disk_used_bytes=91 * 1024**3,
+        disk_free_bytes=9 * 1024**3,
+        disk_used_pct=91.0,
         data_budget_bytes=80 * 1024**3,
         data_bytes=40 * 1024**3,
         data_budget_used_pct=50.0,
@@ -209,6 +210,18 @@ def test_disk_alert_below_threshold_skips(tmp_path, monkeypatch) -> None:
 
     assert result["sent"] is False
     assert result["reason"] == "below_degraded_threshold"
+    assert calls == []
+
+
+def test_disk_alert_requires_less_than_ten_gib_even_at_high_usage(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    calls = patch_bark(monkeypatch, ok=True)
+    for free in (10 * 1024**3, 20 * 1024**3):
+        report = replace(make_report(settings, level="critical_stop_raw"), disk_free_bytes=free)
+        result = maybe_send_disk_alert(report, settings, now=NOW,
+            notification=make_notification_settings(tmp_path))
+        assert not result["sent"]
+        assert result["reason"] == "free_space_above_alert_threshold"
     assert calls == []
 
 

@@ -1,0 +1,548 @@
+{
+  "cash_recheck": {
+    "prior_replay_period": [
+      "2026-07-06",
+      "2026-09-04"
+    ],
+    "rechecked_complete_trade_rows": 85,
+    "raw_cash_agrees": true,
+    "scope": "cash recheck of existing fixed-10:00 replay; not a fresh production-policy backtest",
+    "summaries": [
+      {
+        "setup": "ic_broker_recorded_d20_w10",
+        "attempts": 45,
+        "statuses": {
+          "PARTITION_MISSING": 5,
+          "ANCHOR_BBO_UNAVAILABLE": 3,
+          "COMPLETE_EXIT": 29,
+          "CENSORED": 2,
+          "QUOTE_GAP": 6
+        },
+        "wins": 20,
+        "complete": 29,
+        "win_rate": 0.6896551724137931,
+        "mean_usd": -77.97379310344827,
+        "total_usd": -2261.24,
+        "worst_usd": -685.56,
+        "mean_win_usd": 108.44,
+        "mean_loss_usd": -492.22666666666663,
+        "exits": {
+          "profit_take": 20,
+          "stop_loss": 9
+        }
+      },
+      {
+        "setup": "ic_broker_recorded_d20_w20",
+        "attempts": 45,
+        "statuses": {
+          "PARTITION_MISSING": 5,
+          "ANCHOR_BBO_UNAVAILABLE": 3,
+          "COMPLETE_EXIT": 28,
+          "QUOTE_GAP": 9
+        },
+        "wins": 23,
+        "complete": 28,
+        "win_rate": 0.8214285714285714,
+        "mean_usd": 21.404285714285717,
+        "total_usd": 599.32,
+        "worst_usd": -1030.56,
+        "mean_win_usd": 182.26608695652175,
+        "mean_loss_usd": -718.56,
+        "exits": {
+          "profit_take": 23,
+          "stop_loss": 5
+        }
+      },
+      {
+        "setup": "ic_bbo_implied_d20_w20",
+        "attempts": 45,
+        "statuses": {
+          "PARTITION_MISSING": 5,
+          "ANCHOR_BBO_UNAVAILABLE": 3,
+          "COMPLETE_EXIT": 28,
+          "QUOTE_GAP": 9
+        },
+        "wins": 22,
+        "complete": 28,
+        "win_rate": 0.7857142857142857,
+        "mean_usd": -13.059999999999992,
+        "total_usd": -365.6799999999997,
+        "worst_usd": -1030.56,
+        "mean_win_usd": 183.98545454545453,
+        "mean_loss_usd": -735.56,
+        "exits": {
+          "profit_take": 22,
+          "stop_loss": 6
+        }
+      }
+    ]
+  },
+  "sample_coverage": {
+    "as_of": "2026-09-23T00:48:39.568925+00:00",
+    "historical_indexed_sessions": 51,
+    "within_current_scan": 26,
+    "current_complete": 7,
+    "all_complete": 12,
+    "rows": [
+      {
+        "session": "2026-07-13",
+        "in35day_scan": false,
+        "available_targets": 136,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 33,
+        "first_missing_et": "2026-07-12T20:48:00-04:00"
+      },
+      {
+        "session": "2026-07-14",
+        "in35day_scan": false,
+        "available_targets": 189,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 548,
+        "first_missing_et": "2026-07-14T05:23:00-04:00"
+      },
+      {
+        "session": "2026-07-15",
+        "in35day_scan": false,
+        "available_targets": 174,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 203,
+        "first_missing_et": "2026-07-14T23:38:00-04:00"
+      },
+      {
+        "session": "2026-07-16",
+        "in35day_scan": false,
+        "available_targets": 161,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 223,
+        "first_missing_et": "2026-07-15T23:58:00-04:00"
+      },
+      {
+        "session": "2026-07-17",
+        "in35day_scan": false,
+        "available_targets": 184,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 523,
+        "first_missing_et": "2026-07-17T04:58:00-04:00"
+      },
+      {
+        "session": "2026-07-20",
+        "in35day_scan": false,
+        "available_targets": 167,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 88,
+        "first_missing_et": "2026-07-19T21:43:00-04:00"
+      },
+      {
+        "session": "2026-07-21",
+        "in35day_scan": false,
+        "available_targets": 179,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 53,
+        "first_missing_et": "2026-07-20T21:08:00-04:00"
+      },
+      {
+        "session": "2026-07-22",
+        "in35day_scan": false,
+        "available_targets": 183,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 268,
+        "first_missing_et": "2026-07-22T00:43:00-04:00"
+      },
+      {
+        "session": "2026-07-23",
+        "in35day_scan": false,
+        "available_targets": 188,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 638,
+        "first_missing_et": "2026-07-23T06:53:00-04:00"
+      },
+      {
+        "session": "2026-07-24",
+        "in35day_scan": false,
+        "available_targets": 184,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 278,
+        "first_missing_et": "2026-07-24T00:53:00-04:00"
+      },
+      {
+        "session": "2026-07-27",
+        "in35day_scan": false,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-07-28",
+        "in35day_scan": false,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-07-29",
+        "in35day_scan": false,
+        "available_targets": 180,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 418,
+        "first_missing_et": "2026-07-29T03:13:00-04:00"
+      },
+      {
+        "session": "2026-07-30",
+        "in35day_scan": false,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-07-31",
+        "in35day_scan": false,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-08-03",
+        "in35day_scan": false,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-08-04",
+        "in35day_scan": false,
+        "available_targets": 175,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 33,
+        "first_missing_et": "2026-08-03T20:48:00-04:00"
+      },
+      {
+        "session": "2026-08-05",
+        "in35day_scan": false,
+        "available_targets": 185,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 213,
+        "first_missing_et": "2026-08-04T23:48:00-04:00"
+      },
+      {
+        "session": "2026-08-06",
+        "in35day_scan": false,
+        "available_targets": 188,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 668,
+        "first_missing_et": "2026-08-06T07:23:00-04:00"
+      },
+      {
+        "session": "2026-08-07",
+        "in35day_scan": false,
+        "available_targets": 187,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 68,
+        "first_missing_et": "2026-08-06T21:23:00-04:00"
+      },
+      {
+        "session": "2026-08-10",
+        "in35day_scan": false,
+        "available_targets": 180,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 553,
+        "first_missing_et": "2026-08-10T05:28:00-04:00"
+      },
+      {
+        "session": "2026-08-11",
+        "in35day_scan": false,
+        "available_targets": 185,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 313,
+        "first_missing_et": "2026-08-11T01:28:00-04:00"
+      },
+      {
+        "session": "2026-08-12",
+        "in35day_scan": false,
+        "available_targets": 165,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 188,
+        "first_missing_et": "2026-08-11T23:23:00-04:00"
+      },
+      {
+        "session": "2026-08-13",
+        "in35day_scan": false,
+        "available_targets": 187,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 43,
+        "first_missing_et": "2026-08-12T20:58:00-04:00"
+      },
+      {
+        "session": "2026-08-14",
+        "in35day_scan": false,
+        "available_targets": 37,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 33,
+        "first_missing_et": "2026-08-13T20:48:00-04:00"
+      },
+      {
+        "session": "2026-08-17",
+        "in35day_scan": true,
+        "available_targets": 175,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 443,
+        "first_missing_et": "2026-08-17T03:38:00-04:00"
+      },
+      {
+        "session": "2026-08-18",
+        "in35day_scan": true,
+        "available_targets": 160,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 148,
+        "first_missing_et": "2026-08-17T22:43:00-04:00"
+      },
+      {
+        "session": "2026-08-19",
+        "in35day_scan": true,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-08-20",
+        "in35day_scan": true,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-08-21",
+        "in35day_scan": true,
+        "available_targets": 175,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 73,
+        "first_missing_et": "2026-08-20T21:28:00-04:00"
+      },
+      {
+        "session": "2026-08-24",
+        "in35day_scan": true,
+        "available_targets": 181,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 203,
+        "first_missing_et": "2026-08-23T23:38:00-04:00"
+      },
+      {
+        "session": "2026-08-25",
+        "in35day_scan": true,
+        "available_targets": 181,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 473,
+        "first_missing_et": "2026-08-25T04:08:00-04:00"
+      },
+      {
+        "session": "2026-08-26",
+        "in35day_scan": true,
+        "available_targets": 186,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 183,
+        "first_missing_et": "2026-08-25T23:18:00-04:00"
+      },
+      {
+        "session": "2026-08-27",
+        "in35day_scan": true,
+        "available_targets": 182,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 53,
+        "first_missing_et": "2026-08-26T21:08:00-04:00"
+      },
+      {
+        "session": "2026-08-28",
+        "in35day_scan": true,
+        "available_targets": 176,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 63,
+        "first_missing_et": "2026-08-27T21:18:00-04:00"
+      },
+      {
+        "session": "2026-08-31",
+        "in35day_scan": true,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-09-01",
+        "in35day_scan": true,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-09-02",
+        "in35day_scan": true,
+        "available_targets": 160,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 478,
+        "first_missing_et": "2026-09-02T04:13:00-04:00"
+      },
+      {
+        "session": "2026-09-03",
+        "in35day_scan": true,
+        "available_targets": 130,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 353,
+        "first_missing_et": "2026-09-03T02:08:00-04:00"
+      },
+      {
+        "session": "2026-09-04",
+        "in35day_scan": true,
+        "available_targets": 185,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 83,
+        "first_missing_et": "2026-09-03T21:38:00-04:00"
+      },
+      {
+        "session": "2026-09-08",
+        "in35day_scan": true,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-09-09",
+        "in35day_scan": true,
+        "available_targets": 189,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 613,
+        "first_missing_et": "2026-09-09T06:28:00-04:00"
+      },
+      {
+        "session": "2026-09-10",
+        "in35day_scan": true,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-09-11",
+        "in35day_scan": true,
+        "available_targets": 190,
+        "required_targets": 190,
+        "complete": true,
+        "first_missing_offset": null,
+        "first_missing_et": null
+      },
+      {
+        "session": "2026-09-14",
+        "in35day_scan": true,
+        "available_targets": 180,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 573,
+        "first_missing_et": "2026-09-14T05:48:00-04:00"
+      },
+      {
+        "session": "2026-09-15",
+        "in35day_scan": true,
+        "available_targets": 175,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 648,
+        "first_missing_et": "2026-09-15T07:03:00-04:00"
+      },
+      {
+        "session": "2026-09-16",
+        "in35day_scan": true,
+        "available_targets": 179,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 748,
+        "first_missing_et": "2026-09-16T08:43:00-04:00"
+      },
+      {
+        "session": "2026-09-17",
+        "in35day_scan": true,
+        "available_targets": 166,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 38,
+        "first_missing_et": "2026-09-16T20:53:00-04:00"
+      },
+      {
+        "session": "2026-09-18",
+        "in35day_scan": true,
+        "available_targets": 189,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 223,
+        "first_missing_et": "2026-09-17T23:58:00-04:00"
+      },
+      {
+        "session": "2026-09-21",
+        "in35day_scan": true,
+        "available_targets": 185,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 513,
+        "first_missing_et": "2026-09-21T04:48:00-04:00"
+      },
+      {
+        "session": "2026-09-22",
+        "in35day_scan": true,
+        "available_targets": 186,
+        "required_targets": 190,
+        "complete": false,
+        "first_missing_offset": 203,
+        "first_missing_et": "2026-09-21T23:38:00-04:00"
+      }
+    ]
+  }
+}

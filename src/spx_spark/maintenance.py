@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from spx_spark.config import MaintenanceSettings, NotificationSettings, StorageSettings
+from spx_spark.data_platform.settings import DataPlatformSettings
 from spx_spark.marketdata import Provider
 from spx_spark.notifier.dispatcher import dispatch_notification
 from spx_spark.notifier.model import CommandRunner, default_runner
@@ -442,6 +443,9 @@ def maybe_send_disk_alert(
         now = now or datetime.now(tz=timezone.utc)
         level = report.action_level
         result: dict[str, object] = {"level": level, "sent": False, "reason": ""}
+        if report.disk_free_bytes >= DataPlatformSettings.from_env().storage_pressure_warning_free_bytes:
+            result["reason"] = "free_space_above_alert_threshold"
+            return result
         if level not in DISK_ALERT_LEVELS:
             result["reason"] = "below_degraded_threshold"
             return result

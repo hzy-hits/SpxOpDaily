@@ -909,7 +909,7 @@ def test_gth_event_settlement_put_vertical_is_not_watchable() -> None:
     assert "7750/7745" not in sections.desk_view
     assert "可看 ·" not in sections.desk_view
     assert "可看 ·" not in sections.execution
-    assert "概率暂不可估（四腿报价未就绪）" in sections.desk_view
+    assert "概率暂不可估" in sections.desk_view and "delta" in sections.desk_view
     assert "扫描中 · 仅人工候选可做" in sections.execution
 
 
@@ -1800,7 +1800,7 @@ def test_condor_desk_probabilities_follow_selected_contract_without_scan_fallbac
 
 
 @pytest.mark.parametrize("change", [
-    {"status": "insufficient_sample"}, {"status": "unavailable"},
+    {"status": "unavailable"},
     {"net_profit_rate": None}, {"net_profit_rate": float("nan")},
     {"stop_loss_rate": 1.2}, {"management_policy_version": "old"},
     {"hard_exit_et": "16:00"}, {"n_sessions": 0},
@@ -1853,8 +1853,23 @@ def test_selected_condor_can_use_only_matching_background_estimate(mismatch):
         assert "盈利 62%" in text and "10:30 ET" in text and "贷记 2.50" in text
 
 
-def test_small_condor_sample_does_not_present_all_winners_as_certain_profit():
+def test_small_condor_sample_displays_observed_rates_without_hiding_results():
+    from spx_spark.analytics.options.strategy_payoff import RTH_IRON_CONDOR_MANAGEMENT_POLICY as policy
     from spx_spark.application.order_map.desk_strategy_view import iron_condor_desk_line
     text = iron_condor_desk_line({"status": "ready", "path_distribution": {
-        "status": "insufficient_sample", "n_sessions": 7, "net_profit_rate": 1.0}})
-    assert "7 个完整历史交易日" in text and "概率暂不可估" in text and "%" not in text
+        "status": "insufficient_sample", "n_sessions": 7, "net_profit_rate": 1.0,
+        "tp_before_stop_rate": 1.0, "stop_loss_rate": 0.0,
+        "management_policy_version": policy.policy_version, "hard_exit_et": policy.hard_exit_et}})
+    assert "7 个历史交易日" in text and "小样本" in text and "历史模拟" in text
+    assert "盈利 100%" in text and "止盈 100%" in text and "止损 0%" in text
+    assert "概率暂不可估" not in text
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("spx_price_unavailable", "SPX"),
+    ("iron_condor_delta_quotes_unavailable", "delta"),
+])
+def test_condor_unavailable_summary_uses_actual_input_failure(reason, expected):
+    from spx_spark.application.order_map.desk_strategy_view import iron_condor_desk_line
+    text = iron_condor_desk_line({"status": "unavailable", "reason": reason})
+    assert expected in text

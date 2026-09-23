@@ -31,10 +31,13 @@ def test_condor_background_estimate_freezes_quote_and_never_waits_for_history(mo
 
     entered, release = Event(), Event()
     monkeypatch.setattr(module, "_CONDOR_ADVISORY", module.HistoryPreparation())
+    (tmp_path / "features/iv_surface/date=2026-06-01").mkdir(parents=True)
+    (tmp_path / "features/iv_surface/date=2027-01-01").mkdir(parents=True)
     def slow_history(candidate, facts, **kwargs):
         entered.set()
         assert release.wait(5), "decision waited for the advisory instead of returning"
         assert facts["history_preparation_nonblocking"] is False
+        assert kwargs["probability_settings"].window_days == 66
         return {"status": "estimated_uncalibrated", "net_profit_rate": candidate["quote"]["credit"]}
     monkeypatch.setattr(module, "estimate_path_distribution", slow_history)
     structure = {**_iron_condor(session_mode="rth"), "status": "ready", "provider": "schwab",
