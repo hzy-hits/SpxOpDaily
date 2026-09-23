@@ -1277,6 +1277,37 @@ def test_authorized_iron_condor_survives_advisory_lake_failure(monkeypatch, tmp_
     assert decision["automatic_ordering"] is False
 
 
+def test_live_condor_map_prepares_probabilities_without_holding_up_decision(monkeypatch, tmp_path):
+    from threading import Event
+    from spx_spark.application.order_map import path_distribution as distribution
+    from spx_spark.application.order_map.strategy_edge_model import apply_strategy_edge_authority
+    from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
+    facts = _rth_facts()
+    entered, release, completed = Event(), Event(), Event()
+    monkeypatch.setattr(distribution, "_CONDOR_ADVISORY", distribution.HistoryPreparation())
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack", lambda *a: facts)
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select._accepted_session_cards", lambda _: ())
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.apply_strategy_edge_authority", apply_strategy_edge_authority)
+    def slow_estimate(*args, **kwargs):
+        entered.set()
+        try:
+            assert release.wait(5)
+            raise OSError("advisory lake unavailable")
+        finally:
+            completed.set()
+    monkeypatch.setattr(distribution, "estimate_path_distribution", slow_estimate)
+    try:
+        decision = build_strategy_decision(_payload(), _rth_state(), RTH_NOW,
+            data_root=tmp_path, background_models=True, probability_settings=StrategyDistributionSettings())
+        assert decision["decision_type"] == "IRON_CONDOR", decision["why_not"]
+        assert decision["automatic_ordering"] is False
+        assert "history_preparation_pending" in decision["iron_condor_map"]["path_distribution"]["reason_codes"]
+        assert entered.wait(5)
+    finally:
+        release.set()
+    assert completed.wait(5)
+
+
 @pytest.mark.parametrize("hour,minute,eligible", [(13,29,False),(13,30,True),(15,1,True),(18,0,True),(19,44,True),(19,45,False)])
 def test_rth_ic_entry_clock_respects_session_and_management_exit(hour, minute, eligible):
     now = RTH_NOW.replace(hour=hour, minute=minute)

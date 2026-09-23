@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import median
@@ -34,7 +35,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     simulate_management_policy,
 )
 from spx_spark.application.market_features.physical_followthrough import (
-    ClearingSpotPath,
+    ClearingSpotPath, HistoryPreparation, HistoryPreparing,
     PhysicalSpotPath,
     RTH_OPEN_MINUTE,
     load_iron_condor_clearing_paths,
@@ -54,6 +55,8 @@ from spx_spark.application.order_map.surface_path_distribution import (
 )
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 
+_CONDOR_ADVISORY = HistoryPreparation()
+CONDOR_PROBABILITY_REFRESH_SECONDS = 300
 METHOD = "physical_path_management_policy.v4"
 IRON_CONDOR_CLEARING_METHOD = "physical_path_iron_condor_clear_1230.v2"
 SUPPORTED_DEBITS = {
@@ -105,11 +108,36 @@ def attach_iron_condor_path_distribution(
     policy: StrategyPolicy | None = None,
     paths: tuple[PhysicalSpotPath, ...] | None = None,
     clock_mode: str | None = None,
+    nonblocking: bool = False,
 ) -> dict[str, Any]:
     """Attach the session-specific iron-condor management distribution."""
 
     if str(structure.get("status") or "") != "ready":
         return {**dict(structure), "path_distribution": _unavailable("iron_condor_not_ready")}
+    if nonblocking:
+        # Freeze one quote snapshot per structure/five-minute bucket. No lake I/O
+        # or pricing runs on the caller; estimates disclose their original basis.
+        frozen_structure, frozen_facts = deepcopy(dict(structure)), deepcopy(dict(facts))
+        frozen_facts["history_preparation_nonblocking"] = False
+        key = (str(data_root), facts.get("session_date"), structure.get("session_mode"), structure.get("provider"),
+               structure.get("expiry"), tuple(structure.get("strikes") or ()),
+               int(now.timestamp()) // CONDOR_PROBABILITY_REFRESH_SECONDS, repr(probability_settings))
+        def prepare():
+            try:
+                result = attach_iron_condor_path_distribution(
+                    frozen_structure, frozen_facts, data_root=data_root,
+                    probability_settings=probability_settings, now=now, policy=policy,
+                    paths=paths, clock_mode=clock_mode,
+                )["path_distribution"]
+            except Exception:
+                result = _unavailable("history_preparation_failed")
+            return {**result, "probability_as_of": now.isoformat(),
+                    "entry_credit_basis": _map(frozen_structure.get("quote")).get("credit")}
+        try:
+            distribution = _CONDOR_ADVISORY.get(key, prepare, nonblocking=True)
+        except HistoryPreparing as exc:
+            distribution = _unavailable(str(exc))
+        return {**dict(structure), "path_distribution": distribution}
     candidate = _iron_condor_as_candidate(structure)
     candidate["session_mode"] = candidate.get("session_mode") or _map(facts.get("session")).get(
         "mode"

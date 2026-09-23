@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Mapping
 
 from spx_spark.analytics.options.pricing import finite_float
@@ -64,7 +66,7 @@ def strategy_decision_desk_view(payload: Mapping[str, Any]) -> str | None:
     if gth_session:
         return _gth_scan_desk_view(payload, decision, reasons)
     if watchable and candidate.get("strategy_type") == "IRON_CONDOR":
-        return "人工铁鹰候选 · " + iron_condor_desk_line(candidate)
+        return "人工铁鹰候选 · " + compact_iron_condor_desk_line(payload, decision)
     regime = _mapping(decision.get("regime"))
     pin_center = pin_watch_center(regime)
     trade_center = pin_trade_center(regime)
@@ -312,7 +314,10 @@ def compact_iron_condor_desk_line(
     decision = _mapping(decision or payload.get("strategy_decision"))
     candidate = _mapping(decision.get("candidate"))
     if candidate.get("strategy_type") == "IRON_CONDOR":
-        # Never borrow probabilities from a different scan structure.
+        scan = _mapping(decision.get("iron_condor_map"))
+        identity = ("expiry", "strikes", "session_mode", "provider")
+        if all(candidate.get(key) and candidate.get(key) == scan.get(key) for key in identity):
+            candidate = {**candidate, "path_distribution": scan.get("path_distribution")}
         return iron_condor_desk_line(candidate)
     return iron_condor_desk_line(_mapping(decision.get("iron_condor_map")))
 
@@ -841,8 +846,16 @@ def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
         distribution = _mapping(structure.get("path_distribution"))
     status = distribution.get("status")
     if status == "insufficient_sample":
+        sessions = finite_float(distribution.get("n_sessions"))
+        if sessions is not None and sessions >= 0 and sessions.is_integer():
+            return f"概率暂不可估（仅 {int(sessions)} 个完整历史交易日，样本不足）"
         return "概率暂不可估（历史样本不足）"
     if status != "estimated_uncalibrated":
+        reasons = distribution.get("reason_codes") or ()
+        if "history_preparation_pending" in reasons:
+            return "概率计算中"
+        if "quote_gap" in reasons:
+            return "概率暂不可估（持有路径存在行情缺口）"
         return "概率暂不可估（管理路径未就绪）"
     policies = {
         policy.policy_version: policy
@@ -875,6 +888,15 @@ def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
         f"；按现行规则最迟在对应交易日 {policy.hard_exit_et} ET 退出"
         f"；{int(sessions)} 个历史交易日，未校准"
     )
+    if distribution.get("probability_as_of"):
+        try:
+            at = datetime.fromisoformat(str(distribution["probability_as_of"]).replace("Z", "+00:00"))
+            credit = finite_float(distribution.get("entry_credit_basis"))
+            if at.tzinfo is None or credit is None or credit <= 0:
+                return "概率暂不可估（报价基准缺失）"
+            text += f"；基于 {at.astimezone(ZoneInfo('America/New_York')):%H:%M} ET 贷记 {credit:.2f}"
+        except ValueError:
+            return "概率暂不可估（报价基准缺失）"
     if _mapping(structure.get("placement_diagnostics")).get("stop_buyback_within_width") is False:
         text += "；注意：3C止损价超过翼宽"
     return text

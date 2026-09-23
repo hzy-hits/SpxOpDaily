@@ -35,7 +35,7 @@ from spx_spark.application.order_map.iron_condor import (
     iron_condor_session_state,
 )
 from spx_spark.application.order_map.path_distribution import (
-    attach_path_distribution,
+    attach_path_distribution, attach_iron_condor_path_distribution,
 )
 from spx_spark.application.order_map.strategy_edge_model import (
     apply_strategy_edge_authority,
@@ -128,6 +128,9 @@ def _build_strategy_decision(
         now=_utc(now),
         policy=DEFAULT_STRATEGY_POLICY,
     )
+    if background_models and data_root is not None and (probability_settings is None or probability_settings.enabled):
+        iron_condor_map = attach_iron_condor_path_distribution(iron_condor_map, facts,
+            data_root=data_root, probability_settings=probability_settings, now=_utc(now), nonblocking=True)
     if not reasons:
         iron_condor_rows = enumerate_iron_condor_candidates(
             payload,

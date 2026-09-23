@@ -1830,3 +1830,31 @@ def test_condor_desk_does_not_round_small_stop_risk_to_zero():
     }})
     assert "止损 <0.1%" in text and "盈利 >99.9%" in text
     assert "止损 0%" not in text and "盈利 100%" not in text
+
+
+@pytest.mark.parametrize("mismatch", [None, "provider", "expiry", "strikes", "session_mode"])
+def test_selected_condor_can_use_only_matching_background_estimate(mismatch):
+    from spx_spark.analytics.options.strategy_payoff import RTH_IRON_CONDOR_MANAGEMENT_POLICY as policy
+    from spx_spark.application.order_map.desk_strategy_view import compact_iron_condor_desk_line
+    identity = {"expiry": "20260922", "provider": "schwab", "session_mode": "rth",
+                "strikes": [7550, 7560, 7620, 7630]}
+    candidate = {**identity, "strategy_type": "IRON_CONDOR"}
+    scan = {**identity, "status": "ready", "path_distribution": {
+        "status": "estimated_uncalibrated", "n_sessions": 31,
+        "management_policy_version": policy.policy_version, "hard_exit_et": policy.hard_exit_et,
+        "net_profit_rate": .62, "tp_before_stop_rate": .48, "stop_loss_rate": .21,
+        "probability_as_of": "2026-09-22T14:30:00+00:00", "entry_credit_basis": 2.5}}
+    if mismatch:
+        scan[mismatch] = "different"
+    text = compact_iron_condor_desk_line({}, {"candidate": candidate, "iron_condor_map": scan})
+    if mismatch:
+        assert "概率暂不可估" in text and "%" not in text
+    else:
+        assert "盈利 62%" in text and "10:30 ET" in text and "贷记 2.50" in text
+
+
+def test_small_condor_sample_does_not_present_all_winners_as_certain_profit():
+    from spx_spark.application.order_map.desk_strategy_view import iron_condor_desk_line
+    text = iron_condor_desk_line({"status": "ready", "path_distribution": {
+        "status": "insufficient_sample", "n_sessions": 7, "net_profit_rate": 1.0}})
+    assert "7 个完整历史交易日" in text and "概率暂不可估" in text and "%" not in text

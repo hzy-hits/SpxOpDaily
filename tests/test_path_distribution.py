@@ -24,6 +24,72 @@ GTH_NOW = datetime(2026, 8, 6, 4, 30, tzinfo=timezone.utc)
 EXPIRY = "20260806"
 
 
+def test_condor_background_estimate_freezes_quote_and_never_waits_for_history(monkeypatch, tmp_path):
+    import time as clock
+    from threading import Event
+    from spx_spark.application.order_map import path_distribution as module
+
+    entered, release = Event(), Event()
+    monkeypatch.setattr(module, "_CONDOR_ADVISORY", module.HistoryPreparation())
+    def slow_history(candidate, facts, **kwargs):
+        entered.set()
+        assert release.wait(5), "decision waited for the advisory instead of returning"
+        assert facts["history_preparation_nonblocking"] is False
+        return {"status": "estimated_uncalibrated", "net_profit_rate": candidate["quote"]["credit"]}
+    monkeypatch.setattr(module, "estimate_path_distribution", slow_history)
+    structure = {**_iron_condor(session_mode="rth"), "status": "ready", "provider": "schwab",
+                 "expiry": EXPIRY, "strikes": [7680, 7690, 7810, 7820]}
+    facts = _facts(now=RTH_NOW)
+    def read(at=RTH_NOW):
+        return module.attach_iron_condor_path_distribution(structure, facts, data_root=tmp_path,
+            probability_settings=None, now=at, nonblocking=True)["path_distribution"]
+    try:
+        first = read()
+        assert "history_preparation_pending" in first["reason_codes"]
+        assert entered.wait(5)
+        structure["quote"]["credit"] = .5
+        facts["history_preparation_nonblocking"] = True
+        assert "history_preparation_pending" in read()["reason_codes"]
+    finally:
+        release.set()
+    deadline = clock.monotonic() + 5
+    while (ready := read())["status"] == "unavailable" and clock.monotonic() < deadline:
+        clock.sleep(.01)
+    assert ready["net_profit_rate"] == .8
+    assert ready["entry_credit_basis"] == .8
+    assert ready["probability_as_of"] == RTH_NOW.isoformat()
+    assert "history_preparation_pending" in read(RTH_NOW + timedelta(minutes=5))["reason_codes"]
+    deadline = clock.monotonic() + 5
+    while (refreshed := read(RTH_NOW + timedelta(minutes=5)))["status"] == "unavailable" and clock.monotonic() < deadline:
+        clock.sleep(.01)
+    assert refreshed["entry_credit_basis"] == .5
+    structure["provider"] = "ibkr"
+    assert "history_preparation_pending" in read()["reason_codes"]
+    deadline = clock.monotonic() + 5
+    while (changed := read())["status"] == "unavailable" and clock.monotonic() < deadline:
+        clock.sleep(.01)
+    assert changed["entry_credit_basis"] == .5
+
+
+def test_condor_background_failure_is_unavailable_not_strategy_failure(monkeypatch, tmp_path):
+    import time as clock
+    from spx_spark.application.order_map import path_distribution as module
+    monkeypatch.setattr(module, "_CONDOR_ADVISORY", module.HistoryPreparation())
+    def broken_history(*args, **kwargs):
+        raise OSError("history unreadable")
+    monkeypatch.setattr(module, "estimate_path_distribution", broken_history)
+    structure = {**_iron_condor(session_mode="rth"), "status": "ready"}
+    def read():
+        return module.attach_iron_condor_path_distribution(structure, _facts(now=RTH_NOW),
+            data_root=tmp_path, probability_settings=None, now=RTH_NOW, nonblocking=True)["path_distribution"]
+    deadline = clock.monotonic() + 5
+    while "history_preparation_failed" not in (result := read())["reason_codes"] and clock.monotonic() < deadline:
+        clock.sleep(.01)
+    assert result["status"] == "unavailable"
+    assert "history_preparation_failed" in result["reason_codes"]
+    assert read() == result
+
+
 def _write_session(root: Path, day: str, *, start_et: time, prices: list[float]) -> None:
     path = root / "features" / "spx_standardized_samples" / f"date={day}" / "events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
