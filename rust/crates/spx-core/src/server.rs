@@ -223,6 +223,14 @@ fn handle_connection(
             .process(envelope, Utc::now());
         let ack = match outcome {
             Ok(outcome) => accepted_ack(message_id, &outcome),
+            Err(
+                failure @ crate::CoreError::RawLog(
+                    crate::raw_log::RawLogError::InsufficientFreeSpace { .. },
+                ),
+            ) => {
+                error!(error = %failure, "ingress backpressured by disk reserve; retry after space recovery");
+                CoreAckV1::rejected(Some(message_id), CoreAckReason::ServerBusy)
+            }
             Err(failure) => {
                 error!(error = %failure, "ingress message rejected");
                 CoreAckV1::rejected(Some(message_id), CoreAckReason::ProcessingRejected)

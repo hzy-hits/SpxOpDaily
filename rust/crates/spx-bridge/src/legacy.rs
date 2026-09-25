@@ -176,7 +176,15 @@ pub fn read_research_signals(
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
         return Err(LegacyError::Oversized);
     }
-    let signals: ResearchSignalsV1 = serde_json::from_slice(&bytes)?;
+    let mut payload: Value = serde_json::from_slice(&bytes)?;
+    if payload.get("schema_version").and_then(Value::as_str) == Some("research_context.v2") {
+        // Python-only strategy evidence must not extend the frozen Rust wire contract.
+        let object = payload
+            .as_object_mut()
+            .expect("schema field requires object");
+        object.remove("denoising_forward");
+    }
+    let signals: ResearchSignalsV1 = serde_json::from_value(payload)?;
     signals.validate().map_err(|error| {
         LegacyError::Json(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -367,6 +375,35 @@ mod tests {
         let document = read_research_signals(file.path(), 1_048_576).unwrap();
         assert_eq!(document.signals.schema_version, "research_context.v2");
         assert!(document.signals.context_v2().is_some());
+    }
+
+    #[test]
+    fn python_strategy_extension_isolated_without_accepting_unknown_fields_or_ordering() {
+        let mut payload: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/golden/domain/v2/research_context.json"
+        ))
+        .unwrap();
+        let expected: ResearchSignalsV1 = serde_json::from_value(payload.clone()).unwrap();
+        payload["denoising_forward"] = serde_json::json!({"status": "research_only"});
+        payload["automatic_ordering"] = Value::Bool(false);
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&payload).unwrap())
+            .unwrap();
+        assert_eq!(
+            read_research_signals(file.path(), 1_048_576)
+                .unwrap()
+                .signals,
+            expected
+        );
+        for (key, value) in [
+            ("automatic_ordering", Value::Bool(true)),
+            ("unknown_field", Value::Null),
+        ] {
+            let mut changed = payload.clone();
+            changed[key] = value;
+            std::fs::write(file.path(), serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(read_research_signals(file.path(), 1_048_576).is_err());
+        }
     }
 
     #[test]

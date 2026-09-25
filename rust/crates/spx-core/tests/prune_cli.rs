@@ -54,7 +54,7 @@ fn write_config(temp: &TempDir, raw_log_dir: &std::path::Path) -> std::path::Pat
 }
 
 #[test]
-fn prune_cli_obeys_the_cross_process_directory_lock() {
+fn prune_cli_obeys_the_cross_process_completed_date_lock() {
     let temp = TempDir::new().expect("temporary directory");
     let raw = temp.path().join("frames");
     fs::create_dir(&raw).expect("create raw directory");
@@ -68,7 +68,7 @@ fn prune_cli_obeys_the_cross_process_directory_lock() {
     let config_path = write_config(&temp, &raw);
 
     let descriptor = open(
-        raw.join(DIRECTORY_LOCK_FILE),
+        raw.join(format!(".spx-raw-log-date-{old_date}.lock")),
         OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::from_raw_mode(0o600),
     )

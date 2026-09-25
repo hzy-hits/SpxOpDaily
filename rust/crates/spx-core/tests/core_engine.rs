@@ -1853,3 +1853,68 @@ fn committed_cancellation_without_ingress_record_replays_as_fence_duplicate() {
         CoreOutcome::Duplicate { .. }
     ));
 }
+
+#[test]
+fn disk_reserve_rejects_over_socket_as_retryable_without_writing_frames() {
+    use spx_domain::{AckStatus, CoreAckReason, CoreAckV1};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::time::{Duration, Instant};
+    let temp = TempDir::new().unwrap();
+    let mut cfg = config(&temp);
+    cfg.raw_log_min_free_bytes = 10 * 1024_u64.pow(4);
+    let socket = cfg.socket_path.clone();
+    let raw = cfg.raw_log_dir.clone();
+    let engine = CoreEngine::open(cfg, Utc::now()).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let socket_copy = socket.clone();
+    let server = std::thread::spawn(move || {
+        spx_core::serve_unix(engine, socket_copy, 1_048_576, 2, &stopped)
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let frame = quote_envelope(
+        "message:disk-reserve",
+        Provider::Schwab,
+        MarketSession::Rth,
+        OperationalState::Live,
+        1,
+        Utc::now(),
+    );
+    let bytes = serde_json::to_vec(&frame).unwrap();
+    for _ in 0..5 {
+        stream
+            .write_all(&u32::try_from(bytes.len()).unwrap().to_be_bytes())
+            .unwrap();
+        stream.write_all(&bytes).unwrap();
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).unwrap();
+        let mut response = vec![0; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut response).unwrap();
+        let ack: CoreAckV1 = serde_json::from_slice(&response).unwrap();
+        assert_eq!(ack.status, AckStatus::Rejected);
+        assert_eq!(ack.reason_code, CoreAckReason::ServerBusy);
+        assert_eq!(ack.message_id, Some(frame.message_id.clone()));
+    }
+    assert!(
+        std::fs::read_dir(raw).unwrap().all(|p| p
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|e| e != "ndjson"))
+    );
+    stop.store(true, Ordering::Relaxed);
+    drop(stream);
+    server.join().unwrap().unwrap();
+}

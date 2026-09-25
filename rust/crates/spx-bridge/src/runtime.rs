@@ -1255,6 +1255,59 @@ mod tests {
     }
 
     #[test]
+    fn busy_core_can_recover_after_more_than_the_permanent_rejection_limit() {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp);
+        write_sources(&config);
+        BridgeState::initialize(&config.state_path).unwrap();
+        let listener = UnixListener::bind(&config.socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut frames = Vec::new();
+            for attempt in 0..6 {
+                let (mut stream, _) = listener.accept().unwrap();
+                loop {
+                    let mut length = [0; 4];
+                    if stream.read_exact(&mut length).is_err() {
+                        break;
+                    }
+                    let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+                    stream.read_exact(&mut bytes).unwrap();
+                    let envelope: IngressEnvelopeV1 = serde_json::from_slice(&bytes).unwrap();
+                    frames.push(bytes);
+                    let ack = if attempt < 5 {
+                        CoreAckV1::rejected(Some(envelope.message_id), CoreAckReason::ServerBusy)
+                    } else {
+                        CoreAckV1::accepted(envelope.message_id, CoreAckDisposition::Applied, None)
+                    };
+                    let bytes = serde_json::to_vec(&ack).unwrap();
+                    stream
+                        .write_all(&u32::try_from(bytes.len()).unwrap().to_be_bytes())
+                        .unwrap();
+                    stream.write_all(&bytes).unwrap();
+                    if attempt < 5 {
+                        break;
+                    }
+                }
+            }
+            frames
+        });
+        let mut runtime = BridgeRuntime::open(config).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stop = AtomicBool::new(false);
+        while runtime.health.counters.accepted_frames == 0 && Instant::now() < deadline {
+            runtime
+                .tick(&stop)
+                .expect("transient disk pressure must not halt the bridge");
+        }
+        assert!(runtime.health.counters.accepted_frames > 0);
+        assert!(runtime.state.pending.is_none());
+        drop(runtime);
+        let frames = server.join().unwrap();
+        assert!(frames.len() >= 6);
+        assert!(frames[..6].iter().all(|frame| frame == &frames[0]));
+    }
+
+    #[test]
     fn source_failure_clears_both_providers_and_same_snapshot_recovery_resyncs() {
         let temp = TempDir::new().unwrap();
         let config = config(&temp);

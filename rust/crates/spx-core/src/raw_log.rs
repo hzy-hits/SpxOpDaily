@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -420,7 +420,8 @@ fn prune_raw_log_inner(
         ));
     }
     let directory = validate_retention_target(directory.as_ref())?;
-    let _directory_lock = DirectoryLock::acquire(&directory, DirectoryLockMode::Exclusive)?;
+    // Verification can read gigabytes. Fence completed dates, not today's writer.
+    let _directory_lock = DirectoryLock::acquire(&directory, DirectoryLockMode::Shared)?;
     let keep_cutoff = current_utc_date
         .checked_sub_days(Days::new(u64::from(keep_completed_days)))
         .ok_or(RawLogError::InvalidRetentionPolicy(
@@ -440,6 +441,21 @@ fn prune_raw_log_inner(
         max_total_bytes,
         total_bytes_before,
     )?;
+    let selected_dates: BTreeSet<_> = segments
+        .iter()
+        .zip(&policy_selection.selected)
+        .filter(|(_, selected)| **selected)
+        .map(|(segment, _)| segment.date)
+        .collect();
+    let _date_locks = selected_dates
+        .iter()
+        .map(|date| {
+            DirectoryLock::acquire_path(
+                &date_lock_path(&directory, &date.to_string()),
+                DirectoryLockMode::Exclusive,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let (selection, archive_authorized_files, archive_denials) = match archive_root {
         Some(root) => {
             authorize_archive_selection(&segments, &policy_selection, root, total_bytes_before)
@@ -1230,15 +1246,19 @@ mod tests {
     }
 
     #[test]
-    fn shared_append_lock_blocks_exclusive_prune_until_release() {
+    fn completed_date_prune_waits_for_that_date_but_allows_current_appends() {
         use std::sync::mpsc;
         use std::time::Duration;
 
         let temp = TempDir::new().expect("temporary directory");
         write_segment(temp.path(), "2026-07-29.0000.ndjson", b"expired");
         let directory = fs::canonicalize(temp.path()).expect("canonical raw directory");
-        let shared = DirectoryLock::acquire(&directory, DirectoryLockMode::Shared)
-            .expect("shared append lock");
+        let log = RawLog::new(&directory, 4096).expect("live raw log");
+        let shared = DirectoryLock::acquire_path(
+            &date_lock_path(&directory, "2026-07-29"),
+            DirectoryLockMode::Shared,
+        )
+        .expect("same-date append lock");
         let (started_tx, started_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let prune_directory = directory.clone();
@@ -1258,7 +1278,12 @@ mod tests {
             done_rx.recv_timeout(Duration::from_millis(100)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
-
+        log.append(
+            &Payload { value: "live" },
+            at("2026-08-01T14:00:00Z"),
+            AppendDurability::Durable,
+        )
+        .expect("current date is not fenced by old-date prune");
         drop(shared);
         done_rx
             .recv_timeout(Duration::from_secs(2))

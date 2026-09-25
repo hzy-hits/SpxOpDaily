@@ -86,10 +86,9 @@ work or create a claim/restart loop.
 
 The Oracle overlay replaces the generic frame path with
 `/srv/data/spx-spark/rust-core-shadow/frames`; verified archives live in the
-sibling `archive` directory. At 18:30 `America/New_York`, after the Python
-session finalizer window, `spx-rust-frame-retention.timer` first runs
+sibling `archive` directory. At 00:15 UTC, after the raw frame date closes, `spx-rust-frame-retention.timer` first runs
 `archive-frames --backlog-days 7` and then applies a one-completed-day,
-16 GiB raw-frame policy. Backlog processing prioritizes missing artifacts
+8 GiB raw-frame policy. Backlog processing prioritizes missing artifacts
 oldest-first; existing artifacts can fill remaining batch slots only after
 idempotent verification, so a history longer than seven days advances instead
 of repeatedly selecting the same dates. Each day is streamed at zstd level 1 into a staging directory; every raw
@@ -316,15 +315,20 @@ test -S /run/spx-spark-core-shadow/core.sock
 systemctl --user status spx-spark-order-map-status.timer --no-pager
 /opt/spx-spark-core-shadow/current/bin/spx-core prune-frames \
   --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 1 \
-  --max-total-bytes 17179869184 --require-archive-root \
+  --max-total-bytes 8589934592 --require-archive-root \
   /srv/data/spx-spark/rust-core-shadow/archive --dry-run
 sudo systemctl status spx-rust-frame-retention.timer --no-pager
 sudo journalctl -u spx-rust-frame-retention.service -n 20 --no-pager
 ```
 
-The 16 GiB cap is sized to retain the active UTC partition plus one completed
-UTC day; a completed production day is approximately 5 GiB and cannot satisfy
-the former 2 GiB cap even after a successful archive.
+The 8 GiB cap removes already archived completed segments when retaining them
+would exceed the budget. It never removes the active UTC date, even if that
+date alone exceeds the cap; this is reported as an unsatisfied limit. Old-date
+verification and deletion hold date locks while current-day appends continue.
+The 10 GiB filesystem write reserve remains separate from this retention budget.
+A reserve refusal returns the existing `server_busy` response so the bridge
+retains and retries its exact pending frame after space recovers, without using
+up the permanent bad-frame rejection limit.
 
 Before a manual prune or first timer start, backfill and verify at most seven
 completed UTC days per invocation:
