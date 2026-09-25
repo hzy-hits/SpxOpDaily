@@ -50,5 +50,27 @@ Python全量3,524项、Rust全workspace/all-targets/all-features共310项测试�
 Ruff、Import Linter、Rust fmt/Clippy及systemd日历解析通过。发布后的真实链路状态
 以最终交付时的source/ACK/projection/report检查为准，未用测试结果替代生产检查。
 
-复杂度：生产文件新增/删除0；新增依赖、配置键、服务/timer、数据库/表均0。
+复杂度：生产文件新增/删除0，生产Rust逻辑净增32行（不含测试）；新增依赖、
+配置键、服务/timer、数据库/表均0。
 沿用原归档、重试和通知路径，移除prune的全目录排他等待；仅改变两个既有unit参数。
+
+## 上线观察
+
+生产代码`b389ddbe`已部署到不可变release，仅替换Core/Bridge二进制及既有retention
+unit。report/delivery二进制SHA与原版本一致。Core停止会经`Requires=`连带停止
+report/delivery，已在本次部署中恢复两者；未改变owner、通知配置或Bark实现。
+
+14:42 UTC桥接恢复为`ready`，此前持续被拒的研究合同也已获ACK；14:45:08 UTC新
+Desk Map的source与mirror ID/时间相同。14:44–14:45连续检查行情源年龄约0.7–1.1秒、
+ACK推进，`desk_pipeline_faults=[]`。14:30那一份报告的三个目标在14:30:29–30 UTC
+都有服务端成功回执；这证明投递服务结果，不证明手机已展示或用户已阅读。
+
+只读投递检查还发现9/16、9/24共四条未人工确认的`transport_timeout/uncertain`历史
+记录，与本次磁盘故障分别记录；没有改写它们或重新发送过期消息。
+
+14:48 UTC，安装后的原retention service完整执行成功（`Result=success`、exit 0）：
+9/24归档verified，113段共7,558,577,672字节压缩到196,619,002字节；prune在归档屏障
+通过后回收40段、2,681,659,168字节，保护当日56段。加上紧急回收共释放
+10,069,677,446字节（约9.38 GiB冗余源帧），数据盘当时剩余19.10 GiB。
+14:44:55至14:48:25每十秒记录一次，22次观察的ACK全部推进、告警项全部为空；
+清理期间没有再次阻塞实时写入。既有timer下次运行2026-09-26 00:15 UTC。

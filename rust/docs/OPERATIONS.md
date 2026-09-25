@@ -173,6 +173,13 @@ run `systemctl daemon-reload`, then switch the core release and restart it. Do
 not point an older strict-config binary at a newer TOML: it will refuse unknown
 fields instead of silently ignoring them.
 
+For a binary repair with ownership unchanged, inspect the installed `Requires=`
+relationships before stopping Core: the Oracle report and delivery units depend
+on Core and are stopped with it. After Core and bridge recover, explicitly start
+those previously active report/delivery units with their existing configuration,
+then verify all four units and the desk-pipeline fault check. No ownership marker
+or network gate changes are required for this repair.
+
 Configuration validation caps owner leases at one hour, delivery claim leases
 at five minutes, request timeouts at two minutes, and each of at most ten retry
 delays at one day. These are typo guards; production values should remain much
