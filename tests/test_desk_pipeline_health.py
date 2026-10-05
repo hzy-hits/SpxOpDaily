@@ -39,6 +39,12 @@ def test_projection_lag_is_separate_from_report_completion():
     assert desk_pipeline_faults(**data) == ["desk_projection_not_forwarded"]
 
 
+def test_recovery_report_does_not_mask_a_missing_scheduled_report():
+    data = healthy()
+    data["report"]["last_scheduled_persisted_at"] = (NOW - timedelta(hours=1)).isoformat()
+    assert desk_pipeline_faults(**data) == ["scheduled_report_missing"]
+
+
 def test_independent_alert_retries_cooldown_and_recovery(tmp_path):
     settings = SimpleNamespace(data_root=str(tmp_path))
     root = tmp_path / "health"

@@ -402,20 +402,20 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         self.health.updated_at = now;
         self.health.counters.ticks = self.health.counters.ticks.saturating_add(1);
         self.health.last_error_code = None;
-        let Some(slot) = active_report_slot(now, self.config.slot_grace_seconds) else {
-            self.health.phase = ReportPhase::AwaitingSlot;
-            self.health.active_slot = None;
-            self.health.next_attempt_at = None;
-            self.persist_health()?;
-            return Ok(ReportTick::AwaitingSlot);
-        };
-        self.health.active_slot = Some(slot.ledger_slot().to_owned());
+        let scheduled_slot = active_report_slot(now, self.config.slot_grace_seconds);
 
         let latest = match read_latest_projection(
             &self.config.projection_path,
             self.config.source_max_bytes,
         ) {
             Ok(latest) => latest,
+            Err(_) if scheduled_slot.is_none() => {
+                self.health.phase = ReportPhase::AwaitingSlot;
+                self.health.active_slot = None;
+                self.health.next_attempt_at = None;
+                self.persist_health()?;
+                return Ok(ReportTick::AwaitingSlot);
+            }
             Err(error) => {
                 let code = error.code();
                 self.health.phase = if code == ProjectionSourceErrorCode::Missing {
@@ -430,6 +430,19 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
                 return Ok(ReportTick::SourceUnavailable { code });
             }
         };
+        let slot = if latest.projection.recovery_of.is_some() {
+            crate::source::recovery_report_slot(&latest, now)
+        } else {
+            scheduled_slot
+        };
+        let Some(slot) = slot else {
+            self.health.phase = ReportPhase::AwaitingSlot;
+            self.health.active_slot = None;
+            self.health.next_attempt_at = None;
+            self.persist_health()?;
+            return Ok(ReportTick::AwaitingSlot);
+        };
+        self.health.active_slot = Some(slot.ledger_slot().to_owned());
         let projection = &latest.projection;
         let projection_id = projection.projection_id.as_str().to_owned();
         self.health.last_projection_id = Some(projection_id.clone());
@@ -474,6 +487,22 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
             return Ok(ReportTick::Duplicate {
                 slot: slot.ledger_slot().to_owned(),
             });
+        }
+
+        if slot.ledger_slot().starts_with("recovery:") {
+            // The source has just re-evaluated the facts. Do not delay a correction
+            // on a model request or let a writer omit the newly available data.
+            self.health.last_response_model = None;
+            self.health.last_finish_reason = None;
+            self.health.last_visible_content_bytes = None;
+            self.health.last_response_sha256 = None;
+            self.health.last_fallback_reason = Some("data_recovery".to_owned());
+            return self.persist_message(
+                projection,
+                &slot_token,
+                projection.message.clone(),
+                completion_clock(),
+            );
         }
 
         if let Some(backoff) = &self.backoff
@@ -543,31 +572,42 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
                 .saturating_add(1);
         }
 
+        self.persist_message(projection, &slot_token, message, completed_at)
+    }
+
+    fn persist_message(
+        &mut self,
+        projection: &DeskMapProjectionV1,
+        slot_token: &Token,
+        message: DeskMessageV2,
+        completed_at: DateTime<Utc>,
+    ) -> Result<ReportTick, ReportServiceError> {
+        self.health.updated_at = completed_at;
         if projection_expired_after_generation(completed_at, projection.valid_until) {
             self.backoff = None;
             self.health.phase = ReportPhase::Degraded;
             self.health.last_error_code = Some("projection_expired_after_generation".to_owned());
             self.persist_health()?;
             return Ok(ReportTick::ExpiredAfterGeneration {
-                slot: slot.ledger_slot().to_owned(),
+                slot: slot_token.as_str().to_owned(),
             });
         }
 
         self.store.refresh(completed_at)?;
-        if self.store.exists(&slot_token, completed_at)? {
+        if self.store.exists(slot_token, completed_at)? {
             self.backoff = None;
             self.health.phase = ReportPhase::Duplicate;
             self.health.counters.duplicate_slots =
                 self.health.counters.duplicate_slots.saturating_add(1);
             self.persist_health()?;
             return Ok(ReportTick::Duplicate {
-                slot: slot.ledger_slot().to_owned(),
+                slot: slot_token.as_str().to_owned(),
             });
         }
 
         let intent = build_intent(
             projection,
-            &slot_token,
+            slot_token,
             message,
             self.config.domain_targets()?,
             self.config.max_attempts,
@@ -580,6 +620,9 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         self.backoff = None;
         self.health.phase = ReportPhase::Persisted;
         self.health.last_persisted_at = Some(completed_at);
+        if !slot_token.as_str().starts_with("recovery:") {
+            self.health.last_scheduled_persisted_at = Some(completed_at);
+        }
         self.health.next_attempt_at = None;
         self.health.consecutive_generation_failures = 0;
         self.health.last_error_code = None;
@@ -587,7 +630,7 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
             self.health.counters.persisted_reports.saturating_add(1);
         self.persist_health()?;
         Ok(ReportTick::Persisted {
-            slot: slot.ledger_slot().to_owned(),
+            slot: slot_token.as_str().to_owned(),
             disposition,
         })
     }

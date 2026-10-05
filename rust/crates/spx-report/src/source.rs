@@ -218,6 +218,35 @@ pub fn active_report_slot(now: DateTime<Utc>, grace_seconds: i64) -> Option<Repo
     })
 }
 
+/// A current-session data recovery has its own durable, projection-bound identity.
+pub(crate) fn recovery_report_slot(
+    latest: &LatestDeskMapProjectionV1,
+    now: DateTime<Utc>,
+) -> Option<ReportSlot> {
+    let projection = &latest.projection;
+    projection.recovery_of.as_ref()?;
+    let elapsed = now
+        .signed_duration_since(projection.available_at)
+        .num_seconds();
+    if !(0..120).contains(&elapsed) || now >= projection.valid_until {
+        return None;
+    }
+    let (session, trading_date_et) = scheduled_session(now.with_timezone(&New_York).naive_local())?;
+    if session != projection.session || trading_date_et != projection.trading_date_et {
+        return None;
+    }
+    Some(ReportSlot {
+        source_slot: projection.source_slot.as_str().to_owned(),
+        ledger_slot: format!("recovery:{}", projection.projection_id),
+        trading_date_et,
+        session,
+        starts_at: projection.available_at,
+        closes_at: projection
+            .valid_until
+            .min(projection.available_at + chrono::TimeDelta::minutes(2)),
+    })
+}
+
 fn scheduled_session(local: NaiveDateTime) -> Option<(MarketSession, NaiveDate)> {
     let date = local.date();
     let time = local.time();

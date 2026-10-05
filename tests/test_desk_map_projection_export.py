@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,8 +13,12 @@ from spx_spark.application.order_map.desk_projection_export import (
     build_desk_map_wire,
     persist_desk_map_projection,
     rust_report_owner_enabled,
+    refresh_desk_on_data_recovery,
 )
 from spx_spark.config import StorageSettings
+from spx_spark.analytics.options.strategy_payoff import (
+    IRON_CONDOR_MANAGEMENT_POLICY, RTH_IRON_CONDOR_MANAGEMENT_POLICY,
+)
 from spx_spark.domain.research_context import (
     CASH_INDEX_ORDER,
     CloseLocationDistribution,
@@ -41,6 +45,111 @@ def _storage(root: Path) -> StorageSettings:
         slow_index_stale_after_seconds=30,
         slow_index_labels=frozenset(),
     )
+
+
+def _recovery_payload(now, session, widths=()):
+    payload = _payload()
+    payload["expiry"] = "20260805"
+    payload["as_of"] = now.isoformat()
+    payload["option_structure_frame"]["exposure"] = {"oi_quality": "schwab_unverified"}
+    policy = IRON_CONDOR_MANAGEMENT_POLICY if session == "gth" else RTH_IRON_CONDOR_MANAGEMENT_POLICY
+    payload["strategy_decision"] = {
+        "decision_id": "decision:recovery-test", "decision_at": now.isoformat(),
+        "decision_type": "NO_TRADE", "action_authority": "none", "automatic_ordering": False,
+        "data_quality": {"status": "ready", "market": "ready", "options": "ready", "l1": "ready"},
+        "iron_condor_map": {"width_comparisons": [{
+            "status": "ready", "wing_width": width, "session_mode": session,
+            "strikes": [7400, 7400 + width, 7600, 7600 + width],
+            "quote": {"status": "ready", "credit": 2.5, "max_quote_age_seconds": 2},
+            "path_distribution": {"status": "estimated_uncalibrated", "n_sessions": 7,
+                "net_profit_rate": .7, "tp_before_stop_rate": .6, "stop_loss_rate": .2,
+                "management_policy_version": policy.policy_version, "hard_exit_et": policy.hard_exit_et},
+        } for width in widths]},
+    }
+    return payload
+
+
+@pytest.mark.parametrize("hour,session,slot", [(11, "gth", "2026-08-05:gth:07:00"), (14, "rth", "2026-08-05:10:00")])
+def test_recovery_refreshes_current_map_between_slots_and_suppresses_flapping(tmp_path, monkeypatch, hour, session, slot):
+    from spx_spark.application.order_map import service
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    storage = _storage(tmp_path)
+    now = datetime(2026, 8, 5, hour, 7, tzinfo=timezone.utc)
+    before = now - timedelta(minutes=7)
+    original = persist_desk_map_projection(_recovery_payload(before, session), [], now=before,
+                                          trading_date="2026-08-05", storage=storage)
+    current = _recovery_payload(now, session, (10,))
+    monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    result = refresh_desk_on_data_recovery(storage, current, now=now)
+    assert result["published"]
+    wire = json.loads((tmp_path / "latest/desk_map_projection.json").read_text())
+    assert wire["recovery_of"] == original["projection_id"]
+    assert wire["source_slot"] == slot
+    assert datetime.fromisoformat(wire["available_at"].replace("Z", "+00:00")) >= now
+    assert datetime.fromisoformat(wire["valid_until"].replace("Z", "+00:00")) < now + timedelta(minutes=3)
+    assert "oi_verified" not in wire["recovery_seen"]  # OI need not recover with IC.
+    assert wire["automatic_ordering"] is False
+    assert set(result["recovered"]) == {"iron_condor_10_quotes", "iron_condor_10_probability"}
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    # One width temporarily disappears while another arrives; a return to the
+    # already announced width cannot generate an endless recovery loop.
+    current = _recovery_payload(now, session, (20,))
+    assert refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    current = _recovery_payload(now, session, (10,))
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+
+    # A :15 audit refresh is not sent to the user; it cannot consume a recovery.
+    audit_at = now.replace(minute=15)
+    current = _recovery_payload(audit_at, session, ())
+    persist_desk_map_projection(current, [], now=audit_at, trading_date="2026-08-05", storage=storage)
+    assert not refresh_desk_on_data_recovery(storage, current, now=audit_at)["published"]
+
+
+def test_quarter_hour_audit_does_not_consume_newly_available_data(tmp_path, monkeypatch):
+    from spx_spark.application.order_map import service
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    storage = _storage(tmp_path)
+    now = datetime(2026, 8, 5, 11, 0, tzinfo=timezone.utc)
+    persist_desk_map_projection(_recovery_payload(now, "gth"), [], now=now,
+                               trading_date="2026-08-05", storage=storage)
+    now += timedelta(minutes=15)
+    current = _recovery_payload(now, "gth", (10,))
+    audit = persist_desk_map_projection(current, [], now=now,
+                                       trading_date="2026-08-05", storage=storage)
+    assert "iron_condor_10_quotes" not in audit["recovery_seen"]
+    monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    assert refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+
+
+def test_recovery_does_not_renew_stale_or_future_decisions_or_old_quotes(tmp_path, monkeypatch):
+    from spx_spark.application.order_map.desk_projection_export import available_desk_data
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    now = datetime(2026, 8, 5, 14, 7, tzinfo=timezone.utc)
+    storage = _storage(tmp_path)
+    persist_desk_map_projection(_recovery_payload(now, "rth"), [], now=now,
+                               trading_date="2026-08-05", storage=storage)
+    for offset in (-31, 1):
+        current = _recovery_payload(now + timedelta(seconds=offset), "rth", (10,))
+        assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    current = _recovery_payload(now - timedelta(seconds=10), "rth", (10,))
+    current["strategy_decision"]["iron_condor_map"]["width_comparisons"][0]["quote"]["max_quote_age_seconds"] = 10
+    assert "iron_condor_10_quotes" not in available_desk_data(current, now=now)
+
+
+def test_recovery_cannot_overwrite_a_newer_published_map(tmp_path):
+    storage = _storage(tmp_path)
+    now = datetime(2026, 8, 5, 14, 7, tzinfo=timezone.utc)
+    original = persist_desk_map_projection(_recovery_payload(now, "rth"), [], now=now,
+                                          trading_date="2026-08-05", storage=storage)
+    newer = persist_desk_map_projection(_recovery_payload(now + timedelta(seconds=2), "rth"), [],
+        now=now + timedelta(seconds=2), trading_date="2026-08-05", storage=storage)
+    actual = persist_desk_map_projection(_recovery_payload(now, "rth", (10,)), [],
+        now=now, published_at=now + timedelta(seconds=3), trading_date="2026-08-05", storage=storage,
+        recovery_of=original["projection_id"], recovery_seen={"iron_condor_10_quotes"})
+    assert actual["projection_id"] == newer["projection_id"]
 
 
 def _payload() -> dict[str, object]:

@@ -95,6 +95,12 @@ pub struct DeskMapProjectionV1 {
     pub research_context: Option<ResearchSignalsV1>,
     pub action_authority: ReportActionAuthority,
     pub automatic_ordering: bool,
+    /// Data already announced since the last scheduled map (not trading authority).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_seen: Vec<Token>,
+    /// A newly evaluated correction of this previous map, sent without slot delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_of: Option<Token>,
     pub message: DeskMessageV2,
 }
 
@@ -134,6 +140,18 @@ impl Validate for DeskMapProjectionV1 {
             });
         }
         unique_tokens(&self.quality_reasons, "desk map quality reason")?;
+        unique_tokens(&self.recovery_seen, "desk recovery evidence")?;
+        if self
+            .recovery_of
+            .as_ref()
+            .is_some_and(|id| id == &self.projection_id)
+            || (self.recovery_of.is_some() && self.recovery_seen.is_empty())
+        {
+            return Err(DomainError::Invalid {
+                field: "recovery_of",
+                reason: "recovery must reference a previous map and contain data evidence",
+            });
+        }
         match self.quality {
             DeskDataQuality::Ready if !self.quality_reasons.is_empty() => {
                 return Err(DomainError::Invalid {

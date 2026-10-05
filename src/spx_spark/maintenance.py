@@ -758,7 +758,7 @@ def desk_pipeline_faults(*, now, bridge, report, source, mirrored, delivery_acti
     due = now - timedelta(minutes=DESK_REPORT_GRACE_MINUTES)
     slot = due.replace(minute=due.minute // 30 * 30, second=0, microsecond=0)
     if DEFAULT_MARKET_CALENDAR.is_rth_open(slot) or DEFAULT_MARKET_CALENDAR.is_spx_gth_open(slot):
-        persisted = stamp(report.get("last_persisted_at"))
+        persisted = stamp(report.get("last_scheduled_persisted_at", report.get("last_persisted_at")))
         if persisted is None or not slot <= persisted <= now:
             faults.append("scheduled_report_missing")
     return sorted(faults)

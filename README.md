@@ -26,7 +26,7 @@ Current architecture and refactor execution documents:
 - `docs/structure-signal-vnext.md` - event-driven Desk Map, setup lifecycle, opportunity replay, and HMM shadow contract.
 - `docs/probability-model-p-vs-q-execution-design.md` - risk-neutral versus physical probability, fill, net-PnL distribution, and formal NoTrade research design.
 
-## Current runtime overview (2026-09-22)
+## Current runtime overview (2026-10-05)
 
 Existing ownership: Phase 5 maintenance, Phase 6 frozen runtime, S1/S3 strategy
 and data contracts. Rust retirement and the full data-platform rewrite are
@@ -49,7 +49,7 @@ flowchart TD
     Live --> Bridge["Rust normalized bridge"]
     Projection --> Bridge
     Bridge --> Core["Rust Core: typed readiness, latest projections, frames"]
-    Core --> Report["Rust report: GTH/RTH half-hour schedule and writer"]
+    Core --> Report["Rust report: half-hour maps and immediate data-recovery updates"]
     Report --> Ledger["Rust SQLite ledger / scheduled-report outbox"]
     Ledger --> Delivery["Rust delivery"]
     Core -. health .-> Monitor["Existing Huey Worker: desk pipeline monitor"]
@@ -64,6 +64,11 @@ flowchart TD
   `strategy_decision` stays outside the frozen Rust wire contract. Rust owns
   half-hour Desk Map scheduling/delivery, not the Python candidate lane.
   `automatic_ordering=false` throughout.
+- **Data recovery:** A fresh committed decision that restores missing data
+  triggers a current-time Desk Map update between scheduled slots. The two
+  condor widths' quotes and probabilities recover independently. Repeated
+  observations are deduplicated; recovery messages use the existing delivery
+  path without waiting for a model writer. Missing quotes stay unavailable.
 - **Freshness and failure visibility:** Desk preparation freezes the decision
   before slow work and rechecks validity afterward. The existing Worker checks
   pipeline health every minute and sends faults/recovery directly to Feishu,
@@ -88,6 +93,7 @@ flowchart TD
 
 Recent implementation and acceptance records:
 
+- [Immediate data-recovery Desk Map updates](docs/desk-data-recovery-2026-10-05.md)
 - [Hot-path queries, history preparation and valuation](docs/hot-path-data-contracts-2026-09-15.md)
 - [GTH smooth-convergence authorization and limits](docs/gth-smooth-entry-authorization-2026-09-15.md)
 - [Desk decision clock recovery](docs/desk-decision-clock-recovery-2026-09-17.md)

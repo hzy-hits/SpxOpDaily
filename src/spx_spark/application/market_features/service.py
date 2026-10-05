@@ -971,6 +971,18 @@ def run(
             state_checkpointed = True
     if on_frames is not None:
         on_frames(market_frame.to_dict(), option_frame.to_dict())
+    if strategy_persistence.get("ok"):
+        from spx_spark.application.order_map.desk_projection_export import refresh_desk_on_data_recovery
+
+        try:
+            recovery = refresh_desk_on_data_recovery(
+                storage, {**strategy_payload, "strategy_decision": strategy_decision},
+                now=as_utc(resolved_action_clock()),
+            )
+            if recovery.get("published"):
+                print(json.dumps({"event": "desk_data_recovery", **recovery}, sort_keys=True))
+        except Exception as exc:  # optional report failure must not stop quote sampling
+            print(json.dumps({"event": "desk_data_recovery_failed", "error_type": type(exc).__name__}))
     finish_stage("projections_and_state")
     total_duration_ms = round((perf_counter() - cycle_started) * 1000.0, 3)
     output.update(

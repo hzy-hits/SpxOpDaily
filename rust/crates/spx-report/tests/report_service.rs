@@ -269,6 +269,103 @@ fn ten_am() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 8, 4, 14, 0, 0).unwrap()
 }
 
+#[test]
+fn recovery_between_slots_uses_current_facts_without_model_delay_and_survives_restart() {
+    for gth in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp, true, &[5]);
+        let now = ten_am() + TimeDelta::minutes(7) - TimeDelta::hours(if gth { 3 } else { 0 });
+        let mut source = if gth {
+            gth_projection("desk-map:recovered", "2026-08-04:gth:07:00", now)
+        } else {
+            projection("desk-map:recovered", "2026-08-04:10:00", now)
+        };
+        source.recovery_of = Some(token("desk-map:unavailable"));
+        source.recovery_seen = vec![token("iron_condor_10_quotes")];
+        source.valid_until = now + TimeDelta::minutes(2);
+        let expected = source.message.clone();
+        write_latest(&config.projection_path, source);
+        let writer = FakeWriter::new([]);
+        let inspector = writer.clone();
+        let store = OwnedReportLedger::open(
+            &config.ledger_path,
+            "report-recovery-owner",
+            now,
+            config.owner_lease_seconds,
+        )
+        .unwrap();
+        let mut service = ReportService::open(config.clone(), true, writer, store, now).unwrap();
+        assert_eq!(
+            service.run_once_at(now + TimeDelta::seconds(1)).unwrap(),
+            ReportTick::Persisted {
+                slot: "recovery:desk-map:recovered".to_owned(),
+                disposition: ReportPersistDisposition::Inserted,
+            }
+        );
+        assert_eq!(inspector.calls(), 0);
+        assert!(service.health().last_scheduled_persisted_at.is_none());
+        assert_eq!(
+            service.health().last_fallback_reason.as_deref(),
+            Some("data_recovery")
+        );
+        service.shutdown(now + TimeDelta::seconds(2)).unwrap();
+        let store = OwnedReportLedger::open(
+            &config.ledger_path,
+            "report-recovery-owner-2",
+            now + TimeDelta::seconds(3),
+            config.owner_lease_seconds,
+        )
+        .unwrap();
+        let mut restarted = ReportService::open(
+            config.clone(),
+            true,
+            FakeWriter::new([]),
+            store,
+            now + TimeDelta::seconds(3),
+        )
+        .unwrap();
+        assert!(matches!(
+            restarted.run_once_at(now + TimeDelta::seconds(4)).unwrap(),
+            ReportTick::Duplicate { .. }
+        ));
+        assert!(restarted.health().last_scheduled_persisted_at.is_none());
+        restarted.shutdown(now + TimeDelta::seconds(5)).unwrap();
+        let ledger = LedgerReader::open_existing(&config.ledger_path).unwrap();
+        assert_eq!(ledger.health().unwrap().pending, 2);
+        // A memory-store pass also checks the full message, not only queue counts.
+        let memory = MemoryStore::default();
+        let inspector = memory.clone();
+        let mut service =
+            ReportService::open(config, true, FakeWriter::new([]), memory, now).unwrap();
+        service.run_once_at(now + TimeDelta::seconds(1)).unwrap();
+        assert_eq!(inspector.intents()[0].message, expected);
+    }
+}
+
+#[test]
+fn recovery_cannot_send_future_expired_or_wrong_session_facts() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am() + TimeDelta::minutes(7);
+    let store = MemoryStore::default();
+    let inspector = store.clone();
+    let mut service =
+        ReportService::open(config.clone(), true, FakeWriter::new([]), store, now).unwrap();
+    for available in [now + TimeDelta::seconds(5), now - TimeDelta::seconds(121)] {
+        let mut source = projection("desk-map:bad-time", "2026-08-04:10:00", available);
+        source.recovery_of = Some(token("desk-map:unavailable"));
+        source.recovery_seen = vec![token("iron_condor_10_quotes")];
+        write_latest(&config.projection_path, source);
+        assert_eq!(service.run_once_at(now).unwrap(), ReportTick::AwaitingSlot);
+    }
+    let mut source = gth_projection("desk-map:wrong-session", "2026-08-04:gth:07:00", now);
+    source.recovery_of = Some(token("desk-map:unavailable"));
+    source.recovery_seen = vec![token("iron_condor_10_quotes")];
+    write_latest(&config.projection_path, source);
+    assert_eq!(service.run_once_at(now).unwrap(), ReportTick::AwaitingSlot);
+    assert!(inspector.intents().is_empty());
+}
+
 fn deepseek_response(
     status: u16,
     model: &str,

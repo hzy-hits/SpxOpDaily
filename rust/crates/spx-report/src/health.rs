@@ -49,6 +49,8 @@ pub struct ReportHealth {
     pub last_projection_id: Option<String>,
     pub active_slot: Option<String>,
     pub last_persisted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_scheduled_persisted_at: Option<DateTime<Utc>>,
     pub next_attempt_at: Option<DateTime<Utc>>,
     pub consecutive_generation_failures: u32,
     pub last_error_code: Option<String>,
@@ -72,6 +74,7 @@ impl ReportHealth {
             last_projection_id: None,
             active_slot: None,
             last_persisted_at: None,
+            last_scheduled_persisted_at: None,
             next_attempt_at: None,
             consecutive_generation_failures: 0,
             last_error_code: None,
@@ -105,6 +108,11 @@ impl ReportHealth {
 
         health.last_projection_id = persisted.last_projection_id;
         health.last_persisted_at = persisted.last_persisted_at;
+        health.last_scheduled_persisted_at = persisted.last_scheduled_persisted_at.or_else(|| {
+            (persisted.last_fallback_reason.as_deref() != Some("data_recovery"))
+                .then_some(persisted.last_persisted_at)
+                .flatten()
+        });
         health.last_error_code = persisted.last_error_code;
         health.last_response_model = persisted.last_response_model;
         health.last_finish_reason = persisted.last_finish_reason;

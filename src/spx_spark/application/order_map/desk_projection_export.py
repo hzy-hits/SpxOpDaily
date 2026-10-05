@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,7 +27,11 @@ from spx_spark.application.order_map.report_clock import (
 )
 from spx_spark.config import StorageSettings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
-from spx_spark.state_io import atomic_write_json_secure, read_json_object
+from spx_spark.state_io import atomic_write_json_secure, read_json_object, exclusive_state_lock
+from spx_spark.application.order_map.decision_consistency import committed_strategy_decision
+from spx_spark.analytics.options.strategy_payoff import (
+    IRON_CONDOR_MANAGEMENT_POLICY, RTH_IRON_CONDOR_MANAGEMENT_POLICY,
+)
 
 
 SCHEMA_VERSION = "desk_map_projection.v1"
@@ -54,6 +59,89 @@ def projection_path(storage: StorageSettings) -> Path:
     return Path(storage.data_root) / "latest" / "desk_map_projection.json"
 
 
+def available_desk_data(payload: Mapping[str, Any], *, now: datetime) -> set[str]:
+    """Availability already proven by the current committed decision, not entry permission."""
+    decision = committed_strategy_decision(payload.get("strategy_decision") or {}, now=now)
+    if not decision:
+        return set()
+    session = "rth" if DEFAULT_MARKET_CALENDAR.is_rth_open(now) else "gth"
+    max_age = 15 if session == "rth" else 30
+    decided = datetime.fromisoformat(str(decision["decision_at"]))
+    decision_age = (now - decided).total_seconds()
+    if decision_age > max_age:
+        return set()
+    quality = decision.get("data_quality") or {}
+    ready = {name for name in ("market", "options", "l1") if quality.get(name) == "ready"}
+    if quality.get("status") == "ready":
+        ready.add("decision_data")
+    frame = payload.get("option_structure_frame") or {}
+    if (frame.get("exposure") or {}).get("oi_quality") == "ibkr_ok":
+        ready.add("oi_verified")
+    if (frame.get("structure") or {}).get("gex_quality") == "open_interest_gex":
+        ready.add("gamma_structure")
+    scan = decision.get("iron_condor_map") or {}
+    rows = scan.get("width_comparisons") or [scan]
+    policy = RTH_IRON_CONDOR_MANAGEMENT_POLICY if session == "rth" else IRON_CONDOR_MANAGEMENT_POLICY
+    for row in rows:
+        width = row.get("wing_width")
+        quote = row.get("quote") or {}
+        if (width not in (10, 20) or row.get("status") != "ready"
+                or quote.get("status") != "ready" or len(row.get("strikes") or []) != 4):
+            continue
+        quote_age = quote.get("max_quote_age_seconds")
+        if (not isinstance(quote_age, (int, float)) or not math.isfinite(quote_age)
+                or quote_age < 0 or quote_age + decision_age > max_age):
+            continue
+        ready.add(f"iron_condor_{width:g}_quotes")
+        dist = row.get("path_distribution") or {}
+        values = [dist.get(k) for k in ("net_profit_rate", "tp_before_stop_rate", "stop_loss_rate")]
+        if (dist.get("status") in {"estimated_uncalibrated", "insufficient_sample"}
+                and dist.get("management_policy_version") == policy.policy_version
+                and dist.get("hard_exit_et") == policy.hard_exit_et
+                and isinstance(dist.get("n_sessions"), (int, float)) and dist["n_sessions"] >= 1
+                and all(isinstance(v, (int, float)) and math.isfinite(v) and 0 <= v <= 1 for v in values)
+                and values[1] + values[2] <= 1.0001):
+            ready.add(f"iron_condor_{width:g}_probability")
+    return ready
+
+
+def refresh_desk_on_data_recovery(
+    storage: StorageSettings, payload: dict[str, Any], *, now: datetime,
+) -> dict[str, Any]:
+    """Correct the last published map after fresh Core evidence becomes available."""
+    if not rust_report_owner_enabled() or not (
+        DEFAULT_MARKET_CALENDAR.is_rth_open(now) or DEFAULT_MARKET_CALENDAR.is_spx_gth_open(now)
+    ):
+        return {"published": False}
+    previous = read_json_object(projection_path(storage))
+    trading_date = DEFAULT_MARKET_CALENDAR.research_expiry(now).isoformat()
+    session = "rth" if DEFAULT_MARKET_CALENDAR.is_rth_open(now) else "gth"
+    if (not previous.get("projection_id") or previous.get("trading_date_et") != trading_date
+            or previous.get("session") != session):
+        return {"published": False}
+    seen = set(previous.get("recovery_seen") or ())
+    if not available_desk_data(payload, now=now) - seen:
+        return {"published": False}
+    # No retry sleeps, duplicate strategy evaluation, network calls or image work
+    # on the hot path. The normal report builder revalidates the committed decision.
+    from spx_spark.application.order_map.service import build_order_payload_with_retry
+
+    started = time.monotonic()
+    current = build_order_payload_with_retry(storage, now=now, attempts=1)
+    checked_at = now + timedelta(seconds=time.monotonic() - started)
+    recovered = available_desk_data(current, now=checked_at) - seen
+    if not recovered:
+        return {"published": False}
+    document = persist_desk_map_projection(
+        current, [], now=checked_at, trading_date=trading_date, storage=storage,
+        published_at=checked_at, recovery_of=previous["projection_id"],
+        recovery_seen=seen | recovered,
+    )
+    published = document.get("recovery_of") == previous["projection_id"]
+    return {"published": published, "projection_id": document.get("projection_id"),
+            "recovered": sorted(recovered) if published else []}
+
+
 def build_desk_map_wire(
     payload: Mapping[str, Any],
     changes: list[str],
@@ -62,6 +150,8 @@ def build_desk_map_wire(
     trading_date: str,
     storage: StorageSettings,
     published_at: datetime | None = None,
+    recovery_of: str | None = None,
+    recovery_seen: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build the complete source projection consumed by the Rust report lane."""
 
@@ -80,7 +170,7 @@ def build_desk_map_wire(
     slot_key = (
         rth_slot.key if rth_slot is not None else _projection_slot_key(now, trading_date, session)
     )
-    valid_until = published_at + (DEFAULT_RTH_TTL if rth_open else DEFAULT_GTH_TTL)
+    valid_until = published_at + (timedelta(minutes=2) if recovery_of else DEFAULT_RTH_TTL if rth_open else DEFAULT_GTH_TTL)
     projection = build_desk_map_projection(payload)
     sections = build_desk_message_sections(payload, now)
     stage = projection.stage.value.lower()
@@ -148,6 +238,12 @@ def build_desk_map_wire(
             "data_quality": data_quality,
         },
     }
+    seen = recovery_seen if recovery_seen is not None else available_desk_data(payload, now=now)
+    if seen:
+        document["recovery_seen"] = sorted(seen)
+    if recovery_of:
+        document["recovery_of"] = recovery_of
+        document["message"]["title"] += " · 数据恢复更新"
     identity_payload = {key: value for key, value in document.items() if key != "projection_id"}
     identity = _sha256(identity_payload)
     document["projection_id"] = f"desk-map:{identity[:24]}"
@@ -162,16 +258,27 @@ def persist_desk_map_projection(
     trading_date: str,
     storage: StorageSettings,
     published_at: datetime | None = None,
+    recovery_of: str | None = None,
+    recovery_seen: set[str] | None = None,
 ) -> dict[str, Any]:
-    document = build_desk_map_wire(
-        payload,
-        changes,
-        now=now,
-        trading_date=trading_date,
-        storage=storage,
-        published_at=published_at,
-    )
-    atomic_write_json_secure(projection_path(storage), document)
+    path = projection_path(storage)
+    with exclusive_state_lock(path, timeout_seconds=1):
+        previous = read_json_object(path)
+        if recovery_of and previous.get("projection_id") != recovery_of:
+            return previous
+        # Quarter-hour audit projections are not human reports. They must not
+        # consume a recovery that the half-hour report has not announced.
+        if not recovery_of and now.minute % 30 >= 15:
+            session = "rth" if DEFAULT_MARKET_CALENDAR.is_rth_open(now) else "gth"
+            same_session = previous.get("trading_date_et") == trading_date and previous.get("session") == session
+            recovery_seen = set(previous.get("recovery_seen") or ()) if same_session else set()
+        document = build_desk_map_wire(
+            payload, changes, now=now, trading_date=trading_date, storage=storage,
+            published_at=published_at, recovery_of=recovery_of, recovery_seen=recovery_seen,
+        )
+        if previous.get("observed_through", "") > document["observed_through"]:
+            return previous
+        atomic_write_json_secure(path, document)
     return document
 
 
@@ -686,10 +793,11 @@ def _sha256(value: object) -> str:
 
 
 def _projection_slot_key(now: datetime, trading_date: str, session: str) -> str:
-    """Build a quarter-hour audit slot; Rust delivers only the :00/:30 subset."""
+    """Keep the canonical audit slot even for a correction between boundaries."""
 
     slot_at = floor_report_slot_et(now)
-    return f"{trading_date}:{session}:{slot_at.strftime('%H:%M')}"
+    prefix = trading_date if session == "rth" else f"{trading_date}:gth"
+    return f"{prefix}:{slot_at.strftime('%H:%M')}"
 
 
 __all__ = [
