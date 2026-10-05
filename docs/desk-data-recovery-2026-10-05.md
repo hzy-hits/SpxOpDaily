@@ -119,3 +119,10 @@ Rust 312 项、Cargo fmt/Clippy、Ruff、Import Linter、模块行数预算和 d
 本次复杂度：生产文件新增/删除 0/0，4 个现有生产文件净增 45 行；依赖、
 配置键、服务/timer、数据库/表均新增/删除 0/0。移除 candidate factory 内的
 旧选腿实现，复用执行报价 owner；替换比较行的笼统失败提示，无新兼容 wrapper。
+
+上线：`1db03acb` 已推送 master，运行正式部署脚本后，仅重启本次代码涉及的
+Python Core。12:13:38 UTC 检查：Core 与 IBKR collector 均 active、自动重启
+次数为 0；最新决策为 12:13:36，已保存两种翼宽的逐侧诊断。最近特征周期约
+1.3–2.0 秒（调度间隔仍为 5 秒），无连续失败。IBKR connected、circuit closed，
+行情持续更新，但当时两侧 20Δ 均未选齐，概率仍不可用。重连采集器属于前述
+12:02 的排障动作，不代表原始 Greeks 已恢复。Bark 与 Rust 运行版本均未变。
