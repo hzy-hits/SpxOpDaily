@@ -22,6 +22,7 @@ from spx_spark.application.order_map.operator_status import (
     build_desk_message_sections,
 )
 from spx_spark.application.order_map.report_clock import (
+    RTH_REPORT_START_GRACE_SECONDS,
     floor_report_slot_et,
     rth_report_slot,
 )
@@ -266,9 +267,10 @@ def persist_desk_map_projection(
         previous = read_json_object(path)
         if recovery_of and previous.get("projection_id") != recovery_of:
             return previous
-        # Quarter-hour audit projections are not human reports. They must not
-        # consume a recovery that the half-hour report has not announced.
-        if not recovery_of and now.minute % 30 >= 15:
+        # Audit snapshots and delayed timer catch-ups are not human reports.
+        # They cannot consume a recovery outside the normal source start grace.
+        delay = (now.minute % 30) * 60 + now.second + now.microsecond / 1_000_000
+        if not recovery_of and delay > RTH_REPORT_START_GRACE_SECONDS:
             session = "rth" if DEFAULT_MARKET_CALENDAR.is_rth_open(now) else "gth"
             same_session = previous.get("trading_date_et") == trading_date and previous.get("session") == session
             recovery_seen = set(previous.get("recovery_seen") or ()) if same_session else set()

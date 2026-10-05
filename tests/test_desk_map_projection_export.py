@@ -106,7 +106,8 @@ def test_recovery_refreshes_current_map_between_slots_and_suppresses_flapping(tm
     assert not refresh_desk_on_data_recovery(storage, current, now=audit_at)["published"]
 
 
-def test_quarter_hour_audit_does_not_consume_newly_available_data(tmp_path, monkeypatch):
+@pytest.mark.parametrize("minute", [15, 38])
+def test_audit_or_delayed_timer_does_not_consume_newly_available_data(tmp_path, monkeypatch, minute):
     from spx_spark.application.order_map import service
 
     monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
@@ -114,7 +115,7 @@ def test_quarter_hour_audit_does_not_consume_newly_available_data(tmp_path, monk
     now = datetime(2026, 8, 5, 11, 0, tzinfo=timezone.utc)
     persist_desk_map_projection(_recovery_payload(now, "gth"), [], now=now,
                                trading_date="2026-08-05", storage=storage)
-    now += timedelta(minutes=15)
+    now += timedelta(minutes=minute)
     current = _recovery_payload(now, "gth", (10,))
     audit = persist_desk_map_projection(current, [], now=now,
                                        trading_date="2026-08-05", storage=storage)
