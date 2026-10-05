@@ -1,7 +1,14 @@
 # SPX Strategy Review Site
 
-This directory serves the validated 2026-07-23 all-signal and risk review as a
-private, self-contained static site.
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：退役界面与固定历史页面。** 退役界面或固定历史页面记录；不是实时策略入口，不按旧命令恢复已退役服务。
+> [全仓文档、当前运行状态与合同优先级](../../docs/README.md)（目录核对：2026-10-05）。
+
+This directory retains the 2026-07-23 all-signal and risk review as a private,
+self-contained historical static site. Its telemetry-based opportunity
+reconciliation is not a raw-broker replay of the current strategy policy and
+cannot establish current edge. New strategy evaluation must start from original
+IBKR/Schwab option and underlying data, as required by the root AGENTS.md.
 
 ## Access
 
@@ -14,7 +21,12 @@ code-server proxy:
 No repository root, environment file, account statement, order detail, or raw
 fill record is mounted into the container.
 
-## Rebuild
+## Historical rebuild recipe
+
+The command below records the original pinned report-builder environment.
+Confirm that package is installed before reuse; this documentation update does
+not reinstall the plugin, rebuild the report or attest that the private site is
+currently running. The fixed dataset and sample dates remain unchanged.
 
 Regenerate `public/index.html` from the canonical artifact with the packaged
 report delivery tool, then restart only if nginx is not already running. Static

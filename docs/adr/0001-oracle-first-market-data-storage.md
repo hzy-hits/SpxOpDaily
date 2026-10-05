@@ -1,5 +1,9 @@
 # ADR-0001: SPX 0DTE 市场数据采用 Oracle 单机优先存储
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](../README.md)（目录核对：2026-10-05）。
+
 - Status: Accepted for Phase 1
 - Date: 2026-07-11
 - Scope: `spx-spark` 的实时采集、研究数据和本地保留策略

@@ -1,15 +1,31 @@
 # SPX Spark Core architecture
 
-Status (2026-09-22): bridge, core, scheduled report and delivery are production
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](../../docs/README.md)（目录核对：2026-10-05）。
+
+## Data-recovery repair within the existing lane
+
+Core's committed Python decision can restore a capability previously missing
+from the published map. Python revalidates current time and publishes optional
+`recovery_of` / `recovery_seen` metadata in the existing desk projection. Rust
+validates the projection, skips the model writer and the half-hour wait, and
+uses `recovery:<projection_id>` for durable deduplication in the same ledger.
+The ordinary scheduled-report freshness clock remains independent, so recovery
+cannot hide a missed scheduled map. This does not add strategy authority or a
+new report owner. See [acceptance](../../docs/desk-data-recovery-2026-10-05.md).
+
+Status (2026-10-05): bridge, core, scheduled report and delivery are production
 Rust owners. Phase 6 retirement is deferred; this workspace remains frozen except
 for production-fault repairs. See the [scope decision](../../docs/architecture-simplification-execution-plan-v1.md)
-and [whole-system diagram](../../README.md#current-runtime-overview-2026-09-22).
+and [whole-system diagram](../../README.md#current-runtime-overview).
 A checked-in unit alone does not prove deployment or runtime health.
 
 ## Objective
 
 Rust accepts bounded normalized/advisory projections, applies typed readiness
-rules, and owns the half-hour GTH/RTH Desk Map schedule, report ledger and delivery.
+rules, and owns the half-hour GTH/RTH Desk Map schedule, immediate data-recovery reports,
+report ledger and delivery.
 Python owns broker sessions, research, `build_strategy_decision`, the existing
 manual candidate lane and Desk Map source preparation. Full Python strategy
 decisions do not enter the frozen Rust wire contract. The report writer cannot
@@ -27,7 +43,7 @@ flowchart TD
     Projection --> Bridge
     Bridge --> Core["spx-core: typed readiness and latest projections"]
     Core --> Frames["Append-only frames: operational replay"]
-    Core --> Report["spx-report: half-hour schedule and validated writer"]
+    Core --> Report["spx-report: half-hour schedule / recovery updates"]
     Core --> Ledger["Rust SQLite/WAL ledger"]
     Report --> Ledger
     Ledger --> Delivery["spx-delivery"]

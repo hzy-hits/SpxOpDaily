@@ -1,157 +1,84 @@
 # Notification architecture
 
-> **状态（2026-08-07）：本文档的 lane 语义分级（ops/market/trade/position/report）继续有效；
-> outbox、claims、receipts、receipt mirror 与 Rust report/delivery lane 的实现已冻结。**
-> 该实现将由 `spx-worker` + Huey 单 owner 取代（执行方案 Phase 4，Rust 侧 Phase 6）。
-> 不得扩展 outbox/claim/receipt/mirror 状态机，不得为新 lane 增加耐久化机制。
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 
-## Monorepo ownership overlay
+## 当前 owner 与消息事实
 
-This document defines the Python notification lanes. Python continues to own
-operations, market-warning, trade-ready, position-safety, and legacy report
-delivery. The Rust workspace owns only the explicitly cut over half-hour
-`scheduled_report` lane, using its single SQLite/WAL ledger and receipted
-delivery worker as defined in `rust/docs/ARCHITECTURE.md`.
+Python 最终策略来自 `build_strategy_decision`，人工候选通过既有 Python
+通知路径交给 Huey Worker。半小时 Desk Map 与数据恢复摘要由 Python 准备
+`desk_map_projection.v1`，交给既有 Rust bridge/core/report/ledger/delivery。
+Phase 6 Rust 退役已延期；不能根据历史迁移设计另建 owner 或恢复旧 outbox。
 
-The `SPX_RUST_REPORT_OWNER` fence selects exactly one half-hour report producer.
-When false, the Python contract below applies to that lane. When true, Python
-still publishes the atomic desk projection but must not enqueue the same slot;
-Rust report and delivery own it end to end. The two outboxes are not merged and
-must never both own the same economic slot.
+| 消息 | Producer / scheduler | 持久化与发送 |
+| --- | --- | --- |
+| 人工候选、Python 业务提醒 | 既有 Python 策略/业务模块 | Python operational DB `notification_events` / `notification_attempts`，Huey 工作任务 |
+| 定时桌图 | Python 状态快照 + Rust `:00/:30` ET scheduler | Rust SQLite/WAL ledger、scheduled-report intent、每目标回执 |
+| 数据恢复桌图 | Core 发现新鲜能力恢复，重新准备当前摘要 | 同一 Rust lane，`recovery:<projection_id>` 幂等，跳过模型写手 |
+| 系统故障/恢复 | 既有 Worker 每分钟监测 | 直接飞书提醒，不依赖 Rust report 链路 |
 
-## Contract
+`SPX_RUST_REPORT_OWNER` 与 Rust 配置/CLI/owner marker 共同维持既有单 owner
+边界。正常部署保留当前 owner；样例配置中的 `network_enabled=false` 不是
+生产投递停用的证据。Bark transport、配置与投递规则保持不变。
 
-Every human-facing message uses one of five lanes and the shared notifier dispatcher:
+## 语义边界
 
-| Lane | Purpose | Policy | Examples |
-| --- | --- | --- | --- |
-| `ops_transition` | State changes requiring operational awareness | Deterministic, no reviewer veto, Bark ops | Schwab to IBKR takeover, Schwab restored, both providers unavailable |
-| `market_warning` | Fast market movement warning, not an entry instruction | Deterministic, no LLM latency or veto | SPX/ES shock, reclaim, flip reclaim, call-wall breakout |
-| `trade_ready` | Fully gated executable intent | Deterministic strategy gates; LLM is writer only | Contract, entry limit, invalidation, target, expiry |
-| `position_safety` | Existing-position or execution safety | Deterministic, never blocked by a reviewer | Open/close/quantity/PnL safety events when account tracking is explicitly enabled |
-| `scheduled_report` | Time-based map/status/review | Writer allowed; delivery is still receipted and retryable | Morning map, half-hour Desk Map (including the read-only [Call / Put Skew Spread Shadow](call-skew-spread-shadow.md)), post-close review |
+| Lane | 含义 | 不代表 |
+| --- | --- | --- |
+| `ops_transition` | 数据源/运行状态变化 | 入场授权 |
+| `market_warning` | 已确认的市场提醒 | 自动反向或新仓 |
+| `trade_ready` | 完成适用门禁的人工候选 | 已验证长期 edge、自动下单或已经成交 |
+| `position_safety` | 在明确启用且标明环境的持仓可见性下管理风险 | 未知账户为空仓、Paper 等于真实账户 |
+| `scheduled_report` | 定时/恢复行情与策略摘要 | 该摘要中所有能力都已恢复 |
 
-IV, Gamma and option-structure observations enter the reviewer lane. Explicit
-data-quality observations remain audit-only. The direct and audit-only sets are
-allowlists; their union must never consume the reviewer lane.
+所有候选 `automatic_ordering=false`。NO_TRADE 是不建立新风险，已有仓位仍需
+独立管理。策略状态、通知入队/送达和真实成交是三个不同事实。
 
-## Delivery lifecycle
+## Python 通知实现
 
-Every human-facing producer persists a final notification through
-`enqueue_notification()` before returning. It owns:
+现行存储与执行 owner 是：
 
-1. a durable SQLite enqueue before any network I/O;
-2. an immutable semantic event ID and payload for idempotent producer replay;
-3. independent acknowledgement and retry state for every sink, so a delivered
-   Bark target is never resent while Feishu is recovering;
-4. a content-free SQLite receipt containing semantic event ID, source, lane,
-   outcome and per-sink status.
+- `infrastructure/notifications.py`：每冻结目标一条通知事件、幂等与取消记录。
+- `notifier/unified_delivery.py`：有效期、取消/并发、transport 与恢复处理。
+- `infrastructure/jobs.py`：Huey task、启动恢复和既有重试调度。
 
-The independent delivery worker polls the outbox every 0.5 seconds and owns all
-Feishu/Bark network I/O. The delivery state machine is
-`pending -> claimed -> delivered`; failures use the configured
-15/60/300/900-second schedule and become `dead_letter` after attempt or age
-exhaustion. The 24-hour loop also runs `notification_recovery` every 60 seconds,
-so recovery does not depend on a later market alert. Shock events are the sole
-latency-critical exception: they still enqueue before attempting delivery
-inline.
+事件状态为 `pending`、`processing`、`delivered`、`failed`、`uncertain`；
+各目标的 attempt 单独记录。启动恢复不能把未知网络结果自动当成成功，
+也不能在重试时改变原目标或经济机会。具体事务与调度以这些 owner 代码为准。
 
-Claim order is explicit: position/execution safety first, then expiring
-`trade_ready` and `gth_manual_candidate` work, market warnings, operations, and
-scheduled reports. Within a lane, the earliest expiry wins. Immediately before
-transport, the worker atomically rechecks claim ownership, cancellation and
-expiry; a rejected claim cannot call Bark or Feishu.
+早期独立 delivery worker、receipt mirror 与 JSONL missed-queue 的迁移步骤
+已经完成，不是当前安装指南。历史设计和切换证据分别见
+[Phase 4 cutover](change-brief-p4-2-notification-cutover.md)与
+[operational DB](change-brief-p5-1-s6-operational-db.md)。
 
-The healthy-path service objectives are at most one second from a confirmed
-signal to durable outbox presence and at most five seconds from enqueue to the
-first transport result. Every event must end with either a delivered receipt or
-an explicit terminal receipt. Expiry immediately before claim or network I/O is
-recorded as `expired_before_delivery`; source invalidation is recorded as
-`cancelled_before_delivery`. Expired work is not automatically acknowledged,
-and an unmirrored terminal receipt keeps operational health degraded.
+## Desk Map 时间与恢复
 
-Every per-sink delivery result first appends a content-free receipt intent in
-the same outbox transaction that settles the target. Mirroring that intent into
-the receipt database is idempotent and retryable; a mirror backlog fails both
-worker health and the daily outbox-integrity check. Source cancellation also
-persists a tombstone when no outbox row exists yet, so a concurrent late
-enqueue is rejected atomically instead of reviving an invalidated signal.
+定时源快照、当前策略决策、报价有效期、最终报告和手机回执分别保留时钟。
+报告复用已提交策略，慢工作前冻结、入队前重新校验；不重新读取变化中的 latest
+来制造另一份同名最终策略。
 
-The receipt database also uses rollback-journal `DELETE` mode with
-`synchronous=FULL`. Health is based on its real `quick_check`, schema and exact
-receipt-ID mirror rows—not merely the outbox's `recorded_at` projection. New
-receipt intents are checked every worker cycle; historical mirrors are
-reconciled at startup, after a receipt-file identity change, and at a bounded
-60-second cadence.
+数据恢复流程按 10/20 点翼的报价与概率独立检查，OI 未验证不妨碍已合格铁鹰
+数据的更新。但新鲜 BBO 不会刷新另一条腿或 Greeks 的年龄；缺 Delta 时没有
+选齐结构，不能生成概率。恢复补发不更新定时报告的成功时钟来掩盖漏报。
+当前 API 字段缺口与接入验收见[2026-10-05 记录](desk-data-recovery-2026-10-05.md)。
 
-For `trade_ready`, a fresh, executable final quote may move normally between
-decision and enqueue without suppressing the signal. The notification retains
-the immutable decision NBBO, entry limit and risk plan; the later quote is
-audit-only and tells the receiver to requote. Stale, crossed, excessively wide
-or otherwise unexecutable quotes still fail closed for that delivery attempt.
-They remain transient re-quote conditions inside the five-minute default
-economic-opportunity window, not lifecycle expiry. Quote freshness remains an
-independent 10--15 second gate, while typed configuration bounds the human
-opportunity window to five--ten minutes.
+```mermaid
+sequenceDiagram
+    participant C as Python Core
+    participant P as Existing Desk Projection
+    participant R as Rust Report
+    participant D as Existing Delivery
+    C->>C: 提交决策并核对报价/字段时钟
+    alt 已公告的缺失能力恢复
+        C->>P: 用当前时间生成 recovery_of 投影
+        P->>R: 现有 bridge/core 校验与转发
+        R->>R: 校验有效期、按投影幂等，跳过模型
+        R->>D: 同一 scheduled-report lane
+        D->>D: 每目标记录发送结果
+    end
+```
 
-Operator notification roles have different human projections while the ledger
-keeps the complete immutable ingress payload. `setup` is delivered as a compact
-`WATCH`: it may show the live structure and the condition that would confirm
-it, but it must not look like an entry card or surface an exact contract.
-`trade_ready` is the compact manual action card and must retain the opportunity
-identity, exact contract or spread, decision NBBO, limit, validity, invalidation,
-risk, target and reward/risk. `exit` retains the terminal lifecycle account.
-Research prose is audit context and cannot displace those operational fields.
-
-The half-hour `scheduled_report` is not a lifecycle notification. If its source
-projection is already `invalidated` or `expired`, Rust emits a deterministic
-neutral `STANDBY` status. Its current location and reference structure come
-from the original typed projection, and its next trigger is fixed to waiting
-for a new price event. A model-written title, old LONG/CALL direction, or old
-event trigger is never reused in that terminal standing message.
-
-The producer-side inflight lease is bounded by the remaining signal lifetime.
-If a process stops between local acceptance and durable enqueue, the short
-lease permits an in-lifetime retry. Startup reconciliation repairs either
-direction: an outbox row restores missing local acceptance, while local
-acceptance without its outbox row is cleared and the exact immutable event is
-re-enqueued. Reconciliation compares the persisted payload fingerprint, exact
-sink set and live/delivered target states; matching an event ID alone cannot
-restore producer acceptance, and cancelled or dead-lettered rows fail closed.
-Both `invalidated` and `expired` end the old lifecycle, persist a cancellation
-fence, clear semantic dedupe for a later rearm, and keep the old event ID
-terminal so replay remains idempotent.
-
-The human-notification outbox uses SQLite rollback-journal (`DELETE`) mode with
-`synchronous=FULL`. It intentionally does not use WAL: notifications have
-multiple short-lived producer and consumer processes, which can meet the rare
-[WAL-reset corruption race](https://sqlite.org/wal.html#the_wal_reset_bug)
-present in SQLite versions before 3.51.3. The queue is low-volume, so
-serialized writes are preferable to WAL checkpoint risk.
-
-If integrity checking ever fails, stop every notification producer and
-consumer before recovery. Move the main database plus any adjacent `-wal`,
-`-shm`, or `-journal` files into one timestamped recovery directory; never
-separate or delete sidecars from a live database. Start the delivery worker to
-create the replacement, then require `PRAGMA journal_mode=DELETE`,
-`PRAGMA quick_check=ok`, a stable worker restart count, and one real scheduled
-report before restoring normal operation.
-
-During rollout, failed event IDs are mirrored into the old JSONL missed queue.
-The SQLite worker imports any pre-existing JSONL entries and removes the shadow
-only after the corresponding event is fully delivered. The JSONL flusher is
-used only when the delivery outbox feature flag is disabled for rollback.
-
-Periodic alert candidates retain the SQLite domain-event outbox. `acked` means
-the candidate reached a terminal policy outcome. The outbox additionally stores
-`settlement_outcome` and `delivered_count`; therefore an acknowledged veto or
-audit-only observation is no longer indistinguishable from human delivery.
-
-The intraday shock producer remains latency-critical. It may call the notifier
-before periodic outbox evaluation, but it uses the same cooldown state,
-dispatcher, receipt store and sink policy. The later periodic candidate is
-therefore deduplicated without creating a second human push.
-
-The exchange-local heartbeat, isolated research projection and post-close
-operational gates are specified in
-[RTH runtime clock and end-to-end acceptance](rth-runtime-clock-and-acceptance.md).
+报告保存不等于送达；transport 成功回执也不等于用户已阅读。
+策略回测与归因从原始 IBKR/Schwab 数据重建，通知记录仅支持运行链路核验，
+不得筛选策略样本或充当收益标签。本次文档更新不读取 Bark 数据做归因。

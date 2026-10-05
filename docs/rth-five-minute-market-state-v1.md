@@ -1,5 +1,9 @@
 # RTH 5 分钟市场状态与 Spring Gamma v3 Shadow
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：版本策略与功能合同。** 版本合同；后续授权与局部修复见统一策略合同索引，不能用旧门槛覆盖现行行为。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 当前规则版本：`market_state_5m_eight_variable_rules.v2`（2026-07-25）。
 
 ## 目标

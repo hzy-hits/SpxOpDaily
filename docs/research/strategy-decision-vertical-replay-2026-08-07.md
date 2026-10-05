@@ -1,5 +1,9 @@
 # Strategy Decision v2 · S2/S3 Replay · 2026-08-07
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史研究与实验。** 研究/观察记录；保留原数据来源、样本期、政策和失败结果，不代表现行策略已证明 edge。
+> [全仓文档、当前运行状态与合同优先级](../README.md)（目录核对：2026-10-05）。
+
 状态：**Bootstrap engineering gate passed；不得表述为已验证 edge；生产 owner 尚未切换。**
 
 ## 数据与因果范围

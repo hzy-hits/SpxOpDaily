@@ -1,5 +1,9 @@
 # SPX structure-first signal system
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：版本策略与功能合同。** 版本合同；后续授权与局部修复见统一策略合同索引，不能用旧门槛覆盖现行行为。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 > **状态（2026-08-07）：策略候选的最终授权已统一到
 > `docs/strategy-signal-engine-v2.md` 的 `strategy_decision` 唯一出口（S-track）。**
 > 本文的事件驱动 operator message 与 opportunity replay 语义继续有效；

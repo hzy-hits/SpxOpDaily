@@ -1,5 +1,9 @@
 # IBKR 会话抢占（Session Preemption）数据一致性加固设计
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](../../README.md)（目录核对：2026-10-05）。
+
 状态：设计已实现（2026-07-11，commit `51aefde`）；RTH 抢占演练验收仍待。实现要点：`freeze_quotes_on_connectivity_loss`、断线 purge/世代标记、`ibkr_recovery_observations` 防抖。下文保留调查与验收清单，行号可能随后续提交漂移。
 
 ## 0. 背景与问题定义

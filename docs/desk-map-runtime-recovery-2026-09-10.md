@@ -1,5 +1,9 @@
 # Desk Map 模型身份失败回退与空ATM崩溃修复
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：事故修复与时点验收。** 时点验收记录；现场时间、计数和部署结论仅证明文中那次检查，不代表此刻持续健康。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## 生产证据
 
 2026-09-10 14:00北京时间Python已生成GTH desk_map_projection，observed_through为06:00:03 UTC，源质量ready；Python任务记录rust_report_owner是既有单owner设计。Rust report health处于backoff，last_error_code=unexpected_model，last_response_model=deepseek-flash；最后成功持久化时间为2026-09-09T19:32:17Z。故地图生成失败不能解释成没有策略机会。没有读取Bark记录，尚未核验终端收件。

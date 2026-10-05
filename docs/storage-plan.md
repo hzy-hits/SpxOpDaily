@@ -1,8 +1,33 @@
 # Storage Plan
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
+## Current storage contract
+
+The active system retains original IBKR/Schwab option and underlying history,
+verified Parquet/manifests, bounded latest projections, Python operational
+records, the Huey task store, and the separate frozen Rust ledger/frames.
+Strategy replay uses raw-broker availability time; cards and NO_TRADE records
+cannot select samples or provide PnL labels.
+
+Hourly/weekend compaction is copy-only. Only existing manifest/digest/row-count
+and grace checks authorize an exact source deletion. The verified redundant
+research copy removed on September 23 was not the original broker lake.
+Python warning/critical is below 10 GiB; Rust refuses an append leaving less
+than 10 GiB. The 28 GiB action threshold is maintenance planning, not alert
+suppression. Pressure work is now owned by Huey, not the retired pressure timer.
+
+See [runtime configuration](runtime-configuration.md), [schedule](operations-schedule.md),
+[redundancy audit](desk-condor-probabilities-and-storage-2026-09-23.md) and
+[space threshold acceptance](condor-results-and-disk-threshold-2026-09-23.md).
+The remaining sizing estimates and MVP proposals below are historical design;
+they do not replace the current cleanup or retention implementation.
+
 Date: 2026-07-04
 
-## Decision
+## Historical MVP decision
 
 Do not store full-market OPRA tick data in the MVP.
 

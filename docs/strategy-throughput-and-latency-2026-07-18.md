@@ -1,5 +1,9 @@
 # SPX 0DTE：每日 1–2 笔目标的门禁与实时性诊断
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史研究与实验。** 研究/观察记录；保留原数据来源、样本期、政策和失败结果，不代表现行策略已证明 edge。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## Executive Summary
 
 结论不是“门禁整体太严”，而是两类问题叠加：历史执行链路确实过慢；数据/候选采集失败又被混在策略拒绝里。2026-07-14 至 2026-07-17 四个健康完整 session 的 RTH 漏斗为：4 个 confirmed → 3 个 material intent → 2 个 trade-ready → 2 个 fresh exact L1 → 1 个 strict replay fill。严格回放成交产出仅 0.25 笔/session，距离每天 1–2 笔明显不足，但其中一个 RTH confirmed 根本没有进入 intent，因此不能归因于硬门禁。

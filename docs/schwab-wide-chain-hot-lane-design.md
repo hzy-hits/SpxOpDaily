@@ -1,5 +1,9 @@
 # Schwab 宽链与 Option Hot Lane 设计
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 状态：核心实现与非 RTH smoke acceptance 完成；等待五个 RTH session
 日期：2026-07-12  
 范围：Schwab Market Data REST、SPX/SPXW 0DTE analytics、IBKR validation  

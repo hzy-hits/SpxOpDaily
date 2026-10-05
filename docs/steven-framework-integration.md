@@ -1,5 +1,9 @@
 # Steven SPX Options Framework 集成规格（exposure_map + strategy/steven）
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史研究与实验。** 研究/观察记录；保留原数据来源、样本期、政策和失败结果，不代表现行策略已证明 edge。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 日期：2026-07-11
 状态：规格文档（Phase 2/3 代码已合入；运行默认 `steven.enabled=false`，盘中验收前保持关闭）
 前置阅读：`docs/superpowers/specs/2026-07-11-steven-framework-data-budget-plan.zh.md`、`docs/greeks-definitions.md`

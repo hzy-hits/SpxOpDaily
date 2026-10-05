@@ -1,5 +1,18 @@
 # Unified Market Feature Frames
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
+## Current strategy and report boundary
+
+Market/option frame readiness, native Greek availability and exact-leg
+readiness are distinct. Core owns the committed `strategy_decision`; the report
+reuses that export and validates current time. A healthy feature frame does not
+prove an executable condor or available probability. Full strategy decisions
+stay outside Rust wire; only the bounded Desk projection crosses that boundary.
+See [the current flow](../README.md#current-runtime-overview).
+
 The feature pipeline converts provider-neutral `Quote` records and the existing
 `OptionsMap` into three versioned projections every minute.
 

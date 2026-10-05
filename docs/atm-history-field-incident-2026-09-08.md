@@ -1,5 +1,9 @@
 # ATM 历史字段丢失导致策略输入永久缺失
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：事故修复与时点验收。** 时点验收记录；现场时间、计数和部署结论仅证明文中那次检查，不代表此刻持续健康。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 Phase 8 / S1。`option_volatility_features` 为避免把换 ATM 当成波动收缩，要求
 十五分钟前的 `atm_strike` 与当前一致。但 `merge_option_history` 的压缩投影只
 保留跨式价格和 IV，丢失 `atm_strike`。生产历史虽然有 170 个分钟快照，仍无法

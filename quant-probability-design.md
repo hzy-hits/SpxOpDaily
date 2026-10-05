@@ -1,5 +1,9 @@
 # 量化概率层与 SPY 墙位对照设计(实施规格)
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史研究与实验。** 研究/观察记录；保留原数据来源、样本期、政策和失败结果，不代表现行策略已证明 edge。
+> [全仓文档、当前运行状态与合同优先级](docs/README.md)（目录核对：2026-10-05）。
+
 > **状态（2026-08-07）：历史实施规格，仅作背景记录。** 后续改动遵循
 > `docs/architecture-simplification-execution-plan-v1.md`；不得据此新增 service、state file 或 console script。
 

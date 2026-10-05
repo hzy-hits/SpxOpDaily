@@ -1,5 +1,9 @@
 # Spring Gamma v3 forward audit · 2026-08-28
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史研究与实验。** 研究/观察记录；保留原数据来源、样本期、政策和失败结果，不代表现行策略已证明 edge。
+> [全仓文档、当前运行状态与合同优先级](../README.md)（目录核对：2026-10-05）。
+
 ## Decision
 
 Spring Gamma v3 does not receive confirmation or veto authority. Its persisted

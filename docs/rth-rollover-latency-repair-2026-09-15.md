@@ -1,5 +1,9 @@
 # RTH rollover and latency recurrence — 2026-09-15
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：事故修复与时点验收。** 时点验收记录；现场时间、计数和部署结论仅证明文中那次检查，不代表此刻持续健康。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 Scope: S1/S3 and Phase 6 production-fault exception under the architecture simplification execution plan. Baseline `7e95fa1c`. No strategy expansion or notification changes.
 
 ## Attribution

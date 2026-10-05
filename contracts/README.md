@@ -1,8 +1,20 @@
 # Shared wire-contract registry
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](../docs/README.md)（目录核对：2026-10-05）。
+
+## Existing recovery projection fields
+
+The production fault repair reuses `desk_map_projection.v1` with optional
+`recovery_seen` and `recovery_of`, validated by the existing Python/Rust readers.
+It adds no wire version or strategy authority. Full `strategy_decision` and
+per-side `data_diagnostics` remain Python objects; Rust receives the bounded
+rendered message. See [acceptance](../docs/desk-data-recovery-2026-10-05.md).
+
 > **FROZEN（2026-08-07）：本 contract 集已冻结，不得新增 contract、version 或 fixture。**
-> 跨语言 contract 计划随 Rust 控制面退出一并删除，见
-> `docs/architecture-simplification-execution-plan-v1.md` Phase 6（P6-3）。
+> Phase 6 退出已延期，当前继续保留和验证这些 fixtures；只处理授权的生产故障。
+> 见 [执行方案](../docs/architecture-simplification-execution-plan-v1.md) 的收口决定。
 
 `contracts/golden/` contains sanitized, versioned JSON examples used at runtime
 boundaries. A file being stored here means its shape is auditable across the

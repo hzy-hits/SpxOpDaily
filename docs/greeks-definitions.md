@@ -1,5 +1,16 @@
 # SPX Spark 希腊字母与曝露代理指标定义（exposure_map 规范）
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
+## 数据来源与公式的界线
+
+本文公式用于解释/验证数值语义，不表示生产 broker 已返回对应字段。
+IBKR native Greeks、跨 provider 结构补充与本地定价估算必须保留各自来源和时钟。
+有新鲜 BBO 而 Delta/IV 缺失时，不能以本文公式的存在宣称原始 Greeks 已恢复。
+[2026-10-05 缺口验收](desk-data-recovery-2026-10-05.md)记录了实际边界。
+
 日期：2026-07-11
 状态：规格文档（Phase 2 已实现；`exposure_map` / 单测 golden 必须与本文档公式一一对应）
 适用模块：`src/spx_spark/features/exposure_map.py`、`src/spx_spark/options_map.py`（抽取后消费方）、`src/spx_spark/greek_shadow.py`（符号约定基准）

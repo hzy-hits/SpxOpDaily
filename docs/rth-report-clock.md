@@ -1,13 +1,20 @@
 # RTH report clock contract
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 The scheduled SPX status path uses the exchange session as its only RTH
 clock. `America/New_York` determines the trading date, daylight-saving
 offset, regular close, and early close. Beijing time remains a presentation
 field; it does not own report eligibility.
 
 Python continues to record ET quarter-hour snapshots. Human Desk Maps consume
-only the `:00` / `:30` projections, so the first GTH notification is `20:30`
-rather than the audit-only `20:15` snapshot.
+the `:00` / `:30` projections for scheduled reports, so the first scheduled GTH
+notification is `20:30` rather than the audit-only `20:15` snapshot. Separately,
+[current-time data recovery updates](desk-data-recovery-2026-10-05.md) may
+arrive between scheduled slots; their recovery identity never counts as a
+completed scheduled heartbeat.
 
 ## Schedule and jitter
 
@@ -23,7 +30,7 @@ rather than the audit-only `20:15` snapshot.
   `AccuracySec=1s`, and covers the full RTH. Calendar and application gates
   still reject holidays and post-close invocations.
 - During RTH, quarter-hour snapshots remain available for audit. Human
-  notifications are generated only on half-hour boundaries; a thin delivered
+  scheduled notifications are generated on half-hour boundaries; a thin delivered
   map is marked `rth_heartbeat_degraded_snapshot` rather than hidden.
 - The RTH notification identity uses the resolved slot timestamp and slot
   key, so a process retry cannot create another event for the same boundary.

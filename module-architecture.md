@@ -1,6 +1,18 @@
 # SPX Spark 模块架构与分层协议
 
-> **状态（2026-09-22）：P1-4 已完成，Import Linter 已替代自研模块登记测试。**
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](docs/README.md)（目录核对：2026-10-05）。
+
+## 当前选腿与数据诊断 owner
+
+`application/order_map/execution_quote.py` 拥有现有 `nearest_abs_delta_strike`，
+`candidate_factory.py` 与 `iron_condor.py` 复用同一实现。比较扫描可记录逐侧
+新鲜 BBO、缺失/过期或异源 Delta、选中行权价，供 `desk_strategy_view.py` 摘要。
+诊断不改变目标 Delta、报价年龄、贷记、候选授权或概率定义。
+详见 [2026-10-05 验收](docs/desk-data-recovery-2026-10-05.md)。
+
+> **状态（2026-10-05）：P1-4 已完成，Import Linter 已替代自研模块登记测试。**
 > 当前可执行依赖合同是 [pyproject.toml](pyproject.toml) 中的两个 Import Linter contracts，
 > 使用 `uv run lint-imports` 检查。下方旧 L0–L5 图保留为职责与迁移背景，
 > 不是仍在运行的 AST 登记规则。Phase 6 Rust 退出和 Phase 7 全面重写已延期，
@@ -16,7 +28,7 @@ flowchart TD
 ```
 
 准确禁止依赖和已接受例外以 `pyproject.toml` 为准；现有顶层 helper 未全部迁移。
-完整运行链路见 [README 架构图](README.md#current-runtime-overview-2026-09-22)：
+完整运行链路见 [README 架构图](README.md#current-runtime-overview)：
 Python Core 拥有最终策略，报告复用其导出；Rust 保留定时桌图和对应投递；
 现有 Worker 的 `jobs.py` 调度 `maintenance.py` 独立检查桌图链路并向飞书告警。
 会话查询使用现有 Python operational DB 的索引字段；收益回放使用原始券商数据，

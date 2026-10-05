@@ -1,5 +1,9 @@
 # Runtime configuration
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 > **状态（2026-08-08）：旧 `runtime.yaml` 已迁为 `runtime.toml`，重复的 `runtime_config.py` loader 已删除；剩余 legacy settings loader 与 `config.py` env helper 已按执行方案第 0 节接受为按需技术债，P5-2 不再是施工队列。**
 > 新配置只允许进入最小 pydantic-settings `AppSettings`；不得向过渡 TOML
 > 增加键、env helper 或 loader 兼容分支。仅在实际修改对应 owner 时就地迁移。
@@ -41,12 +45,12 @@ shock/strategy windows, post-close review, scheduled push LLM writing, the
 Steven observe-only guidance block (`steven.*`, default disabled), and the
 research data platform.
 
-The production GTH data budget gives IBKR `84` SPXW lines (`56` persistent hot
-contracts plus `28` rotating contracts) and `0` SPY option lines; Schwab owns
-the SPY option lane. This prevents a stale local environment override from
-silently spending scarce IBKR lines on the wrong product. A two-second
-flush cadence advances one 28-contract rotation slice while the 56-contract
-hot lane remains continuously subscribed. The adaptive capacity tracker lowers
+The option allocation owner is `ibkr/stream/quota_plan.py`. GTH/fallback targets
+`46` hot + `38` rotation lines (84 option lines); normal RTH validation targets
+`44` hot + `20` rotation lines. Base, temporary exact-leg and reserve lines
+share the total discovered capacity of 100. Actual allocation can be lower.
+Schwab owns the SPY option lane. A two-second configured flush does not imply
+all strikes or all Greek fields refreshed at that cadence. The adaptive capacity tracker lowers
 the plan after ticker-limit evidence. From 30 minutes before the actual RTH close
 (15:30 ET on normal sessions, 12:30 ET on scheduled early closes) to 17:00 ET, acquisition
 rolls its front contract to the next trading day's SPXW while analytics retains
@@ -108,18 +112,18 @@ artifact dates one pressure pass verifies. If the host misses multiple trading
 days, backfill each missing date explicitly with `--date YYYY-MM-DD`; automatic
 mode never invents or silently skips a historical review.
 
-The hourly `spx-spark-storage-pressure.timer` calls that same application with
+The existing Huey Worker calls that same application hourly at UTC `:20` with
 `--pressure-check`. Watermarks are typed configuration, not systemd literals:
 
 - `data_platform.storage_pressure_action_free_bytes`: 28 GiB by default;
-- `data_platform.storage_pressure_warning_free_bytes`: 24 GiB by default;
-- `data_platform.storage_pressure_critical_free_bytes`: 20 GiB by default;
+- `data_platform.storage_pressure_warning_free_bytes`: below 10 GiB;
+- `data_platform.storage_pressure_critical_free_bytes`: below 10 GiB;
 - `data_platform.replay_raw_delete_grace_hours`: minimum age after verified
   publication before an eligible raw source can be removed.
 
-Free-space severity increases as available bytes cross those levels downward.
-The critical default matches the Oracle Rust raw-log reserve, while the higher
-levels leave room to finish compaction before ingress fails closed. Pressure
+The warning/critical checks trigger only below 10 GiB, not at equality. The
+Oracle Rust append reserve rejects writes that would leave less than 10 GiB.
+The 28 GiB action threshold is early housekeeping, not a notification restriction. Pressure
 never grants deletion authority by itself: the completed-day artifact,
 source/Parquet digests, row counts and grace gate must all pass. Any required
 artifact or verification failure exits non-zero without deleting raw data.
@@ -130,7 +134,8 @@ legacy `.env` still enables the old 48-hour path. They continue producing
 verified Parquet and manifests; only the session finalizer may remove an exact
 raw partition.
 
-Both timer paths use the same outer `flock`. The systemd units deliberately do
+The existing finalizer/compaction paths retain their own single-writer locks;
+`spx-spark-storage-pressure.timer` is retired, with pressure work owned by Huey. The systemd units deliberately do
 not pass watermark numbers, so `defaults < deployment < environment` remains
 the sole precedence rule. Put machine-specific overrides in the ignored
 `config/runtime.local.toml`.

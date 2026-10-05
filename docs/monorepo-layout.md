@@ -1,10 +1,14 @@
 # SPX Spark monorepo contract
 
-> **状态（2026-09-22）：Python/Rust 双运行时仍是当前部署边界。**
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
+> **状态（2026-10-05）：Python/Rust 双运行时仍是当前部署边界。**
 > 按 [执行方案第 0 节](architecture-simplification-execution-plan-v1.md) 的收口决定，
 > Phase 6 Rust 退出已延期；现有 Rust 保留并冻结，仅修复生产故障。
 > 新增职责复用 Python owner，不扩展 Rust 所有权或跨语言 contract。
-> 完整运行图见 [README](../README.md#current-runtime-overview-2026-09-22)。
+> 完整运行图见 [README](../README.md#current-runtime-overview)。
 
 Status: repository integration contract. This change unifies source and CI; it
 does not by itself authorize a production restart, report-owner switch, or
@@ -66,11 +70,11 @@ git ls-files rust/target  # must print nothing
 | Quote normalization and atomic mirror projections | Python | Rust consumes only bounded, typed files; it does not open broker sessions |
 | HMM, range research, DuckDB, Parquet, notebooks, replay, backtests | Python | Research may iterate quickly but has `action_authority=none` until a versioned production contract is accepted |
 | Final strategy decisions and manual candidate lane | Python | `build_strategy_decision` is the sole candidate authority; full decisions stay outside Rust wire contracts |
-| Desk source preparation | Python | Reuse committed strategy export, freeze before slow work and recheck expiry |
+| Desk source preparation | Python | Reuse committed strategy export, freeze before slow work, recheck expiry; Core publishes current-time updates when missing data capabilities recover |
 | Pipeline fault/recovery monitor | Python Huey Worker | Existing maintenance task sends direct Feishu alerts independently of the Rust report path; host/Worker/network remain dependencies |
 | Typed bridge/core readiness invariants | Rust | Unknown state, stale data, incomplete exact legs, and invalid transitions fail closed |
 | Append-only frames and Rust operational SQLite/WAL ledger | Rust | One writer per Rust lane; distinct from the existing Python operational decision database |
-| Half-hour Desk Map scheduling, report validation, scheduled-report outbox and receipts | Rust | Network I/O still requires the existing config gate, CLI gate, and single-owner fence |
+| Half-hour and data-recovery Desk Map scheduling, report validation, scheduled-report outbox and receipts | Rust | Network I/O still requires the existing config gate, CLI gate, and single-owner fence |
 | Real or paper order placement | Neither | Automatic ordering remains unavailable |
 
 Keeping both languages does not mean duplicating responsibilities. Python is

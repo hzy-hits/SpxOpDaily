@@ -1,5 +1,9 @@
 # SPX Spark 0DTE 算法与策略信号引擎设计 v2
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：版本策略与功能合同。** 版本合同；后续授权与局部修复见统一策略合同索引，不能用旧门槛覆盖现行行为。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 状态：**实施合同（Implementation Contract）**
 适用仓库：`hzy-hits/SpxOpDaily`
 目标路径：`docs/strategy-signal-engine-v2.md`

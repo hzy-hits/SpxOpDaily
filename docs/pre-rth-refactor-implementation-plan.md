@@ -1,5 +1,9 @@
 # SPX Spark 首个 RTH 前重构实施计划
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 > **状态（2026-08-07）：本计划执行窗口已结束，文档转为历史记录。**
 > 未完成项不得按本文继续实施；后续工作以 `docs/architecture-simplification-blueprint-v1.md`
 > 与 `docs/architecture-simplification-execution-plan-v1.md` 为准。

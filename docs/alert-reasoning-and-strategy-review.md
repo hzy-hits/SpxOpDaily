@@ -1,5 +1,9 @@
 # Alert Reasoning and SPXW Strategy Model Review
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史研究与实验。** 研究/观察记录；保留原数据来源、样本期、政策和失败结果，不代表现行策略已证明 edge。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 Date: 2026-07-05
 
 Scope: SPX/SPXW manual option trading alerts. ES is allowed as confirmation. VIX family, ETFs, Hyperliquid, Polymarket, and on-chain smart-money data are algorithm context only unless explicitly promoted by future validation.

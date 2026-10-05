@@ -1,5 +1,9 @@
 # User-authorized GTH smooth-convergence iron condor
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：版本策略与功能合同。** 版本合同；后续授权与局部修复见统一策略合同索引，不能用旧门槛覆盖现行行为。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 Scope: S1/S3 under the architecture simplification execution plan. Baseline 5ead639c. The user explicitly authorized the new iron-condor entry after reviewing the observation-only implementation and raw-quote diagnostic. This supersedes the observation-only restriction in AGENTS item38 and the entry-authorization conclusion of gth-convergence-diagnostics-2026-09-15.md. That report's empirical observations and limitations remain unchanged.
 
 ## Entry contract

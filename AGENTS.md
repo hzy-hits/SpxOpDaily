@@ -1,6 +1,10 @@
 # SPX Spark 项目协作说明
 
-本文件是 Agent 进入本仓库后的第一份项目说明。它记录项目目标、环境入口、工作边界和验收要求；实现细节仍以代码、测试和相应专题文档为准。
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](docs/README.md)（目录核对：2026-10-05）。
+
+本文件是 Agent 进入本仓库后的第一份项目说明。它记录项目目标、环境入口、工作边界和验收要求；实现细节仍以代码、测试和相应专题文档为准。全仓 Markdown 的状态与导航见 [docs/README.md](docs/README.md)。
 
 ## 1. 项目基本信息
 
@@ -51,7 +55,7 @@ git@github-spxopdaily:hzy-hits/SpxOpDaily.git
 - IB Gateway API 端口（Paper 通常为 4002）只能由服务器 loopback 访问；OCI ingress 和主机 firewall 都不得向公网开放 4001/4002。
 - OI/volume/exposure surface 是结构代理，不等同于真实做市商或参与者持仓；没有带方向和 open/close 标签的数据时必须如实标注限制。
 - 非显然的业务阈值和策略规则写入 typed config、deployment overlay 或文档，不要散落硬编码。
-- 配置优先级固定为 `defaults < deployment < environment`。机器专属值放在 gitignored 的 `config/runtime.local.yaml` 或本机环境中。
+- 配置优先级固定为 `defaults < deployment < environment`。机器专属值放在 gitignored 的 `config/runtime.local.toml` 或本机环境中。
 - 不读取、打印或提交 `.env`、token、broker 凭据、私钥、cookie、通知密钥以及 `/srv/data` 下的运行时 secrets。
 - 不覆盖用户已有改动；开始和结束时都检查工作树，并把观察事实与推断分开说明。
 
@@ -61,7 +65,7 @@ git@github-spxopdaily:hzy-hits/SpxOpDaily.git
 - `docs/monorepo-layout.md`：Python/Rust 所有权、保留历史、CI 与部署边界。
 - `rust/AGENTS.md`：Rust workspace 的严格状态机与安全边界。
 - `rust/docs/ARCHITECTURE.md`：Rust core、ledger、report、delivery 架构。
-- `module-architecture.md`：模块分层和依赖规则；新增生产模块时必须同步架构登记测试。
+- `module-architecture.md`：模块分层和依赖规则；新增或移动生产模块时须遵守现行 Import Linter 合同。
 - `docs/headless-deployment.md`：Oracle、IB Gateway/IBC、VNC 和 systemd 部署说明。
 - `docs/runtime-configuration.md`：typed settings 与部署配置规则。
 - `docs/market-data-capability-matrix.md`：数据源能力和 readiness 语义。
@@ -137,7 +141,7 @@ journalctl --user -u <service-name> -n 100 --no-pager
 4. 只重启受影响服务，并避免双 writer；合并仓库本身不得顺带转移 report/delivery owner。
 5. 部署后分别验证 unit 状态、restart count、日志、health endpoint、数据源时间戳/NBBO readiness 和实际通知投递状态。
 
-生产核心通常包括 `spx-spark-24h`、`spx-spark-ibkr-stream`、`spx-spark-schwab-marketdata`、`spx-spark-schwab-oauth`、`spx-spark-market-features-hot`、`spx-spark-intraday-shock-hot`、`spx-spark-notification-delivery`、`spx-spark-surface-dashboard`、`spx-spark-surface-live`、`spx-spark-surface-replay` 和 `ibc-gateway`。实际状态始终以远端 systemd、health endpoint 和数据新鲜度检查为准。
+生产 Python 核心为 `spx-core`、`spx-worker`、`spx-spark-ibkr-stream`、`spx-spark-schwab-marketdata`、`spx-spark-schwab-oauth` 和 `ibc-gateway`；Rust 保留 system units `spx-rust-core-shadow`、`spx-rust-normalized-bridge`、`spx-rust-report`、`spx-rust-delivery`。旧 24h、独立 hot-worker、旧 notification-delivery 以及 surface live/replay 服务不再是当前启动清单。实际状态以 systemd、health、数据新鲜度和回执核对为准，详见 [运行调度](docs/operations-schedule.md)。
 
 ## 7. 完成交付标准
 
@@ -259,3 +263,7 @@ A change that increases process count, active languages, mutable stores or owner
 38. 2026-09-15 GTH收敛诊断修复（S1/S3）：价格位移或ATR缺失/非正时仅判历史不可用，不声称价格单边。平缓收敛按既有3%跨式衰减、5/15m IV不升、1.25ATR位移与观测数单独输出observation_only，不要求先扩张，亦不授权新入场。桌图同时展示波动、位移、贷记与报价独立阻断，原扩张回落合同不变。欧盘原始IBKR对照及缺口见docs/gth-convergence-diagnostics-2026-09-15.md；GTH蝶式未因移动RTH时钟获得授权，Bark不变。
 
 39. 2026-09-15用户明确授权GTH平缓收敛铁鹰（S1/S3，GTH证据合同v4，全局v69不变）：第38条observation_only限制被本条替代。30个原观测、同合约15m跨式衰减≥3%、5/15m ATM IV不升、15m位移≤1.25ATR且所需数据完整时，可独立进入现有IRON_CONDOR_DELTA人工授权，不再要求先扩张10%/峰后回落8%/峰值时间。entry_kind=smooth_convergence、setup_state=GTH_SMOOTH_CONVERGENCE；原扩张回落入口仍保留。IBKR exact BBO/Greeks30s、BBO skew10s、20Δ/10宽、贷记25%–55%、两侧各≥25%、$1000风险、GCR10≤20%、宏观/会话及0.5C/3C/12:30管理不变。明确forward_unvalidated_user_override、automatic_ordering=false；不得另加“先证明盈利/再观察N天”授权条件。候选文案改为真实入场依据，Bark传输与投递规则不动。见docs/gth-smooth-entry-authorization-2026-09-15.md。
+
+40. 2026-10-05 数据恢复与缺口诊断（S1/S3、Phase 6 冻结故障修复）：Core 提交最终决策后，对已公告缺失能力的真实恢复触发当前时间 Desk Map；沿用现有 Rust report/delivery，按 recovery projection 去重，不能用恢复消息掩盖定时漏报。20Δ/10、20 点翼报价与概率分别识别；20 点翼仍为比较扫描，不扩大人工策略授权。BBO、Greeks、OI 独立时钟；data_plane_healthy 不证明 Delta 完整。选腿 owner 为 application/order_map/execution_quote.py，width_comparisons.data_diagnostics 记录逐侧报价与 Delta 缺口。2026-10-05 12:07–12:15 UTC 独立 API 查询及 collector 重连后 native Greeks 仍部分缺失；12:45 新验收确认字段返回、报价就绪，12:24 的恢复摘要已有回执。不得把字段后来返回归因为已证明的券商根因修复；见 [验收记录](docs/desk-data-recovery-2026-10-05.md)。
+
+41. 文档维护（2026-10-05）：[文档总览](docs/README.md)覆盖所有已跟踪 Markdown，包括根目录、docs、rust、contracts、site 和测试说明。现行运行文档随代码更新；版本合同标明后续覆盖；历史研究保留样本期、参数与失败结论。失效页面不能继续作为部署入口，不能为更新日期把历史验收改写成当前成功。文档状态标签是导航，不新增生产授权；推送后核对 origin/master 与工作树，纯文档不重启服务。

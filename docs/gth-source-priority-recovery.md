@@ -1,5 +1,9 @@
 # GTH 已确认水平优先级修复与铁鹰长持有复核
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：版本策略与功能合同。** 版本合同；后续授权与局部修复见统一策略合同索引，不能用旧门槛覆盖现行行为。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## 范围与代码修复
 
 执行方案 Phase 8 / S3，复用 gth_trend_entry_source.py。原来源选择顺序是Asia-range、advance、transition、confirmed level；新鲜但未获现行人工授权的趋势背景可能先占用唯一来源，令有效水平信号无法进入下游。修改为Asia-range、confirmed level、advance、transition。水平必须同时满足formal_signal=true、confirmed、quality_ok=true、expires_at>now；不会复活过期水平。Asia-range既有优先级保留。欧洲transition与水平同时出现时也以已确认水平优先，这是本次明确的选源政策。

@@ -1,5 +1,9 @@
 # SPXW 执行价算子扩展与模型研究附录 v1
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：版本策略与功能合同。** 版本合同；后续授权与局部修复见统一策略合同索引，不能用旧门槛覆盖现行行为。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 状态：**已实现（随主文档 SDCTX-1–5；验收见 `docs/research/strike-differential-context-acceptance-2026-08-10.md`）**  
 适用仓库：`hzy-hits/SpxOpDaily`  
 适用主文档：`docs/spxw-strike-differential-decision-context-v1.md`  

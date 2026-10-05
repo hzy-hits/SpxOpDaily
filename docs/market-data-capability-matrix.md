@@ -1,5 +1,25 @@
 # Market-data capability matrix
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
+## Independent field readiness
+
+Fresh BBO, native Greeks, OI, strategy readiness and message delivery are
+separate capabilities. `data_plane_healthy=true` does not prove all of them.
+For a GTH condor, source, market-data type, per-leg BBO/Greeks age and four-leg
+skew still follow the existing IBKR-only contract. Missing Delta is not a quote
+subscription acknowledgement, and a new price tick cannot renew old Greeks.
+
+On 2026-10-05, independent IB Gateway API requests returned live BBO but no
+model/bid/ask Greeks for some near-price SPXW contracts. Collector reconnection
+left the gap present. The two 20Δ width comparisons failed before probability
+estimation; this was not a sample-count failure. Current diagnostics distinguish
+short-leg selection, four-leg quote and credit failures. Counts and restored
+capabilities must be measured at the new decision time, not copied from that
+incident. See [evidence](desk-data-recovery-2026-10-05.md).
+
 This is the operational contract for what SPX Spark may use. HTTP success,
 WebSocket subscription acceptance, and local receipt time are not evidence of
 live market data; the provider source timestamp must advance.
@@ -11,7 +31,7 @@ live market data; the provider source timestamp must advance.
 | Schwab stream ES/MES | CME Globex | production | path, returns, volume, VWAP, basis context | native SPX or SPXW GEX |
 | Schwab stream NQ/RTY/YM | Globex | production | GTH/overnight cross-index percent returns relative to ES | SPX coordinate; option pricing; RTH cash NDX/DJI/RUT replacement |
 | Schwab stream one ES futures option | Globex | validation | entitlement, continuity, timestamp, spread and OI probe | ES surface/GEX; SPXW pricing |
-| IBKR SPXW current expiry | Cboe GTH | production | exclusive GTH SPXW bid/ask, IV and option pricing | replacement with stale Schwab rows |
+| IBKR SPXW current expiry | Cboe GTH | production | exclusive GTH SPXW pricing; bid/ask and native IV/Greeks each require their own observed availability | replacement with stale Schwab rows |
 | Schwab SPXW current expiry | Cboe GTH | unavailable for live pricing | frozen audit/last structure only | GTH model price, limit, probability or entry |
 | Schwab SPX 7D/30D + TLT/IEF option research chains | US RTH normal profile | forward collection, raw-only | constant-tenor ATM-IV and same-expiry call-put skew research after coverage accumulates | latest-state pricing, alerts, strategy gates, GTH use |
 | Schwab SPX cash index | outside RTH | frozen reference | last cash close/reference | executable spot or fresh GTH direction |

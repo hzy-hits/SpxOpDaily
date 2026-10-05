@@ -1,5 +1,9 @@
 # Change Brief — P5-1 / S6 operational DB and strategy-decision owner
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## Goal
 
 - `spx.sqlite` 成为操作事实的唯一目标数据库，先承接实时 `StrategyDecision` 与两腿/三腿执行快照。

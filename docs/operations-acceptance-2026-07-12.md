@@ -1,5 +1,9 @@
 # SPX Spark Operations Acceptance - 2026-07-12
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：事故修复与时点验收。** 时点验收记录；现场时间、计数和部署结论仅证明文中那次检查，不代表此刻持续健康。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## Verdict
 
 - Runtime and notification acceptance: **PASS**.

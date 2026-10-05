@@ -1,16 +1,22 @@
 # Schwab primary and IBKR fallback decision
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## Decision
 
 SPX Spark uses Schwab as the normal RTH SPX/SPXW provider and as a continuous
 ES/MES provider. During SPX Global Trading Hours (GTH), IBKR is the production
-SPXW pricing source unless fresh Schwab option coverage is proven by source
-timestamps. IBKR is retained for three bounded responsibilities:
+SPXW execution-pricing source under the current strategy contract. Freshness
+alone does not authorize switching GTH execution to Schwab. IBKR is retained
+for the following bounded roles:
 
 1. L1 market-data fallback when Schwab direct anchors fail health checks.
 2. The production SPXW pricing feed during GTH, when Schwab SPXW source
    timestamps are frozen.
-3. Paper-order and execution-algorithm validation for a future broker adapter.
+3. Read-only Paper-session integration checks. Any future order adapter is
+   outside current production scope; no automatic orders are enabled.
 
 IBKR is not treated as a depth, tick, or full-chain advantage in the current
 system because the deployed collector only consumes L1 data.
@@ -31,13 +37,18 @@ The normal Oracle deployment uses the dedicated IBKR Paper username and
 - If the Paper feed is delayed, frozen, unsubscribed, or blocked by a competing
   market-data session, failover is unavailable and new entries fail closed.
 
-The GTH Paper plan uses 56 continuously subscribed SPXW contracts and a
-28-contract rotating slice. The slice advances every two seconds. Together
-with the SPX and ES base anchors, the expected peak is 86 of the initial
-100-line entitlement. VIX-family, ETF, MES, and cross-index context stays on
-Schwab; IBKR slow polling is disabled by default. Exact GTH legs preempt slots
-from the rotating slice rather than increasing that peak. Runtime ticker-limit
-evidence reduces the effective capacity automatically.
+The current option-lane target is 46 hot + 38 rotating contracts during GTH,
+fallback and prefetch; RTH validation uses 44 hot + 20 rotating contracts.
+The 100-line entitlement includes base, temporary exact-leg and reserve lines;
+it is not a 100-option budget. Exact-leg requests consume the existing budget,
+and observed ticker limits can reduce it. See the existing
+`src/spx_spark/ibkr/stream/quota_plan.py` owner and
+[runtime configuration](runtime-configuration.md). VIX-family, ETF, MES and
+cross-index context remain on Schwab; IBKR slow polling is disabled by default.
+
+Fresh BBO does not imply native Delta/IV. Each field retains its own provider
+and time contract; the [2026-10-05 audit](desk-data-recovery-2026-10-05.md)
+records fresh quotes with missing native Greeks at the API boundary.
 
 The Live username is intentionally not kept logged in on Oracle. Live-account
 positions, orders, fills, and PnL therefore remain outside this deployment's

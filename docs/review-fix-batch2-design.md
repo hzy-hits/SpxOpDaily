@@ -1,5 +1,9 @@
 # 评审修复·批次 2:收盘换月 + 量化修正(S1/S2/S4/S5/S8)(实施规格)
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 状态: 2026-07-07 设计完成,待实施。对应 docs/architecture-review-kangyu.md 的
 S1(volume 加权 GEX)、S2(零 gamma spot 扫描)、S4(skew delta 标准化)、
 S5(ATM 插值)、S8(movement 阈值用 expected move 归一),外加用户需求:

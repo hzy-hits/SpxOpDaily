@@ -1,5 +1,9 @@
 # SPX Spark Architecture Plan
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 > 文档状态：历史产品/数据源规划。当前强制分层以 `module-architecture.md` 为准，
 > 首个 RTH 前的重构执行顺序以
 > `docs/pre-rth-refactor-implementation-plan.md` 为准，完整验收以

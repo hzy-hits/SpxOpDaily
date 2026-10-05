@@ -1,5 +1,9 @@
 # GTH 入场证据修复与平缓收缩检验（v68）
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：版本策略与功能合同。** 版本合同；后续授权与局部修复见统一策略合同索引，不能用旧门槛覆盖现行行为。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## 交付范围
 
 执行方案 Phase 8 / S-track S1（市场事实）、S3（策略候选），延续v67修复。现有owner：market_features/options.py、session_episode.py；授权版本同步到strategy_regime.py、strategy_edge_model.py、gth_iron_condor.py，iron_condor.py保留v67已合格锁腿。

@@ -1,5 +1,9 @@
 # SPX Spark 工程化重构与验收规格
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 > **状态（2026-08-07）：本文档部分章节已被取代。**
 > 架构基线见 `docs/architecture-simplification-blueprint-v1.md`，执行基线见 `docs/architecture-simplification-execution-plan-v1.md`。
 > 失效章节：§7 状态机规格、§8 模块级拆分计划、§10 IPC 与消息边界、§11 Rust/NumPy 决策门、§13 验收测试矩阵。

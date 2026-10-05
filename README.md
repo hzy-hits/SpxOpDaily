@@ -1,592 +1,163 @@
 # SPX Spark
 
-Near-real-time SPX/SPXW 0DTE dashboard and alert research system.
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](docs/README.md)（目录核对：2026-10-05）。
 
-Current scope:
+面向人工决策的 SPX/SPXW 行情、策略研究与 Desk Map 系统。常规 RTH 使用
+Schwab，GTH 与 Schwab 故障备用使用 IBKR Paper。所有策略均为人工候选，
+`automatic_ordering=false`；没有真实或 Paper 自动下单能力。
 
-- Use Schwab as the normal RTH provider and IBKR Paper as the SPXW GTH and
-  Schwab-outage fallback provider.
-- Record the boundary between live, delayed, frozen, and missing feeds from
-  provider source timestamps.
-- Keep the project isolated from the machine's default Codex setup.
-- No live order placement. Paper positions and fills are simulation data and
-  must never be presented as the user's live-account exposure.
+[全部文档与状态](docs/README.md) · [协作约束](AGENTS.md) ·
+[部署手册](docs/headless-deployment.md) · [运行调度](docs/operations-schedule.md) ·
+[数据能力](docs/market-data-capability-matrix.md)
 
-Current architecture and refactor execution documents:
+## Current runtime overview
 
-- `docs/architecture-simplification-blueprint-v1.md` - **architecture simplification baseline; authoritative for all new work.**
-- `docs/architecture-simplification-execution-plan-v1.md` - **verified facts, hard constraints, and phase task cards for the simplification refactor.**
-- `docs/strategy-signal-engine-v2.md` - **unified 0DTE strategy signal engine implementation contract (S-track).**
-- `docs/monorepo-layout.md` - current Python/Rust ownership, history, CI, and deployment boundary (Rust runtime frozen; Phase 6 retirement deferred).
-- `module-architecture.md` - enforced Python module layers and dependency rules.
-- `rust/docs/ARCHITECTURE.md` - typed Rust runtime, ledger, report, and delivery architecture.
-- `docs/refactor-architecture-acceptance-plan.md` - Python refactor evidence and acceptance specification.
-- `docs/pre-rth-refactor-implementation-plan.md` - implementation order before the first RTH session.
-- `docs/schwab-wide-chain-hot-lane-design.md` - Schwab wide-chain, 500-symbol hot lane, and IBKR validation design.
-- `docs/structure-signal-vnext.md` - event-driven Desk Map, setup lifecycle, opportunity replay, and HMM shadow contract.
-- `docs/probability-model-p-vs-q-execution-design.md` - risk-neutral versus physical probability, fill, net-PnL distribution, and formal NoTrade research design.
-
-## Current runtime overview (2026-10-05)
-
-Existing ownership: Phase 5 maintenance, Phase 6 frozen runtime, S1/S3 strategy
-and data contracts. Rust retirement and the full data-platform rewrite are
-**deferred** under the [August 8 scope decision](docs/architecture-simplification-execution-plan-v1.md).
-The diagram describes existing components, not new services.
+核对日期：2026-10-05。Python Core/Worker 与现有 Rust 运行时共同运行；
+Phase 6 Rust 退出和 Phase 7 数据平台全面重写已延期。下面是已存在的组件。
 
 ```mermaid
 flowchart TD
-    Brokers["Schwab RTH / IBKR GTH and fallback"] --> Collectors["Python collectors: source time, contract identity, NBBO"]
-    Collectors --> Raw["Original broker option and underlying history"]
-    Collectors --> Live["Normalized live state"]
-    Raw --> Research["Python research / causal replay / history preparation"]
-    Live --> Strategy["Python Core: build_strategy_decision"]
+    Brokers["Schwab RTH / IBKR GTH与备用"] --> Collectors["Python collectors：合约、来源、独立字段时钟"]
+    Collectors --> Raw["原始券商期权与标的历史"]
+    Collectors --> Live["Normalized latest state"]
+    Raw --> Research["Python 因果回放 / 历史准备"]
+    Live --> Strategy["Python Core：build_strategy_decision"]
     Research --> Strategy
-    Strategy --> Decisions["Python operational DB and final decision export"]
-    Decisions --> Candidates["Existing Python manual candidate lane"]
-    Decisions --> Desk["Python Desk Map preparation: validate frozen decision"]
+    Strategy --> Decisions["Python operational DB / 最终决策导出"]
+    Decisions --> Candidates["既有 Python 人工候选 lane"]
+    Candidates --> Worker["Huey Worker / Python 通知记录"]
+    Decisions --> Desk["Desk Map：复用决策、重验当前时间"]
     Live --> Desk
-    Desk --> Projection["Bounded desk_map_projection.v1"]
-    Live --> Bridge["Rust normalized bridge"]
+    Desk --> Projection["desk_map_projection.v1"]
+    Live --> Bridge["Rust bridge"]
     Projection --> Bridge
-    Bridge --> Core["Rust Core: typed readiness, latest projections, frames"]
-    Core --> Report["Rust report: half-hour maps and immediate data-recovery updates"]
-    Report --> Ledger["Rust SQLite ledger / scheduled-report outbox"]
-    Ledger --> Delivery["Rust delivery"]
-    Core -. health .-> Monitor["Existing Huey Worker: desk pipeline monitor"]
-    Report -. health and report freshness .-> Monitor
-    Projection -. forwarding lag .-> Monitor
-    Delivery -. service state .-> Monitor
-    Monitor --> Feishu["Existing direct Feishu fault / recovery alerts"]
+    Bridge --> Core["Rust core：typed readiness / frames"]
+    Core --> Report["Rust report：半小时桌图 + 数据恢复更新"]
+    Report --> Ledger["Rust ledger / scheduled-report outbox"]
+    Ledger --> Delivery["Rust delivery / 每目标回执"]
+    Core -. health .-> Monitor["既有 Worker：独立链路监测"]
+    Report -. freshness .-> Monitor
+    Monitor --> Feishu["直接飞书故障 / 恢复提醒"]
 ```
 
-- **Strategy and presentation:** Python's `build_strategy_decision` is the sole
-  human candidate authority. Reports reuse the committed result; the full
-  `strategy_decision` stays outside the frozen Rust wire contract. Rust owns
-  half-hour Desk Map scheduling/delivery, not the Python candidate lane.
-  `automatic_ordering=false` throughout.
-- **Data recovery:** A fresh committed decision that restores missing data
-  triggers a current-time Desk Map update between scheduled slots. The two
-  condor widths' quotes and probabilities recover independently. Repeated
-  observations are deduplicated; recovery messages use the existing delivery
-  path without waiting for a model writer. Missing quotes stay unavailable.
-- **Freshness and failure visibility:** Desk preparation freezes the decision
-  before slow work and rechecks validity afterward. The existing Worker checks
-  pipeline health every minute and sends faults/recovery directly to Feishu,
-  bypassing the Rust report path. It still depends on the Worker, host and network.
-  A persisted report or running service does not prove phone delivery.
-- **Hot-path work:** Session checks use indexed scalar metadata in the existing
-  Python operational database instead of repeatedly decoding large research
-  JSON. Bounded background history preparation reduces synchronous work; missing
-  required evidence still follows the strategy's eligibility rules. This does
-  not establish that all research latency has been eliminated.
-- **Research evidence:** Replay starts from original IBKR/Schwab option and
-  underlying data, using availability timestamps. Historical strategy cards,
-  NO_TRADE and notifications must not select samples, generate PnL labels or
-  establish edge. Rust frames/ledger support operational lineage, not a
-  replacement strategy dataset. Bark remains unchanged.
-- **Product scope:** Production strategies remain primarily 0DTE manual
-  directional spreads, butterflies and authorized RTH/GTH iron condors. GTH
-  includes smooth convergence alongside expansion-to-contraction. Authorization
-  is not evidence of profitable edge. Multi-expiry broker queries and research
-  scans exist; they do not establish continuous fresh full-chain coverage through
-  Friday or a production multi-DTE strategy engine.
+Python 的 `build_strategy_decision` 是唯一人工候选授权出口。报告使用已提交
+决策；完整 `strategy_decision` 不进入 Rust wire。Rust 拥有定时桌图及其投递，
+不连接券商、不为 Python 策略选腿。具体边界见[单仓库合同](docs/monorepo-layout.md)
+与[通知合同](docs/notification-architecture.md)。
 
-Recent implementation and acceptance records:
+旧 Live Surface/Replay 网站已退役，现有网站入口只提供固定通知图片。
+[图片入口](site/spxw-surface/README.md)和[历史策略复盘页](site/strategy-review/README.md)
+不能当作实时完整行情或账户持仓界面。
 
-- [Immediate data-recovery Desk Map updates](docs/desk-data-recovery-2026-10-05.md)
-- [Hot-path queries, history preparation and valuation](docs/hot-path-data-contracts-2026-09-15.md)
-- [GTH smooth-convergence authorization and limits](docs/gth-smooth-entry-authorization-2026-09-15.md)
-- [Desk decision clock recovery](docs/desk-decision-clock-recovery-2026-09-17.md)
-- [Independent pipeline monitoring and recovery](docs/desk-pipeline-monitor-2026-09-21.md)
-- [Condor probability summaries and verified redundant-copy cleanup](docs/desk-condor-probabilities-and-storage-2026-09-23.md)
-- [Bridge disk-pressure recovery and UTC frame retention](docs/bridge-disk-recovery-2026-09-25.md)
-- [Condor 10/20-wide Desk Map, backtest cash recheck and 10 GiB reserve](docs/condor-results-and-disk-threshold-2026-09-23.md)
+## 策略与数据状态
 
-## Repository Layout
+当前全局策略合同为 `strategy_policy.bootstrap.v69`，后续局部修复见
+[文档目录中的策略合同](docs/README.md#strategy-contracts)。生产以 0DTE 为主：
 
-This repository is the single source of truth for SPX Spark. The former
-standalone Rust history was imported without squashing, so its original commits
-remain auditable under `rust/`.
+| 结构 | 当前合同要点 | 说明 |
+| --- | --- | --- |
+| 方向 Debit Spread | 已授权价格/量价 setup、exact BBO 与几何门；通用管理无固定 20 分钟退出，保留对应止损/跟踪及硬退出 | 训练或研究的 20 分钟标签不等于现行完整持有政策 |
+| RTH 铁鹰 | 09:30≤ET<15:45，按当前 Schwab 20Δ/10 点翼选腿；已取消每日一次和 10:00–11:00 限制 | 仍须环境、贷记、数据与风险门 |
+| GTH 铁鹰 | IBKR 20Δ/10 点翼；扩张回落或已授权平缓收敛；报价/Greeks≤30 秒，BBO skew≤10 秒 | 保留会话约束与 0.5C/3C/对应交易日 12:30 ET 管理 |
+| 蝶式 | Stable Pin 合同与 RTH 11:00 起的滚动未来 60 分钟收敛合同分别执行 | 滚动蝶按冻结目标时间退出，不再固定等到 15:55；未授权 GTH 滚动蝶 |
 
-| Path | Runtime ownership |
-|---|---|
-| `src/spx_spark/` | Provider sessions, final strategy decisions, manual candidate lane, research/replay, and maintenance |
-| `rust/` | Strict wire/domain contracts, append-only frames, SQLite ledger, half-hour report, outbox, and delivery coordination |
-| `contracts/golden/` | Versioned cross-runtime wire examples and fail-closed fixtures |
-| `tests/` | Python application, architecture, replay, and provider tests |
-| `rust/crates/*/tests/` | Rust contract, state-machine, ledger, report, and delivery tests |
+这些授权不等于已证明 edge。多到期查询及研究链存在，但不代表到周五每个
+到期日都有持续完整新鲜报价，也不代表已经上线 3–5 DTE 策略。
 
-Python owns broker sessions, final strategy decisions, and research. Rust
-does not connect to a broker or place orders. Cross-language changes now land in
-one commit and the root CI validates both workspaces. See
-[the monorepo contract](docs/monorepo-layout.md) for the exact boundary.
+### 铁鹰概率与缺失诊断
 
-## Quick Start
+桌图分别显示 20Δ/10 点翼与 20Δ/20 点翼。20 点翼是比较扫描，不能继承
+10 点翼的入场权限。每组必须先选齐当前合约、取得合格四腿报价，才可估计路径概率。
+
+- 当前费用后盈利/止盈/止损百分比是**历史路径模拟频率**，附交易日数量和未校准标记。
+  有效小样本可以展示；缺失或非法字段不能产生百分比。
+- RTH 固定 10:00 入场的 29/37、28/37 基准有自己的样本期与退出规则，
+  不等于当前 GTH 结构或完整生产选择政策的胜率。
+- `data_plane_healthy=true` 只表明行情流在推进，不能证明 Delta、IV、OI 或
+  exact 四腿齐全。BBO、Greeks 与 OI 必须分别检查来源和时间。
+- 2026-10-05 的独立查询确认部分 IBKR 合约有 live BBO 却没有 native Greeks；
+  collector 重连未补齐。当时修复了逐侧缺失诊断，**未宣称券商字段恢复**。
+  随后 12:24 UTC 已自动发出恢复更新；12:45 的两种翼宽报价就绪，桌图均取得
+  42 个历史交易日的模拟频率。字段恢复与诊断修复分别记录，不能证明是重连使其恢复。
+  详情见[现场证据与验收](docs/desk-data-recovery-2026-10-05.md)。
+
+数据真正恢复后，Core 会在固定半小时桌图之间重算当前时间摘要，并通过既有
+Rust 路径补发、去重。恢复消息不表示所有数据同时恢复，也不自动授权交易。
+
+## Repository layout
+
+| 路径 | 职责 |
+| --- | --- |
+| `src/spx_spark/` | Python 采集、策略、研究、Core/Worker、运维 |
+| `rust/` | 现有 typed core、bridge、ledger、report、delivery |
+| `contracts/golden/` | 冻结的跨语言 wire 示例与验收 fixtures |
+| `tests/`、`rust/crates/*/tests/` | Python/Rust 测试与因果、经济、外部边界验收 |
+| `config/`、`systemd/` | 已跟踪默认值、部署示例和 Python user units |
+| `docs/` | 当前说明、版本合同与保留的研究/事故证据 |
+| `site/` | 固定图片入口和历史复盘静态页 |
+
+Python operational DB、Huey 队列、Rust ledger 与原始行情湖各有明确职责；
+仓库合并不意味着它们共用一个数据库。Rust 原仓库历史已完整保留在单仓库中。
+
+## Quick start and validation
 
 ```bash
 cd /home/ubuntu/spx-spark
-cp .env.example .env
-uv sync
-uv run spx verify ibkr
+uv sync --frozen
+uv run spx --help
+uv run pytest -q tests/test_iron_condor.py tests/test_desk_map_projection_export.py
+uv run lint-imports
+uv run ruff check src tests scripts
+git diff --check
 ```
 
-Validate the Rust workspace from the same checkout:
+重要代码发布还需全量 Python 与 Rust 检查；纯文档更新核查链接、命令、
+路径与 `git diff --check`。Rust 验证从 `rust/` 执行：
 
 ```bash
-cd /home/ubuntu/spx-spark/rust
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-targets --all-features
 ```
 
-IBKR requirements:
+券商连接需已有的本机运行配置与授权。不要输出 `.env`、token、cookie 或私钥。
+正常生产使用 loopback Paper Gateway `127.0.0.1:4002`；不得对公网开放 API 端口。
+遇到 `10197` 应退避，不得踢掉用户的手机/TWS 会话。
 
-- TWS or IB Gateway must be running.
-- API socket must be enabled.
-- Production market-data collection uses the dedicated Paper username and IB
-  Gateway Paper port `127.0.0.1:4002`; the Live username remains available to
-  IBKR Mobile without sharing its brokerage session with Oracle.
-- Keep IBKR Gateway's Read-Only API setting enabled for this project.
-- The Paper feed is accepted only when source timestamps advance, market data
-  type is live, and the configured SPXW GTH coverage gate passes.
-
-## Isolated Codex Wrapper
+## Operations
 
 ```bash
-scripts/run-codex-isolated.sh "summarize this project"
+git status --short --branch
+git rev-parse --short HEAD
+systemctl --user show spx-core.service spx-worker.service \
+  spx-spark-ibkr-stream.service spx-spark-schwab-marketdata.service \
+  -p Id -p ActiveState -p NRestarts
+systemctl --user list-timers 'spx*' --no-pager
 ```
 
-The wrapper uses project-local `.codex-home` and `.codex-log` directories. It does not modify `~/.codex`.
-
-## Runtime Mode
-
-```bash
-uv run spx ops runtime-mode status
-uv run spx ops runtime-mode ibkr-on --ttl-minutes 120 --reason "manual monitor request"
-uv run spx ops runtime-mode protected --ttl-minutes 180 --reason "phone trading"
-uv run spx ops runtime-mode clear
-```
-
-The runtime mode file is local state under `runtime/`. It lets an agent temporarily allow or block IBKR collection without changing permanent config.
-
-## IBKR Collector
-
-```bash
-uv run spx ibkr collect --dry-run
-uv run spx ibkr collect --skip-options
-uv run spx ibkr collect --force --skip-options
-uv run spx ibkr collect --force
-```
-
-The collector writes normalized IBKR quotes into the same raw/latest-state path as the mock
-collector. By default it respects runtime mode and will not connect if IBKR is protected or
-outside the allowed schedule. Use `--force` only when you intentionally want this SSH host to
-connect to TWS/IB Gateway.
-
-Suggested real-data acceptance sequence:
-
-```bash
-scripts/start-ibgateway-xvfb.sh
-scripts/start-ibgateway-vnc.sh
-uv run spx ops runtime-mode ibkr-on --ttl-minutes 120 --reason "manual IBKR data test"
-uv run spx ibkr collect --force --skip-options --json
-uv run spx status --all-providers
-uv run spx ibkr collect --force --json
-```
-
-Trading-hours entitlement report:
-
-```bash
-IBKR_PORT=4001 uv run spx report ibkr-hours --skip-options
-IBKR_PORT=4001 IBKR_MAX_OPTION_LINES=40 uv run spx report ibkr-hours
-```
-
-The report writes `logs/ibkr-trading-hours-report-*.json` and classifies each
-requested row as `ok`, `stale`, `delayed`, `frozen`, `missing_price`,
-`missing_bid_ask`, `missing_greeks`, `missing`, or `error`. Run it during
-regular U.S. trading hours for the real acceptance result; weekend or overnight
-runs are marked `not_rth` unless `--allow-outside-rth` is set. With the minimal
-SPX+ES base universe, one-shot commands intentionally do not infer SPX ATM from
-raw ES outside RTH; GTH SPXW acceptance and collection belong to the persistent
-stream, which maintains the qualified SPX/ES basis and stable ATM state.
-
-On a headless host, view the Gateway login window through an SSH tunnel:
-
-```bash
-ssh -L 5909:127.0.0.1:5909 ubuntu@YOUR_SERVER
-```
-
-Then connect a local VNC viewer to `127.0.0.1:5909`. The VNC bridge is bound
-to localhost and is only for manual Gateway login/configuration.
-
-### Streaming Collector
-
-`spx-spark-ibkr-stream` is the persistent alternative to the snapshot
-collector. It keeps one read-only connection (own client id 172) with base
-SPX and ES anchors always subscribed, a hot SPXW lane near ATM, and the
-remaining option-line budget rotating through the sampling planner's strike
-groups. It checks pending exact-leg pin requests every 50ms while preserving
-the two-second raw/latest flush cadence, re-plans when SPX drifts 10+ points,
-reconnects with exponential backoff, backs off politely on a competing session
-(IBKR 10197), and re-checks runtime mode continuously. Broad VIX-family, ETF,
-MES, and cross-index context remains on Schwab rather than consuming IBKR lines.
-
-```bash
-uv run spx ibkr stream --print-config
-uv run spx ibkr stream --force --skip-options --duration-seconds 60
-uv run spx ibkr stream --force
-```
-
-Run it as a service (keep `SPX_SERVICE_ENABLE_IBKR=false` in the 24h loop so
-only one IBKR writer is active):
-
-```bash
-ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-ibkr-stream.service ~/.config/systemd/user/spx-spark-ibkr-stream.service
-systemctl --user daemon-reload
-systemctl --user enable --now spx-spark-ibkr-stream.service
-```
-
-### IBKR Index CFDs
-
-`IBKR_VERIFY_CFDS` is empty by default. Opting in to `IBUS500` adds that IBKR
-index CFD to the collector and verifier universe. `IBUS500` tracks the S&P 500 cash index at the same
-price level and trades nearly 24h on weekdays, so it doubles as an off-hours
-SPX price proxy. The persistent stream prefers fresh RTH `SPX`, then an opt-in
-off-hours `IBUS500`, then basis-adjusted `ES`, then `SPY*10`; stateless commands
-never use raw ES. Rows appear as `cfd:IBUS500` and the trading-hours report groups them
-under `cfd_proxies` (optional group; it never fails the overall status). CFD
-market data requires the account's CFD permission; without it the row shows an
-entitlement error and everything else keeps working.
-
-### Session Recovery
-
-If a manual phone/desktop login preempts the automated Gateway session, the
-recovery chain is: IBC yields (`ExistingSessionDetectedAction=secondary`) ->
-systemd restarts the service every 60s indefinitely (`StartLimitIntervalSec=0`)
--> login succeeds once the manual session ends -> the collector conflict probe
-returns to IBKR automatically. A watchdog timer (`ibc-watchdog.timer`) also
-restarts the Gateway when the process is alive but the API port stays dead.
-See `docs/headless-deployment.md` (Session Recovery Chain) for details.
-
-The production IBKR default is deliberately limited to SPX, ES, and SPXW.
-Schwab owns vol-regime, ETF, MES, and cross-index context. For a bounded IBKR
-entitlement diagnostic, use explicit exchanges when a broker symbol needs
-correction, for example:
-
-```bash
-IBKR_VERIFY_INDEXES='SPX,VIX,VIX1D,VIX9D,VIX3M,VVIX,SKEW,NDX@NASDAQ,RUT@RUSSELL,DJX@CBOE,DJU@CBOE' \
-  uv run spx ibkr collect --force --skip-options --json
-```
-
-For NDX/RUT/Dow/utilities context, ETF proxies `QQQ/IWM/DIA/XLU` are often
-enough for alerts and use ordinary US stock data lines. The alert payload keeps
-official cash indexes separate from proxies; missing official index data degrades
-that layer instead of being silently replaced.
-
-## Schwab Verifier
-
-```bash
-uv run spx schwab oauth status
-uv run spx schwab oauth authorize
-uv run spx verify schwab --offline
-uv run spx verify schwab --print-config
-uv run spx verify schwab
-```
-
-The verifier checks candidate index quotes, ETF/futures quotes, and option chains without
-placing orders. `scripts/create-schwab-token.sh` remains a manual fallback only: stop the
-gateway before using it. A process owner lock prevents both flows from touching one token file.
-
-For production, use the dedicated Cloudflare callback plus localhost data gateway. One
-long-running process owns the refresh-capable Schwab client; collectors never race on the token
-file. See [docs/schwab-cloudflare-oauth.md](docs/schwab-cloudflare-oauth.md).
-
-### Schwab Wide-Chain Market Data Service
-
-The dedicated collector owns the 80/100/120-strike SPXW discovery plan, separate front/next
-cadences, the concrete option hot quote batch, and the 70% request plan ceiling. Keep the legacy
-24h-loop collector disabled (`schwab.collection.service_loop_enabled=false`) so there is one
-market-data scheduler.
-
-```bash
-systemctl --user enable --now spx-spark-schwab-marketdata.service
-systemctl --user status spx-spark-schwab-marketdata.service
-curl -fsS http://127.0.0.1:8184/healthz | jq .request_window
-```
-
-Runtime and acceptance details are in
-[docs/schwab-wide-chain-hot-lane-design.md](docs/schwab-wide-chain-hot-lane-design.md).
-
-## Maintenance Dry Run
-
-```bash
-scripts/run-maintenance-dry-run.sh
-scripts/run-maintenance-dry-run.sh --json --no-write
-```
-
-The dry run scans disk usage and cleanup candidates only. It does not delete files.
-
-## Sampling Plan
-
-```bash
-uv run spx ops sampling-plan --underlier 7500 --expiry 20260706 --next-expiry 20260707
-uv run spx ops sampling-plan --underlier 7500 --mode degraded --summary-json
-```
-
-The planner produces the SPXW hot lane and rolling quote groups for collectors. It does not request market data.
-
-## Alert Profile
-
-```bash
-uv run spx ops alert-profile
-uv run spx ops alert-profile --schedule
-uv run spx ops alert-profile --at 2026-07-06T14:30:00
-scripts/run-alert-engine.sh --at 2026-07-07T03:15:00
-uv run spx report options-map
-scripts/run-iv-surface.sh
-scripts/run-24h-service.sh --print-config
-scripts/send-openclaw-test-alert.sh
-```
-
-The alert profile is the 24h monitoring layer. It maps New York and Beijing
-time to the current monitoring window, source priority, alert cadence, summary
-cadence, and SPXW sampling mode. The IBKR trading-hours report remains a data
-entitlement check; it does not replace premarket, after-hours, futures,
-Hyperliquid, or Polymarket monitoring.
-
-The alert engine reads normalized latest state and emits data-health and
-price-move alerts. Notification is optional and disabled by default. Enable it
-with `ALERT_NOTIFY_ENABLED=true`; `ALERT_NOTIFY_OPENCLAW_DRY_RUN=true` keeps the
-OpenClaw path in dry-run mode while testing.
-
-Human-facing alerts are intentionally SPX-only. The visible push surface is
-limited to SPX, SPXW option structure, and ES confirmation. VIX-family indexes,
-ETF proxies, on-chain data, prediction markets, and macro/risk proxies may feed
-the internal score, but they are not shown to the human and cannot directly
-trigger a push as separate trading instruments.
-
-OpenClaw Weixin is supported through the `openclaw message send` CLI. The Weixin
-channel requires a valid conversation `context_token`; a raw login `userId` may
-dry-run successfully but real sends can fail until the user has messaged the
-OpenClaw bot and the gateway has cached that context.
-
-For fast agent-confirmed pushes, use the local Codex CLI sink. It uses this
-machine's Codex/ChatGPT login and then delivers the short confirmation through
-OpenClaw Weixin. Keep raw message pushes off:
-
-```env
-ALERT_NOTIFY_ENABLED=true
-ALERT_NOTIFY_OPENCLAW_ENABLED=false
-ALERT_NOTIFY_CODEX_ENABLED=true
-ALERT_NOTIFY_CODEX_DELIVER=true
-ALERT_NOTIFY_CODEX_MODEL=gpt-5.3-codex-spark
-ALERT_NOTIFY_CODEX_REASONING_EFFORT=high
-ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE=true
-```
-
-With `ALERT_NOTIFY_CODEX_REQUIRE_DELIVERY_CUE=true`, Weixin delivery happens
-only when Codex starts with an explicit cue such as `需要看盘:`. Smoke tests or
-degraded-data conclusions that start with `不需要推送:` are recorded but not
-forwarded. The Codex prompt receives `human_focus_context`, which contains only
-SPX, SPXW walls/gamma/IV surface, ES confirmation, Micopedia guidance, and the
-past-hour SPXW IV-surface summary.
-
-Minimal OpenClaw test:
-
-```bash
-openclaw gateway status
-openclaw channels status
-scripts/send-openclaw-test-alert.sh
-ALERT_NOTIFY_OPENCLAW_DRY_RUN=false scripts/send-openclaw-test-alert.sh
-```
-
-`spx report options-map` is the current options-intelligence feature layer. It reads
-SPXW option quotes from latest state and computes ATM strike, ATM straddle,
-expected move, IV/skew ratios, Greek coverage, and an open-interest-based GEX
-prototype for zero gamma, put wall, and call wall when OI is available. Without
-open interest it intentionally reports `unknown_no_open_interest` instead of
-pretending that gamma-only data is a real wall map.
-
-`run-iv-surface.sh` writes a 5-minute surface snapshot under
-`data/features/iv_surface/` and `data/latest/iv_surface.json`. It tracks ATM IV,
-skew, surface shift, smile curvature, 0DTE-vs-next-expiry IV gap, and quote
-quality. The alert engine also reads the last hour of these snapshots when
-deciding whether an SPXW alert is worth waking the human. `run-24h-service.sh` is
-the modular long-running loop. It runs
-Hyperliquid, IV surface, and alert tasks by default; IBKR is disabled unless
-`SPX_SERVICE_ENABLE_IBKR=true` is set in `.env`.
-
-Order-map and human-focus payloads also include a strict same-day SPXW
-`spxw_0dte_greeks_reference.v1` shadow layer. It derives Delta, Gamma, Theta,
-Vega, Charm, Color, Speed, Vanna, Vomma, and Zomma plus bounded spot/time/IV
-scenarios. Aggregates are OI-only gross magnitudes with position sign and
-direction explicitly `unknown`; they cannot change candidate direction,
-ranking, or limits. Delivered snapshots are persisted under
-`data/features/spxw_0dte_greeks_reference/` and summarized in the post-close
-review. See [docs/zero-dte-greeks-reference.md](docs/zero-dte-greeks-reference.md).
-
-The former read-only `SPXW 0DTE Decision Surface` Live/Replay website and its
-projection/replay implementation are deleted. Historical artifacts remain
-untouched, while `spx.zh3nyu.com` serves only the fixed OI and strategy-risk
-PNGs used by notifications. See
-[site/spxw-surface/README.md](site/spxw-surface/README.md) for the reduced
-deployment boundary.
-
-The same 5-second SPX/ES path monitor now freezes the pre-move flip band and
-call wall. Two fresh synchronized confirmations can produce a short-lived
-`flip_reclaim_call` or `call_wall_breakout_call` bias and direct alert; the
-15-minute order map then replaces the invalidated same-level Put with that Call
-while retaining the other risk play. Shock/reclaim events are scored after 5/15/30
-minutes with directional MFE/MAE in daily
-`data/features/intraday_event_outcomes/date=YYYY-MM-DD/` partitions, while the higher-Greeks shadow can sample
-every 60 seconds during RTH with `SPX_SERVICE_ENABLE_GREEK_SHADOW=true`.
-
-## Research Data Platform
-
-The optional data platform keeps realtime storage and research workloads
-separate:
-
-- SQLite WAL records low-volume event, decision, delivery, outcome, and
-  compaction-lineage facts only when an alert candidate exists.
-- closed-hour raw quote JSONL is normalized into verified ZSTD Parquet without
-  deleting the source;
-- a rebuildable DuckDB catalog exposes versioned strategy-outcome, Put/Call
-  bias, data-quality, and quote views.
-
-Enable only the fail-open shadow ledger and keep deletion disabled:
-
-```bash
-DATA_PLATFORM_ENABLED=true
-DATA_PLATFORM_RAW_DELETE_ENABLED=false
-```
-
-Operational commands:
-
-```bash
-uv run spx data status
-uv run spx data replay-spool
-scripts/run-data-compact.sh --dry-run --limit 1 --json
-scripts/run-data-compact.sh --limit 1 --json
-uv run spx data query strategy --start 2026-07-10 --limit 100
-uv run spx data query bias --start 2026-07-10
-```
-
-`replay-spool` only retains transient storage failures and references that may
-still be waiting on a parent record. Legacy conflicts, unresolved references,
-and malformed records are durably moved to the adjacent owner-only
-`*.dead-letter.jsonl`; the command reports `status=quarantined` and exits
-successfully once no retryable records remain.
-
-`spx-spark-data-compact.timer` runs at minute `:08` with jitter, a five-minute
-source settle gate, and an eight-partition cap per run so the initial backfill
-cannot monopolize disk I/O. The same run replays transient SQLite fallback
-records and syncs compaction lineage. It never removes raw JSONL. See
-[docs/data-platform-design.md](docs/data-platform-design.md) for contracts,
-failure boundaries, schema evolution, and the production rollout rule.
-
-Post-close SPX/SPXW review:
-
-```bash
-uv run spx job post-close-review --date auto
-uv run spx job post-close-review --date 2026-07-06 --json
-```
-
-The review is designed to run after the US close delay and to be appended by the
-local Hermes daily report. It writes:
-
-- `data/reports/spx_options_review/date=YYYY-MM-DD/review.md`
-- `data/reports/spx_options_review/date=YYYY-MM-DD/review.json`
-- `data/latest/spx_options_review.md`
-- `/home/ubuntu/research/finance/daily/spx-options-review/latest-spx-options-review.md`
-
-The systemd timer `spx-spark-post-close-review.timer` runs Monday through
-Friday at 17:15 America/New_York. The application calendar still suppresses
-holidays and verifies report identity before publishing.
-`complete` is emitted only when the structured SPX/ES bucket, edge-recency,
-live-ratio, SPXW breadth/IV, and IV-surface coverage checks all pass; otherwise
-the JSON and Markdown reports remain explicitly `degraded` with measured checks.
-
-Install the 24h user service:
-
-```bash
-mkdir -p ~/.config/systemd/user
-ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-24h.service ~/.config/systemd/user/spx-spark-24h.service
-systemctl --user daemon-reload
-systemctl --user enable --now spx-spark-24h.service
-journalctl --user -u spx-spark-24h.service -f
-```
-
-## Mock Data Loop
-
-```bash
-uv run spx ops mock-collector --underlier 7500 --expiry 20260706 --next-expiry 20260707
-uv run spx status --instrument index:SPX
-uv run spx status --all-providers
-```
-
-The mock collector generates normalized `Quote` rows, writes raw JSONL files under
-`MARKET_DATA_DATA_ROOT/raw/`, and updates `MARKET_DATA_LATEST_STATE_PATH`. It is the
-local no-broker test path for sampler, storage, latest-state, and fallback logic.
-
-## Hyperliquid Collector
-
-```bash
-scripts/run-hyperliquid-collector.sh --print-config
-scripts/run-hyperliquid-collector.sh --list-coins
-scripts/run-hyperliquid-collector.sh --coin 'S&P500-USDC' --json
-scripts/run-hyperliquid-collector.sh --dex xyz --coin xyz:SP500 --json
-uv run spx status --all-providers --instrument crypto_perp:xyz:SP500
-```
-
-The Hyperliquid collector uses public `POST /info` endpoints and does not need an API key.
-It writes a normalized perp quote plus a Hyperliquid context row with funding, OI,
-oracle premium, book imbalance, and recent-trade burst fields.
-
-Live verification found the S&P 500-like perpetual on HIP-3 dex `xyz` as `xyz:SP500`
-around the 7,500 index level. The default-dex `SPX` symbol trades around `0.43`, so it is a
-different Hyperliquid crypto/perp asset and must not be mixed with `index:SPX`.
-
-## MrMicopedia Guidance
-
-```bash
-uv run spx report micopedia --underlier 7502 --vix1d 12.5 --gamma-state pin --event opex,jpm_collar
-uv run spx report micopedia --from-latest-state --time-phase open --event cpi --json
-```
-
-This produces an observational `MicopediaSignal`: regime, map focus, trigger
-watchlist, candidate expression shape, risk guardrails, data warnings, and the
-suggested SPXW sampling mode. It is an explanation/checklist layer only and does
-not place orders.
-
-## Market Data Model
-
-IBKR, Schwab, and Hyperliquid payloads enter through provider adapters and become
-`ProviderSnapshot` objects before they reach storage, fallback, sampling, features,
-greeks, alerts, or dashboard code. Downstream code should compare normalized
-`Quote.quality` and provider priority instead of branching on provider-specific fields.
-
-## Secret Scan
-
-```bash
-scripts/scan-secrets.sh
-scripts/scan-secrets.sh --all
-```
-
-Default mode scans only git-tracked files. `--all` scans the working tree but excludes
-local runtime noise such as `.venv/`, `.firecrawl/`, cache folders, logs, runtime state,
-and raw data.
-
-## Notes
-
-- Architecture plan: `docs/architecture-plan.md`
-- Design review and improvement plan: `docs/design-review.md`
-- Headless deployment: `docs/headless-deployment.md`
-- Data source decision memo: `docs/data-source-decision.md`
-- IBKR API research: `docs/ibkr-api-research.md`
-- Storage plan: `docs/storage-plan.md`
-- Market data model: `docs/market-data-model.md`
-- Sampling engine design: `docs/sampling-engine-design.md`
-- Operations schedule: `docs/operations-schedule.md`
-- Trend spread framework: `docs/trend-spread-framework.md`
-- MrMicopedia agent guidance: `docs/micopedia-agent-guidance.md`
-- MrMicopedia background knowledge: `docs/micopedia-background-knowledge.md`
+核对服务后，还必须检查 provider/token 状态、源报价时间、独立 Greeks/OI 时间、
+策略 `decision_at`、报告投影时间及每目标回执。`active`、`READY`、报告保存与
+手机送达是不同事实。无账户可见性时，不得把 Paper 或未知持仓写成真实空仓。
+
+正式 Python 部署入口是 `scripts/install-spx-spark-services.sh`：要求干净的
+`master` 且 HEAD 等于已 fetch 的 `origin/master`，检查 unit drift，只重启受影响
+owner。首次安装/完整 cutover 的 `--now` 会重启多个服务，不用于例行文档更新。
+Rust 通过[既有运维流程](rust/docs/OPERATIONS.md)发布，不能随 Python 部署转移 owner。
+
+[运行配置](docs/runtime-configuration.md)使用 `defaults < deployment < environment`；
+机器覆盖位于 gitignored 的 `config/runtime.local.toml`。Python warning/critical
+与生产 Rust 写入 reserve 使用 10 GiB 口径；28 GiB 可触发维护评估，不代表限制告警。
+删除数据还必须通过现有 manifest/摘要/行数/宽限验证。
+
+## Research boundary
+
+回测、回放及策略归因从原始 IBKR/Schwab 期权和标的数据重建，满足
+`available_at <= decision_at`，逐腿检查报价年龄、合约身份、数量、费用及完整退出。
+策略卡、NO_TRADE 和通知记录不得定义研究样本、收益标签或证明 edge。
+Bark 代码、配置、投递和数据归因边界保持不变。
+
+当前路径模拟、原始四腿 NBBO 回放、实际成交记录必须分别说明。OI/Gamma 与
+L1 资金流是代理，不是真实做市商净持仓或完整逐笔开平仓。规则冻结、独立 session
+和完整政策回放的限制见[研究与历史证据目录](docs/README.md#document-catalog)。

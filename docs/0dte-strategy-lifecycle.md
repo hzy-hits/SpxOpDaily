@@ -1,7 +1,15 @@
 # 0DTE strategy lifecycle
 
-This document records the production decision boundaries for the SPX intraday
-engine.  The implementation is advisory and never submits an order.
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
+This document preserves an earlier lifecycle contract for the SPX intraday
+engine. Its GTH direct-advisory geometry, virtual exit and publication details
+are historical, not the current human-candidate contract. Current authorization
+comes only from `build_strategy_decision`; see the
+[current contract map](README.md#strategy-contracts). Automatic ordering remains
+disabled. The old management policy below must not label new-policy backtests.
 
 ## Stable terrain map
 

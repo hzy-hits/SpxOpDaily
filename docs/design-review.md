@@ -1,5 +1,9 @@
 # 设计缺陷 Review 与改进计划
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 > 文档状态：2026-07-06 历史审阅与实施记录。2026-07-12 的 realtime analytics、
 > readiness、typed settings、RTH shadow 和大文件审计结论已经进入
 > `docs/pre-rth-refactor-implementation-plan.md`。两者冲突时以新计划、

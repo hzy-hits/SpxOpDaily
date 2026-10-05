@@ -1,5 +1,9 @@
 # kangyu 评审修复·批次 1:正确性修复(实施规格)
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 状态: 2026-07-07 设计完成,待实施。对应 docs/architecture-review-kangyu.md 的
 P1-2、P1-3(残留)、P1-4、P1-5、P2-3(残留)、P2-5、P3-1、S3、S6、A5。
 已在此前改造中修复、本批不再处理: P1-1(冷却 key 已改为 kind|instrument|dedup_group)、

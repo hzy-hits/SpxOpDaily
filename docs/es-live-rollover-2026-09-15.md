@@ -1,5 +1,9 @@
 # ES live rollover recovery — 2026-09-15
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：事故修复与时点验收。** 时点验收记录；现场时间、计数和部署结论仅证明文中那次检查，不代表此刻持续健康。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 Scope: existing S3 provider input responsibility; minimal production fault repair. Baseline e610c3e9. No new data lane, process or subscription capacity.
 
 IBKR stream has been running since September 5. Its CLI resolves IbkrSettings once before starting StreamRuntime. September 15's default resolves December, but the running collector still subscribes September. A network reconnect alone reuses that old settings object. The prior fix correctly allowed different provider maturities without rejecting known selected ES, but did not change the upstream subscription.

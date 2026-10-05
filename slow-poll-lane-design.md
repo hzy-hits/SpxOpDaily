@@ -1,5 +1,9 @@
 # 慢速轮询 lane:VIX 族与上下文 ETF 改为轮询,腾行情线给期权链(实施规格)
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](docs/README.md)（目录核对：2026-10-05）。
+
 > **状态（2026-08-07）：历史实施规格，仅作背景记录。** 后续改动遵循
 > `docs/architecture-simplification-execution-plan-v1.md`；不得据此新增 service、state file 或 console script。
 

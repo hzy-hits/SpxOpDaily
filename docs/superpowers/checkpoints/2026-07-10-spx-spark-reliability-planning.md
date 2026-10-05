@@ -1,5 +1,9 @@
 # SPX Spark reliability hardening checkpoint
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
+> [全仓文档、当前运行状态与合同优先级](../../README.md)（目录核对：2026-10-05）。
+
 Paused at the user's request on 2026-07-10.
 
 ## Authoritative remote state

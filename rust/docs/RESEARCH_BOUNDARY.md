@@ -1,19 +1,25 @@
 # Research boundary
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](../../docs/README.md)（目录核对：2026-10-05）。
+
 Production is intentionally simple; research may be complex behind a durable,
 causal and versioned boundary.
 
 ## Ownership split
 
-| Production Rust | Python research |
-|---|---|
-| Provider/readiness enums and invariants | HMM fitting and state interpretation |
-| One decision-time snapshot | Feature exploration and model comparison |
-| Deterministic hard gates | Walk-forward calibration and backtests |
-| `NO_TRADE` or `MANUAL_CANDIDATE` | Replay and counterfactual comparisons |
-| SQLite operational ledger | Parquet analytical history and DuckDB queries |
-| RTH `:00`/`:30` schedule, report intent and receipt lifecycle | Atomic research/desk projections, post-close artifacts and notebooks |
-| Full eight-section DeepSeek report contract | HMM/range feature generation and interpretation |
+| Frozen Rust runtime | Python production | Python research |
+|---|---|---|
+| Typed ingress/readiness and bounded frames | Broker collection and field clocks | Feature exploration and raw-broker replay |
+| Typed core decision, separate from Python strategy authority | `build_strategy_decision`, exact legs, policy gates | Training, calibration and policy comparison |
+| Rust ledger and scheduled-report delivery | Existing operational DB and Huey candidate lane | Parquet/DuckDB analytical history |
+| Scheduled reports and validated recovery summaries | Committed decision and Desk Map projection | Advisory model context and post-close artifacts |
+
+The ordinary report writer and deterministic recovery/fallback paths are distinct.
+A model response cannot create strategy authority. Full `strategy_decision` and
+its per-leg diagnostics remain outside Rust wire. No new ownership transfer is
+authorized by this document.
 
 Rust does not query DuckDB in the live path. DuckDB is a query and computation
 engine, not the operational source of truth. Parquet and versioned replay
@@ -35,7 +41,13 @@ post-close
       --> Python/DuckDB analysis, HMM and strategy comparison
 ```
 
-Replay is generated once after the session and opened on demand. It is not a
+The diagram describes Rust frame audit lineage, not the sampling source for
+strategy profitability. Strategy replay must reconstruct signals and exact
+option execution from original IBKR/Schwab data available at decision time;
+cards, NO_TRADE rows and notification histories cannot select its samples.
+Bark remains unchanged and is not an attribution input.
+
+Replay artifacts are generated for bounded research runs and opened on demand. It is not a
 permanent production service. A `.duckdb` file may be a disposable local cache,
 but it is not shared mutable state and must be reconstructable from Parquet and
 the replay manifest.

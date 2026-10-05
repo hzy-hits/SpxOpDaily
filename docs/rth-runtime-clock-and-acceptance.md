@@ -1,5 +1,9 @@
 # RTH runtime clock and end-to-end acceptance
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 ## One session clock
 
 Every RTH component derives session ownership and boundaries from
@@ -40,14 +44,19 @@ The report clock is defined by
 - service-manager start grace: at most 120 seconds after the slot;
 - a second invocation in the same slot is deduplicated.
 
-RTH slots are heartbeats. `no_material_changes` and a temporarily thin
+These are snapshot slots; scheduled human Desk Maps use `:00`/`:30`, with
+separately identified data-recovery updates between slots. See the
+[report clock contract](rth-report-clock.md).
+
+RTH scheduled slots are heartbeats. `no_material_changes` and a temporarily thin
 snapshot cannot suppress them; a thin heartbeat is delivered with an explicit
 degraded warning.
 
 ## ES five-minute bar ownership
 
-`spx-spark-es-bar-sampler.service` is the sole writer of
-`latest/es_bars_5m.json`. It observes one real, provider-qualified ES source
+The existing `es_bar_sampler` owner runs inside `spx-core.service` and is the
+sole writer of `latest/es_bars_5m.json`; the old standalone unit is not the
+production owner. It observes one real, provider-qualified ES source
 timestamp every five seconds, rejects duplicate, out-of-order, future and
 contract-conflicted observations, and never interpolates or fills a missed
 bucket. A partial bar remains partial; it cannot be promoted merely to restore
@@ -57,8 +66,8 @@ The heavy market-feature worker only reads the sampler's last atomic snapshot,
 so ES observation is no longer serialized behind option-chain, Greek and
 report computation. Shared-host I/O can still affect the sampler, so
 `latest/es_bar_sampler.lease.json` records every cycle, including duration,
-overrun and consecutive failures. The 24-hour supervisor treats a stale lease
-as a data-plane fault even when systemd still reports the process as active.
+overrun and consecutive failures. Core and the existing health checks consume
+these data-plane facts; an active process alone does not establish freshness.
 
 ## Research-only Spring projection
 

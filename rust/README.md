@@ -1,7 +1,11 @@
 # SPX Spark Core
 
-> **FROZEN（2026-08-07）：本 workspace 已冻结，只接受生产故障与安全修复；退出计划见
-> `docs/architecture-simplification-execution-plan-v1.md` Phase 6。**
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](../docs/README.md)（目录核对：2026-10-05）。
+
+> **FROZEN：本 workspace 只接受生产故障与安全修复。Phase 6 退出已延期，见
+> [当前执行基线](../docs/architecture-simplification-execution-plan-v1.md)。**
 
 Clean-room Rust production runtime for SPX Spark.
 
@@ -10,10 +14,10 @@ is the source of truth; the former standalone repository is retained only as a
 read-only history source. The import preserved the original Rust commits
 without squashing.
 
-> **Status:** the isolated core and normalized mirror bridge run on Oracle.
-> Half-hour report/delivery ownership is implemented as a separate cutover lane
-> but is not changed merely by these checked-in files. Rust does not connect to
-> a broker and has no order-placement authority.
+> **Status (2026-10-05):** core, bridge, report and delivery are deployed Oracle
+> system services. The retained `shadow` path/name does not imply report delivery
+> is disabled. Rust owns half-hour and data-recovery Desk Maps; Python remains
+> the broker and final strategy owner. No order placement is implemented.
 
 The project deliberately implements a small production boundary:
 
@@ -24,7 +28,7 @@ Python normalized/research/desk projections --> spx-bridge --> spx-core
                                                                +--> append-only frames
                                                                +--> SQLite/WAL ledger
                                                                           ^
-GTH/RTH :00/:30 ET --> spx-report --> full DeepSeek desk report -----------+
+GTH/RTH slots + recovery --> spx-report --> validated desk report -------+
                                                                           |
                                                                           v
                                                                     spx-delivery
@@ -35,8 +39,8 @@ append-only market frames --> Python research / Parquet / DuckDB / replay
 `spx-core` normalizes one accepted snapshot, applies provider and exact-leg
 readiness, produces only `NO_TRADE` or `MANUAL_CANDIDATE`, and stores durable
 latest projections. `spx-report` owns GTH/RTH `:00`/`:30` ET scheduling and persists
-a complete `scheduled_report` intent. `spx-delivery` is the only notification
-sender. Its worker owns claim, retry, receipts, uncertain outcomes, dead
+a complete `scheduled_report` intent. `spx-delivery` is the sole sender for
+this Rust-owned lane; Python candidate notifications retain their own owner. Its worker owns claim, retry, receipts, uncertain outcomes, dead
 letters, and explicit operator acknowledgement/replay. TTL, cancellation and
 transport start are one atomic `Claimed -> InFlight` ledger transition.
 
@@ -63,7 +67,7 @@ lane may create an informational `scheduled_report` intent.
 | `spx-bridge` | Fail-closed JSON mapping, durable cursor and typed ACK client |
 | `spx-core` | Ingress, quote book, snapshot, readiness, policy, health |
 | `spx-ledger` | SQLite/WAL decisions, intents, target state, receipts, DLQ |
-| `spx-report` | Half-hour GTH/RTH schedule, DeepSeek writer, full report validation |
+| `spx-report` | Half-hour GTH/RTH reports, bounded model writer, deterministic recovery/fallback validation |
 | `spx-delivery` | Deterministic renderers and isolated HTTP delivery worker |
 
 `spx-report` and `spx-delivery` refuse outbound I/O unless both their TOML gate
@@ -82,14 +86,16 @@ Each provider update is a bounded, atomic `replace_provider_snapshot` frame;
 missing, zero, crossed, stale or session-unknown quotes cannot leave an older
 exact leg silently authoritative.
 
-The current Python production strategies are not yet semantically replaceable
-by Rust `EvaluationRequestV1`: RTH can produce a single-leg contract and the GTH
-level lane uses dynamic 5–40 point verticals, while Rust v1 deliberately accepts
-exactly two legs and a 10-point vertical. Python therefore remains strategy
-owner. The half-hour informational lane is independent: the Python timer keeps
-producing the atomic desk projection, while `SPX_RUST_REPORT_OWNER=true` fences
-off Python enqueue so Rust alone owns schedule, writer, ledger/outbox and
-delivery.
+Python production includes authorized directional spreads, butterflies and iron
+condors, with their own versioned management contracts. These cannot be
+replaced by Rust `EvaluationRequestV1`'s limited two-leg geometry. Full Python
+strategy decisions remain outside Rust wire. With `SPX_RUST_REPORT_OWNER=true`,
+Python publishes the bounded Desk projection while Rust owns its report lane.
+
+A real data-capability recovery uses the same lane between half-hour slots,
+with `recovery:<projection_id>` deduplication and no model writer. Partial data
+recovery is not proof that all exact legs or Greeks are available. See
+[current acceptance](../docs/desk-data-recovery-2026-10-05.md).
 
 ## Development
 

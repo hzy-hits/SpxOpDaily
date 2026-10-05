@@ -1,8 +1,13 @@
 # SPX Spark Core collaboration guide
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](../docs/README.md)（目录核对：2026-10-05）。
+
 > **FROZEN（2026-08-07）：Rust workspace 已冻结，只接受生产故障与安全修复。**
 > 不新增 crate、wire version、golden fixture、策略、通知、报表和 lifecycle。
-> 退出计划见 `docs/architecture-simplification-execution-plan-v1.md` Phase 6。
+> Phase 6 退出已延期，见[当前执行基线](../docs/architecture-simplification-execution-plan-v1.md)。
+> Python `build_strategy_decision` 仍是人读策略唯一授权出口；Rust typed decision 不替代它。
 
 This directory is the clean-room Rust production core within the SPX Spark
 monorepo. It does

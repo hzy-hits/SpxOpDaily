@@ -1,8 +1,40 @@
 # Operations guide
 
-Status: operating contract. The isolated Oracle core has been installed without
-network delivery; bridge activation is bounded to normalized quote mirror
-ownership until live-session acceptance is complete.
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](../../docs/README.md)（目录核对：2026-10-05）。
+
+## Active Oracle verification
+
+Source is `/home/ubuntu/spx-spark/rust`; immutable releases are under
+`/opt/spx-spark-core-shadow/releases`, selected by the `current` symlink.
+Production configuration remains outside Git under `/etc/spx-spark-core-shadow`;
+never print protected environment or credential files. The ledger and latest
+projections live under `/var/lib/spx-spark-core-shadow`; bridge/report health
+files are under `/var/lib/spx-spark-bridge-shadow` and
+`/var/lib/spx-spark-report-shadow`. Raw frames and verified archives use
+`/srv/data/spx-spark/rust-core-shadow`.
+
+```bash
+systemctl show spx-rust-core-shadow.service spx-rust-normalized-bridge.service \
+  spx-rust-report.service spx-rust-delivery.service \
+  -p Id -p ActiveState -p NRestarts
+readlink /opt/spx-spark-core-shadow/current
+```
+
+Verify source timestamps and native field coverage separately from bridge ACK,
+report save and each target's receipt. In the October 5 incident the pipeline
+could publish a recovery map while 20Δ Greeks were still missing. Do not restart
+Gateway, enable another report owner or rewrite success timestamps to conceal
+that gap. Python-only diagnostic changes do not require a Rust restart.
+[Current incident evidence](../../docs/desk-data-recovery-2026-10-05.md).
+
+Status (2026-10-05): core, bridge, report and delivery are deployed system
+services. Checked-in shadow examples retain disabled network gates; they are
+not the active production configuration. Phase 6 retirement is deferred.
+Python remains the broker and strategy owner. The phase-specific bootstrap and
+cutover instructions below are historical/explicit migration procedures, not
+steps to repeat during a normal documentation or Python-only deployment.
 
 ## Local validation
 
@@ -64,7 +96,7 @@ targets in `delivery.toml`. Core turns an unconfigured request target into
 target before transport, so a configuration change cannot silently reroute old
 work or create a claim/restart loop.
 
-## Proposed host layout
+## Generic example host layout (not the active Oracle paths)
 
 ```text
 /opt/spx-spark-core/bin/                 immutable release binaries

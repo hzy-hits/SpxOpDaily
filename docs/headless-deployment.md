@@ -1,5 +1,9 @@
 # Headless Deployment Notes
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 This project is designed to run on a Linux headless host.
 
 The Oracle checkout is now a monorepo: Python commands run from
@@ -252,7 +256,7 @@ it during regular trading hours to validate SPXW bid/ask and model greeks. GTH
 SPXW validation uses the persistent stream: the stateless report deliberately
 does not turn raw ES into an SPX strike without the stream's qualified basis.
 
-## systemd User Timer
+## 可选的 verifier timer（不替代常驻采集器）
 
 Install the verifier timer for the current user:
 
@@ -270,35 +274,41 @@ Inspect logs:
 journalctl --user -u spx-ibkr-verifier.service -n 100 --no-pager
 ```
 
-## 24h Service Loop
+## 当前 Core / Worker 部署
 
-The 24h loop is modular. By default it runs public Hyperliquid collection, IV
-surface snapshots, and alert evaluation. IBKR collection is disabled unless
-`.env` explicitly sets `SPX_SERVICE_ENABLE_IBKR=true`, so the service will not
-take the broker session by accident.
+旧 24h loop 与独立 hot-worker unit 已收敛进 `spx-core.service` 和
+`spx-worker.service`，不得重新安装旧 `spx-spark-24h.service`。
 
-Dry check:
+已获授权的部署先确认干净 master 与远端目标，再使用正式入口：
 
 ```bash
-scripts/run-24h-service.sh --print-config
-SPX_SERVICE_ENABLE_HYPERLIQUID=false scripts/run-24h-service.sh --once
+cd /home/ubuntu/spx-spark
+git status --short --branch
+git fetch origin master
+git rev-parse HEAD origin/master
+scripts/install-spx-spark-services.sh
 ```
 
-Install the user service:
+脚本核对工作树、分支和 unit drift，并同步已有 units；只重启本次受影响 owner。
+例如仅修改策略和桌图事实时，运行 `systemctl --user restart spx-core.service`。
+`--now` 用于明确授权的完整启动/cutover，会重启采集器与其他服务。
+文档改动不需要重启 broker、Core 或 Rust。不要打印 `.env` 或 protected config。
 
 ```bash
-mkdir -p ~/.config/systemd/user
-ln -sfn /home/ubuntu/spx-spark/systemd/spx-spark-24h.service ~/.config/systemd/user/spx-spark-24h.service
-systemctl --user daemon-reload
-systemctl --user enable --now spx-spark-24h.service
+systemctl --user show spx-core.service spx-worker.service \
+  spx-spark-ibkr-stream.service spx-spark-schwab-marketdata.service \
+  -p Id -p ActiveState -p NRestarts
+journalctl --user -u spx-core.service -n 50 --no-pager
 ```
 
-Inspect logs:
+正常桌图准备由 `spx-spark-order-map-status.service`（`spx job order-map --status`）
+承担；Rust owner 启用时旧的 `spx job order-map` 定时发送会主动抑制。
+不要把这个 suppression 当故障，也不要另开 Python 发送者。
+Core 在数据真正恢复时使用同一投影路径即时更新。
 
-```bash
-journalctl --user -u spx-spark-24h.service -n 100 --no-pager
-journalctl --user -u spx-spark-24h.service -f
-```
+验收需分开核对源时间、独立 BBO/Greeks/OI、策略时间、projection/bridge/报告
+时钟和每目标回执。IBKR healthy 但某腿没有 Delta 是字段缺口，不能靠更新
+心跳掩盖。原始缺口记录见[2026-10-05 验收](desk-data-recovery-2026-10-05.md)。
 
 ## OpenClaw Weixin Alerts
 

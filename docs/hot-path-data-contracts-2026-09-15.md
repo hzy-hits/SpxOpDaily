@@ -1,5 +1,9 @@
 # Session queries, historical preparation and liquidation cash flows
 
+<!-- documentation-status: 2026-10-05 -->
+> **文档定位：事故修复与时点验收。** 时点验收记录；现场时间、计数和部署结论仅证明文中那次检查，不代表此刻持续健康。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
 Scope: Phase 5 P5-1 / S6 (existing operational table), Phase 3 P3-2 production latency repair, and S1/S3 valuation semantics. Baseline c8b736cb. No new strategy, process, queue, mutable store or notification owner.
 
 ## Changes
