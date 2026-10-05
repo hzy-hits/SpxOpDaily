@@ -951,7 +951,8 @@ def test_both_condor_widths_survive_desk_export_with_separate_quotes_and_evidenc
         assert "买7440P/卖7460P/卖7540C/买7560C" in twenty
         assert "贷记4.80" in twenty and "盈利 80%" in twenty
     else:
-        assert "四腿报价未齐" in twenty and "历史模拟" not in twenty
+        assert "概率暂不可估" in twenty and "历史模拟" not in twenty
+        assert "买7440P" not in twenty and "贷记4.80" not in twenty
         assert "盈利 70%" not in twenty
     audit = json.loads((Path(__file__).resolve().parents[1] / "docs/condor-evidence-audit-2026-09-23.json").read_text())
     for part, reference in zip((ten, twenty), audit["cash_recheck"]["summaries"][:2]):

@@ -328,7 +328,8 @@ def compact_iron_condor_desk_line(
             label = "人工候选" if selected else "结构扫描"
             credit = finite_float(_mapping(row.get("quote")).get("credit"))
             strikes = row.get("strikes") or ()
-            legs = "四腿报价未齐"
+            legs = ("20Δ短腿尚未选齐" if row.get("reason") == "iron_condor_short_delta_unavailable"
+                    else humanize_strategy_reason(str(row.get("reason") or "iron_condor_four_leg_quote_unavailable")))
             if row.get("status") == "ready" and len(strikes) == 4 and credit is not None:
                 lp, sp, sc, lc = strikes
                 legs = f"买{lp:g}P/卖{sp:g}P/卖{sc:g}C/买{lc:g}C · 贷记{credit:.2f}"
@@ -598,6 +599,7 @@ def humanize_strategy_reason(
         "debit_long_beyond_remaining_move": "长腿超出剩余期望波动，20 分钟/到期都很难碰到",
         "gth_delta_scan_long_above_cap": "夜盘 delta 扫描长腿超过 20Δ",
         "iron_condor_delta_quotes_unavailable": "5–20Δ 卖权铁鹰缺少带 delta 的新鲜报价",
+        "iron_condor_short_delta_unavailable": "20Δ短腿尚未选齐",
         "iron_condor_four_leg_quote_unavailable": "铁鹰四腿报价不齐",
         "iron_condor_credit_unavailable": "铁鹰保守贷记尚未形成",
         "iron_condor_credit_fraction": "铁鹰贷记相对翼宽不在可接受区间",
@@ -867,6 +869,24 @@ def iron_condor_desk_line(structure: Mapping[str, Any]) -> str:
     """Management-path frequencies, not delta-implied or expiry probabilities."""
     if not structure or structure.get("status") == "unavailable":
         reason = str(structure.get("reason") or "iron_condor_four_leg_quote_unavailable")
+        diagnostics = _mapping(structure.get("data_diagnostics"))
+        if reason == "iron_condor_short_delta_unavailable" and diagnostics:
+            missing = []
+            for side, label in (("P", "Put"), ("C", "Call")):
+                data = _mapping(diagnostics.get(side))
+                if not data or data.get("selected_strike") is not None:
+                    continue
+                if not data.get("fresh_bbo"):
+                    missing.append(f"{label}侧无新鲜两边报价")
+                else:
+                    detail = []
+                    if data.get("missing_delta"):
+                        detail.append(f"{data['missing_delta']}份新鲜报价缺Delta")
+                    if data.get("stale_delta"):
+                        detail.append(f"{data['stale_delta']}份Delta过期或来源不符")
+                    missing.append(f"{label}侧20Δ档无合格短腿" + ("，" + "、".join(detail) if detail else ""))
+            if missing:
+                return "概率暂不可估（" + "；".join(missing) + "）"
         return f"概率暂不可估（{humanize_strategy_reason(reason)}）"
     distribution = _mapping(_mapping(structure.get("edge")).get("path_distribution"))
     if not distribution:

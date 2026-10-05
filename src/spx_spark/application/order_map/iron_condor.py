@@ -27,8 +27,8 @@ from spx_spark.application.order_map.candidate_factory import (
     _round_to_strike,
     _session_option_legs,
     _time,
-    nearest_abs_delta_strike,
 )
+from spx_spark.application.order_map.execution_quote import nearest_abs_delta_strike
 from spx_spark.application.order_map.gth_iron_condor import (
     GTH_EVIDENCE_CONTRACT_HASH,
     GTH_ENTRY_CONTRACT_VERSION,
@@ -108,13 +108,16 @@ def build_iron_condor_map(
             quote_max_skew_seconds=(GTH_MAX_EXACT_QUOTE_SKEW_SECONDS if session_mode == "gth" else policy.quote_max_skew_seconds),
         )
         for width in (10.0, 20.0):
+            diagnostics: dict[str, Any] = {}
             row = _structure_for_short_delta(
                 latest, expiry, spot=spot, short_abs_delta=HUMAN_SHORT_DELTA, now=now,
                 session_policy=replace(scan_policy, iron_condor_wing_width=width),
                 providers=(Provider.IBKR,) if session_mode == "gth" else (Provider.SCHWAB,),
+                diagnostics=diagnostics,
             )
             comparisons.append({
-                **(row or _unavailable_map("iron_condor_delta_quotes_unavailable", expiry=expiry, spot=spot)),
+                **(row or _unavailable_map(diagnostics.get("reason", "iron_condor_delta_quotes_unavailable"), expiry=expiry, spot=spot)),
+                "data_diagnostics": diagnostics,
                 "wing_width": width, "short_abs_delta": HUMAN_SHORT_DELTA, "session_mode": session_mode,
                 "decision_effect": "comparison_only", "automatic_ordering": False,
             })
@@ -779,6 +782,7 @@ def _structure_for_short_delta(
     session_policy: StrategyPolicy,
     providers: Sequence[Provider],
     call_short_abs_delta: float | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     width = float(session_policy.iron_condor_wing_width or WING_WIDTH)
     strikes = _ten_wide_from_short_delta(
@@ -790,6 +794,7 @@ def _structure_for_short_delta(
         now=now,
         policy=session_policy,
         providers=providers,
+        diagnostics=diagnostics,
     )
     if strikes is None:
         return None
@@ -808,6 +813,8 @@ def _structure_for_short_delta(
         providers=providers,
     )
     if len(legs) != 4:
+        if diagnostics is not None:
+            diagnostics.update(reason="iron_condor_four_leg_quote_unavailable", strikes=list(strikes))
         return None
     put_long, put_short, call_short, call_long = legs
     provider = Provider(str(put_long.get("provider")))
@@ -856,8 +863,12 @@ def _structure_for_short_delta(
                 net_credit=float(quote["credit"]),
             )
         except ValueError:
+            if diagnostics is not None:
+                diagnostics["reason"] = "iron_condor_credit_unavailable"
             return None
     if quote.get("status") != "ready" or not economics:
+        if diagnostics is not None:
+            diagnostics.update(reason="iron_condor_credit_unavailable", quote_reasons=quote.get("reasons", []))
         return None
     inside = put_short_k < spot < call_short_k
     return {
@@ -892,34 +903,21 @@ def _ten_wide_from_short_delta(
     policy: StrategyPolicy,
     providers: Sequence[Provider],
     call_short_abs_delta: float | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[float, float, float, float] | None:
-    put_short = nearest_abs_delta_strike(
-        latest,
-        expiry,
-        "P",
-        target_abs_delta=short_abs_delta,
-        now=now,
-        policy=policy,
-        providers=providers,
-        max_distance=SHORT_DELTA_TOLERANCE,
-        min_abs_delta=SHORT_DELTA_MIN,
-        max_abs_delta=min(short_abs_delta, SHORT_DELTA_MAX),
-        max_greeks_age_seconds=policy.quote_max_age_seconds,
-    )
-    call_short = nearest_abs_delta_strike(
-        latest,
-        expiry,
-        "C",
-        target_abs_delta=call_short_abs_delta if call_short_abs_delta is not None else short_abs_delta,
-        now=now,
-        policy=policy,
-        providers=providers,
-        max_distance=SHORT_DELTA_TOLERANCE,
-        min_abs_delta=SHORT_DELTA_MIN,
-        max_abs_delta=min(call_short_abs_delta if call_short_abs_delta is not None else short_abs_delta, SHORT_DELTA_MAX),
-        max_greeks_age_seconds=policy.quote_max_age_seconds,
-    )
+    sides = diagnostics if diagnostics is not None else {}
+    selected = []
+    for side, target in (("P", short_abs_delta), ("C", call_short_abs_delta if call_short_abs_delta is not None else short_abs_delta)):
+        sides[side] = {}
+        selected.append(nearest_abs_delta_strike(
+            latest, expiry, side, target_abs_delta=target, now=now, policy=policy,
+            providers=providers, max_distance=SHORT_DELTA_TOLERANCE,
+            min_abs_delta=SHORT_DELTA_MIN, max_abs_delta=min(target, SHORT_DELTA_MAX),
+            max_greeks_age_seconds=policy.quote_max_age_seconds, diagnostics=sides[side],
+        ))
+    put_short, call_short = selected
     if put_short is None or call_short is None:
+        sides["reason"] = "iron_condor_short_delta_unavailable"
         return None
     put_long = _round_to_strike(put_short - width)
     call_long = _round_to_strike(call_short + width)

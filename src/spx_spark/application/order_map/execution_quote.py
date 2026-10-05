@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Iterable
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
-from spx_spark.marketdata import Quote
+from spx_spark.analytics.options.pricing import usable_delta
+from spx_spark.application.market_features.market import quote_source_at
+from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.marketdata import MarketDataQuality, Provider, Quote
 from spx_spark.settings.order_map import DEFAULT_ORDER_MAP_POLICY, OrderMapPolicy
-from spx_spark.storage import configured_quote_use_decision
+from spx_spark.storage import LatestState, configured_quote_use_decision
 
 
 MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 5.0
@@ -196,3 +200,93 @@ def _mid_divergence_bps(values: tuple[float, ...]) -> float | None:
     high = max(values)
     center = (low + high) / 2.0
     return (high - low) / center * 10_000.0 if center > 0 else None
+
+
+def nearest_abs_delta_strike(
+    latest: LatestState,
+    expiry: str,
+    right: str,
+    *,
+    target_abs_delta: float,
+    now: datetime,
+    policy: StrategyPolicy,
+    providers: Sequence[Provider],
+    max_distance: float = 0.08,
+    min_abs_delta: float | None = None,
+    max_abs_delta: float | None = None,
+    max_greeks_age_seconds: float | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> float | None:
+    """Return the strike whose |delta| is closest to target among fresh quotes.
+
+    When ``max_abs_delta`` is set, richer strikes above that cap are ignored so
+    a 20Δ target means 20Δ or the next strike below it, never 21–25Δ.
+    """
+
+    wanted = str(right or "").upper()
+    floor = 0.0 if min_abs_delta is None else float(min_abs_delta)
+    ceiling = None if max_abs_delta is None else float(max_abs_delta)
+    counts = dict(contracts=0, fresh_bbo=0, missing_delta=0, stale_delta=0, usable_delta=0)
+    if diagnostics is not None:
+        diagnostics.update(counts, selected_strike=None, providers=[p.value for p in providers])
+    for provider in providers:
+        best_strike: float | None = None
+        best_distance: float | None = None
+        for quote in latest.quotes:
+            instrument = quote.instrument
+            if (
+                quote.provider is not provider
+                or instrument.expiry != expiry
+                or str(getattr(instrument.right, "value", instrument.right) or "").upper() != wanted
+            ):
+                continue
+            counts["contracts"] += 1
+            source_at = quote_source_at(quote)
+            if source_at is None:
+                continue
+            age = (now - source_at).total_seconds()
+            if age < 0.0 or age > policy.quote_max_age_seconds:
+                continue
+            fresh_bbo = (quote.quality is MarketDataQuality.LIVE and quote.bid is not None
+                         and quote.ask is not None and 0 <= quote.bid <= quote.ask)
+            if fresh_bbo:
+                counts["fresh_bbo"] += 1
+            delta = usable_delta(quote)
+            if delta is None:
+                if fresh_bbo and (quote.greeks is None or quote.greeks.delta is None):
+                    counts["missing_delta"] += 1
+                continue
+            if max_greeks_age_seconds is not None:
+                raw = quote.raw if isinstance(quote.raw, Mapping) else {}
+                raw_at = raw.get("greeks_observed_at")
+                try:
+                    greeks_at = raw_at if isinstance(raw_at, datetime) else datetime.fromisoformat(str(raw_at).replace("Z", "+00:00"))
+                    greeks_at = greeks_at if greeks_at.tzinfo else source_at
+                except ValueError:
+                    greeks_at = source_at
+                greeks_provider = str(raw.get("greeks_provider") or provider.value)
+                greeks_age = (now - greeks_at).total_seconds()
+                if (
+                    greeks_provider != provider.value
+                    or greeks_age < 0.0
+                    or greeks_age > max_greeks_age_seconds
+                ):
+                    counts["stale_delta"] += 1
+                    continue
+            counts["usable_delta"] += 1
+            abs_delta = abs(delta)
+            if abs_delta < floor:
+                continue
+            if ceiling is not None and abs_delta - ceiling > 1e-9:
+                continue
+            distance = abs(abs_delta - target_abs_delta)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_strike = round(float(instrument.strike) / 5.0) * 5.0 if instrument.strike is not None else None
+        if best_strike is not None and best_distance is not None and best_distance <= max_distance:
+            if diagnostics is not None:
+                diagnostics.update(counts, selected_strike=best_strike)
+            return best_strike
+    if diagnostics is not None:
+        diagnostics.update(counts)
+    return None

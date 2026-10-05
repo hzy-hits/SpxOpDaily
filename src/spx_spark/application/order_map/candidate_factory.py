@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from spx_spark.analytics.greeks.black_scholes import bs_price
-from spx_spark.analytics.options.pricing import usable_delta, time_to_expiry_years
+from spx_spark.analytics.options.pricing import time_to_expiry_years
 from spx_spark.analytics.options.strategy_payoff import (
     CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY,
     butterfly_economics,
@@ -27,6 +27,7 @@ from spx_spark.application.market_features.physical_close_convergence import (
     CLOSE_CONVERGENCE_MODEL_VERSION,
 )
 from spx_spark.application.market_features.session_quote_selection import provider_quote
+from spx_spark.application.order_map.execution_quote import nearest_abs_delta_strike
 from spx_spark.application.order_map.ict_liquidity import ict_filter_payload
 from spx_spark.application.order_map.volume_machine import es_momentum_clarity_block
 from spx_spark.application.order_map.strategy_regime import (
@@ -1273,74 +1274,6 @@ def _session_option_legs(
         ):
             return legs
     return []
-
-
-def nearest_abs_delta_strike(
-    latest: LatestState,
-    expiry: str,
-    right: str,
-    *,
-    target_abs_delta: float,
-    now: datetime,
-    policy: StrategyPolicy,
-    providers: Sequence[Provider],
-    max_distance: float = 0.08,
-    min_abs_delta: float | None = None,
-    max_abs_delta: float | None = None,
-    max_greeks_age_seconds: float | None = None,
-) -> float | None:
-    """Return the strike whose |delta| is closest to target among fresh quotes.
-
-    When ``max_abs_delta`` is set, richer strikes above that cap are ignored so
-    a 20Δ target means 20Δ or the next strike below it, never 21–25Δ.
-    """
-
-    wanted = str(right or "").upper()
-    floor = 0.0 if min_abs_delta is None else float(min_abs_delta)
-    ceiling = None if max_abs_delta is None else float(max_abs_delta)
-    for provider in providers:
-        best_strike: float | None = None
-        best_distance: float | None = None
-        for quote in latest.quotes:
-            instrument = quote.instrument
-            if (
-                quote.provider is not provider
-                or instrument.expiry != expiry
-                or str(getattr(instrument.right, "value", instrument.right) or "").upper() != wanted
-            ):
-                continue
-            source_at = quote_source_at(quote)
-            if source_at is None:
-                continue
-            age = (now - source_at).total_seconds()
-            if age < 0.0 or age > policy.quote_max_age_seconds:
-                continue
-            delta = usable_delta(quote)
-            if delta is None:
-                continue
-            if max_greeks_age_seconds is not None:
-                raw = _map(quote.raw)
-                greeks_at = _time(raw.get("greeks_observed_at")) or source_at
-                greeks_provider = str(raw.get("greeks_provider") or provider.value)
-                greeks_age = (now - greeks_at).total_seconds()
-                if (
-                    greeks_provider != provider.value
-                    or greeks_age < 0.0
-                    or greeks_age > max_greeks_age_seconds
-                ):
-                    continue
-            abs_delta = abs(delta)
-            if abs_delta < floor:
-                continue
-            if ceiling is not None and abs_delta - ceiling > 1e-9:
-                continue
-            distance = abs(abs_delta - target_abs_delta)
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                best_strike = _round_to_strike(instrument.strike)
-        if best_strike is not None and best_distance is not None and best_distance <= max_distance:
-            return best_strike
-    return None
 
 
 def _long_delta_above_scan_cap(long: Mapping[str, Any], policy: StrategyPolicy) -> bool:

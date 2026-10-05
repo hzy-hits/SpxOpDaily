@@ -1451,3 +1451,43 @@ def test_only_stale_width_is_removed_from_desk_scan(mode, stale_strike, unavaila
     assert scan[1 - unavailable_index]["status"] == "ready"
     assert scan[unavailable_index]["status"] == "unavailable"
     assert scan[unavailable_index]["quote"]["status"] == "unavailable"
+    assert scan[unavailable_index]["reason"] == "iron_condor_four_leg_quote_unavailable"
+
+
+@pytest.mark.parametrize("mode", ["rth", "gth"])
+@pytest.mark.parametrize("fault", ["missing_delta", "stale_delta", "foreign_delta", "stale_bbo"])
+def test_condor_exposes_missing_field_without_inventing_quotes_or_delta(mode, fault):
+    from spx_spark.application.order_map.desk_strategy_view import compact_iron_condor_desk_line
+
+    now, facts, state = (RTH_NOW, _rth_facts(), _rth_state()) if mode == "rth" else (NOW, _gth_transition_facts(), _gth_state())
+    quotes = []
+    for q in state.quotes:
+        if q.instrument.right.value == "P":
+            if fault == "missing_delta":
+                q = replace(q, greeks=None)
+            elif fault in {"stale_delta", "foreign_delta"}:
+                at = now - timedelta(seconds=31) if fault == "stale_delta" else now
+                provider = q.provider.value if fault == "stale_delta" else "other"
+                q = replace(q, raw={"greeks_observed_at": at.isoformat(), "greeks_provider": provider})
+            else:
+                q = replace(q, quote_time=now-timedelta(seconds=31), received_at=now-timedelta(seconds=31))
+        quotes.append(q)
+    broken = replace(state, quotes=tuple(quotes), best_quotes=tuple(quotes))
+    result = build_iron_condor_map(_payload(), facts, broken, now=now, policy=StrategyPolicy())
+    for row in result["width_comparisons"]:
+        assert row["status"] == "unavailable"
+        assert row["reason"] == "iron_condor_short_delta_unavailable"
+        put, call = (row["data_diagnostics"][side] for side in ("P", "C"))
+        assert put["selected_strike"] is None and call["selected_strike"] is not None
+        if fault == "missing_delta":
+            assert put["fresh_bbo"] > 0 and put["missing_delta"] == put["fresh_bbo"]
+        elif fault in {"stale_delta", "foreign_delta"}:
+            assert put["fresh_bbo"] > 0 and put["missing_delta"] == 0 and put["stale_delta"] > 0
+        else:
+            assert put["fresh_bbo"] == 0
+    assert enumerate_iron_condor_candidates(_payload(), facts, broken, now=now, policy=StrategyPolicy()) == []
+    text = compact_iron_condor_desk_line({"strategy_decision": {"iron_condor_map": result}})
+    assert "Put" in text and "四腿报价未齐" not in text
+    # The unchanged selector recovers on real provider fields, without a restart or artificial TTL.
+    restored = build_iron_condor_map(_payload(), facts, state, now=now, policy=StrategyPolicy())
+    assert all(row["status"] == "ready" for row in restored["width_comparisons"])
