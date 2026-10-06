@@ -613,6 +613,19 @@ def test_option_plan_respects_line_budget_and_keeps_pairs():
     assert max(abs(strike - 7500) for strike in strikes) <= 50
 
 
+def test_next_expiry_context_cannot_displace_current_expiry_hot_quotes():
+    kwargs = dict(atm_reference=7780, expiry="20261006", next_expiry="20261007",
+                  mode="human_alert", max_option_lines=84, hot_lane_share=46 / 84)
+    baseline = build_option_subscription_plan(**kwargs,
+        sampling_settings=make_sampling_settings(hot_window_points=55, include_next_expiry=False))
+    expanded = build_option_subscription_plan(**kwargs,
+        sampling_settings=make_sampling_settings(hot_window_points=55, include_next_expiry=True))
+    assert expanded.hot == baseline.hot
+    assert len(expanded.hot) == 46
+    assert all(len(expanded.hot) + len(group) <= 84 for group in expanded.rotations)
+    assert any(spec.expiry == "20261007" for group in expanded.rotations for spec in group)
+
+
 def test_option_plan_never_splits_pairs_across_two_expiries() -> None:
     plan = build_option_subscription_plan(
         atm_reference=7500.0,

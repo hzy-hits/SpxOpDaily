@@ -53,7 +53,11 @@ def build_option_subscription_plan(
     rotation_budget = max(total_budget - hot_budget, 0)
     rotation_budget -= rotation_budget % 2
 
-    hot = tuple(contract_pairs_by_atm_distance(plan.hot_lane, plan.atm_strike)[:hot_budget])
+    # Current-expiry execution must not lose its hot legs to next-expiry
+    # context at nearby strikes. Deferred contracts remain in rotation.
+    ordered_hot = contract_pairs_by_atm_distance(plan.hot_lane, plan.atm_strike)
+    ordered_hot.sort(key=lambda spec: spec.expiry != expiry)
+    hot = tuple(ordered_hot[:hot_budget])
     hot_keys = {(spec.expiry, spec.strike, spec.right) for spec in hot}
 
     rotations: list[tuple[OptionContractSpec, ...]] = []
@@ -197,4 +201,3 @@ def contract_qualification_key(contract: Any) -> tuple[object, ...]:
             "right",
         )
     )
-
