@@ -1242,6 +1242,7 @@ def _session_option_legs(
     now: datetime,
     policy: StrategyPolicy,
     providers: Sequence[Provider],
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     for provider in providers:
         legs = [
@@ -1256,6 +1257,15 @@ def _session_option_legs(
             for strike, right in contracts
         ]
         times = [_time(leg.get("source_at")) for leg in legs]
+        if diagnostics is not None:
+            observed = [value for value in times if value is not None]
+            diagnostics.update(
+                legs=legs,
+                max_quote_age_seconds=max(((now - value).total_seconds() for value in observed), default=None),
+                source_skew_seconds=(max(observed) - min(observed)).total_seconds() if observed else None,
+                quote_age_limit_seconds=policy.quote_max_age_seconds,
+                quote_skew_limit_seconds=policy.quote_max_skew_seconds,
+            )
         if (
             all(legs)
             and all(_number(leg.get("bid")) is not None for leg in legs)

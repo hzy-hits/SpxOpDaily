@@ -87,7 +87,7 @@ def test_recovery_refreshes_current_map_between_slots_and_suppresses_flapping(tm
     assert wire["recovery_of"] == original["projection_id"]
     assert wire["source_slot"] == slot
     assert datetime.fromisoformat(wire["available_at"].replace("Z", "+00:00")) >= now
-    assert datetime.fromisoformat(wire["valid_until"].replace("Z", "+00:00")) < now + timedelta(minutes=3)
+    assert datetime.fromisoformat(wire["valid_until"].replace("Z", "+00:00")) >= now + timedelta(minutes=20)
     assert "oi_verified" not in wire["recovery_seen"]  # OI need not recover with IC.
     assert wire["automatic_ordering"] is False
     assert set(result["recovered"]) == {"iron_condor_10_quotes", "iron_condor_10_probability"}

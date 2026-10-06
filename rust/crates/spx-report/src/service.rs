@@ -618,7 +618,11 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         } else {
             scheduled_operator_projection(projection, projection.message.clone())?
         };
-        self.persist_message(projection, slot_token, message, completed_at)
+        let mut delivery_projection = projection.clone();
+        delivery_projection.valid_until = delivery_projection
+            .valid_until
+            .min(projection.available_at + TimeDelta::minutes(2));
+        self.persist_message(&delivery_projection, slot_token, message, completed_at)
     }
 
     fn persist_message(

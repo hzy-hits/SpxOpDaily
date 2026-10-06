@@ -19,6 +19,9 @@ BASIS_MAX_TIMESTAMP_SKEW_SECONDS = 5.0
 BASIS_MAX_ABS_POINTS = 120.0
 BASIS_MAX_MEDIAN_DEVIATION_POINTS = 15.0
 BASIS_MAX_TRADING_DAY_AGE = 3
+# Subscription positioning only; agreement across several option pairs is
+# required before an implied coordinate can move the collector's hot window.
+PARITY_REFERENCE_MIN_PAIRS = 3
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,7 @@ class AtmReferenceController:
         ibus500: ReferenceQuote | None = None,
         es: ReferenceQuote | None = None,
         spy: ReferenceQuote | None = None,
+        option_reference: ReferenceQuote | None = None,
         expiry_rollover: bool = False,
         stable_atm_recovery: bool = False,
     ) -> AtmReferenceResult:
@@ -253,6 +257,14 @@ class AtmReferenceController:
                 source="ES_basis_adj",
                 reason="fresh_es_with_persisted_rth_basis",
                 basis=valid_basis,
+            )
+        elif not is_rth and option_reference is not None and option_reference.is_fresh:
+            candidate = _candidate(
+                quote=option_reference,
+                value=float(option_reference.value),
+                strike_step=strike_step,
+                source="SPXW_parity",
+                reason="fresh_option_pairs_subscription_reference",
             )
         elif spy is not None and spy.is_fresh:
             candidate = _candidate(

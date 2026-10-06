@@ -811,10 +811,22 @@ def _structure_for_short_delta(
         now=now,
         policy=session_policy,
         providers=providers,
+        diagnostics=diagnostics,
     )
     if len(legs) != 4:
         if diagnostics is not None:
             diagnostics.update(reason="iron_condor_four_leg_quote_unavailable", strikes=list(strikes))
+            observed_legs = diagnostics.get("legs") or []
+            if len(observed_legs) == 4 and all(observed_legs):
+                check = conservative_iron_condor_bbo(
+                    *observed_legs, now=now,
+                    max_quote_age_seconds=session_policy.quote_max_age_seconds,
+                    max_source_skew_seconds=session_policy.quote_max_skew_seconds,
+                )
+                reasons = check.get("reasons") or []
+                diagnostics["quote_reasons"] = reasons
+                if reasons:
+                    diagnostics["reason"] = reasons[0]
         return None
     put_long, put_short, call_short, call_long = legs
     provider = Provider(str(put_long.get("provider")))

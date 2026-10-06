@@ -84,6 +84,18 @@ def test_off_hours_prefers_fresh_ibus500_cash_proxy() -> None:
     assert result.candidate.value == 7512
 
 
+def test_option_coordinate_recovers_off_hours_subscriptions_without_creating_es_basis():
+    controller = AtmReferenceController()
+    result = resolve(controller, es=quote(7840, contract="202612"),
+                     option_reference=quote(7779.25))
+    assert result.candidate.rounded_strike == 7780
+    assert result.candidate.source == "SPXW_parity"
+    assert controller.basis_tracker.state is None
+    assert resolve(controller, option_reference=quote(7779, freshness="stale")).candidate is None
+    rth = resolve(controller, is_rth=True, spx=quote(7771), option_reference=quote(7779))
+    assert rth.candidate.source == "SPX" and rth.candidate.value == 7771
+
+
 def test_es_is_eligible_only_with_qualified_same_contract_basis() -> None:
     controller = AtmReferenceController()
     no_basis = resolve(

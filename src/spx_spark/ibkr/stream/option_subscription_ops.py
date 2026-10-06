@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from spx_spark.analytics.options.chain import chain_implied_spot, pair_by_strike
+from spx_spark.ibkr.adapter import quote_from_ibkr_row
+from spx_spark.ibkr.atm_reference import (
+    BASIS_MAX_TIMESTAMP_SKEW_SECONDS, PARITY_REFERENCE_MIN_PAIRS, ReferenceQuote,
+)
 from spx_spark.ibkr.stream import deps as stream_deps
 from spx_spark.ibkr.stream.capacity_tracker import active_market_data_lines
 from spx_spark.ibkr.stream.contracts import (
@@ -20,6 +25,7 @@ from spx_spark.ibkr.stream.quota_plan import plan_ibkr_option_allocation
 from spx_spark.ibkr.slow_poll import SlowPollScheduler
 from spx_spark.ibkr.verifier import VerifyRow
 from spx_spark.market_calendar import ET
+from spx_spark.marketdata import MarketDataQuality, OptionRight
 from spx_spark.provider_failover import FailoverMode
 from spx_spark.provider_failover_controller import load_failover_control
 
@@ -218,6 +224,41 @@ class OptionSubscriptionOps:
             and stable is not None
             and stable.expiry == today
         )
+        option_reference = None
+        if not self.market_calendar.is_rth_open(decision_at):
+            # Reuse the broker's current same-expiry option observations when
+            # cash/CFD/basis references are absent. This only locates subscriptions;
+            # it cannot supply executable leg prices or renew quote timestamps.
+            pairs = pair_by_strike([
+                quote for row in rows
+                if row.kind == "option" and row.label.startswith(f"option:SPXW:{today}:")
+                for quote in [quote_from_ibkr_row(
+                    row, received_at=decision_at,
+                    stale_after_seconds=self.ibkr_settings.stale_after_seconds,
+                )]
+                if quote.quality is MarketDataQuality.LIVE and quote.quote_time is not None
+                and 0 <= (decision_at - quote.quote_time).total_seconds() <= self.ibkr_settings.stale_after_seconds
+                and quote.bid is not None and quote.ask is not None and 0 < quote.bid <= quote.ask
+            ])
+            pairs = {
+                strike: sides for strike, sides in pairs.items()
+                if (call := sides.get(OptionRight.CALL)) is not None
+                and (put := sides.get(OptionRight.PUT)) is not None
+                and abs((call.quote_time - put.quote_time).total_seconds()) <= BASIS_MAX_TIMESTAMP_SKEW_SECONDS
+                and call.ask - call.bid + put.ask - put.bid <= self.sampling_settings.strike_step
+            }
+            pairs = dict(sorted(pairs.items(), key=lambda item: abs(
+                item[1][OptionRight.CALL].mid - item[1][OptionRight.PUT].mid
+            ))[:5])
+            if len(pairs) >= PARITY_REFERENCE_MIN_PAIRS:
+                times = [quote.quote_time for sides in pairs.values() for quote in sides.values()]
+                values = [strike + sides[OptionRight.CALL].mid - sides[OptionRight.PUT].mid
+                          for strike, sides in pairs.items()]
+                if ((max(times) - min(times)).total_seconds() <= BASIS_MAX_TIMESTAMP_SKEW_SECONDS
+                        and max(values) - min(values) <= self.sampling_settings.strike_step):
+                    option_reference = ReferenceQuote(
+                        value=chain_implied_spot(pairs), observed_at=min(times), freshness="fresh",
+                    )
         atm_result = self.atm_reference_controller.resolve(
             strike_step=max(int(self.sampling_settings.strike_step), 1),
             is_rth=self.market_calendar.is_rth_open(decision_at),
@@ -231,6 +272,7 @@ class OptionSubscriptionOps:
                 as_of=decision_at,
             ),
             spy=reference_quote_from_row(by_label.get("stock:SPY"), as_of=decision_at),
+            option_reference=option_reference,
             expiry_rollover=expiry_rollover,
             stable_atm_recovery=stable_atm_recovery,
         )

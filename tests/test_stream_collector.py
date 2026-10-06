@@ -56,6 +56,74 @@ def test_lifecycle_budget_reserves_one_bounded_qualification() -> None:
     assert not lifecycle_has_qualification_budget(100.0, now_monotonic=100.51)
 
 
+@pytest.mark.parametrize("fault", [None, "stale", "future", "frozen", "missing_put", "skew", "dispersion", "wide", "other_expiry"])
+def test_gth_hot_window_follows_fresh_option_pairs_without_cash_or_es_basis(tmp_path, monkeypatch, fault):
+    from datetime import timedelta
+    from spx_spark.ibkr.atm_reference import AtmReferenceController, StableAtmState
+    from spx_spark.ibkr.option_replan import OptionReplanController
+    from spx_spark.ibkr.stream import option_subscription_ops
+    from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+
+    start = datetime(2026, 10, 6, 2, 0, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        current = start
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(option_subscription_ops, "datetime", Clock)
+    collector = object.__new__(StreamCollector)
+    collector.skip_options = False
+    collector.base_subs = {}
+    collector.market_calendar = DEFAULT_MARKET_CALENDAR
+    collector.ibkr_settings = SimpleNamespace(stale_after_seconds=15)
+    collector.sampling_settings = make_sampling_settings(hot_window_points=100)
+    collector.stream_settings = SimpleNamespace(market_data_line_capacity=100, slow_poll_chunk_size=6, max_option_lines=84)
+    collector.provider_failover_settings = SimpleNamespace(state_path=tmp_path / "failover.json")
+    collector._prepare_option_definition_cache = lambda **kwargs: None
+    collector.atm_reference_controller = AtmReferenceController()
+    collector.atm_reference_controller.stable_atm = StableAtmState(7760, "stable_atm", start - timedelta(hours=1), "20261006")
+    collector.option_replan_controller = OptionReplanController(
+        accepted_atm=7760, accepted_source="stable_atm", accepted_expiry="20261006",
+        last_applied_at=start - timedelta(hours=1),
+    )
+    installed = []
+    collector.reconcile_option_plan = lambda plan: installed.append(plan) or True
+    for offset in (0, 8, 16):
+        Clock.current = start + timedelta(seconds=offset)
+        rows = []
+        for strike in (7770, 7775, 7780):
+            for right in ("C", "P"):
+                if fault == "missing_put" and right == "P":
+                    continue
+                difference = 7779.25 - strike
+                mid = 30 + max(difference if right == "C" else -difference, 0)
+                if fault == "dispersion" and strike == 7780 and right == "C":
+                    mid += 20
+                age = 20 if fault == "stale" else -1 if fault == "future" else 9 if fault == "skew" and right == "C" else 1
+                expiry = "20261007" if fault == "other_expiry" else "20261006"
+                rows.append(VerifyRow(
+                    label=f"option:SPXW:{expiry}:{strike}:{right}", kind="option", symbol="SPX",
+                    market_data_type=2 if fault == "frozen" else 1, stale=False,
+                    bid=mid - .1, ask=mid + (.1 if fault != "wide" else 10),
+                    ticker_time=(Clock.current - timedelta(seconds=age)).isoformat(),
+                ))
+        collector.ensure_option_plan(rows)
+    if fault is None:
+        assert len(installed) == 1
+        plan = installed[0]
+        assert plan.atm_strike == 7780
+        assert len(plan.hot) == 46
+        assert collector.atm_reference_controller.stable_atm.source == "SPXW_parity"
+        assert collector.atm_reference_controller.basis_tracker.state is None
+        hot = {(s.strike, s.right) for s in plan.hot}
+        assert {(7730, "P"), (7740, "P"), (7815, "C"), (7825, "C")} <= hot
+    else:
+        assert installed == []
+
+
 def test_position_shadow_failure_never_breaks_market_data_or_overwrites_snapshot(
     monkeypatch,
 ) -> None:

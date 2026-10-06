@@ -287,7 +287,7 @@ fn recovery_between_slots_uses_current_facts_without_model_delay_and_survives_re
         };
         source.recovery_of = Some(token("desk-map:unavailable"));
         source.recovery_seen = vec![token("iron_condor_10_quotes")];
-        source.valid_until = now + TimeDelta::minutes(2);
+        source.valid_until = now + TimeDelta::minutes(65);
         let expected = source.message.clone();
         write_latest(&config.projection_path, source);
         let writer = FakeWriter::new([]);
@@ -344,6 +344,14 @@ fn recovery_between_slots_uses_current_facts_without_model_delay_and_survives_re
             ReportService::open(config, true, FakeWriter::new([]), memory, now).unwrap();
         service.run_once_at(now + TimeDelta::seconds(1)).unwrap();
         assert_eq!(inspector.intents()[0].message, expected);
+        assert_eq!(
+            inspector.intents()[0].expires_at,
+            now + TimeDelta::minutes(2)
+        );
+        assert_eq!(
+            service.run_once_at(now + TimeDelta::seconds(121)).unwrap(),
+            ReportTick::AwaitingSlot
+        );
     }
 }
 

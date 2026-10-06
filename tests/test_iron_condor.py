@@ -1451,7 +1451,25 @@ def test_only_stale_width_is_removed_from_desk_scan(mode, stale_strike, unavaila
     assert scan[1 - unavailable_index]["status"] == "ready"
     assert scan[unavailable_index]["status"] == "unavailable"
     assert scan[unavailable_index]["quote"]["status"] == "unavailable"
-    assert scan[unavailable_index]["reason"] == "iron_condor_four_leg_quote_unavailable"
+    assert scan[unavailable_index]["reason"] in {
+        "iron_condor_leg_quote_stale", "iron_condor_four_leg_quote_unavailable",
+    }
+
+
+def test_gth_complete_but_unsynchronized_quotes_report_skew_not_missing_legs():
+    state = _gth_state()
+    quotes = tuple(replace(q, received_at=NOW - timedelta(seconds=12),
+                           quote_time=NOW - timedelta(seconds=12))
+                   if q.instrument.right.value == "C" else q for q in state.quotes)
+    state = replace(state, quotes=quotes, best_quotes=quotes)
+    rows = build_iron_condor_map(_payload(), _facts(), state, now=NOW,
+                                 policy=StrategyPolicy())["width_comparisons"]
+    for row in rows:
+        assert row["status"] == "unavailable"
+        assert row["reason"] == "iron_condor_leg_time_skew_exceeded"
+        assert len(row["data_diagnostics"]["legs"]) == 4
+        assert row["data_diagnostics"]["source_skew_seconds"] == 12
+        assert row["data_diagnostics"]["quote_skew_limit_seconds"] == 10
 
 
 @pytest.mark.parametrize("mode", ["rth", "gth"])

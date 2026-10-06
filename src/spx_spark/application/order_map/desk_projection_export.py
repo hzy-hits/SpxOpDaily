@@ -171,7 +171,10 @@ def build_desk_map_wire(
     slot_key = (
         rth_slot.key if rth_slot is not None else _projection_slot_key(now, trading_date, session)
     )
-    valid_until = published_at + (timedelta(minutes=2) if recovery_of else DEFAULT_RTH_TTL if rth_open else DEFAULT_GTH_TTL)
+    # The latest map remains a readable snapshot for the regular map lifetime.
+    # Rust independently limits both recovery admission and delivery to two
+    # minutes; consuming that update must not expire the whole bridge lane.
+    valid_until = published_at + (DEFAULT_RTH_TTL if rth_open else DEFAULT_GTH_TTL)
     projection = build_desk_map_projection(payload)
     sections = build_desk_message_sections(payload, now)
     stage = projection.stage.value.lower()
