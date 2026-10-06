@@ -617,6 +617,37 @@ def test_desk_sections_make_unavailable_market_facts_explicit() -> None:
     assert sections.data_quality == "执行数据 READY · 决策坐标、结构与实时报价可用"
 
 
+@pytest.mark.parametrize("authorized", [False, True])
+def test_rth_desk_shows_each_condor_width_and_benchmark_only_once(authorized) -> None:
+    payload = _payload()
+    rows = [
+        {
+            "status": "ready", "wing_width": width, "expiry": "20260715",
+            "session_mode": "rth", "provider": "schwab",
+            "strikes": [7520 - width, 7520, 7600, 7600 + width],
+            "quote": {"credit": credit},
+        }
+        for width, credit in [(10, 2.15), (20, 3.30)]
+    ]
+    payload["strategy_decision"] = {
+        "decision_type": "IRON_CONDOR" if authorized else "NO_TRADE",
+        "action_authority": "manual" if authorized else "none",
+        "candidate": {**rows[0], "strategy_type": "IRON_CONDOR"} if authorized else None,
+        "iron_condor_map": {"status": "ready", "width_comparisons": rows},
+        "why_not": {"nearest_candidate": {
+            "strategy_type": "IRON_CONDOR",
+            "failed_gates": [] if authorized else [{"gate": "iron_condor_credit_fraction"}],
+        }},
+    }
+    sections = build_desk_message_sections(payload, NOW)
+    text = sections.desk_view + "\n" + sections.structure
+    for width in (10, 20):
+        assert text.count(f"20Δ/{width}点翼") == 1
+    assert text.count("RTH基准：") == 2
+    assert text.count("回测基准：") == 1
+    assert "人工候选" in sections.structure if authorized else "卡在：" in sections.structure
+
+
 def test_desk_sections_include_captured_option_flow_without_granting_authority() -> None:
     payload = _payload()
     payload["intraday_shock_state"] = {

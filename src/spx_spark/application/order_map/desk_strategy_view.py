@@ -214,7 +214,14 @@ def strategy_lane_status_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
         )
 
     if iron_condor:
-        condor_text = compact_iron_condor_desk_line(payload, decision)
+        summary_in_desk_view = bool(iron_condor.get("width_comparisons")) or (
+            strategy_candidate_is_watchable(payload, decision)
+            and candidate.get("strategy_type") == "IRON_CONDOR"
+        )
+        condor_text = (
+            "人工候选" if decision.get("action_authority") == "manual"
+            and candidate.get("strategy_type") == "IRON_CONDOR" else "结构扫描"
+        ) if summary_in_desk_view else compact_iron_condor_desk_line(payload, decision)
         condor_gate = next(
             (
                 row

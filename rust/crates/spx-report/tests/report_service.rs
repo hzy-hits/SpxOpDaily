@@ -25,6 +25,7 @@ enum WriterOutcome {
 struct FakeWriter {
     outcomes: Arc<Mutex<VecDeque<WriterOutcome>>>,
     calls: Arc<Mutex<Vec<String>>>,
+    arriving_projection: Option<(std::path::PathBuf, DeskMapProjectionV1)>,
 }
 
 impl FakeWriter {
@@ -32,6 +33,7 @@ impl FakeWriter {
         Self {
             outcomes: Arc::new(Mutex::new(outcomes.into_iter().collect())),
             calls: Arc::new(Mutex::new(Vec::new())),
+            arriving_projection: None,
         }
     }
 
@@ -49,6 +51,9 @@ impl DeskMessageWriter for FakeWriter {
             .lock()
             .unwrap()
             .push(projection.projection_id.as_str().to_owned());
+        if let Some((path, current)) = &self.arriving_projection {
+            write_latest(path, current.clone());
+        }
         match self.outcomes.lock().unwrap().pop_front().unwrap() {
             WriterOutcome::Failure(code) => Err(DeskMessageWriteFailure::new(code)),
             WriterOutcome::Success => {
@@ -364,6 +369,156 @@ fn recovery_cannot_send_future_expired_or_wrong_session_facts() {
     write_latest(&config.projection_path, source);
     assert_eq!(service.run_once_at(now).unwrap(), ReportTick::AwaitingSlot);
     assert!(inspector.intents().is_empty());
+}
+
+#[test]
+fn scheduled_report_absorbs_recovery_before_or_during_generation_and_dedups_after_restart() {
+    for gth in [false, true] {
+        for before_generation in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let config = config(&temp, true, &[5]);
+            let start = ten_am() - TimeDelta::hours(if gth { 3 } else { 0 });
+            let now = start + TimeDelta::seconds(20);
+            let original = if gth {
+                gth_projection("desk-map:original", "2026-08-04:gth:07:00", start)
+            } else {
+                projection("desk-map:original", "2026-08-04:10:00", start)
+            };
+            let mut recovered = original.clone();
+            recovered.projection_id = token("desk-map:recovered");
+            recovered.recovery_of = Some(original.projection_id.clone());
+            recovered.recovery_seen = vec![token("iron_condor_10_quotes")];
+            recovered.available_at = start + TimeDelta::seconds(15);
+            recovered.valid_until = now + TimeDelta::minutes(2);
+            write_latest(
+                &config.projection_path,
+                if before_generation {
+                    recovered.clone()
+                } else {
+                    original
+                },
+            );
+            let mut writer = FakeWriter::new([WriterOutcome::Success]);
+            if !before_generation {
+                writer.arriving_projection =
+                    Some((config.projection_path.clone(), recovered.clone()));
+            }
+            let inspector = writer.clone();
+            let store = OwnedReportLedger::open(
+                &config.ledger_path,
+                "report-coalesce-owner",
+                now,
+                config.owner_lease_seconds,
+            )
+            .unwrap();
+            let mut service =
+                ReportService::open(config.clone(), true, writer, store, now).unwrap();
+            let expected_slot = if gth {
+                "2026-08-04T07:00:00-04:00"
+            } else {
+                "2026-08-04T10:00:00-04:00"
+            };
+            assert_eq!(
+                service.run_once_at(now).unwrap(),
+                ReportTick::Persisted {
+                    slot: expected_slot.to_owned(),
+                    disposition: ReportPersistDisposition::Inserted,
+                }
+            );
+            assert_eq!(inspector.calls(), usize::from(!before_generation));
+            assert_eq!(
+                service.health().last_projection_id.as_deref(),
+                Some("desk-map:recovered")
+            );
+            assert_eq!(
+                service.health().last_fallback_reason.as_deref(),
+                Some("data_recovery_coalesced")
+            );
+            assert_eq!(service.health().last_scheduled_persisted_at, Some(now));
+            service.shutdown(now + TimeDelta::seconds(1)).unwrap();
+            let store = OwnedReportLedger::open(
+                &config.ledger_path,
+                "report-restarted-owner",
+                now + TimeDelta::seconds(2),
+                config.owner_lease_seconds,
+            )
+            .unwrap();
+            let mut restarted =
+                ReportService::open(config.clone(), true, FakeWriter::new([]), store, now).unwrap();
+            assert!(matches!(
+                restarted.run_once_at(now + TimeDelta::seconds(3)).unwrap(),
+                ReportTick::Duplicate { .. }
+            ));
+            assert_eq!(
+                LedgerReader::open_existing(&config.ledger_path)
+                    .unwrap()
+                    .health()
+                    .unwrap()
+                    .pending,
+                2
+            );
+
+            // A genuinely newer recovery after publication must still send immediately.
+            recovered.recovery_of = Some(recovered.projection_id.clone());
+            recovered.projection_id = token("desk-map:later-recovery");
+            recovered.available_at = now + TimeDelta::seconds(4);
+            recovered.recovery_seen.push(token("iron_condor_20_quotes"));
+            write_latest(&config.projection_path, recovered);
+            assert_eq!(
+                restarted.run_once_at(now + TimeDelta::seconds(5)).unwrap(),
+                ReportTick::Persisted {
+                    slot: "recovery:desk-map:later-recovery".to_owned(),
+                    disposition: ReportPersistDisposition::Inserted,
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn generation_uses_recovered_content_but_rejects_future_expired_or_other_slot_updates() {
+    for invalid in ["", "future", "expired", "other_slot"] {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp, true, &[5]);
+        let now = ten_am() + TimeDelta::seconds(20);
+        let original = projection("desk-map:original", "2026-08-04:10:00", ten_am());
+        let mut recovered = original.clone();
+        recovered.projection_id = token("desk-map:recovered");
+        recovered.recovery_of = Some(original.projection_id.clone());
+        recovered.recovery_seen = vec![token("iron_condor_10_quotes")];
+        recovered.message.desk_view = token("Recovered four-leg quotes and current probabilities");
+        recovered.available_at = now - TimeDelta::seconds(1);
+        recovered.valid_until = now + TimeDelta::minutes(2);
+        match invalid {
+            "future" => recovered.available_at = now + TimeDelta::seconds(1),
+            "expired" => {
+                recovered.available_at = now - TimeDelta::seconds(10);
+                recovered.valid_until = now;
+            }
+            "other_slot" => recovered.source_slot = token("2026-08-04:09:30"),
+            _ => {}
+        }
+        write_latest(&config.projection_path, original.clone());
+        let mut writer = FakeWriter::new([WriterOutcome::Success]);
+        writer.arriving_projection = Some((config.projection_path.clone(), recovered.clone()));
+        let store = MemoryStore::default();
+        let inspector = store.clone();
+        let mut service = ReportService::open(config, true, writer, store, now).unwrap();
+        assert!(matches!(
+            service.run_once_at(now).unwrap(),
+            ReportTick::Persisted { .. }
+        ));
+        let intents = inspector.intents();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(
+            intents[0].message.desk_view,
+            if invalid.is_empty() {
+                recovered.message.desk_view
+            } else {
+                original.message.desk_view
+            }
+        );
+    }
 }
 
 fn deepseek_response(

@@ -1588,6 +1588,20 @@ fn scheduled_report_semantic_id_and_et_slot_are_collision_safe() {
     );
 
     let mut same_slot = report.clone();
+    let recovery_slot = token(&format!(
+        "recovery:{}",
+        report.lineage.source_projection_id().unwrap()
+    ));
+    assert!(
+        ledger
+            .scheduled_report_exists(&owner, &recovery_slot, now)
+            .unwrap()
+    );
+    assert!(
+        !ledger
+            .scheduled_report_exists(&owner, &token("recovery:another-projection"), now)
+            .unwrap()
+    );
     same_slot.intent_id = token("different-event-same-slot");
     same_slot.semantic_id = token("different-semantic-same-slot");
     assert!(matches!(

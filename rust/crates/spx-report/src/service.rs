@@ -431,7 +431,23 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
             }
         };
         let slot = if latest.projection.recovery_of.is_some() {
-            crate::source::recovery_report_slot(&latest, now)
+            let recovery_slot = crate::source::recovery_report_slot(&latest, now);
+            if let Some(scheduled) = scheduled_slot.filter(|scheduled| {
+                recovery_slot.is_some()
+                    && crate::projection_eligibility(&latest, scheduled, now)
+                        == ProjectionEligibility::Eligible
+            }) {
+                self.store.refresh(now)?;
+                let token =
+                    Token::new(scheduled.ledger_slot().to_owned(), "scheduled report slot")?;
+                if self.store.exists(&token, now)? {
+                    recovery_slot
+                } else {
+                    Some(scheduled)
+                }
+            } else {
+                recovery_slot
+            }
         } else {
             scheduled_slot
         };
@@ -489,20 +505,8 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
             });
         }
 
-        if slot.ledger_slot().starts_with("recovery:") {
-            // The source has just re-evaluated the facts. Do not delay a correction
-            // on a model request or let a writer omit the newly available data.
-            self.health.last_response_model = None;
-            self.health.last_finish_reason = None;
-            self.health.last_visible_content_bytes = None;
-            self.health.last_response_sha256 = None;
-            self.health.last_fallback_reason = Some("data_recovery".to_owned());
-            return self.persist_message(
-                projection,
-                &slot_token,
-                projection.message.clone(),
-                completion_clock(),
-            );
+        if projection.recovery_of.is_some() {
+            return self.persist_recovery(projection, &slot_token, completion_clock());
         }
 
         if let Some(backoff) = &self.backoff
@@ -535,6 +539,19 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         let result = self.writer.write_message(projection);
         let completed_at = completion_clock();
         self.health.updated_at = completed_at;
+        // A model request can outlive quote/probability recovery. Publish the
+        // current facts once, under the scheduled slot, instead of queuing the
+        // stale report followed immediately by its correction.
+        if let Ok(current) =
+            read_latest_projection(&self.config.projection_path, self.config.source_max_bytes)
+            && current.projection.projection_id != projection.projection_id
+            && current.projection.available_at >= projection.available_at
+            && crate::source::recovery_report_slot(&current, completed_at).is_some()
+            && crate::projection_eligibility(&current, &slot, completed_at)
+                == ProjectionEligibility::Eligible
+        {
+            return self.persist_recovery(&current.projection, &slot_token, completed_at);
+        }
         let (message, response_metadata, fallback_reason) = match result {
             Ok(output) => (output.message, output.metadata, None),
             Err(failure) => {
@@ -573,6 +590,35 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         }
 
         self.persist_message(projection, &slot_token, message, completed_at)
+    }
+
+    fn persist_recovery(
+        &mut self,
+        projection: &DeskMapProjectionV1,
+        slot_token: &Token,
+        completed_at: DateTime<Utc>,
+    ) -> Result<ReportTick, ReportServiceError> {
+        // Recovery uses validated source facts without another model request.
+        self.health.last_projection_id = Some(projection.projection_id.as_str().to_owned());
+        self.health.last_response_model = None;
+        self.health.last_finish_reason = None;
+        self.health.last_visible_content_bytes = None;
+        self.health.last_response_sha256 = None;
+        let recovery_slot = slot_token.as_str().starts_with("recovery:");
+        self.health.last_fallback_reason = Some(
+            if recovery_slot {
+                "data_recovery"
+            } else {
+                "data_recovery_coalesced"
+            }
+            .to_owned(),
+        );
+        let message = if recovery_slot {
+            projection.message.clone()
+        } else {
+            scheduled_operator_projection(projection, projection.message.clone())?
+        };
+        self.persist_message(projection, slot_token, message, completed_at)
     }
 
     fn persist_message(

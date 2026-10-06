@@ -387,7 +387,8 @@ impl Ledger {
         Ok(outcome)
     }
 
-    /// Checks whether the stable ET report slot is already present without mutating the outbox.
+    /// Checks whether a report slot is present without mutating the outbox. A recovery
+    /// already incorporated into a scheduled report is also considered present.
     ///
     /// # Errors
     ///
@@ -400,12 +401,27 @@ impl Ledger {
     ) -> Result<bool, LedgerError> {
         self.require_owner(lease, OwnerRole::Report, now)?;
         let connection = self.connection()?;
-        Ok(connection.query_row(
+        let slot_exists: bool = connection.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM notification_events
                 WHERE lane = 'scheduled_report' AND report_slot = ?1
              )",
             [slot.as_str()],
+            |row| row.get(0),
+        )?;
+        let Some(projection_id) = slot
+            .as_str()
+            .strip_prefix("recovery:")
+            .filter(|_| !slot_exists)
+        else {
+            return Ok(slot_exists);
+        };
+        Ok(connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM notification_events
+                WHERE lane = 'scheduled_report' AND source_projection_id = ?1
+             )",
+            [projection_id],
             |row| row.get(0),
         )?)
     }
