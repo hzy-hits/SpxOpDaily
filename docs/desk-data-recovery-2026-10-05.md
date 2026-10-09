@@ -101,6 +101,14 @@ S1/S3、Phase 6 冻结生产故障修复：现有 Python projection owner 在快
 发布检查：Python 全量 3,556 项、Rust 全量 316 项通过；Ruff、Import Linter、
 Cargo fmt/Clippy、report/delivery release build 和实际生产配置检查通过；
 147 份 Markdown 的 400 个本地链接、7 个锚点及 diff 检查通过。
+部署：`f7fe3f61` 已推送 master，正式 Python 安装脚本通过；09:14:11 北京时间
+重启 report/delivery，09:14:12 重启 Core。运行中 report/delivery 的二进制路径
+和 Core 的 `runtime_git_sha` 均核对为此提交；core/bridge 的 Rust 二进制复用
+原版，券商采集器、Gateway、Worker 未重启。09:14:28–09:15:53 连续 18 次检查，
+Core 达到 20 个成功周期、连续失败 0，Bridge ready、report 无错误，IBKR 数据
+时钟推进；没有重发旧通知。该观察段没有新的独立恢复或定时通知产生，压缩后
+新卡的生产手机回执尚未自然触发；全链路模拟投递验证使用 MockTransport，
+未额外向用户发送测试卡，也不把这一短观察窗口宣布为全天去重完成。
 
 ### 2026-10-06：热订阅参考缺失与恢复快照过期补修
 
