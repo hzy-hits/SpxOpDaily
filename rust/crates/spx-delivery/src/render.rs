@@ -23,7 +23,26 @@ pub fn render_desk_message(message: &DeskMessageV1) -> RenderedMessage {
     RenderedMessage { title, body }
 }
 
-pub fn render_desk_message_v2(message: &DeskMessageV2) -> RenderedMessage {
+pub fn render_desk_message_v2(message: &DeskMessageV2, recovery: bool) -> RenderedMessage {
+    if recovery {
+        // The immutable intent retains the full map. A data correction must
+        // not resend its chart links, wall commentary and fixed backtest table.
+        let summary = message
+            .desk_view
+            .as_str()
+            .lines()
+            .filter(|line| !line.starts_with("RTH基准：") && !line.starts_with("回测基准："))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return RenderedMessage {
+            title: message.title.as_str().to_owned(),
+            body: format!(
+                "{summary}\n\n执行  {}\n数据  {}\n数据补充，不构成新的入场建议；已有仓位需独立管理",
+                message.execution.as_str(),
+                message.data_quality.as_str(),
+            ),
+        };
+    }
     let body = format!(
         "{}\n\n图表  策略风险 {}\nOI结构 {}\n\n位置  {}\n\n结构  {}\n\n触发  {}\n\n失效  {}\n\n目标  {}\n\n执行  {}\n\n数据  {}",
         message.desk_view.as_str(),
@@ -287,17 +306,20 @@ mod tests {
     #[test]
     fn renders_operator_facing_v2_sections_without_normalizing_or_truncating() {
         let long_primary = format!("first line\n{}  tail", "x".repeat(3_500));
-        let rendered = render_desk_message_v2(&DeskMessageV2 {
-            title: token("SPX RTH Desk Map · 10:00 ET"),
-            desk_view: token("Bullish  above VWAP"),
-            location: token("SPX 7568 | OR15 7565"),
-            structure: token("Put 7525 | Flip 7550 | Call 7580"),
-            primary_path: token(&long_primary),
-            alternative_path: token("Lose VWAP\nand rotate to flip"),
-            targets: token("7580 / 7595"),
-            execution: token("Wait for retest; no chase"),
-            data_quality: token("DEGRADED: clipped mass 28.4%"),
-        });
+        let rendered = render_desk_message_v2(
+            &DeskMessageV2 {
+                title: token("SPX RTH Desk Map · 10:00 ET"),
+                desk_view: token("Bullish  above VWAP"),
+                location: token("SPX 7568 | OR15 7565"),
+                structure: token("Put 7525 | Flip 7550 | Call 7580"),
+                primary_path: token(&long_primary),
+                alternative_path: token("Lose VWAP\nand rotate to flip"),
+                targets: token("7580 / 7595"),
+                execution: token("Wait for retest; no chase"),
+                data_quality: token("DEGRADED: clipped mass 28.4%"),
+            },
+            false,
+        );
 
         assert_eq!(rendered.title, "SPX RTH Desk Map · 10:00 ET");
         assert!(rendered.body.contains("Bullish  above VWAP"));
@@ -316,6 +338,45 @@ mod tests {
                 .body
                 .ends_with("数据  DEGRADED: clipped mass 28.4%")
         );
+    }
+
+    #[test]
+    fn recovery_keeps_current_economics_without_resending_the_map_and_static_benchmarks() {
+        let message = DeskMessageV2 {
+            title: token("SPX Desk Map · 数据恢复更新"),
+            desk_view: token(
+                "NO TRADE\n20Δ/10点翼 · 7730/7740/7815/7825 · 贷记2.20\n历史模拟 70% · 21日未校准 · 12:30退出 · 报价21:00 ET\nRTH基准：旧10点翼统计\n20Δ/20点翼 · 7720/7740/7815/7835 · 贷记3.80\n历史模拟 65% · 21日未校准 · 12:30退出 · 报价21:00 ET\nRTH基准：旧20点翼统计\n回测基准：固定旧样本",
+            ),
+            location: token("SPX 7780"),
+            structure: token("Call Wall 7810"),
+            primary_path: token("等待突破确认"),
+            alternative_path: token("已有仓位独立管理"),
+            targets: token("无新目标"),
+            execution: token("扫描不等于人工入场授权"),
+            data_quality: token("OI未验证"),
+        };
+        let compact = render_desk_message_v2(&message, true);
+        for fact in [
+            "7730/7740/7815/7825",
+            "7720/7740/7815/7835",
+            "70%",
+            "65%",
+            "21日未校准",
+            "12:30退出",
+            "21:00 ET",
+            "扫描不等于人工入场授权",
+            "OI未验证",
+        ] {
+            assert!(compact.body.contains(fact));
+        }
+        for repeated in ["RTH基准", "回测基准", "Call Wall", STRATEGY_RISK_IMAGE_URL] {
+            assert!(!compact.body.contains(repeated));
+        }
+        // Layout follows the durable recovery lineage, never a title substring.
+        let scheduled = render_desk_message_v2(&message, false);
+        for fact in ["RTH基准", "回测基准", "Call Wall", STRATEGY_RISK_IMAGE_URL] {
+            assert!(scheduled.body.contains(fact));
+        }
     }
 
     #[test]

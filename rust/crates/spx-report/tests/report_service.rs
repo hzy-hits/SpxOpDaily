@@ -495,6 +495,7 @@ fn generation_uses_recovered_content_but_rejects_future_expired_or_other_slot_up
         recovered.recovery_of = Some(original.projection_id.clone());
         recovered.recovery_seen = vec![token("iron_condor_10_quotes")];
         recovered.message.desk_view = token("Recovered four-leg quotes and current probabilities");
+        recovered.message.title = token("SPX Desk Map · 数据恢复更新");
         recovered.available_at = now - TimeDelta::seconds(1);
         recovered.valid_until = now + TimeDelta::minutes(2);
         match invalid {
@@ -518,6 +519,13 @@ fn generation_uses_recovered_content_but_rejects_future_expired_or_other_slot_up
         ));
         let intents = inspector.intents();
         assert_eq!(intents.len(), 1);
+        assert!(
+            !intents[0]
+                .message
+                .title
+                .as_str()
+                .ends_with(" · 数据恢复更新")
+        );
         assert_eq!(
             intents[0].message.desk_view,
             if invalid.is_empty() {

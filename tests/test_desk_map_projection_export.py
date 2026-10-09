@@ -153,6 +153,57 @@ def test_recovery_cannot_overwrite_a_newer_published_map(tmp_path):
     assert actual["projection_id"] == newer["projection_id"]
 
 
+@pytest.mark.parametrize("hour,session", [(11, "gth"), (14, "rth")])
+def test_quote_then_probability_recovery_publishes_one_completed_update(tmp_path, monkeypatch, hour, session):
+    from spx_spark.application.order_map import service
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    storage = _storage(tmp_path)
+    start = datetime(2026, 8, 5, hour, tzinfo=timezone.utc)
+    baseline = persist_desk_map_projection(_recovery_payload(start, session), [], now=start,
+                                          trading_date="2026-08-05", storage=storage)
+    current = _recovery_payload(start + timedelta(seconds=35), session, (10, 20))
+    for row in current["strategy_decision"]["iron_condor_map"]["width_comparisons"]:
+        row["path_distribution"] = {"status": "unavailable", "reason_codes": ["history_preparation_pending"]}
+    monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    # Reproduce the production :00 map -> :35 quotes -> :40 probabilities sequence.
+    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=35))["published"]
+    assert json.loads((tmp_path / "latest/desk_map_projection.json").read_text())["projection_id"] == baseline["projection_id"]
+    current = _recovery_payload(start + timedelta(seconds=40), session, (10, 20))
+    result = refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=40))
+    assert result["published"]
+    assert set(result["recovered"]) == {
+        f"iron_condor_{width}_{kind}" for width in (10, 20) for kind in ("quotes", "probability")
+    }
+    # Durable baseline survives another consumer call and temporary field loss.
+    current = _recovery_payload(start + timedelta(seconds=45), session)
+    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=45))["published"]
+    current = _recovery_payload(start + timedelta(seconds=50), session, (10, 20))
+    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=50))["published"]
+
+
+def test_recovery_rechecks_pending_history_without_hiding_terminal_quote_recovery(tmp_path, monkeypatch):
+    from spx_spark.application.order_map import service
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    storage = _storage(tmp_path)
+    now = datetime(2026, 8, 5, 11, 7, tzinfo=timezone.utc)
+    baseline_at = now - timedelta(minutes=7)
+    persist_desk_map_projection(_recovery_payload(baseline_at, "gth"), [], now=baseline_at,
+                               trading_date="2026-08-05", storage=storage)
+    ready = _recovery_payload(now, "gth", (10,))
+    current = copy.deepcopy(ready)
+    row = current["strategy_decision"]["iron_condor_map"]["width_comparisons"][0]
+    row["path_distribution"] = {"status": "unavailable", "reason_codes": ["history_preparation_pending"]}
+    monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    assert not refresh_desk_on_data_recovery(storage, ready, now=now)["published"]
+    # A terminal historical gap must not wait forever for a probability.
+    row["path_distribution"]["reason_codes"] = ["quote_gap"]
+    result = refresh_desk_on_data_recovery(storage, current, now=now)
+    assert result["published"]
+    assert result["recovered"] == ["iron_condor_10_quotes"]
+
+
 def _payload() -> dict[str, object]:
     return {
         "expiry": "20260804",

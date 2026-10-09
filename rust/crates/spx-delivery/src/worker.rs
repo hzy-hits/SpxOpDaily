@@ -260,9 +260,13 @@ impl<T: Transport> DeliveryWorker<T> {
         }
         let rendered = match &claimed.intent {
             ClaimedNotificationIntent::TradeReady(intent) => render_desk_message(&intent.message),
-            ClaimedNotificationIntent::ScheduledReport(intent) => {
-                render_desk_message_v2(&intent.message)
-            }
+            ClaimedNotificationIntent::ScheduledReport(intent) => render_desk_message_v2(
+                &intent.message,
+                intent
+                    .lineage
+                    .slot()
+                    .is_some_and(|slot| slot.as_str().starts_with("recovery:")),
+            ),
             ClaimedNotificationIntent::TraderEvent(notification) => {
                 crate::render_operator_notification(notification)
             }
@@ -468,7 +472,7 @@ mod tests {
         }
     }
 
-    fn scheduled_fixture(result: TransportResult) -> Fixture {
+    fn scheduled_fixture(result: TransportResult, recovery: bool) -> Fixture {
         let temp = TempDir::new().unwrap();
         let now = Utc.timestamp_opt(1_785_590_400, 0).unwrap();
         let ledger_path = temp.path().join("ledger.sqlite");
@@ -481,8 +485,15 @@ mod tests {
                 TimeDelta::seconds(60),
             )
             .unwrap();
+        let mut intent = scheduled_intent(now);
+        if recovery {
+            intent.lineage = NotificationLineageV2::ScheduledReport {
+                source_projection_id: token("projection-recovery"),
+                slot: token("recovery:projection-recovery"),
+            };
+        }
         ledger
-            .persist_scheduled_report(&report_owner, &scheduled_intent(now), now)
+            .persist_scheduled_report(&report_owner, &intent, now)
             .unwrap();
         let worker = DeliveryWorker::open(
             delivery_config(ledger_path),
@@ -731,9 +742,12 @@ mod tests {
 
     #[test]
     fn scheduled_report_is_claimed_rendered_in_full_and_sent_once() {
-        let mut fixture = scheduled_fixture(TransportResult::Delivered {
-            provider_message_id: Some("provider-report-1".to_owned()),
-        });
+        let mut fixture = scheduled_fixture(
+            TransportResult::Delivered {
+                provider_message_id: Some("provider-report-1".to_owned()),
+            },
+            false,
+        );
         let summary = fixture.worker.run_once_at(fixture.now).unwrap();
         assert_eq!(summary.delivered, 1);
         assert_eq!(fixture.worker.health().unwrap().delivered, 1);
@@ -763,6 +777,36 @@ mod tests {
                 .body
                 .ends_with("数据  DEGRADED: clipped mass 28.4%")
         );
+    }
+
+    #[test]
+    fn recovery_lineage_sends_a_compact_correction_once() {
+        let mut fixture = scheduled_fixture(
+            TransportResult::Delivered {
+                provider_message_id: Some("provider-recovery-1".to_owned()),
+            },
+            true,
+        );
+        assert_eq!(
+            fixture.worker.run_once_at(fixture.now).unwrap().delivered,
+            1
+        );
+        assert_eq!(
+            fixture
+                .worker
+                .run_once_at(fixture.now + TimeDelta::seconds(1))
+                .unwrap()
+                .claimed,
+            0
+        );
+        let requests = fixture.worker.transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body = &requests[0].message.body;
+        assert!(body.contains("Bullish  above VWAP"));
+        assert!(body.contains("Wait for retest; no chase"));
+        assert!(body.contains("DEGRADED: clipped mass 28.4%"));
+        assert!(!body.contains("位置  SPX"));
+        assert!(!body.contains(&"x".repeat(3_500)));
     }
 
     #[test]

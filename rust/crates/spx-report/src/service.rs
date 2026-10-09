@@ -613,11 +613,16 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
             }
             .to_owned(),
         );
-        let message = if recovery_slot {
+        let mut message = if recovery_slot {
             projection.message.clone()
         } else {
             scheduled_operator_projection(projection, projection.message.clone())?
         };
+        if !recovery_slot
+            && let Some(title) = message.title.as_str().strip_suffix(" · 数据恢复更新")
+        {
+            message.title = Token::new(title, "scheduled title")?;
+        }
         let mut delivery_projection = projection.clone();
         delivery_projection.valid_until = delivery_projection
             .valid_until

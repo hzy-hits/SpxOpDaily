@@ -106,6 +106,21 @@ def available_desk_data(payload: Mapping[str, Any], *, now: datetime) -> set[str
     return ready
 
 
+def _completed_recovery(payload: Mapping[str, Any], ready: set[str], seen: set[str]) -> set[str]:
+    recovered = ready - seen
+    scan = (payload.get("strategy_decision") or {}).get("iron_condor_map") or {}
+    for row in scan.get("width_comparisons") or [scan]:
+        width = row.get("wing_width")
+        if width not in (10, 20):
+            continue
+        distribution = row.get("path_distribution") or {}
+        # Quote recovery starts asynchronous history preparation. Its in-flight
+        # progress is not another completed result to push five seconds earlier.
+        if "history_preparation_pending" in (distribution.get("reason_codes") or ()):
+            recovered.discard(f"iron_condor_{width:g}_quotes")
+    return recovered
+
+
 def refresh_desk_on_data_recovery(
     storage: StorageSettings, payload: dict[str, Any], *, now: datetime,
 ) -> dict[str, Any]:
@@ -121,7 +136,7 @@ def refresh_desk_on_data_recovery(
             or previous.get("session") != session):
         return {"published": False}
     seen = set(previous.get("recovery_seen") or ())
-    if not available_desk_data(payload, now=now) - seen:
+    if not _completed_recovery(payload, available_desk_data(payload, now=now), seen):
         return {"published": False}
     # No retry sleeps, duplicate strategy evaluation, network calls or image work
     # on the hot path. The normal report builder revalidates the committed decision.
@@ -130,7 +145,7 @@ def refresh_desk_on_data_recovery(
     started = time.monotonic()
     current = build_order_payload_with_retry(storage, now=now, attempts=1)
     checked_at = now + timedelta(seconds=time.monotonic() - started)
-    recovered = available_desk_data(current, now=checked_at) - seen
+    recovered = _completed_recovery(current, available_desk_data(current, now=checked_at), seen)
     if not recovered:
         return {"published": False}
     document = persist_desk_map_projection(
