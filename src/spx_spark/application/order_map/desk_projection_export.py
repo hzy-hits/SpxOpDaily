@@ -114,10 +114,10 @@ def _completed_recovery(payload: Mapping[str, Any], ready: set[str], seen: set[s
         if width not in (10, 20):
             continue
         distribution = row.get("path_distribution") or {}
-        # Quote recovery starts asynchronous history preparation. Its in-flight
-        # progress is not another completed result to push five seconds earlier.
+        # Recovery republishes one card. Generic market/OI readiness must not
+        # send that card while any displayed IC result is still being prepared.
         if "history_preparation_pending" in (distribution.get("reason_codes") or ()):
-            recovered.discard(f"iron_condor_{width:g}_quotes")
+            return set()
     return recovered
 
 

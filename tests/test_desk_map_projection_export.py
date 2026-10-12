@@ -204,6 +204,51 @@ def test_recovery_rechecks_pending_history_without_hiding_terminal_quote_recover
     assert result["recovered"] == ["iron_condor_10_quotes"]
 
 
+@pytest.mark.parametrize("hour,session", [(0, "gth"), (14, "rth")])
+def test_cold_start_generic_readiness_and_ic_history_publish_one_complete_recovery(tmp_path, monkeypatch, hour, session):
+    from spx_spark.application.order_map import service
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    storage = _storage(tmp_path)
+    start = datetime(2026, 10, 12, hour, 15, 5, tzinfo=timezone.utc)
+    baseline = _recovery_payload(start, session)
+    baseline["expiry"] = "20261012"
+    baseline["strategy_decision"]["data_quality"] = {}
+    baseline["option_structure_frame"]["structure"] = {}
+    original = persist_desk_map_projection(baseline, [], now=start,
+        trading_date="2026-10-12", storage=storage)
+
+    now = start + timedelta(seconds=47)
+    current = _recovery_payload(now, session, (10, 20))
+    current["expiry"] = "20261012"
+    current["option_structure_frame"]["exposure"] = {"oi_quality": "ibkr_ok"}
+    current["option_structure_frame"]["structure"] = {"gex_quality": "open_interest_gex"}
+    completed = copy.deepcopy(current)
+    rows = current["strategy_decision"]["iron_condor_map"]["width_comparisons"]
+    for row in rows:
+        row["path_distribution"] = {"status": "unavailable", "reason_codes": ["history_preparation_pending"]}
+    monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    # The Oct 12 first notification was triggered by these six generic flags,
+    # even after the quote-only recovery had been suppressed.
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    assert json.loads((tmp_path / "latest/desk_map_projection.json").read_text())["projection_id"] == original["projection_id"]
+
+    # Completing one displayed width is still an intermediate whole-card state.
+    rows[0]["path_distribution"] = completed["strategy_decision"]["iron_condor_map"]["width_comparisons"][0]["path_distribution"]
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    current = completed
+    now += timedelta(seconds=15)
+    current["strategy_decision"]["decision_at"] = now.isoformat()
+    current["as_of"] = now.isoformat()
+    result = refresh_desk_on_data_recovery(storage, current, now=now)
+    assert result["published"]
+    assert set(result["recovered"]) == {
+        "decision_data", "gamma_structure", "l1", "market", "oi_verified", "options",
+        *(f"iron_condor_{width}_{kind}" for width in (10, 20) for kind in ("quotes", "probability")),
+    }
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+
+
 def _payload() -> dict[str, object]:
     return {
         "expiry": "20260804",
