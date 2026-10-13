@@ -1007,6 +1007,19 @@ def _data_quality(
         _extend_reasons(reasons, strategy_quality.get("reasons"), prefix="strategy:")
         if not strategy_quality.get("reasons"):
             reasons.append("strategy:data_quality_degraded")
+    scan = _mapping(_mapping(payload.get("strategy_decision")).get("iron_condor_map"))
+    for row in scan.get("width_comparisons") or [scan]:
+        # Healthy broad frames do not prove the displayed structure has its
+        # Delta/leg inputs. Economic gates and research preparation are separate.
+        reason = _mapping(row).get("reason")
+        if reason in {
+            "iron_condor_delta_quotes_unavailable", "iron_condor_short_delta_unavailable",
+            "iron_condor_four_leg_quote_unavailable", "iron_condor_leg_quote_stale",
+            "iron_condor_leg_time_skew_exceeded", "iron_condor_leg_quote_from_future",
+            "iron_condor_leg_source_time_missing", "iron_condor_leg_nbbo_invalid",
+            "iron_condor_leg_provider_mismatch", "iron_condor_credit_unavailable",
+        }:
+            reasons.append(reason)
     if current_session_is_gth(payload, decision):
         for warning in payload.get("warnings") or ():
             token = str(warning or "").strip()

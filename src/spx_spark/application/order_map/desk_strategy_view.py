@@ -689,6 +689,10 @@ def humanize_strategy_reason(
 def quality_reason_text(reason: str) -> str:
     if reason == "strategy:decision_unavailable":
         return "策略决策缺失、过期或校验失败；行情更新不代表策略有效"
+    if reason == "iron_condor_short_delta_unavailable":
+        return "铁鹰选腿 Delta 缺失、过期或档位覆盖不足；报价更新不代表选腿恢复"
+    if reason.startswith("iron_condor_"):
+        return humanize_strategy_reason(reason)
     labels = {
         "spx_price_unavailable": "触发坐标不可用（GTH 以期权隐含/ES 为准，不要求现金 SPX）",
         "option_frame:unavailable": "期权结构帧不可用，Gamma 与墙位不可靠",

@@ -20,6 +20,13 @@ short-leg selection, four-leg quote and credit failures. Counts and restored
 capabilities must be measured at the new decision time, not copied from that
 incident. See [evidence](desk-data-recovery-2026-10-05.md).
 
+Since the 2026-10-13 desk-quality repair, a displayed condor's missing Delta,
+missing/stale leg BBO or invalid source clocks also mark the desk data DEGRADED,
+even when broad frames are ready. This describes that structure's data gap;
+it does not change another candidate's authorization. Economic rejection and
+pending historical probability preparation do not mark live data unavailable.
+Collector reconnection and fresh BBO alone cannot establish native-Greeks recovery.
+
 This is the operational contract for what SPX Spark may use. HTTP success,
 WebSocket subscription acceptance, and local receipt time are not evidence of
 live market data; the provider source timestamp must advance.

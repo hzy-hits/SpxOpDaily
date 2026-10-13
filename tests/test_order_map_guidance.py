@@ -1447,6 +1447,50 @@ def test_missing_required_frames_cannot_report_ready_data_quality() -> None:
     assert "Frames market=" not in sections.data_quality
 
 
+@pytest.mark.parametrize("session", ["rth", "gth"])
+@pytest.mark.parametrize("reason", [
+    "iron_condor_short_delta_unavailable",
+    "iron_condor_four_leg_quote_unavailable",
+    "iron_condor_leg_quote_stale",
+])
+def test_condor_data_gap_is_visible_despite_healthy_market_frames(session, reason) -> None:
+    payload = _payload()
+    payload["session_mode"] = session
+    payload["strategy_decision"] = {
+        "decision_type": "NO_TRADE",
+        "data_quality": {"status": "ready"},
+        "iron_condor_map": {"width_comparisons": [
+            {"wing_width": width, "status": "unavailable", "reason": reason}
+            for width in (10, 20)
+        ]},
+    }
+    baseline_stage = build_desk_map_projection(_payload()).stage
+    projection = build_desk_map_projection(payload)
+    sections = build_desk_message_sections(payload, NOW)
+    assert projection.data_quality == "DEGRADED"
+    assert projection.quality_reasons.count(reason) == 1
+    assert projection.stage == baseline_stage
+    assert "DEGRADED" in sections.data_quality
+    assert "READY" not in sections.data_quality
+    assert "铁鹰" in sections.data_quality
+
+    # Recovered execution inputs clear the data defect even if no trade is
+    # authorized and historical probabilities are still being prepared.
+    for row in payload["strategy_decision"]["iron_condor_map"]["width_comparisons"]:
+        row.update(status="ready", reason=None, path_distribution={
+            "status": "unavailable", "reason_codes": ["history_preparation_pending"],
+        })
+    assert build_desk_map_projection(payload).data_quality == "READY"
+
+
+def test_condor_economic_rejection_is_not_a_market_data_outage() -> None:
+    payload = _payload()
+    payload["strategy_decision"] = {"iron_condor_map": {
+        "status": "unavailable", "reason": "iron_condor_credit_fraction",
+    }}
+    assert build_desk_map_projection(payload).data_quality == "READY"
+
+
 def test_current_ready_is_paused_when_required_frames_are_missing() -> None:
     payload = _payload()
     payload.pop("minute_market_frame")
