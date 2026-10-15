@@ -1,6 +1,6 @@
 # Storage Plan
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-15 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 
@@ -24,6 +24,107 @@ See [runtime configuration](runtime-configuration.md), [schedule](operations-sch
 [space threshold acceptance](condor-results-and-disk-threshold-2026-09-23.md).
 The remaining sizing estimates and MVP proposals below are historical design;
 they do not replace the current cleanup or retention implementation.
+
+## Operational database archive and reset (2026-10-15, P5-1)
+
+`/srv/data/spx-spark/spx.sqlite` is the Python operational database, not the
+original broker quote lake. Its historical decision/feature JSON can be large:
+the October 15 inspection found approximately 100–120 KB per recent decision,
+with a new decision about every five seconds. The roughly 30 GiB file had no
+free pages. `VACUUM` alone therefore would not reclaim that history.
+
+The raw-data compaction/retention jobs and Rust frame retention do not prune
+this database. A successful daily archive is not evidence that old operational
+rows have been removed. This maintenance is a one-off historical reset; it does
+not install automatic operational-database retention or reduce future writes.
+
+Before resetting it, use the production market-data root explicitly when
+checking the existing ledger fallback and manifest backfill:
+
+```bash
+MARKET_DATA_DATA_ROOT=/srv/data/spx-spark/data DATA_PLATFORM_LEDGER_PATH=/srv/data/spx-spark/spx.sqlite uv run spx data replay-spool
+MARKET_DATA_DATA_ROOT=/srv/data/spx-spark/data DATA_PLATFORM_LEDGER_PATH=/srv/data/spx-spark/spx.sqlite uv run spx data sync-manifests
+```
+
+On October 15 the ordinary fallback queue was empty; all 7,681 compaction
+manifests were already synchronized, with no sync failures. The 72 records
+quarantined on July 11 remain preserved: 54 immutable-ledger conflicts and
+18 missing-reference errors. They were also copied into the private archive;
+no conflicting history was force-overwritten. This checks pending operational
+persistence; it does not claim every historical strategy has complete outcome
+labels. Strategy research still reconstructs raw broker quotes, never selects
+its samples from old cards or notification records.
+
+The reset uses the existing SQLite schema and zstd. Pause Core/Worker and the
+existing DB-writing task timers; keep broker collectors running. Check that no
+other process holds the DB, checkpoint WAL, and hold a write lock while building
+the smaller runtime file. Keep the complete old file intact in a restricted
+archive directory on the same filesystem. Rename preserves the original inode
+without requiring another 30 GiB copy. The backup stays outside Git: it contains
+operational history and notification payloads.
+
+Build a replacement at a temporary sibling path. Preserve all notification
+events/attempts, compaction manifests, schema/migration state and mutable
+operational state. Keep the current GTH session from **2026-10-14 22:00 UTC**,
+plus the older decisions/events referenced by retained outcomes and feature
+snapshots. This is a storage cutoff, not a research sample filter. Validate the
+schema, copied counts, SQLite integrity and foreign keys; only then move the
+old file into the archive, install the replacement, restore WAL, and resume the
+previously active services and timers. Compress the offline old file after
+service recovery; verify decompressed byte count and SHA-256 against that file
+before unlinking it. Compression does not prolong the decision-engine outage.
+Old uncertain deliveries are not manually retried.
+
+The one-off script and its manifest are retained with the archive, not installed
+as a new production service or another active database. To inspect old records,
+decompress the verified archive into an offline location with sufficient space.
+Do not overwrite a running database to restore history; a rollback would also
+discard all newer operational and notification state.
+
+At 00:49:06 UTC the rebuilt runtime database was **807,989,248 bytes**
+(770.56 MiB), down from **32,516,317,184 bytes** (30.28 GiB). It retained
+322 decisions, 334 legs, 107 events, 104 outcomes, all 8,081 notification events,
+all 8,853 notification attempts, all 7,681 manifests and the Alembic revision.
+The unchanged schema, row counts, `quick_check`, and `foreign_key_check` passed.
+A synthetic database using the production schema also passed full archive
+restore, byte-hash, dependency-retention and notification-state checks.
+
+The initial compression-first attempt paused writers for approximately
+126 seconds, then was abandoned to avoid a long outage. The subsequent rebuild
+and cutover paused them for approximately 71 seconds; old bytes remained intact
+through both attempts. Core/Worker resumed with `NRestarts=0`, and a fresh
+decision persisted at 00:49:15 UTC. Broker collectors remained active, IBKR
+reported a healthy fresh flush, and Bridge ACKs continued. The incomplete
+first compressed attempt was removed after the complete old DB was safely
+retained offline.
+
+At 01:11:41 UTC the archive's full decompressed byte count and SHA-256 matched
+the frozen source, and the old uncompressed DB was unlinked. The archive is
+**1,854,652,515 bytes** (1.727 GiB); the replacement plus archive reclaim
+**29,853,675,421 bytes** (27.803 GiB) relative to the old file. The data volume
+then had **51,396,165,632 bytes** (47.866 GiB) available. The live DB had already
+grown to approximately 0.77 GiB from resumed writes, as expected.
+
+The private archive is
+`/srv/data/spx-spark/backups/20261015-operational-reset-v2/`:
+`spx-before-reset.sqlite.zst`, `manifest.json`, the one-off scripts, synthetic
+test evidence, quarantined July records and maintenance/health logs. The
+manifest records both the compressed and original SHA-256. The final process
+exited successfully; neither the uncompressed backup nor staging DB remains.
+
+Complexity: production files added/deleted **0/0**, net production LOC **0**;
+dependencies, config keys, services/timers and active databases/tables added or
+removed **0**. Historical runtime rows moved to the verified archive; no new
+production retention path, schema version or notification implementation.
+
+End-to-end follow-up found a separate report-generation failure: the 01:00
+Desk Map was generated and mirrored, but the report writer remained
+`generating` from 01:00:20 for roughly its configured 180-second request window,
+then recorded one generation failure without persisting a report. At 01:05 UTC
+the existing monitor reported `scheduled_report_missing`; no successful target
+receipt existed for this slot. Report/delivery code and configuration were not
+changed by this database maintenance. Thus restored decisions and Bridge ACKs
+must not be described as a successful 01:00 push.
 
 Date: 2026-07-04
 
