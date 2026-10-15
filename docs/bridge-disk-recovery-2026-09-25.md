@@ -101,3 +101,32 @@ UTC日期原文；压缩档案、当天/未来日期、未验证或被修改的�
 五次busy期间心跳推进但ACK不推进、恢复后发送原pending frame。部署结果另记于下方。
 Rust fmt、Clippy、全workspace/all-targets/all-features共316项测试，以及Python
 桥接告警7项测试通过；本次未修改Python生产逻辑、策略阈值或Bark。
+
+发布门另完成Python全量3,565项、Ruff和Import Linter。代码`a22ac1be`已推送master，
+Core/Bridge部署到不可变`a22ac1bed33a68ff8bedba23cdb7fd079f2c58cd-disk-recovery`
+release；report/delivery二进制与上一release逐字节一致，原owner和配置不变。
+只重启Rust Core/Bridge及随Core依赖恢复的report/delivery；Python服务未因本次发布重启。
+
+00:23 UTC第一轮清理完成：94段、6,280,915,275字节，归档屏障satisfied。
+Bridge恢复ready并持续ACK；上游和报告端均为`desk-map:4c99de43e8350c74db494146`，
+available_at均为00:15:14.029938 UTC。00:15那份当前GTH桌图已补齐转发，旧RTH桌图
+未重发。每日unit已加载零日保留参数，下次执行10/16 00:15 UTC。
+
+00:25 UTC零日保留再回收76段、5,056,177,653字节；合计170段、11,337,092,928字节
+（约10.56 GiB），数据盘可用20.47 GiB。两个完整日期压缩档案仍存在，raw目录只剩
+10/15当天帧。00:26再次运行安装后的原service，archive/prune完整退出0，Result=success；
+report/delivery与上一release二进制SHA一致，Core/Bridge进程exe确认来自新release。
+
+另有独立上游故障：IBKR在00:14自动处理数据农场断开，00:16重连收到10197，
+collector按既有规则退让。桥接恢复不代表GTH执行行情恢复；未抢占用户手机/TWS会话。
+00:29自动恢复为`healthy market-data flush`，00:30:08仍健康；这是后续观察，不能
+将先前10197归因为磁盘故障，也不证明所有选腿Delta已经齐备。
+
+00:29:26和00:29:50两份原有数据恢复更新各有三个目标成功回执；00:30定时Desk Map
+于00:30:35.735661 UTC保存，三个目标在00:30:37.738521 UTC前全部delivered。
+source/mirror ID与available_at一致，链路告警项为空；四个Rust unit均active，
+发布后NRestarts均0。服务端回执不能证明手机显示或阅读。未重放任何过期通知。
+
+复杂度：生产文件新增/删除0，生产逻辑净增2行；依赖、配置键、服务/timer、数据库/表
+新增/删除均0。替换原完整日期保留一日的冗余规则；没有增加第二套归档、重试或通知路径。
+运行数据库约30 GiB仍需持续关注增长，本次没有未经归档证明地删除其记录。
