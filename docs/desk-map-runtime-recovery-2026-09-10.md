@@ -68,3 +68,20 @@ Rust workspace/all-targets/all-features **318 项测试通过**，fmt、Clippy �
 service/timer、数据库/表增删 **0**。
 仅修改既有 report 逻辑和请求超时值；策略授权、行情采集及 Bark 实现均不改变。
 原先禁止 provider 故障兜底的路径和每次轮询清空故障的路径被替换。
+
+上线代码为 `99d095b8`，02:21:37 UTC 已切换到不可变 release，仅替换并重启
+`spx-rust-report`，非敏感 `report.toml` 的请求超时由 180 改为 90 秒。Core、Bridge、
+Delivery 的 PID 和二进制校验和均未改变，网络 gate、owner、通知目标及凭据未改变。
+第一次切换因 `Type=simple` 刚启动时进程仍为 `systemd-executor`，过早校验触发自动
+回滚；补上最多五秒的实际 executable 检查后再次成功切换。回滚与最终切换记录保留在
+`/srv/data/spx-spark/deploy-backups/20261015-report-fallback/`，其中不含凭据文件。
+发布后清理了本轮约 1.9 GiB 构建产物，运行程序位于 `/opt`，未删除运行文件。
+
+02:30 定时任务完成真实验证：02:30:06 开始模型生成，02:30:08.228580 的更新恢复
+投影随即到达。02:31:36.704556 的新日志明确记录 `transport_failed`、耗时 **90 秒**；
+该证据证明本轮外部模型调用在等待上限失败，不追溯臆测先前已丢失的具体错误码。
+程序采用当前恢复投影，以正常半小时 slot 合并保存：
+`last_scheduled_persisted_at=2026-10-15T02:31:36.704175821Z`，原因记录为
+`data_recovery_coalesced`。三个目标于 02:31:38–39 UTC 均取得 `delivered` 服务端回执，
+该时段只有一个报告事件；这是服务端送达验收，不代表已确认手机显示或用户阅读。
+未补发 01:00、01:30、02:00 旧卡。模型可用性仍有问题，但不再阻断这轮新鲜桌图。
