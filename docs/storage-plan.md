@@ -126,6 +126,62 @@ receipt existed for this slot. Report/delivery code and configuration were not
 changed by this database maintenance. Thus restored decisions and Bridge ACKs
 must not be described as a successful 01:00 push.
 
+## Host-wide cache and old-program cleanup (2026-10-15)
+
+Following the P5-1 operational-DB maintenance, a separate whole-host inventory
+removed unused build products and download caches. This was maintenance within
+the existing ownership boundaries, not a restart of the deferred P7 rewrite.
+No production code, configuration, package dependency, service, timer, database
+or table was added or removed; no production service was restarted.
+
+| Removed material | Scope and checks |
+| --- | --- |
+| Temporary and repository Rust build products, approximately 9.5 GiB allocated before cleanup | `cargo clean` for `/tmp/spx-bridge-repair-target` and `rust/target`; running binaries remain in the immutable `/opt/spx-spark-core-shadow/releases/` release |
+| Old Cursor program versions and an old program-only backup, 3.29 GiB | Checked executable, working-directory, file-descriptor, memory-map and launcher references; retained current/active and previous versions; preserved all user snapshots and workspace state |
+| Eight disabled Snap revisions and unused download-cache files | Removed exact disabled revisions with `snap remove --revision`; then removed only old regular cache files with one remaining hard link and no open file reference; current revisions and their linked cache remain |
+| APT, pip, UV, Go and unused Docker build caches | Used the existing package/build tools; Docker prune was limited to unused build cache older than seven days; running images, containers and volumes retained |
+
+Do not add apparent directory sizes to infer reclaimed space: Snap download
+cache entries can hard-link installed revisions, and Cargo reports logical
+bytes. Measure filesystem available bytes before and after. At **01:25:10 UTC**
+the net available-space increase was **15.42 GiB**, separate from the earlier
+27.80 GiB DB cleanup:
+
+| Filesystem | Available before this pass | Available after this pass |
+| --- | ---: | ---: |
+| `/` | 10,811,461,632 bytes | 23,337,095,168 bytes |
+| `/srv/data` | 51,343,904,768 bytes | 55,379,054,592 bytes |
+
+The UV cleaner initially removed the home cache symlink. The physical cache
+was then cleaned explicitly and `/home/ubuntu/.cache/uv` was restored to
+`/srv/data/ubuntu-home/.cache/uv`; the installed Python environment still imports
+successfully. Subsequent builds/downloads will repopulate caches. No new
+automatic retention policy was installed by this pass.
+
+Large retained items include about 13 GiB raw broker history, 14 GiB Parquet
+lake, 5.4 GiB features, 2.8 GiB published data, 7.8 GiB Cursor snapshots, the
+verified database archive and production rollback binaries. Raw and Parquet
+directories are not interchangeable copies merely because both exist: deletion
+still requires the existing per-partition manifest and content checks. The
+8 GiB swap file had about 3.25 GiB in use and was retained. Active container
+images, unrelated research projects and recent incident journals were retained.
+
+Core/Worker, collectors and the four Rust units remained active with
+`NRestarts=0`. At 01:24:18 UTC the newest decision was 3.9 seconds old, IBKR
+reported a healthy data plane, and Bridge source/mirror and ACK were current.
+The independent `scheduled_report_missing` fault remained; this cleanup does
+not establish successful report generation or phone delivery. No deleted open
+file larger than 10 MiB remained in the process-FD scan.
+
+Private evidence is alongside the DB archive in
+`backups/20261015-operational-reset-v2/host-storage-cleanup.json`,
+`host-snap-cleanup.json` and `host-old-programs-cleanup.py`. It records exact
+removed program paths, retained versions and filesystem measurements.
+Complexity: production files **+0/-0**, net production LOC **0**; dependencies,
+config keys, services/timers and databases/tables **+0/-0**. Removed paths are
+rebuildable artifacts and unused program versions, not a production ownership
+or legacy-code migration.
+
 Date: 2026-07-04
 
 ## Historical MVP decision
