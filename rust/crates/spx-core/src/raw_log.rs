@@ -409,9 +409,9 @@ fn prune_raw_log_inner(
     dry_run: bool,
     archive_root: Option<&Path>,
 ) -> Result<RawLogPruneReport, RawLogError> {
-    if !(1..=365).contains(&keep_completed_days) {
+    if keep_completed_days > 365 {
         return Err(RawLogError::InvalidRetentionPolicy(
-            "keep_completed_days must be within 1..=365",
+            "keep_completed_days must be within 0..=365",
         ));
     }
     if max_total_bytes == 0 {
@@ -1422,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_barrier_allows_only_matching_verified_source_deletion() {
+    fn zero_day_retention_requires_archive_and_protects_current_and_future_dates() {
         let temp = TempDir::new().expect("temporary directory");
         let frames = temp.path().join("frames");
         let archive = temp.path().join("archive");
@@ -1430,8 +1430,25 @@ mod tests {
         fs::create_dir(&archive).expect("create archive");
         let frames = fs::canonicalize(frames).expect("canonical frames");
         let archive = fs::canonicalize(archive).expect("canonical archive");
-        let observed_at = at("2026-07-29T14:30:00Z");
-        write_valid_ingress_segment(&frames, "2026-07-29.0000.ndjson", observed_at);
+        let observed_at = at("2026-07-31T14:30:00Z");
+        write_valid_ingress_segment(&frames, "2026-07-31.0000.ndjson", observed_at);
+        write_segment(&frames, "2026-08-01.0000.ndjson", b"current");
+        write_segment(&frames, "2026-08-02.0000.ndjson", b"future");
+        let withheld = prune_raw_log_with_archive(
+            &frames,
+            NaiveDate::from_ymd_opt(2026, 8, 1).expect("current date"),
+            0,
+            u64::MAX,
+            false,
+            &archive,
+        )
+        .expect("unarchived date protected");
+        assert_eq!(
+            withheld.archive_barrier_status,
+            RawLogArchiveBarrierStatus::Withheld
+        );
+        assert_eq!(withheld.removed_files, 0);
+        assert!(frames.join("2026-07-31.0000.ndjson").exists());
         archive_completed_utc_day(
             &frames,
             &archive,
@@ -1443,7 +1460,7 @@ mod tests {
         let report = prune_raw_log_with_archive(
             &frames,
             NaiveDate::from_ymd_opt(2026, 8, 1).expect("current date"),
-            1,
+            0,
             u64::MAX,
             false,
             &archive,
@@ -1455,7 +1472,10 @@ mod tests {
         );
         assert_eq!(report.archive_authorized_files, 1);
         assert_eq!(report.removed_files, 1);
-        assert!(!frames.join("2026-07-29.0000.ndjson").exists());
+        assert!(!frames.join("2026-07-31.0000.ndjson").exists());
+        assert_eq!(report.protected_current_or_future_files, 2);
+        assert!(frames.join("2026-08-01.0000.ndjson").exists());
+        assert!(frames.join("2026-08-02.0000.ndjson").exists());
     }
 
     #[test]

@@ -119,8 +119,10 @@ work or create a claim/restart loop.
 The Oracle overlay replaces the generic frame path with
 `/srv/data/spx-spark/rust-core-shadow/frames`; verified archives live in the
 sibling `archive` directory. At 00:15 UTC, after the raw frame date closes, `spx-rust-frame-retention.timer` first runs
-`archive-frames --backlog-days 7` and then applies a one-completed-day,
-8 GiB raw-frame policy. Backlog processing prioritizes missing artifacts
+`archive-frames --backlog-days 7` and then removes verified completed-date raw
+duplicates (`--keep-completed-days 0`), retaining the compressed archives.
+The 8 GiB raw-frame budget remains a check on protected current-date growth.
+Backlog processing prioritizes missing artifacts
 oldest-first; existing artifacts can fill remaining batch slots only after
 idempotent verification, so a history longer than seven days advances instead
 of repeatedly selecting the same dates. Each day is streamed at zstd level 1 into a staging directory; every raw
@@ -353,21 +355,23 @@ test -S /run/spx-spark-core-shadow/core.sock
   --config /etc/spx-spark-core-shadow/bridge.toml
 systemctl --user status spx-spark-order-map-status.timer --no-pager
 /opt/spx-spark-core-shadow/current/bin/spx-core prune-frames \
-  --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 1 \
+  --config /etc/spx-spark-core-shadow/core.toml --keep-completed-days 0 \
   --max-total-bytes 8589934592 --require-archive-root \
   /srv/data/spx-spark/rust-core-shadow/archive --dry-run
 sudo systemctl status spx-rust-frame-retention.timer --no-pager
 sudo journalctl -u spx-rust-frame-retention.service -n 20 --no-pager
 ```
 
-The 8 GiB cap removes already archived completed segments when retaining them
-would exceed the budget. It never removes the active UTC date, even if that
+Zero completed-day retention removes every verified completed-date raw duplicate,
+even when raw bytes are below 8 GiB. It never removes the active UTC date, even if that
 date alone exceeds the cap; this is reported as an unsatisfied limit. Old-date
 verification and deletion hold date locks while current-day appends continue.
 The 10 GiB filesystem write reserve remains separate from this retention budget.
 A reserve refusal returns the existing `server_busy` response so the bridge
 retains and retries its exact pending frame after space recovers, without using
 up the permanent bad-frame rejection limit.
+Bridge `updated_at` records process heartbeat during these retries; source clocks
+and `last_matching_ack_at` still show whether data and forwarding have recovered.
 
 Before a manual prune or first timer start, backfill and verify at most seven
 completed UTC days per invocation:

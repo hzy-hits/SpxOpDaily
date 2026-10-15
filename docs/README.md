@@ -43,6 +43,9 @@
   RTH validation 44 + 20；实际容量和临时 exact-leg 仍受原配额 owner 约束。
 - Python 空间 warning/critical 与生产 Rust 写入 reserve 为 10 GiB；28 GiB 是维护
   触发线。去重、清理需原有 manifest 验证，不删除未经验证的原始券商行情。
+- 2026-10-15桥接磁盘复发修复：既有每日归档后清理所有已验证完整UTC日期的Rust
+  原文副本，保留压缩档案和当天帧；重试心跳与数据/ACK时钟分离。
+  原因与时点验收见[桥接磁盘事故记录](bridge-disk-recovery-2026-09-25.md)。
 
 <a id="strategy-contracts"></a>
 ## 当前策略合同索引

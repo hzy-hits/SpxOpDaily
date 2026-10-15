@@ -1043,7 +1043,9 @@ impl BridgeRuntime {
         Err(failure)
     }
 
-    fn persist_health(&self) {
+    fn persist_health(&mut self) {
+        // Process liveness is independent of source freshness and accepted ACKs.
+        self.health.updated_at = Utc::now();
         if let Err(failure) = self.health.persist(&self.config.health_path) {
             error!(error = %failure, "failed to persist bridge health projection");
         }
@@ -1295,9 +1297,22 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let stop = AtomicBool::new(false);
         while runtime.health.counters.accepted_frames == 0 && Instant::now() < deadline {
+            let before = Utc::now();
+            let rejected_before = runtime.health.counters.rejected_acks;
             runtime
                 .tick(&stop)
                 .expect("transient disk pressure must not halt the bridge");
+            if runtime.health.counters.rejected_acks > rejected_before {
+                let persisted: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&runtime.config.health_path).unwrap())
+                        .unwrap();
+                let heartbeat: chrono::DateTime<Utc> =
+                    serde_json::from_value(persisted["updated_at"].clone()).unwrap();
+                assert!(heartbeat >= before);
+                assert_eq!(persisted["phase"], "degraded");
+                assert!(persisted["last_matching_ack_at"].is_null());
+                assert!(runtime.state.pending.is_some());
+            }
         }
         assert!(runtime.health.counters.accepted_frames > 0);
         assert!(runtime.state.pending.is_none());

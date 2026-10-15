@@ -97,7 +97,7 @@ fn archive_then_manifest_gated_prune_runs_end_to_end() {
     let archive = fs::canonicalize(archive).expect("canonical archive directory");
     let date = Utc::now()
         .date_naive()
-        .checked_sub_days(Days::new(10))
+        .checked_sub_days(Days::new(1))
         .expect("old date");
     write_valid_segment(&raw, date);
     let config = write_config(&temp, &raw);
@@ -130,7 +130,7 @@ fn archive_then_manifest_gated_prune_runs_end_to_end() {
             "--config",
             config.to_str().expect("config path"),
             "--keep-completed-days",
-            "1",
+            "0",
             "--max-total-bytes",
             "67108864",
             "--require-archive-root",
