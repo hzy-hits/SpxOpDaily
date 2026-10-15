@@ -50,11 +50,26 @@ impl DeskMessageWriteFailure {
         self.metadata.as_ref()
     }
 
-    fn projection_fallback_metadata(&self) -> Option<&ResponseMetadata> {
+    fn permits_projection_fallback(&self) -> bool {
+        // Provider availability must not suppress an independently validated
+        // source map. Never publish the failed provider's partial output.
+        if matches!(
+            self.code,
+            ReportWriterErrorCode::Transport
+                | ReportWriterErrorCode::HttpStatus
+                | ReportWriterErrorCode::InvalidProviderJson
+                | ReportWriterErrorCode::InvalidChoiceCount
+                | ReportWriterErrorCode::MissingFinishReason
+                | ReportWriterErrorCode::OutputTruncated
+                | ReportWriterErrorCode::RejectedFinishReason
+                | ReportWriterErrorCode::MissingContent
+        ) {
+            return true;
+        }
         // Discard an unidentified model's output. The already validated source
         // projection can still supply the scheduled map without model authority.
         if self.code == ReportWriterErrorCode::UnexpectedModel {
-            return self.metadata.as_ref().filter(|metadata| {
+            return self.metadata.as_ref().is_some_and(|metadata| {
                 (200..300).contains(&metadata.http_status) && metadata.response_model.is_some()
             });
         }
@@ -73,7 +88,7 @@ impl DeskMessageWriteFailure {
                 | ReportWriterErrorCode::ResearchDisclosureFailed
                 | ReportWriterErrorCode::OperatorLanguageViolation
         );
-        self.metadata.as_ref().filter(|metadata| {
+        self.metadata.as_ref().is_some_and(|metadata| {
             validation_failed
                 && (200..300).contains(&metadata.http_status)
                 && metadata.response_model.as_deref() == Some(DEEPSEEK_MODEL_ID)
@@ -401,7 +416,6 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         self.require_network()?;
         self.health.updated_at = now;
         self.health.counters.ticks = self.health.counters.ticks.saturating_add(1);
-        self.health.last_error_code = None;
         let scheduled_slot = active_report_slot(now, self.config.slot_grace_seconds);
 
         let latest = match read_latest_projection(
@@ -495,6 +509,7 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         if self.store.exists(&slot_token, now)? {
             self.backoff = None;
             self.health.phase = ReportPhase::Duplicate;
+            self.health.last_error_code = None;
             self.health.next_attempt_at = None;
             self.health.consecutive_generation_failures = 0;
             self.health.counters.duplicate_slots =
@@ -539,6 +554,15 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         let result = self.writer.write_message(projection);
         let completed_at = completion_clock();
         self.health.updated_at = completed_at;
+        if let Err(failure) = &result {
+            tracing::warn!(
+                projection_id = %projection_id,
+                error_code = %failure.code(),
+                http_status = failure.metadata().map(|metadata| metadata.http_status),
+                elapsed_seconds = (completed_at - now).num_seconds(),
+                "desk report writer failed; source projection remains authoritative"
+            );
+        }
         // A model request can outlive quote/probability recovery. Publish the
         // current facts once, under the scheduled slot, instead of queuing the
         // stale report followed immediately by its correction.
@@ -553,15 +577,17 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
             return self.persist_recovery(&current.projection, &slot_token, completed_at);
         }
         let (message, response_metadata, fallback_reason) = match result {
-            Ok(output) => (output.message, output.metadata, None),
+            Ok(output) => (output.message, Some(output.metadata), None),
             Err(failure) => {
-                if let Some(metadata) = failure.projection_fallback_metadata().cloned() {
+                if failure.permits_projection_fallback() {
                     projection.message.validate()?;
-                    (projection.message.clone(), metadata, Some(failure.code()))
+                    (
+                        projection.message.clone(),
+                        failure.metadata().cloned(),
+                        Some(failure.code()),
+                    )
                 } else {
-                    if let Some(metadata) = failure.metadata() {
-                        self.record_response_metadata(metadata);
-                    }
+                    self.record_response_metadata(failure.metadata());
                     let error_code = failure.code();
                     self.health.last_fallback_reason = None;
                     let next_attempt_at = self.record_generation_failure(
@@ -579,7 +605,7 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
             }
         };
         let message = scheduled_operator_projection(projection, message)?;
-        self.record_response_metadata(&response_metadata);
+        self.record_response_metadata(response_metadata.as_ref());
         self.health.last_fallback_reason = fallback_reason.map(|reason| reason.as_str().to_owned());
         if fallback_reason.is_some() {
             self.health.counters.projection_message_fallbacks = self
@@ -600,10 +626,7 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
     ) -> Result<ReportTick, ReportServiceError> {
         // Recovery uses validated source facts without another model request.
         self.health.last_projection_id = Some(projection.projection_id.as_str().to_owned());
-        self.health.last_response_model = None;
-        self.health.last_finish_reason = None;
-        self.health.last_visible_content_bytes = None;
-        self.health.last_response_sha256 = None;
+        self.record_response_metadata(None);
         let recovery_slot = slot_token.as_str().starts_with("recovery:");
         self.health.last_fallback_reason = Some(
             if recovery_slot {
@@ -652,6 +675,7 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         if self.store.exists(slot_token, completed_at)? {
             self.backoff = None;
             self.health.phase = ReportPhase::Duplicate;
+            self.health.last_error_code = None;
             self.health.counters.duplicate_slots =
                 self.health.counters.duplicate_slots.saturating_add(1);
             self.persist_health()?;
@@ -733,15 +757,12 @@ impl<W: DeskMessageWriter, L: ScheduledReportStore> ReportService<W, L> {
         }
     }
 
-    fn record_response_metadata(&mut self, metadata: &crate::ResponseMetadata) {
-        self.health
-            .last_response_model
-            .clone_from(&metadata.response_model);
-        self.health
-            .last_finish_reason
-            .clone_from(&metadata.finish_reason);
-        self.health.last_visible_content_bytes = metadata.visible_content_bytes;
-        self.health.last_response_sha256 = Some(metadata.raw_response_sha256.clone());
+    fn record_response_metadata(&mut self, metadata: Option<&crate::ResponseMetadata>) {
+        self.health.last_response_model = metadata.and_then(|item| item.response_model.clone());
+        self.health.last_finish_reason = metadata.and_then(|item| item.finish_reason.clone());
+        self.health.last_visible_content_bytes =
+            metadata.and_then(|item| item.visible_content_bytes);
+        self.health.last_response_sha256 = metadata.map(|item| item.raw_response_sha256.clone());
     }
 
     fn persist_health(&self) -> Result<(), ReportServiceError> {
@@ -863,10 +884,7 @@ fn projection_expired_after_generation(
 mod tests {
     use chrono::{TimeDelta, TimeZone as _};
 
-    use super::{
-        DEEPSEEK_MODEL_ID, DeskMessageWriteFailure, ReportWriterErrorCode, ResponseMetadata,
-        projection_expired_after_generation, scheduled_operator_projection,
-    };
+    use super::{projection_expired_after_generation, scheduled_operator_projection};
     use spx_domain::{DeskDirection, DeskLevelPhase, DeskMapProjectionV1, DeskStage, Token};
 
     #[test]
@@ -883,71 +901,6 @@ mod tests {
             projection_valid_until,
             projection_valid_until
         ));
-    }
-
-    #[test]
-    fn projection_fallback_requires_stop_and_a_message_validation_error() {
-        let metadata = ResponseMetadata {
-            http_status: 200,
-            raw_response_bytes: 512,
-            raw_response_sha256: "a".repeat(64),
-            response_model: Some(DEEPSEEK_MODEL_ID.to_owned()),
-            finish_reason: Some("stop".to_owned()),
-            visible_content_bytes: Some(128),
-        };
-        let validation_codes = [
-            ReportWriterErrorCode::DeskMessageInvalidJson,
-            ReportWriterErrorCode::DeskMessageInvalidContract,
-            ReportWriterErrorCode::SemanticMarkerFieldMismatch,
-            ReportWriterErrorCode::DirectionAuthorityViolation,
-            ReportWriterErrorCode::DirectionLabelMissing,
-            ReportWriterErrorCode::ExecutionStateMarkerMissing,
-            ReportWriterErrorCode::CriticalFactMissing,
-            ReportWriterErrorCode::FieldCompressionDetected,
-            ReportWriterErrorCode::InternalDetailLeak,
-            ReportWriterErrorCode::ResearchAdvisoryMissing,
-            ReportWriterErrorCode::ResearchDisclosureFailed,
-            ReportWriterErrorCode::OperatorLanguageViolation,
-        ];
-        for code in validation_codes {
-            assert!(
-                DeskMessageWriteFailure::with_metadata(code, metadata.clone())
-                    .projection_fallback_metadata()
-                    .is_some(),
-                "{code} should permit the deterministic projection fallback"
-            );
-        }
-
-        for code in [
-            ReportWriterErrorCode::Transport,
-            ReportWriterErrorCode::HttpStatus,
-            ReportWriterErrorCode::RejectedFinishReason,
-            ReportWriterErrorCode::MissingContent,
-        ] {
-            assert!(
-                DeskMessageWriteFailure::with_metadata(code, metadata.clone())
-                    .projection_fallback_metadata()
-                    .is_none(),
-                "{code} must remain fail closed"
-            );
-        }
-
-        let mut http_failure = metadata.clone();
-        http_failure.http_status = 503;
-        let mut model_failure = metadata.clone();
-        model_failure.response_model = Some("deepseek-other".to_owned());
-        let mut finish_failure = metadata;
-        finish_failure.finish_reason = Some("length".to_owned());
-        for invalid_metadata in [http_failure, model_failure, finish_failure] {
-            assert!(
-                DeskMessageWriteFailure::with_metadata(
-                    ReportWriterErrorCode::DeskMessageInvalidJson,
-                    invalid_metadata,
-                )
-                .projection_fallback_metadata()
-                .is_none()
-            );
-        }
     }
 
     #[test]

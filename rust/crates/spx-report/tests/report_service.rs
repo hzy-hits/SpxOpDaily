@@ -802,7 +802,7 @@ fn omitted_p_vs_q_diagnostics_persist_the_compact_writer_message() {
 }
 
 #[test]
-fn non_stop_provider_completion_still_backs_off_without_fallback() {
+fn truncated_provider_output_uses_only_the_validated_source_once() {
     let temp = TempDir::new().unwrap();
     let config = config(&temp, true, &[5]);
     let now = ten_am() + TimeDelta::seconds(10);
@@ -813,7 +813,7 @@ fn non_stop_provider_completion_still_backs_off_without_fallback() {
         200,
         DEEPSEEK_MODEL_ID,
         "length",
-        &content,
+        "untrusted incomplete model output must never be published",
     ));
     let writer = ReportWriterClient::new(config.writer.clone(), true, transport).unwrap();
     let store = MemoryStore::default();
@@ -822,17 +822,149 @@ fn non_stop_provider_completion_still_backs_off_without_fallback() {
 
     assert_eq!(
         service.run_once_at(now).unwrap(),
-        ReportTick::Backoff {
-            error_code: ReportWriterErrorCode::OutputTruncated,
-            next_attempt_at: now + TimeDelta::seconds(5),
+        ReportTick::Persisted {
+            slot: "2026-08-04T10:00:00-04:00".to_owned(),
+            disposition: ReportPersistDisposition::Inserted,
         }
     );
-    assert!(store_inspector.intents().is_empty());
+    assert_eq!(store_inspector.intents().len(), 1);
+    assert_eq!(
+        serde_json::to_string(&store_inspector.intents()[0].message).unwrap(),
+        content
+    );
     let health = ReportHealth::load(&config.health_path).unwrap();
-    assert!(health.last_fallback_reason.is_none());
-    assert_eq!(health.counters.projection_message_fallbacks, 0);
-    assert_eq!(health.counters.generation_failures, 1);
+    assert_eq!(
+        health.last_fallback_reason.as_deref(),
+        Some("output_truncated")
+    );
+    assert_eq!(health.counters.projection_message_fallbacks, 1);
+    assert_eq!(health.counters.generation_failures, 0);
     assert_eq!(health.last_finish_reason.as_deref(), Some("length"));
+    assert!(matches!(
+        service.run_once_at(now + TimeDelta::seconds(1)).unwrap(),
+        ReportTick::Duplicate { .. }
+    ));
+    assert_eq!(store_inspector.intents().len(), 1);
+}
+
+#[test]
+fn provider_unavailable_persists_current_source_once_without_claiming_model_output() {
+    for response in [
+        TransportResponse::new(429, r#"{"error":"rate limited"}"#),
+        TransportResponse::new(503, "upstream unavailable"),
+        TransportResponse::new(200, "invalid JSON envelope"),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp, true, &[5]);
+        let now = ten_am() + TimeDelta::seconds(10);
+        let source = projection("desk-map:provider-outage", "2026-08-04:10:00", ten_am());
+        let expected = source.message.clone();
+        write_latest(&config.projection_path, source);
+        let writer =
+            ReportWriterClient::new(config.writer.clone(), true, StaticTransport::new(response))
+                .unwrap();
+        let store = MemoryStore::default();
+        let inspector = store.clone();
+        let mut service = ReportService::open(config, true, writer, store, now).unwrap();
+        assert!(matches!(
+            service.run_once_at(now).unwrap(),
+            ReportTick::Persisted { .. }
+        ));
+        assert!(matches!(
+            service.run_once_at(now + TimeDelta::seconds(1)).unwrap(),
+            ReportTick::Duplicate { .. }
+        ));
+        assert_eq!(inspector.intents().len(), 1);
+        assert_eq!(inspector.intents()[0].message, expected);
+        assert!(service.health().last_fallback_reason.is_some());
+        assert!(service.health().last_response_model.is_none());
+    }
+
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp, true, &[5]);
+    let now = ten_am() + TimeDelta::seconds(10);
+    let source = projection("desk-map:timeout", "2026-08-04:10:00", ten_am());
+    let expected = source.message.clone();
+    write_latest(&config.projection_path, source);
+    let store = MemoryStore::default();
+    let inspector = store.clone();
+    let writer = FakeWriter::new([WriterOutcome::Failure(ReportWriterErrorCode::Transport)]);
+    let mut service = ReportService::open(config, true, writer, store, now).unwrap();
+    assert!(matches!(
+        service.run_once_at(now).unwrap(),
+        ReportTick::Persisted { .. }
+    ));
+    assert_eq!(inspector.intents()[0].message, expected);
+    assert_eq!(
+        service.health().last_fallback_reason.as_deref(),
+        Some("transport_failed")
+    );
+    assert!(service.health().last_response_sha256.is_none());
+    assert!(service.health().last_response_model.is_none());
+}
+
+#[test]
+fn provider_fallback_cannot_publish_expired_future_or_previous_slot_facts() {
+    for invalid in ["expired", "future", "previous_slot"] {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp, true, &[5]);
+        let now = ten_am() + TimeDelta::seconds(10);
+        let mut source = projection("desk-map:invalid-source", "2026-08-04:10:00", ten_am());
+        match invalid {
+            "expired" => source.valid_until = now,
+            "future" => source.available_at = now + TimeDelta::seconds(1),
+            _ => source.source_slot = token("2026-08-04:09:30"),
+        }
+        write_latest(&config.projection_path, source);
+        let writer = FakeWriter::new([WriterOutcome::Failure(ReportWriterErrorCode::Transport)]);
+        let calls = writer.clone();
+        let store = MemoryStore::default();
+        let inspector = store.clone();
+        let mut service = ReportService::open(config, true, writer, store, now).unwrap();
+        assert!(matches!(
+            service.run_once_at(now).unwrap(),
+            ReportTick::Ineligible { .. }
+        ));
+        assert!(inspector.intents().is_empty());
+        assert_eq!(calls.calls(), 0);
+    }
+}
+
+#[test]
+fn local_generation_errors_remain_blocking_and_visible_after_the_slot() {
+    for code in [
+        ReportWriterErrorCode::NetworkNotAuthorized,
+        ReportWriterErrorCode::InvalidConfig,
+        ReportWriterErrorCode::ProjectionInvalid,
+        ReportWriterErrorCode::RequestSerialization,
+    ] {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp, true, &[5]);
+        let now = ten_am() + TimeDelta::seconds(10);
+        write_latest(
+            &config.projection_path,
+            projection("desk-map:local-error", "2026-08-04:10:00", ten_am()),
+        );
+        let store = MemoryStore::default();
+        let inspector = store.clone();
+        let writer = FakeWriter::new([WriterOutcome::Failure(code)]);
+        let mut service = ReportService::open(config, true, writer, store, now).unwrap();
+        assert!(matches!(
+            service.run_once_at(now).unwrap(),
+            ReportTick::Backoff { .. }
+        ));
+        assert_eq!(
+            service
+                .run_once_at(ten_am() + TimeDelta::minutes(6))
+                .unwrap(),
+            ReportTick::AwaitingSlot
+        );
+        assert!(inspector.intents().is_empty());
+        assert_eq!(
+            service.health().last_error_code.as_deref(),
+            Some(code.as_str())
+        );
+    }
 }
 
 #[test]

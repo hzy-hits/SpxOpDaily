@@ -1,6 +1,6 @@
 # Operations guide
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-15 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](../../docs/README.md)（目录核对：2026-10-05）。
 
@@ -179,6 +179,16 @@ The slot grace controls when a generation may start; an in-flight successful
 generation is accepted until the source projection expires. The complete
 response is accepted only when all eight sections validate and `finish_reason`
 is not `length`.
+
+Provider transport/HTTP, malformed-envelope and truncated-output failures use
+the independently validated source Desk Map, never partial provider content.
+Source expiry, current-session checks and slot deduplication still apply; local
+authorization/configuration/projection failures remain blocking. Production's
+writer timeout is 90 seconds, within the existing 120-second recovery window.
+One warning per failed attempt records the error code, HTTP status when present,
+and elapsed seconds without response text or credentials. Waiting for another
+slot retains the previous failure code until a later result replaces it.
+See the [October 15 incident](../../docs/desk-map-runtime-recovery-2026-09-10.md#2026-10-15模型失败阻断报告恢复窗口被等待耗尽).
 
 `spx-delivery` provides `check-config`, `run`, `once`, `health`, `acknowledge`,
 and `replay`.
