@@ -37,6 +37,15 @@ Delta 为 0.19047680156951705，BBO 约1.4秒，但 Greeks 记录仍为
 合同和diff检查通过。未修改Rust。01:21 UTC部署前仍有10197冲突，原始
 IBKR期权最后写入为01:10:09；故真实回调频率改善尚未完成线上验收。
 
+部署：代码 `6d40f051` 已推送 master，正式 installer 预检通过；01:21:43 UTC
+仅重启 `spx-spark-ibkr-stream`，新PID318257、NRestarts=0。Core、Worker、
+Schwab、Rust report/delivery PID均未改变。01:21:50 再次收到10197并正常退避，
+01:22 检查时仍没有新期权流，故未宣称线上Delta或交易信号已恢复。
+Bridge ACK与Core决策仍推进，现有Desk管道故障检查为空；没有手动补发通知。
+
+复杂度：生产文件新增/删除0/0，修改2个，净增21行；依赖、配置键、服务/timer、
+数据库/表新增删除均0；删除旧 `option_greeks_fingerprint` 数值比较计时路径。
+
 ## 问题与修复
 
 Core 持续刷新策略决策，但桌图源按 15 分钟刷新，Rust 报告只在整点、
