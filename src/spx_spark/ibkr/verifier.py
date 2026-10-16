@@ -429,6 +429,8 @@ def subscribe_contract(
 
     try:
         ticker = ib.reqMktData(contract, generic_ticks_for_contract(contract), False, False)
+        if row.kind == "option":
+            _track_model_greeks_clock(ticker)
         row.subscribed = True
         row.request_id = ticker_request_id(ib, ticker)
         return ticker
@@ -451,12 +453,47 @@ def subscribe_contract(
 
         try:
             ticker = ib.reqMktData(contract, generic_ticks_for_contract(contract), False, False)
+            if row.kind == "option":
+                _track_model_greeks_clock(ticker)
             row.subscribed = True
             row.request_id = ticker_request_id(ib, ticker)
             return ticker
         except Exception as retry_exc:  # noqa: BLE001
             row.error = f"subscribe failed after qualify fallback: {retry_exc}"
             return None
+
+
+def _track_model_greeks_clock(ticker: Any) -> None:
+    """Timestamp model callbacks, including equal values, once per Ticker."""
+
+    if hasattr(ticker, "_spx_model_greeks_observed_at"):
+        return
+    connect = getattr(getattr(ticker, "updateEvent", None), "connect", None)
+    if not callable(connect):
+        return
+    ticker._spx_model_greeks_observed_at = None
+    previous = getattr(ticker, "modelGreeks", None)
+
+    def on_update(updated: Any) -> None:
+        nonlocal previous
+        current = getattr(updated, "modelGreeks", None)
+        # ib_async creates a new immutable OptionComputation for every model
+        # callback. Price/OI/bid-Greeks callbacks leave this object untouched.
+        if current is previous:
+            return
+        previous = current
+        observed_at = getattr(updated, "time", None)
+        # tcpDataProcessed sets Ticker.time to the packet receipt time before
+        # emitting updateEvent. Snapshot/flush time must never renew Greeks.
+        updated._spx_model_greeks_observed_at = (
+            observed_at.astimezone(timezone.utc).isoformat()
+            if current is not None
+            and isinstance(observed_at, datetime)
+            and observed_at.tzinfo is not None
+            else None
+        )
+
+    connect(on_update)
 
 
 def ticker_request_id(ib: Any, ticker: Any) -> int | None:
@@ -566,7 +603,6 @@ def snapshot_rows(
                 now - ticker_time.astimezone(timezone.utc)
             ).total_seconds() > row_stale_after
 
-        previous_greeks = option_greeks_fingerprint(row)
         greeks = getattr(ticker, "modelGreeks", None)
         if greeks is not None:
             row.model_iv = clean_float(getattr(greeks, "impliedVol", None))
@@ -575,11 +611,7 @@ def snapshot_rows(
             row.theta = clean_float(getattr(greeks, "theta", None))
             row.vega = clean_float(getattr(greeks, "vega", None))
             row.und_price = clean_float(getattr(greeks, "undPrice", None))
-            current_greeks = option_greeks_fingerprint(row)
-            if any(value is not None for value in current_greeks) and (
-                row.greeks_observed_at is None or current_greeks != previous_greeks
-            ):
-                row.greeks_observed_at = now.isoformat()
+        row.greeks_observed_at = getattr(ticker, "_spx_model_greeks_observed_at", None)
 
         current_fingerprint = normalized_row_fingerprint(row)
         if (row.last_update_at is None or current_fingerprint != previous_fingerprint) and any(
@@ -612,19 +644,6 @@ def normalized_row_fingerprint(row: VerifyRow) -> tuple[object, ...]:
         row.model_iv,
         row.delta,
         row.gamma,
-        row.und_price,
-    )
-
-
-def option_greeks_fingerprint(row: VerifyRow) -> tuple[float | None, ...]:
-    """Values whose change proves a new IBKR model-Greeks observation."""
-
-    return (
-        row.model_iv,
-        row.delta,
-        row.gamma,
-        row.theta,
-        row.vega,
         row.und_price,
     )
 

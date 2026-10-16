@@ -39,6 +39,9 @@
   Put 侧无合格短腿，因此尚未证明数据持续稳定。
 - GTH 执行报价仍限 IBKR；不能拿 frozen Schwab、旧 Delta 或未授权本地反算填补。
   字段、报价与概率分别按当前诊断报告，不以文档日期替代实际新鲜度。
+- 2026-10-16 [Greeks 时钟修复](desk-data-recovery-2026-10-05.md#greeks-callback-clock-2026-10-16)：
+  接收相同数值的新模型回调也记录字段时间，BBO或重复快照不刷新Delta；
+  保留GTH 30秒门，raw去重保留真实回调可用时间，历史缺失证据不补造。
 - IBKR 总配额包含全部 ticker lines。GTH/fallback/prefetch 目标 46 hot + 38 rotation，
   RTH validation 44 + 20；实际容量和临时 exact-leg 仍受原配额 owner 约束。
 - Python 空间 warning/critical 与生产 Rust 写入 reserve 为 10 GiB；28 GiB 是维护

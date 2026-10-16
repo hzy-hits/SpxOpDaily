@@ -27,6 +27,17 @@ it does not change another candidate's authorization. Economic rejection and
 pending historical probability preparation do not mark live data unavailable.
 Collector reconnection and fresh BBO alone cannot establish native-Greeks recovery.
 
+Since the 2026-10-16 clock repair, IBKR model-Greeks freshness follows receipt
+of a new `modelGreeks` computation callback, including an identical-valued
+callback. `ib_async` replaces the immutable computation object and emits its
+Ticker update with the packet receipt timestamp; this is an observed receipt
+clock, not an exchange-supplied computation timestamp. Price, OI, bid/ask/last
+Greeks, polling and subscription reuse cannot renew that clock. The existing
+GTH 30-second age limit remains unchanged. Raw deduplication retains new model
+callback timestamps so replay sees the same availability evidence; historical
+records missing that evidence are not retroactively refreshed. See the
+[2026-10-16 incident and verification](desk-data-recovery-2026-10-05.md#greeks-callback-clock-2026-10-16).
+
 This is the operational contract for what SPX Spark may use. HTTP success,
 WebSocket subscription acceptance, and local receipt time are not evidence of
 live market data; the provider source timestamp must advance.

@@ -2176,6 +2176,20 @@ def test_ibkr_raw_persistence_is_change_only_with_periodic_checkpoint() -> None:
     assert third == (changed,)
     assert fourth == (checkpoint,)
 
+    # Genuine model callback time is availability evidence, unlike a repeated
+    # snapshot's transport/rotation clocks. Replay must retain equal Greeks.
+    for second in (2, 3):
+        callback_at = now.replace(minute=1, second=second)
+        callback = replace(
+            checkpoint, received_at=callback_at,
+            raw={"greeks_provider": "ibkr", "greeks_observed_at": callback_at.isoformat()},
+        )
+        snapshot = ProviderSnapshot(
+            provider=Provider.IBKR, received_at=callback_at, quotes=(callback,),
+        )
+        assert collector._raw_quotes_for_persistence(snapshot, received_at=callback_at) == (callback,)
+        assert collector._raw_quotes_for_persistence(snapshot, received_at=callback_at) == ()
+
 
 def test_flush_marks_all_rows_stale_during_tws_connectivity_loss(monkeypatch) -> None:
     collector = _flush_test_collector()

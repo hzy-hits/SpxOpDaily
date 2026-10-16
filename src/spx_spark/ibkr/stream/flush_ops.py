@@ -51,7 +51,9 @@ def _quote_fingerprint(quote: object) -> str:
         cleaned = {
             key: value
             for key, value in provenance.items()
-            if not str(key).endswith("_observed_at")
+            # A model-Greeks callback is new availability evidence even when
+            # its values are identical; retain it for causal raw-data replay.
+            if key == "greeks_observed_at" or not str(key).endswith("_observed_at")
         }
         if cleaned:
             payload["field_provenance"] = cleaned

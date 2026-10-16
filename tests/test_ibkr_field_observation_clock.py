@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+
+from ib_async import IB, Option
 
 from spx_spark.analytics.options.quote_policy import (
     option_field_age_seconds,
     option_field_observed_at,
 )
 from spx_spark.ibkr.adapter import quote_from_ibkr_row
-from spx_spark.ibkr.verifier import VerifyRow, snapshot_rows
+from spx_spark.application.order_map.execution_quote import nearest_abs_delta_strike
+from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.ibkr.verifier import VerifyRow, qualify_and_subscribe, snapshot_rows
 from spx_spark.marketdata import (
     InstrumentId,
     MarketDataQuality,
@@ -17,39 +20,36 @@ from spx_spark.marketdata import (
     Provider,
     Quote,
 )
-from spx_spark.storage import merge_option_observations
+from spx_spark.storage import LatestState, merge_option_observations
 
 
 UTC = timezone.utc
 START = datetime(2026, 7, 24, 14, 30, tzinfo=UTC)
 
 
-class OptionTicker:
-    def __init__(self) -> None:
-        self.contract = SimpleNamespace(right="C")
-        self.marketDataType = 1
-        self.bid = 9.9
-        self.ask = 10.1
-        self.last = 10.0
-        self.close = 9.5
-        self.bidSize = 10
-        self.askSize = 12
-        self.lastSize = 1
-        self.volume = 100
-        self.callOpenInterest = 321
-        self.putOpenInterest = None
-        self.time = START
-        self.modelGreeks = SimpleNamespace(
-            impliedVol=0.2,
-            delta=0.5,
-            gamma=0.001,
-            theta=-0.1,
-            vega=0.2,
-            undPrice=7500.0,
-        )
+def option_subscription():
+    ib = IB()
+    contract = Option("SPX", "20260724", 7500, "C", "SMART", conId=123)
+    ticker = ib.wrapper.startTicker(1, contract, "mktData")
+    ib.reqMktData = lambda *_args: ticker  # local API boundary, no connection
+    subscriptions = qualify_and_subscribe(
+        ib, [("option:SPXW:20260724:7500:C", "option", contract)]
+    )
+    ticker.marketDataType = 1
+    ib.wrapper.lastTime = START
+    ib.wrapper.priceSizeTick(1, 1, 9.9, 10)
+    ib.wrapper.priceSizeTick(1, 2, 10.1, 12)
+    ib.wrapper.tickSize(1, 27, 321)
+    model_callback(ib, START)
+    return ib, ticker, subscriptions
 
-    def marketPrice(self) -> float:
-        return 10.0
+
+def model_callback(ib, at, *, tick_type=13, gamma=0.001):
+    ib.wrapper.lastTime = at
+    ib.wrapper.tickOptionComputation(
+        1, tick_type, 0, 0.2, 0.19, 10.0, 0.0, gamma, 0.2, -0.1, 7500.0
+    )
+    ib.wrapper.tcpDataProcessed()
 
 
 def option_row() -> VerifyRow:
@@ -63,9 +63,8 @@ def option_row() -> VerifyRow:
 
 
 def test_identical_ibkr_fields_keep_their_original_observation_clocks() -> None:
-    ticker = OptionTicker()
-    row = option_row()
-    subscriptions = {row.label: (ticker, row)}
+    ib, ticker, subscriptions = option_subscription()
+    row = next(iter(subscriptions.values()))[1]
 
     snapshot_rows(subscriptions, 15.0, option_stale_after_seconds=90.0, now=START)
     first = quote_from_ibkr_row(row, received_at=START)
@@ -73,11 +72,13 @@ def test_identical_ibkr_fields_keep_their_original_observation_clocks() -> None:
     assert option_field_observed_at(first, field="open_interest") == START
 
     later = START + timedelta(seconds=60)
-    ticker.time = later  # a new quiet pricing observation, not new structure
+    ib.wrapper.lastTime = later
+    ib.wrapper.priceSizeTick(1, 1, ticker.bid, ticker.bidSize + 1)
+    ib.wrapper.tcpDataProcessed()
     snapshot_rows(subscriptions, 15.0, option_stale_after_seconds=90.0, now=later)
     second = quote_from_ibkr_row(row, received_at=later)
 
-    assert option_field_observed_at(second, field="pricing") == START
+    assert option_field_observed_at(second, field="pricing") == later
     assert option_field_observed_at(second, field="greeks") == START
     assert option_field_observed_at(second, field="open_interest") == START
     assert option_field_age_seconds(second, as_of=later, field="greeks") == 60.0
@@ -85,14 +86,12 @@ def test_identical_ibkr_fields_keep_their_original_observation_clocks() -> None:
 
 
 def test_ibkr_field_changes_advance_only_the_changed_field_clocks() -> None:
-    ticker = OptionTicker()
-    row = option_row()
-    subscriptions = {row.label: (ticker, row)}
+    ib, _ticker, subscriptions = option_subscription()
+    row = next(iter(subscriptions.values()))[1]
     snapshot_rows(subscriptions, 15.0, option_stale_after_seconds=90.0, now=START)
 
     greek_change_at = START + timedelta(seconds=30)
-    ticker.time = greek_change_at
-    ticker.modelGreeks.gamma = 0.0012
+    model_callback(ib, greek_change_at, gamma=0.0012)
     snapshot_rows(
         subscriptions,
         15.0,
@@ -104,8 +103,9 @@ def test_ibkr_field_changes_advance_only_the_changed_field_clocks() -> None:
     assert option_field_observed_at(greek_changed, field="open_interest") == START
 
     oi_change_at = START + timedelta(seconds=60)
-    ticker.time = oi_change_at
-    ticker.callOpenInterest = 322
+    ib.wrapper.lastTime = oi_change_at
+    ib.wrapper.tickSize(1, 27, 322)
+    ib.wrapper.tcpDataProcessed()
     snapshot_rows(
         subscriptions,
         15.0,
@@ -115,6 +115,57 @@ def test_ibkr_field_changes_advance_only_the_changed_field_clocks() -> None:
     oi_changed = quote_from_ibkr_row(row, received_at=oi_change_at)
     assert option_field_observed_at(oi_changed, field="greeks") == greek_change_at
     assert option_field_observed_at(oi_changed, field="open_interest") == oi_change_at
+
+
+def test_equal_model_callback_restores_delta_but_other_ticks_cannot_renew_it() -> None:
+    ib, ticker, subscriptions = option_subscription()
+    row = next(iter(subscriptions.values()))[1]
+    snapshot_rows(subscriptions, 90.0, now=START)
+    original = quote_from_ibkr_row(row, received_at=START)
+
+    def selected_at(now):
+        snapshot_rows(subscriptions, 90.0, now=now)
+        quote = quote_from_ibkr_row(row, received_at=now)
+        latest = LatestState(START, now, (quote,), (quote,))
+        selected = nearest_abs_delta_strike(
+            latest, "20260724", "C", target_abs_delta=0.2, now=now,
+            policy=StrategyPolicy(quote_max_age_seconds=30), providers=(Provider.IBKR,),
+            max_abs_delta=0.2, max_greeks_age_seconds=30,
+        )
+        return quote, selected
+
+    at = START + timedelta(seconds=40)
+    ib.wrapper.lastTime = at
+    ib.wrapper.priceSizeTick(1, 1, 9.95, 10)
+    ib.wrapper.tcpDataProcessed()
+    assert selected_at(at)[1] is None
+
+    model_callback(ib, at)  # exactly the same six Greek/model values
+    fresh, selected = selected_at(at + timedelta(seconds=2))
+    assert fresh.greeks == original.greeks
+    assert option_field_observed_at(fresh, field="greeks") == at
+    assert selected == 7500
+
+    # Snapshot delay is not added to the clock. Price, OI and other computation
+    # ticks do not make the expired model Delta executable again.
+    later = at + timedelta(seconds=31)
+    ib.wrapper.lastTime = later
+    ib.wrapper.priceSizeTick(1, 1, 10.0, 11)
+    ib.wrapper.tickSize(1, 27, 322)
+    for tick_type in (10, 11, 12):
+        model_callback(ib, later, tick_type=tick_type)
+    stale, selected = selected_at(later)
+    assert option_field_observed_at(stale, field="greeks") == at
+    assert selected is None
+
+    # Reusing a cached Ticker on resubscription is not a new model observation.
+    subscriptions = qualify_and_subscribe(
+        ib, [(row.label, "option", ticker.contract)]
+    )
+    row = next(iter(subscriptions.values()))[1]
+    assert selected_at(later)[1] is None
+    model_callback(ib, later)
+    assert selected_at(later)[1] == 7500
 
 
 def test_missing_cross_provider_structure_clock_fails_closed_during_merge() -> None:
