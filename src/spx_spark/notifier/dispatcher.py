@@ -239,7 +239,31 @@ def enqueue_notification(
         engine=_store(settings),
         schedule=lambda event_id: _schedule_event(settings, event_id),
     )
+    if envelope.correlation_id:
+        _record_correlation(envelope)
     return _enqueue_result(result)
+
+
+def _record_correlation(envelope: NotificationEnvelope) -> None:
+    """Keep a small receipt-side lookup from logical event id to correlation id."""
+
+    from spx_spark.app_settings import get_settings
+    from spx_spark.state_io import append_jsonl_secure
+
+    try:
+        append_jsonl_secure(
+            get_settings().data_root / "audit" / "notification_correlations.jsonl",
+            {
+                "event_id": envelope.event_id,
+                "correlation_id": envelope.correlation_id,
+                "lane": envelope.lane,
+                "kind": envelope.kind,
+                "recorded_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+        )
+    except OSError:
+        # Correlation telemetry must never block the notification queue.
+        pass
 
 
 def enqueue_linked_notification(
