@@ -43,7 +43,7 @@
 | `spx-spark-maintenance-weekly.timer` | 周日 `13:00 Asia/Shanghai` | `current` | 默认只审计，跨阈值才 prune |
 | `spx-spark-data-compact.timer` | 每小时 `:08`，随机延迟 ≤120s | `current` | copy-only，验证 manifest |
 | `spx-spark-data-compact-weekend.timer` | 周六/日 `08:30 Asia/Shanghai`，延迟 ≤300s | `current` | 大 batch |
-| `spx-ibkr-verifier.timer` | 每 15 分钟 | `current` | 只读 verifier |
+| `spx-ibkr-verifier.timer` | 每 15 分钟 | `optional` | 只读 verifier；由主机部署单独启用 |
 | `spx-ibkr-verifier.timer`（Huey 内） | 宏观日历每 5 分钟、桌图监测每分钟、存储压力每小时 `:20`、维护审计 `23:30 UTC` | `current` | `infrastructure/jobs.py` |
 | `spx-spark-post-close-review.timer` | 工作日 `17:15 ET` | `legacy`（安装脚本禁用） | 由 session finalizer 取代，保留手工入口 |
 | `spx-spark-backtest-weekly.timer` | 周一 `09:17`，延迟 ≤300s | `legacy`（安装脚本禁用） | 已移到家庭研究节点 |
