@@ -11,18 +11,34 @@ integration checks from research claims. The home infrastructure is managed in a
 separate operations workspace; this repository contains the application, release
 pipeline, and integration documentation, not a complete home-lab installer.
 
+## Interactive guide and original HTML
+
+[Download the bilingual interactive guide](https://raw.githubusercontent.com/hzy-hits/SpxOpDaily/master/docs/architecture/service-flow.html)
+([HTML source](service-flow.html)) for one view at a time, zoom, searchable service
+handoffs, and source references. It defaults to English and includes Chinese.
+GitHub displays HTML as source: download and open it in a browser for interaction.
+
+The [original Chinese atlas](reference/README.md) is also preserved, including its
+24 call flows, 72 key data-dictionary entries, module/type indexes, and interactive
+inspectors. It is a historical source map pinned to `97fc378`, not a current
+production audit. The new service-flow diagram uses its owner/commit/export
+boundaries, checked against the current source; the cloud/home diagrams describe
+the subsequently deployed integration.
+
 ## Diagram index
 
 | View | English | Chinese |
 | --- | --- | --- |
-| System overview | [SVG](diagrams/system-overview.en.svg) · [Mermaid source](diagrams/system-overview.en.mmd) | [SVG](diagrams/system-overview.zh-CN.svg) · [Source](diagrams/system-overview.zh-CN.mmd) |
-| Runtime and data ownership | [SVG](diagrams/runtime.en.svg) · [Mermaid source](diagrams/runtime.en.mmd) | [SVG](diagrams/runtime.zh-CN.svg) · [Source](diagrams/runtime.zh-CN.mmd) |
-| Build, release, and deployment | [SVG](diagrams/delivery.en.svg) · [Mermaid source](diagrams/delivery.en.mmd) | [SVG](diagrams/delivery.zh-CN.svg) · [Source](diagrams/delivery.zh-CN.mmd) |
-| Archive and research lifecycle | [SVG](diagrams/research.en.svg) · [Mermaid source](diagrams/research.en.mmd) | [SVG](diagrams/research.zh-CN.svg) · [Source](diagrams/research.zh-CN.mmd) |
+| System overview | [SVG](diagrams/system-overview.en.svg) | [SVG](diagrams/system-overview.zh-CN.svg) |
+| Runtime and data ownership | [SVG](diagrams/runtime.en.svg) | [SVG](diagrams/runtime.zh-CN.svg) |
+| Build, release, and deployment | [SVG](diagrams/delivery.en.svg) | [SVG](diagrams/delivery.zh-CN.svg) |
+| Archive and research lifecycle | [SVG](diagrams/research.en.svg) | [SVG](diagrams/research.zh-CN.svg) |
 
-SVGs render directly in GitHub and can be opened at full size. Solid arrows carry
-data or artifacts. Dashed arrows represent control, scheduling, or health checks.
-Arrows summarize interfaces; they do not imply shared database ownership.
+SVGs render directly in GitHub and can be opened at full size. The environment
+view separates role cards from four numbered handoff routes. Other views use
+separate stages and fixed spacing; the dashed routes in the runtime
+view denote quote files and IPC. Arrows describe specific calls or data/artifact transfers,
+not a synchronous system-wide loop or shared database ownership.
 
 ## System overview
 
@@ -47,7 +63,16 @@ application-level checks. A green scheduler or VM metric cannot replace them.
 
 ## Runtime and data ownership
 
-![Python strategy authority, Rust scheduled reporting, and separate notification lanes](diagrams/runtime.en.svg)
+![Independent collectors, concurrent Core tasks, commit and notification boundaries, and Rust reporting](diagrams/runtime.en.svg)
+
+Collectors own broker sessions outside Core. Inside Core, samplers, market-feature
+and shock runners execute concurrently. Normalized raw history is appended before
+latest-state projection is updated; these are independent writes. The decision
+path commits operational state, exports the decision, then enqueues notification
+work; failed persistence blocks READY. Optional explanatory context follows that
+boundary. Neither the provider writes nor commit/export/queue form one cross-store
+atomic transaction. See the [interactive walkthrough](service-flow.html) and
+[historical source atlas](reference/README.md) for the detailed call paths.
 
 | Responsibility | Owner | Contract |
 | --- | --- | --- |
@@ -181,26 +206,26 @@ decision equivalence, or profitable performance.
   not enforce a container-wide memory cgroup limit; its other resource limits are
   not an equivalent guarantee.
 
-## Maintaining the diagrams
+## Maintaining the diagrams and HTML
 
-Edit the paired `.en.mmd` and `.zh-CN.mmd` sources together, then regenerate their
-SVGs. Labels, edge meanings, scope, and limitations must agree across languages.
-SVGs are checked in so reading the docs needs no renderer or external service.
-
-The exports were rendered with Mermaid CLI **12.0.0**. On a documentation workstation
-with Node.js/npm and a working Chromium installation, render from the repository root:
+The [standard-library SVG renderer](render_diagrams.py) is the editable source for
+all four English/Chinese diagram pairs. It fixes card positions, separates stage
+headings from connector routes, and checks text height before writing an export.
+The previous automatically laid-out Mermaid sources were replaced to avoid label
+and connector collisions.
 
 ```bash
-# Use a UTF-8 font with Chinese glyphs for the Chinese exports.
-for source in docs/architecture/diagrams/*.mmd; do
-  npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc \
-    -i "$source" -o "${source%.mmd}.svg" -b white --no-font-embed
-done
+python3 docs/architecture/render_diagrams.py
 git diff --check
 ```
 
-Mermaid CLI/Chromium are documentation tooling, not application dependencies.
-Inspect each export for clipping and label overlap, check relative links, and keep
-private host addresses, credentials, and operational dumps out of public diagrams.
-Update the baseline date only after checking the described implementation; retain
-historical acceptance limits instead of turning them into live status claims.
+The renderer also refreshes the embedded diagrams in [service-flow.html](service-flow.html).
+The guide is a standalone file: translations, diagram views, filter and zoom run
+locally with no external assets. Edit both languages together. Preserve the
+original atlas in `reference/` as historical evidence instead of rewriting its
+baseline or implying that its optional source paths are deployed.
+
+Inspect SVGs at normal README width and HTML at desktop/mobile widths. Check text
+bounds, links, search, view/language switching, and zoom. Keep private addresses,
+credentials and operational dumps out of current public diagrams; historical
+source examples in the original atlas retain their fixed-revision context.

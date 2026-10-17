@@ -9,6 +9,7 @@ Schwab 负责常规交易时段（RTH），IBKR Paper 负责全球交易时段�
 所有候选均由人工决策：`automatic_ordering=false`，不具备真实或 Paper 自动下单能力。
 
 [架构与设计图](docs/architecture/README.zh-CN.md) ·
+[交互 HTML 说明](docs/architecture/service-flow.html) ·
 [部署手册](docs/headless-deployment.md#cloud-delivery-cutover-2026-10-17) ·
 [数据能力](docs/market-data-capability-matrix.md) ·
 [文档目录](docs/README.md#document-catalog) · [协作约束](AGENTS.md)
@@ -36,6 +37,20 @@ Schwab 负责常规交易时段（RTH），IBKR Paper 负责全球交易时段�
 | Linux 研究笔记本 | 使用固定 AMD64 容器和专用 `/srv/research` 研究盘进行回放与回测 |
 | NAS | 已核验的报价快照、清单、研究结果和备份回执 |
 | Mac | 审阅、运维和按需研究；未注册为定时计算 Worker |
+
+### 服务与数据流转
+
+采集器、Python Core、Python Worker 与 Rust 报告路径各有负责方。Core 内部的采样、
+市场特征和 shock 任务并发运行；下图说明它们之间的交接，不是一个同步大循环。
+
+![服务流转：独立采集、并发 Core、决策提交、Python 通知与独立 Rust 报告](docs/architecture/diagrams/runtime.zh-CN.svg)
+
+[打开完整尺寸图](docs/architecture/diagrams/runtime.zh-CN.svg) ·
+[下载交互说明 — English / 中文](https://raw.githubusercontent.com/hzy-hits/SpxOpDaily/master/docs/architecture/service-flow.html) ·
+[原始 HTML 图册 — 中文历史快照](docs/architecture/reference/README.md)
+
+交互说明包含独立视图、缩放、流程检索和源码入口。GitHub 只显示 HTML 源码，下载文件后用
+浏览器打开即可。原始图册保留其 `97fc378` 源码基准；现行云端交付与家庭研究另在新说明中记录。
 
 Python 负责券商采集、分析、研究和最终策略决策，`build_strategy_decision` 是唯一
 人工候选授权出口。Rust 保留 typed readiness、frames、定时 Desk Map 和报告投递路径；
@@ -102,7 +117,7 @@ git diff --check
 | `tests/`、`rust/crates/*/tests/` | Python/Rust 行为、因果、经济及外部边界检查 |
 | `.github/workflows/ci.yml`、`Dockerfile`、`scripts/deploy-release.py` | 云端构建与受控生产交付 |
 | `config/`、`systemd/` | 跟踪的默认值、部署示例和服务定义 |
-| `docs/architecture/` | 中英架构说明、SVG 设计图和可编辑 Mermaid 源码 |
+| `docs/architecture/` | 中英说明、疏排 SVG 图、交互 HTML 和原始源码图册 |
 | `docs/`、`site/` | 合同、运维、历史证据、通知图片入口和历史复盘页 |
 
 ## 解读与限制

@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>SPX Spark · Service Flow Guide</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#18334b;font:16px/1.65 Arial,"PingFang SC","Microsoft YaHei",sans-serif}main{max-width:1280px;margin:auto;padding:32px 28px 70px}header{padding:16px 0 28px}h1{font-size:clamp(28px,4vw,44px);line-height:1.2;max-width:1000px;margin:14px 0 18px}h2{font-size:26px;line-height:1.3;margin:0 0 12px}p{margin:10px 0}.eyebrow{font-size:12px;letter-spacing:.12em;font-weight:700;color:#637d92}.topline{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.intro{max-width:900px;font-size:18px;color:#496377}.baseline{padding:14px 18px;background:#eaf0f7;border-left:3px solid #557eab;font-size:14px;margin:24px 0 0}button,input{font:inherit}button,a.button{border:1px solid #bdcbd9;background:white;color:#234765;padding:9px 15px;border-radius:8px;cursor:pointer;min-height:44px;text-decoration:none;display:inline-block}button[aria-pressed="true"]{background:#244d74;border-color:#244d74;color:white}button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #3879ba;outline-offset:3px}.view-controls{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:20px 0}.tabs,.zoom,.links{display:flex;gap:8px;flex-wrap:wrap}.figure-shell{border:1px solid #cbd6df;border-radius:14px;background:white;overflow:hidden}.diagram{overflow:auto;padding:20px}.diagram svg{display:block;width:100%;min-width:720px;height:auto}.caption{padding:14px 20px;border-top:1px solid #e0e7ed;background:#f8fafc;color:#526b7f;font-size:14px}.content-section{margin-top:52px}.filter{margin:24px 0;max-width:650px}.filter label{display:block;font-weight:600;margin-bottom:6px}input{width:100%;border:1px solid #b8c8d5;border-radius:8px;padding:11px 14px;background:white;color:#18334b}.flow-list{display:grid;gap:16px}details{border:1px solid #ccd7e0;border-radius:12px;background:white;overflow:hidden}summary{padding:20px 24px;cursor:pointer;font-weight:700;line-height:1.4}details[open] summary{border-bottom:1px solid #e1e8ee;background:#edf4fa}.flow-body{padding:4px 24px 22px;max-width:1020px}.flow-body p{margin:16px 0}.sources{font-size:13px;display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:20px}a{color:#235d90;overflow-wrap:anywhere}.reference{padding:28px;background:white;border:1px solid #ccd7e0;border-radius:14px}.reference p{max-width:1020px}.links{margin:22px 0 16px}.note{font-size:14px;color:#50687b}.limits{font-size:15px;max-width:1050px;color:#4d6375}footer{margin-top:34px;font-size:13px;color:#61788b}.empty{padding:20px;border:1px dashed #a9bfce;border-radius:8px}@media(max-width:640px){main{padding:18px 14px 40px}.diagram{padding:8px}.content-section{margin-top:34px}summary{padding:17px}.flow-body{padding:2px 17px 17px}.reference{padding:20px}.tabs button{padding:8px 10px}.zoom{width:100%}}
+</style></head><body><main>
+<header><div class="topline"><span class="eyebrow" data-i18n="eyebrow"></span><div class="tabs" aria-label="Language"><button id="en" aria-pressed="true">English</button><button id="zh-CN" aria-pressed="false">简体中文</button></div></div><h1 data-i18n="title"></h1><p class="intro" data-i18n="intro"></p><p class="baseline" data-i18n="baseline"></p></header>
+<section aria-label="Architecture diagrams"><div class="view-controls"><div class="tabs" id="views"><button data-view="system-overview" data-i18n="overview" aria-pressed="true"></button><button data-view="runtime" data-i18n="runtime" aria-pressed="false"></button><button data-view="delivery" data-i18n="delivery" aria-pressed="false"></button><button data-view="research" data-i18n="research" aria-pressed="false"></button></div><div class="zoom"><button id="out" data-i18n="zoomOut"></button><button id="in" data-i18n="zoomIn"></button><button id="fit" data-i18n="reset"></button></div></div><div class="figure-shell"><div class="diagram" id="diagram" tabindex="0" aria-label="Scrollable architecture diagram"></div><div class="caption" data-i18n="hint"></div></div></section>
+<section class="content-section"><h2 data-i18n="flowHeading"></h2><p data-i18n="flowIntro"></p><div class="filter"><label for="filter" data-i18n="searchLabel"></label><input id="filter" type="search" autocomplete="off"></div><div class="flow-list" id="flows"></div></section>
+<section class="content-section reference"><h2 data-i18n="referenceHeading"></h2><p data-i18n="referenceText"></p><div class="links"><a class="button" href="https://raw.githubusercontent.com/hzy-hits/SpxOpDaily/master/docs/architecture/reference/spx-module-data-atlas.html" data-i18n="download"></a><a class="button" href="https://github.com/hzy-hits/SpxOpDaily/tree/master/docs/architecture/reference" data-i18n="viewSource"></a><a class="button" href="https://raw.githubusercontent.com/hzy-hits/SpxOpDaily/master/docs/architecture/service-flow.html" data-i18n="downloadGuide"></a></div><p class="note" data-i18n="githubNote"></p></section>
+<section class="content-section limits"><h2 data-i18n="limitsHeading"></h2><p data-i18n="limits"></p></section>
+<footer><a href="https://github.com/hzy-hits/SpxOpDaily/tree/master/docs/architecture">Architecture documentation / 架构文档</a> · SPX Spark · 2026-10-17</footer><noscript><p>Enable JavaScript for language, search and diagram controls. The original atlas can also be read without scripting.</p><a href="https://github.com/hzy-hits/SpxOpDaily/tree/master/docs/architecture/reference">Original atlas / 原始图册</a></noscript>
+</main>
+<template id="system-overview-en"><!-- diagram:system-overview:en -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="840" viewBox="0 0 1200 840" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · environments and handoffs</title>
+<desc id="description">Roles above; the four cross-environment routes below.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="840" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · environments and handoffs</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">Roles above; the four cross-environment routes below.</text>
+<text x="40" y="130" font-size="18" font-weight="700" class="">01  CLOUD</text>
+<rect x="40" y="150" width="320" height="380" rx="16" fill="#eef4ff"/>
+<text x="440" y="130" font-size="18" font-weight="700" class="">02  ORACLE</text>
+<rect x="440" y="150" width="320" height="380" rx="16" fill="#eaf7f2"/>
+<text x="840" y="130" font-size="18" font-weight="700" class="">03  HOME</text>
+<rect x="840" y="150" width="320" height="380" rx="16" fill="#f2edfc"/>
+<g data-card="Developers / agents">
+<rect x="50" y="170" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="200" font-size="20" font-weight="700" class="">Developers / agents</text>
+<text x="69" y="229" font-size="17" font-weight="400" class="">Code changes and reviewed</text>
+<text x="69" y="252" font-size="17" font-weight="400" class="">PRs</text>
+</g>
+<g data-card="GitHub Actions">
+<rect x="50" y="290" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="320" font-size="20" font-weight="700" class="">GitHub Actions</text>
+<text x="69" y="349" font-size="17" font-weight="400" class="">Test and build AMD64 +</text>
+<text x="69" y="372" font-size="17" font-weight="400" class="">ARM64</text>
+</g>
+<g data-card="Releases + GHCR">
+<rect x="50" y="410" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="440" font-size="20" font-weight="700" class="">Releases + GHCR</text>
+<text x="69" y="469" font-size="17" font-weight="400" class="">One commit, native bundles</text>
+<text x="69" y="492" font-size="17" font-weight="400" class="">and images</text>
+</g>
+<g data-card="Production services">
+<rect x="450" y="170" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="200" font-size="20" font-weight="700" class="">Production services</text>
+<text x="469" y="229" font-size="17" font-weight="400" class="">Existing Python + Rust</text>
+<text x="469" y="252" font-size="17" font-weight="400" class="">under systemd</text>
+</g>
+<g data-card="Live state">
+<rect x="450" y="290" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="320" font-size="20" font-weight="700" class="">Live state</text>
+<text x="469" y="349" font-size="17" font-weight="400" class="">Quotes, operational DBs and</text>
+<text x="469" y="372" font-size="17" font-weight="400" class="">report ledgers</text>
+</g>
+<g data-card="Runtime ownership">
+<rect x="450" y="410" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="440" font-size="20" font-weight="700" class="">Runtime ownership</text>
+<text x="469" y="469" font-size="17" font-weight="400" class="">Collect, decide, report and</text>
+<text x="469" y="492" font-size="17" font-weight="400" class="">notify</text>
+</g>
+<g data-card="Raspberry Pi">
+<rect x="850" y="170" width="300" height="105" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="869" y="200" font-size="20" font-weight="700" class="">Raspberry Pi</text>
+<text x="869" y="229" font-size="17" font-weight="400" class="">Prefect scheduling +</text>
+<text x="869" y="252" font-size="17" font-weight="400" class="">archive transfer</text>
+</g>
+<g data-card="Linux laptop">
+<rect x="850" y="290" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="320" font-size="20" font-weight="700" class="">Linux laptop</text>
+<text x="869" y="349" font-size="17" font-weight="400" class="">Pinned image + dedicated</text>
+<text x="869" y="372" font-size="17" font-weight="400" class="">research disk</text>
+</g>
+<g data-card="NAS">
+<rect x="850" y="410" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="440" font-size="20" font-weight="700" class="">NAS</text>
+<text x="869" y="469" font-size="17" font-weight="400" class="">Verified snapshots + result</text>
+<text x="869" y="492" font-size="17" font-weight="400" class="">backups</text>
+</g>
+<text x="40" y="579" font-size="17" font-weight="700" class="">HANDOFFS · data and artifacts</text>
+<text x="48" y="616" font-size="19" font-weight="600" class="">1  Release bundle  →  Oracle</text>
+<text x="655" y="616" font-size="17" font-weight="400" class="muted">ARM64 / systemd</text>
+<text x="48" y="659" font-size="19" font-weight="600" class="">2  Matching image  →  Linux laptop</text>
+<text x="655" y="659" font-size="17" font-weight="400" class="muted">AMD64 / isolated replay</text>
+<text x="48" y="702" font-size="19" font-weight="600" class="">3  Oracle quotes  →  Pi  →  NAS</text>
+<text x="655" y="702" font-size="17" font-weight="400" class="muted">Read-only archive + NAS verification</text>
+<text x="48" y="745" font-size="19" font-weight="600" class="">4  NAS snapshot  →  laptop  →  NAS</text>
+<text x="655" y="745" font-size="17" font-weight="400" class="muted">Research inputs + result receipts</text>
+<text x="40" y="807" font-size="17" font-weight="400" class="muted">Mac: review, operations and on-demand research. No scheduled compute role.</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<template id="runtime-en"><!-- diagram:runtime:en -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1040" viewBox="0 0 1200 1040" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · service and data flow</title>
+<desc id="description">Concurrent owners; arrows show specific handoffs, not one synchronous loop.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="1040" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · service and data flow</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">Concurrent owners; arrows show specific handoffs, not one synchronous loop.</text>
+<text x="40" y="132" font-size="17" font-weight="700" class="">01  INGESTION AND CONCURRENT CORE</text>
+<text x="40" y="427" font-size="17" font-weight="700" class="">02  DECISION COMMIT AND MANUAL NOTIFICATION</text>
+<text x="40" y="727" font-size="17" font-weight="700" class="">03  RESEARCH AND THE SEPARATE REPORT LANE</text>
+<path class="edge" d="M340,230 L450,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,230 L860,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,310 L1010,460" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,540 L750,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,540 L340,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M600,620 L600,760" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,840 L860,840" marker-end="url(#arrow)"/>
+<path class="edge" d="M500,310 L500,360 L20,360 L20,840 L40,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<path class="edge" d="M600,150 L600,110 L1180,110 L1180,840 L1160,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<text x="820" y="132" font-size="16" font-weight="400" class="muted">Normalized mirror → Unix IPC</text>
+<g data-card="Broker collectors">
+<rect x="40" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="180" font-size="20" font-weight="700" class="">Broker collectors</text>
+<text x="59" y="209" font-size="17" font-weight="400" class="">Schwab RTH / IBKR GTH</text>
+<text x="59" y="232" font-size="17" font-weight="400" class="">Independent sessions and</text>
+<text x="59" y="255" font-size="17" font-weight="400" class="">clocks</text>
+</g>
+<g data-card="Normalized data">
+<rect x="450" y="150" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="180" font-size="20" font-weight="700" class="">Normalized data</text>
+<text x="469" y="209" font-size="17" font-weight="400" class="">Append raw quotes, then</text>
+<text x="469" y="232" font-size="17" font-weight="400" class="">update latest state</text>
+<text x="469" y="255" font-size="17" font-weight="400" class="">Separate writes, not one</text>
+<text x="469" y="278" font-size="17" font-weight="400" class="">transaction</text>
+</g>
+<g data-card="Python Core">
+<rect x="860" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="180" font-size="20" font-weight="700" class="">Python Core</text>
+<text x="879" y="209" font-size="17" font-weight="400" class="">Concurrent samplers,</text>
+<text x="879" y="232" font-size="17" font-weight="400" class="">market-feature and shock</text>
+<text x="879" y="255" font-size="17" font-weight="400" class="">runners</text>
+</g>
+<g data-card="Final strategy decision">
+<rect x="860" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="490" font-size="20" font-weight="700" class="">Final strategy decision</text>
+<text x="879" y="519" font-size="17" font-weight="400" class="">build_strategy_decision</text>
+<text x="879" y="542" font-size="17" font-weight="400" class="">Facts → candidates →</text>
+<text x="879" y="565" font-size="17" font-weight="400" class="">gates</text>
+<text x="879" y="588" font-size="17" font-weight="400" class="">Manual-only authority</text>
+</g>
+<g data-card="Commit and publish">
+<rect x="450" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="490" font-size="20" font-weight="700" class="">Commit and publish</text>
+<text x="469" y="519" font-size="17" font-weight="400" class="">SQLite → decision JSON</text>
+<text x="469" y="542" font-size="17" font-weight="400" class="">Then enqueue event_id</text>
+<text x="469" y="565" font-size="17" font-weight="400" class="">Failure blocks READY</text>
+</g>
+<g data-card="Python Worker / Huey">
+<rect x="40" y="460" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="59" y="490" font-size="20" font-weight="700" class="">Python Worker / Huey</text>
+<text x="59" y="519" font-size="17" font-weight="400" class="">event_id → notification</text>
+<text x="59" y="542" font-size="17" font-weight="400" class="">tasks</text>
+<text x="59" y="565" font-size="17" font-weight="400" class="">Queue DB ≠ operational DB</text>
+<text x="59" y="588" font-size="17" font-weight="400" class="">Independent health alerts</text>
+</g>
+<g data-card="Research entry points">
+<rect x="40" y="760" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="790" font-size="20" font-weight="700" class="">Research entry points</text>
+<text x="59" y="819" font-size="17" font-weight="400" class="">Raw quotes + source clocks</text>
+<text x="59" y="842" font-size="17" font-weight="400" class="">Conditional live research</text>
+<text x="59" y="865" font-size="17" font-weight="400" class="">or isolated causal replay</text>
+<text x="59" y="888" font-size="17" font-weight="400" class="">No trade authority</text>
+</g>
+<g data-card="Desk Map export">
+<rect x="450" y="760" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="790" font-size="20" font-weight="700" class="">Desk Map export</text>
+<text x="469" y="819" font-size="17" font-weight="400" class="">Reuse committed decision</text>
+<text x="469" y="842" font-size="17" font-weight="400" class="">Recheck current-time</text>
+<text x="469" y="865" font-size="17" font-weight="400" class="">validity</text>
+<text x="469" y="888" font-size="17" font-weight="400" class="">desk_map_projection.v1</text>
+</g>
+<g data-card="Rust report + delivery">
+<rect x="860" y="760" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="790" font-size="20" font-weight="700" class="">Rust report + delivery</text>
+<text x="879" y="819" font-size="17" font-weight="400" class="">Bridge → core → report</text>
+<text x="879" y="842" font-size="17" font-weight="400" class="">Ledger / outbox / receipts</text>
+<text x="879" y="865" font-size="17" font-weight="400" class="">No broker sessions</text>
+<text x="879" y="888" font-size="17" font-weight="400" class="">No strategy leg selection</text>
+</g>
+<text x="40" y="973" font-size="17" font-weight="400" class="muted">Source map: the earlier HTML atlas + current source contracts. Dashed routes: quote files and IPC.</text>
+<text x="40" y="1006" font-size="17" font-weight="400" class="muted">Reports and optional research do not create another strategy authority. No automated orders.</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<template id="delivery-en"><!-- diagram:delivery:en -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="950" viewBox="0 0 1200 950" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · build, release and deployment</title>
+<desc id="description">One commit; native production packages and isolated research images.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="950" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · build, release and deployment</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">One commit; native production packages and isolated research images.</text>
+<text x="40" y="133" font-size="17" font-weight="700" class="">01  CLOUD DELIVERY</text>
+<text x="40" y="402" font-size="17" font-weight="700" class="">02  ORACLE · EXISTING SYSTEMD SERVICES</text>
+<text x="40" y="703" font-size="17" font-weight="700" class="">03  HOME · RESEARCH IMAGE</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,350 L20,350 L20,505 L40,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M20,505 L20,805 L40,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M300,505 L330,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M590,505 L620,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M880,505 L910,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,805 L450,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,805 L860,805" marker-end="url(#arrow)"/>
+<g data-card="Pull request + checks">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">Pull request + checks</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">Python + Rust tests</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">Native AMD64 / ARM64 checks</text>
+</g>
+<g data-card="Merge to master">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">Merge to master</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">Eligible mainline build</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">Validate packages and</text>
+<text x="469" y="260" font-size="17" font-weight="400" class="">images</text>
+</g>
+<g data-card="Publish artifacts">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">Publish artifacts</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">GitHub Releases + GHCR</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">Commit SHA +</text>
+<text x="879" y="260" font-size="17" font-weight="400" class="">checksums/digests</text>
+</g>
+<g data-card="Verify package">
+<rect x="40" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="455" font-size="20" font-weight="700" class="">Verify package</text>
+<text x="59" y="484" font-size="17" font-weight="400" class="">Commit + hash</text>
+<text x="59" y="507" font-size="17" font-weight="400" class="">Migrations + services</text>
+</g>
+<g data-card="Switch paths">
+<rect x="330" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="349" y="455" font-size="20" font-weight="700" class="">Switch paths</text>
+<text x="349" y="484" font-size="17" font-weight="400" class="">Stop existing writers</text>
+<text x="349" y="507" font-size="17" font-weight="400" class="">Activate native bundle</text>
+</g>
+<g data-card="Runtime checks">
+<rect x="620" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="639" y="455" font-size="20" font-weight="700" class="">Runtime checks</text>
+<text x="639" y="484" font-size="17" font-weight="400" class="">Stable processes</text>
+<text x="639" y="507" font-size="17" font-weight="400" class="">Advancing bridge health</text>
+</g>
+<g data-card="Keep or roll back">
+<rect x="910" y="425" width="260" height="160" rx="12" fill="#fff0eb" stroke="#a45139" stroke-width="1.4"/>
+<text x="929" y="455" font-size="20" font-weight="700" class="">Keep or roll back</text>
+<text x="929" y="484" font-size="17" font-weight="400" class="">Pass: retain release</text>
+<text x="929" y="507" font-size="17" font-weight="400" class="">Fail: previous binaries</text>
+</g>
+<text x="40" y="633" font-size="17" font-weight="400" class="muted">Host configuration, secrets and databases keep their owners. Binary rollback does not undo database writes.</text>
+<g data-card="Load matching image">
+<rect x="40" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="755" font-size="20" font-weight="700" class="">Load matching image</text>
+<text x="59" y="784" font-size="17" font-weight="400" class="">Pinned AMD64 identity</text>
+<text x="59" y="807" font-size="17" font-weight="400" class="">No production credentials</text>
+</g>
+<g data-card="Prepare research disk">
+<rect x="450" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="755" font-size="20" font-weight="700" class="">Prepare research disk</text>
+<text x="469" y="784" font-size="17" font-weight="400" class="">Verified snapshot + policy</text>
+<text x="469" y="807" font-size="17" font-weight="400" class="">Read-only inputs</text>
+</g>
+<g data-card="Isolated replay">
+<rect x="860" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="755" font-size="20" font-weight="700" class="">Isolated replay</text>
+<text x="879" y="784" font-size="17" font-weight="400" class="">No network</text>
+<text x="879" y="807" font-size="17" font-weight="400" class="">Bounded CPU and memory</text>
+</g>
+<text x="40" y="925" font-size="17" font-weight="400" class="muted">Documentation-only master changes do not trigger Oracle deployment.</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<template id="research-en"><!-- diagram:research:en -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="995" viewBox="0 0 1200 995" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · archive and research lifecycle</title>
+<desc id="description">Daily archive, pinned weekly replay, then verified result retention.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="995" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · archive and research lifecycle</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">Daily archive, pinned weekly replay, then verified result retention.</text>
+<text x="40" y="135" font-size="17" font-weight="700" class="">01  DAILY · WEEKDAYS 17:30 NEW YORK</text>
+<text x="40" y="425" font-size="17" font-weight="700" class="">02  WEEKLY · SATURDAY 10:00 SHANGHAI</text>
+<text x="40" y="715" font-size="17" font-weight="700" class="">03  RESULTS · AFTER SUCCESS OR FAILURE</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,445" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,525 L750,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,525 L340,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M190,605 L190,650 L20,650 L20,815 L40,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,815 L450,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,815 L860,815" marker-end="url(#arrow)"/>
+<g data-card="Oracle partitions">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">Oracle partitions</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">Closed + verified Parquet</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">Read-only transfer endpoint</text>
+</g>
+<g data-card="Pi archive worker">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">Pi archive worker</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">Stream to verified NAS</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">mount</text>
+<text x="469" y="260" font-size="17" font-weight="400" class="">No SD-card staging</text>
+</g>
+<g data-card="NAS verification">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">NAS verification</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">Reread objects; verify</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">hashes</text>
+<text x="879" y="260" font-size="17" font-weight="400" class="">Publish immutable snapshot</text>
+</g>
+<g data-card="Select fixed snapshot">
+<rect x="860" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="475" font-size="20" font-weight="700" class="">Select fixed snapshot</text>
+<text x="879" y="504" font-size="17" font-weight="400" class="">Immutable input manifest</text>
+<text x="879" y="527" font-size="17" font-weight="400" class="">Safe archived policy</text>
+<text x="879" y="550" font-size="17" font-weight="400" class="">settings</text>
+</g>
+<g data-card="Pin laptop inputs">
+<rect x="450" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="475" font-size="20" font-weight="700" class="">Pin laptop inputs</text>
+<text x="469" y="504" font-size="17" font-weight="400" class="">Research disk + verified</text>
+<text x="469" y="527" font-size="17" font-weight="400" class="">data</text>
+<text x="469" y="550" font-size="17" font-weight="400" class="">Matching policy and code</text>
+<text x="469" y="573" font-size="17" font-weight="400" class="">image</text>
+</g>
+<g data-card="Current-strategy replay">
+<rect x="40" y="445" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="475" font-size="20" font-weight="700" class="">Current-strategy replay</text>
+<text x="59" y="504" font-size="17" font-weight="400" class="">Causal quotes; no network</text>
+<text x="59" y="527" font-size="17" font-weight="400" class="">RTH / GTH kept separate</text>
+</g>
+<g data-card="Local run evidence">
+<rect x="40" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="765" font-size="20" font-weight="700" class="">Local run evidence</text>
+<text x="59" y="794" font-size="17" font-weight="400" class="">Reports + logs + manifests</text>
+<text x="59" y="817" font-size="17" font-weight="400" class="">Preserve gaps and failed</text>
+<text x="59" y="840" font-size="17" font-weight="400" class="">outcomes</text>
+</g>
+<g data-card="NAS result backup">
+<rect x="450" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="765" font-size="20" font-weight="700" class="">NAS result backup</text>
+<text x="469" y="794" font-size="17" font-weight="400" class="">Independent file</text>
+<text x="469" y="817" font-size="17" font-weight="400" class="">verification</text>
+<text x="469" y="840" font-size="17" font-weight="400" class="">Retry pending backups</text>
+</g>
+<g data-card="Receipt + local copy">
+<rect x="860" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="765" font-size="20" font-weight="700" class="">Receipt + local copy</text>
+<text x="879" y="794" font-size="17" font-weight="400" class="">Record verified retention</text>
+<text x="879" y="817" font-size="17" font-weight="400" class="">No new Oracle deletion rule</text>
+</g>
+<text x="40" y="951" font-size="17" font-weight="400" class="muted">The Pi schedules; the laptop computes. Later backup success does not rewrite a failed compute run.</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<template id="system-overview-zh-CN"><!-- diagram:system-overview:zh-CN -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="840" viewBox="0 0 1200 840" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 环境分工与交接</title>
+<desc id="description">上方说明各环境职责，下方单独列出四条跨环境交接路径。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="840" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 环境分工与交接</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">上方说明各环境职责，下方单独列出四条跨环境交接路径。</text>
+<text x="40" y="130" font-size="18" font-weight="700" class="">01  云端</text>
+<rect x="40" y="150" width="320" height="380" rx="16" fill="#eef4ff"/>
+<text x="440" y="130" font-size="18" font-weight="700" class="">02  ORACLE</text>
+<rect x="440" y="150" width="320" height="380" rx="16" fill="#eaf7f2"/>
+<text x="840" y="130" font-size="18" font-weight="700" class="">03  家庭</text>
+<rect x="840" y="150" width="320" height="380" rx="16" fill="#f2edfc"/>
+<g data-card="开发者 / Agent">
+<rect x="50" y="170" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="200" font-size="20" font-weight="700" class="">开发者 / Agent</text>
+<text x="69" y="229" font-size="17" font-weight="400" class="">修改代码与审阅 PR</text>
+</g>
+<g data-card="GitHub Actions">
+<rect x="50" y="290" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="320" font-size="20" font-weight="700" class="">GitHub Actions</text>
+<text x="69" y="349" font-size="17" font-weight="400" class="">测试并构建 AMD64 + ARM64</text>
+</g>
+<g data-card="Releases + GHCR">
+<rect x="50" y="410" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="440" font-size="20" font-weight="700" class="">Releases + GHCR</text>
+<text x="69" y="469" font-size="17" font-weight="400" class="">同一提交、原生包与容器镜像</text>
+</g>
+<g data-card="生产服务">
+<rect x="450" y="170" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="200" font-size="20" font-weight="700" class="">生产服务</text>
+<text x="469" y="229" font-size="17" font-weight="400" class="">systemd 管理既有 Python +</text>
+<text x="469" y="252" font-size="17" font-weight="400" class="">Rust</text>
+</g>
+<g data-card="在线状态">
+<rect x="450" y="290" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="320" font-size="20" font-weight="700" class="">在线状态</text>
+<text x="469" y="349" font-size="17" font-weight="400" class="">行情、运行数据库与报告账本</text>
+</g>
+<g data-card="运行职责">
+<rect x="450" y="410" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="440" font-size="20" font-weight="700" class="">运行职责</text>
+<text x="469" y="469" font-size="17" font-weight="400" class="">采集、决策、报告与通知</text>
+</g>
+<g data-card="树莓派">
+<rect x="850" y="170" width="300" height="105" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="869" y="200" font-size="20" font-weight="700" class="">树莓派</text>
+<text x="869" y="229" font-size="17" font-weight="400" class="">Prefect 调度 + 归档传输</text>
+</g>
+<g data-card="Linux 笔记本">
+<rect x="850" y="290" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="320" font-size="20" font-weight="700" class="">Linux 笔记本</text>
+<text x="869" y="349" font-size="17" font-weight="400" class="">固定镜像 + 专用研究盘</text>
+</g>
+<g data-card="NAS">
+<rect x="850" y="410" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="440" font-size="20" font-weight="700" class="">NAS</text>
+<text x="869" y="469" font-size="17" font-weight="400" class="">核验快照 + 结果备份</text>
+</g>
+<text x="40" y="579" font-size="17" font-weight="700" class="">交接路径 · 数据与产物</text>
+<text x="48" y="616" font-size="19" font-weight="600" class="">1  发布原生包  →  Oracle</text>
+<text x="655" y="616" font-size="17" font-weight="400" class="muted">ARM64 / systemd</text>
+<text x="48" y="659" font-size="19" font-weight="600" class="">2  同提交镜像  →  Linux 笔记本</text>
+<text x="655" y="659" font-size="17" font-weight="400" class="muted">AMD64 / 隔离回放</text>
+<text x="48" y="702" font-size="19" font-weight="600" class="">3  Oracle 行情  →  树莓派  →  NAS</text>
+<text x="655" y="702" font-size="17" font-weight="400" class="muted">只读归档 + NAS 本机核验</text>
+<text x="48" y="745" font-size="19" font-weight="600" class="">4  NAS 快照  →  笔记本  →  NAS</text>
+<text x="655" y="745" font-size="17" font-weight="400" class="muted">研究输入 + 结果回执</text>
+<text x="40" y="807" font-size="17" font-weight="400" class="muted">Mac：审阅、运维和按需研究；不承担定时计算 Worker 职责。</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<template id="runtime-zh-CN"><!-- diagram:runtime:zh-CN -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1040" viewBox="0 0 1200 1040" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 服务与数据流转</title>
+<desc id="description">各 owner 并发运行；箭头表示具体交接，不表示一个同步大循环。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="1040" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 服务与数据流转</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">各 owner 并发运行；箭头表示具体交接，不表示一个同步大循环。</text>
+<text x="40" y="132" font-size="17" font-weight="700" class="">01  采集与并发 Core</text>
+<text x="40" y="427" font-size="17" font-weight="700" class="">02  决策提交与人工候选通知</text>
+<text x="40" y="727" font-size="17" font-weight="700" class="">03  研究与独立报告路径</text>
+<path class="edge" d="M340,230 L450,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,230 L860,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,310 L1010,460" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,540 L750,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,540 L340,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M600,620 L600,760" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,840 L860,840" marker-end="url(#arrow)"/>
+<path class="edge" d="M500,310 L500,360 L20,360 L20,840 L40,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<path class="edge" d="M600,150 L600,110 L1180,110 L1180,840 L1160,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<text x="820" y="132" font-size="16" font-weight="400" class="muted">标准行情镜像 → Unix IPC</text>
+<g data-card="券商采集器">
+<rect x="40" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="180" font-size="20" font-weight="700" class="">券商采集器</text>
+<text x="59" y="209" font-size="17" font-weight="400" class="">Schwab RTH / IBKR GTH</text>
+<text x="59" y="232" font-size="17" font-weight="400" class="">独立会话与字段时钟</text>
+</g>
+<g data-card="标准化数据">
+<rect x="450" y="150" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="180" font-size="20" font-weight="700" class="">标准化数据</text>
+<text x="469" y="209" font-size="17" font-weight="400" class="">先追加 raw，再更新 latest</text>
+<text x="469" y="232" font-size="17" font-weight="400" class="">两次独立写入，不是同一事务</text>
+</g>
+<g data-card="Python Core">
+<rect x="860" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="180" font-size="20" font-weight="700" class="">Python Core</text>
+<text x="879" y="209" font-size="17" font-weight="400" class="">采样、市场特征与 shock runner</text>
+<text x="879" y="232" font-size="17" font-weight="400" class="">并发运行</text>
+</g>
+<g data-card="最终策略决策">
+<rect x="860" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="490" font-size="20" font-weight="700" class="">最终策略决策</text>
+<text x="879" y="519" font-size="17" font-weight="400" class="">build_strategy_decision</text>
+<text x="879" y="542" font-size="17" font-weight="400" class="">事实 → 候选 → 门控</text>
+<text x="879" y="565" font-size="17" font-weight="400" class="">仅人工候选授权</text>
+</g>
+<g data-card="提交 → 导出 → 入队">
+<rect x="450" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="490" font-size="20" font-weight="700" class="">提交 → 导出 → 入队</text>
+<text x="469" y="519" font-size="17" font-weight="400" class="">Python SQLite → 决策 JSON</text>
+<text x="469" y="542" font-size="17" font-weight="400" class="">随后入队通知事件</text>
+<text x="469" y="565" font-size="17" font-weight="400" class="">持久化失败阻止 READY</text>
+</g>
+<g data-card="Python Worker / Huey">
+<rect x="40" y="460" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="59" y="490" font-size="20" font-weight="700" class="">Python Worker / Huey</text>
+<text x="59" y="519" font-size="17" font-weight="400" class="">event_id → 通知任务</text>
+<text x="59" y="542" font-size="17" font-weight="400" class="">队列库 ≠ 运行库</text>
+<text x="59" y="565" font-size="17" font-weight="400" class="">独立健康告警</text>
+</g>
+<g data-card="研究入口">
+<rect x="40" y="760" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="790" font-size="20" font-weight="700" class="">研究入口</text>
+<text x="59" y="819" font-size="17" font-weight="400" class="">原始报价 + 可用时间</text>
+<text x="59" y="842" font-size="17" font-weight="400" class="">按条件实时研究或离线回放</text>
+<text x="59" y="865" font-size="17" font-weight="400" class="">不具有交易授权</text>
+</g>
+<g data-card="Desk Map 导出">
+<rect x="450" y="760" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="790" font-size="20" font-weight="700" class="">Desk Map 导出</text>
+<text x="469" y="819" font-size="17" font-weight="400" class="">复用已提交决策</text>
+<text x="469" y="842" font-size="17" font-weight="400" class="">重验当前时点有效性</text>
+<text x="469" y="865" font-size="17" font-weight="400" class="">desk_map_projection.v1</text>
+</g>
+<g data-card="Rust 报告与投递">
+<rect x="860" y="760" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="790" font-size="20" font-weight="700" class="">Rust 报告与投递</text>
+<text x="879" y="819" font-size="17" font-weight="400" class="">Bridge → core → report</text>
+<text x="879" y="842" font-size="17" font-weight="400" class="">账本 → 投递 → 回执</text>
+<text x="879" y="865" font-size="17" font-weight="400" class="">不连接券商、不选策略腿</text>
+</g>
+<text x="40" y="973" font-size="17" font-weight="400" class="muted">参考：早期 HTML 图册 + 现行源码合同。虚线表示报价文件与 IPC 交接。</text>
+<text x="40" y="1006" font-size="17" font-weight="400" class="muted">报告与可选研究不产生第二个策略授权出口；没有自动下单。</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<template id="delivery-zh-CN"><!-- diagram:delivery:zh-CN -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="950" viewBox="0 0 1200 950" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 构建、发布与部署</title>
+<desc id="description">同一提交标识：生产原生包与隔离研究镜像。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="950" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 构建、发布与部署</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">同一提交标识：生产原生包与隔离研究镜像。</text>
+<text x="40" y="133" font-size="17" font-weight="700" class="">01  云端交付</text>
+<text x="40" y="402" font-size="17" font-weight="700" class="">02  ORACLE · 既有 SYSTEMD 服务</text>
+<text x="40" y="703" font-size="17" font-weight="700" class="">03  家庭 · 研究镜像</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,350 L20,350 L20,505 L40,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M20,505 L20,805 L40,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M300,505 L330,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M590,505 L620,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M880,505 L910,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,805 L450,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,805 L860,805" marker-end="url(#arrow)"/>
+<g data-card="PR 与必需检查">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">PR 与必需检查</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">Python + Rust 测试</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">原生 AMD64 / ARM64 检查</text>
+</g>
+<g data-card="合并至 master">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">合并至 master</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">符合路径条件的主线构建</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">验证运行包与镜像</text>
+</g>
+<g data-card="发布产物">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">发布产物</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">GitHub Releases + GHCR</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">提交 SHA + 校验值 / digest</text>
+</g>
+<g data-card="校验运行包">
+<rect x="40" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="455" font-size="20" font-weight="700" class="">校验运行包</text>
+<text x="59" y="484" font-size="17" font-weight="400" class="">提交 + 哈希</text>
+<text x="59" y="507" font-size="17" font-weight="400" class="">迁移 + 服务</text>
+</g>
+<g data-card="切换程序路径">
+<rect x="330" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="349" y="455" font-size="20" font-weight="700" class="">切换程序路径</text>
+<text x="349" y="484" font-size="17" font-weight="400" class="">停止既有写入方</text>
+<text x="349" y="507" font-size="17" font-weight="400" class="">启用原生运行包</text>
+</g>
+<g data-card="运行验收">
+<rect x="620" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="639" y="455" font-size="20" font-weight="700" class="">运行验收</text>
+<text x="639" y="484" font-size="17" font-weight="400" class="">进程稳定</text>
+<text x="639" y="507" font-size="17" font-weight="400" class="">Bridge 健康记录推进</text>
+</g>
+<g data-card="保留或回滚">
+<rect x="910" y="425" width="260" height="160" rx="12" fill="#fff0eb" stroke="#a45139" stroke-width="1.4"/>
+<text x="929" y="455" font-size="20" font-weight="700" class="">保留或回滚</text>
+<text x="929" y="484" font-size="17" font-weight="400" class="">通过：保留新版本</text>
+<text x="929" y="507" font-size="17" font-weight="400" class="">失败：恢复旧程序</text>
+</g>
+<text x="40" y="633" font-size="17" font-weight="400" class="muted">主机配置、凭据与数据库保持原归属；程序回滚不会撤销数据库写入。</text>
+<g data-card="加载同版本镜像">
+<rect x="40" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="755" font-size="20" font-weight="700" class="">加载同版本镜像</text>
+<text x="59" y="784" font-size="17" font-weight="400" class="">固定 AMD64 镜像身份</text>
+<text x="59" y="807" font-size="17" font-weight="400" class="">不含生产凭据</text>
+</g>
+<g data-card="准备研究盘">
+<rect x="450" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="755" font-size="20" font-weight="700" class="">准备研究盘</text>
+<text x="469" y="784" font-size="17" font-weight="400" class="">已核验快照 + 策略配置</text>
+<text x="469" y="807" font-size="17" font-weight="400" class="">只读输入</text>
+</g>
+<g data-card="隔离回放">
+<rect x="860" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="755" font-size="20" font-weight="700" class="">隔离回放</text>
+<text x="879" y="784" font-size="17" font-weight="400" class="">断网</text>
+<text x="879" y="807" font-size="17" font-weight="400" class="">CPU 与内存限额</text>
+</g>
+<text x="40" y="925" font-size="17" font-weight="400" class="muted">主线纯文档变更不会触发 Oracle 部署。</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<template id="research-zh-CN"><!-- diagram:research:zh-CN -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="995" viewBox="0 0 1200 995" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 归档与研究生命周期</title>
+<desc id="description">每日增量归档，固定快照周回放，结果核验后保存。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="995" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 归档与研究生命周期</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">每日增量归档，固定快照周回放，结果核验后保存。</text>
+<text x="40" y="135" font-size="17" font-weight="700" class="">01  日归档 · 工作日美东 17:30</text>
+<text x="40" y="425" font-size="17" font-weight="700" class="">02  周研究 · 周六北京时间 10:00</text>
+<text x="40" y="715" font-size="17" font-weight="700" class="">03  结果保存 · 完成或失败后</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,445" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,525 L750,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,525 L340,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M190,605 L190,650 L20,650 L20,815 L40,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,815 L450,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,815 L860,815" marker-end="url(#arrow)"/>
+<g data-card="Oracle 报价分区">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">Oracle 报价分区</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">已关闭 + 已核验 Parquet</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">只读传输接口</text>
+</g>
+<g data-card="树莓派归档 Worker">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">树莓派归档 Worker</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">流式写入已核验 NAS 挂载</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">不暂存到存储卡</text>
+</g>
+<g data-card="NAS 本机核验">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">NAS 本机核验</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">重读对象并核验哈希</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">发布不可变快照</text>
+</g>
+<g data-card="选择固定快照">
+<rect x="860" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="475" font-size="20" font-weight="700" class="">选择固定快照</text>
+<text x="879" y="504" font-size="17" font-weight="400" class="">不可变输入清单</text>
+<text x="879" y="527" font-size="17" font-weight="400" class="">安全归档策略配置</text>
+</g>
+<g data-card="固定笔记本输入">
+<rect x="450" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="475" font-size="20" font-weight="700" class="">固定笔记本输入</text>
+<text x="469" y="504" font-size="17" font-weight="400" class="">研究盘 + 已核验数据</text>
+<text x="469" y="527" font-size="17" font-weight="400" class="">匹配策略配置与代码镜像</text>
+</g>
+<g data-card="当前策略回放">
+<rect x="40" y="445" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="475" font-size="20" font-weight="700" class="">当前策略回放</text>
+<text x="59" y="504" font-size="17" font-weight="400" class="">因果报价；断网执行</text>
+<text x="59" y="527" font-size="17" font-weight="400" class="">RTH / GTH 分开</text>
+</g>
+<g data-card="本地运行证据">
+<rect x="40" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="765" font-size="20" font-weight="700" class="">本地运行证据</text>
+<text x="59" y="794" font-size="17" font-weight="400" class="">报告 + 日志 + 清单</text>
+<text x="59" y="817" font-size="17" font-weight="400" class="">保留缺口与失败结果</text>
+</g>
+<g data-card="NAS 结果备份">
+<rect x="450" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="765" font-size="20" font-weight="700" class="">NAS 结果备份</text>
+<text x="469" y="794" font-size="17" font-weight="400" class="">独立文件核验</text>
+<text x="469" y="817" font-size="17" font-weight="400" class="">待备份结果自动补传</text>
+</g>
+<g data-card="回执 + 本地副本">
+<rect x="860" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="765" font-size="20" font-weight="700" class="">回执 + 本地副本</text>
+<text x="879" y="794" font-size="17" font-weight="400" class="">记录核验完成</text>
+<text x="879" y="817" font-size="17" font-weight="400" class="">不新增 Oracle 删除规则</text>
+</g>
+<text x="40" y="951" font-size="17" font-weight="400" class="muted">树莓派负责调度，笔记本负责计算；后续备份成功不改写计算任务的历史失败状态。</text>
+</svg>
+<!-- end-diagram -->
+</template>
+<script id="content" type="application/json">{"en": {"eyebrow": "SPX SPARK / ARCHITECTURE", "title": "Services, data and delivery — separate views.", "intro": "A source-linked guide to the actual owners and handoffs. Read one flow at a time; the full historical atlas remains available below.", "baseline": "Current guide: 2026-10-17 · checked against source 97a94f8. Historical atlas: 97fc378. Neither page is a live health dashboard.", "viewLabel": "Choose a view", "overview": "Environments", "runtime": "Service flow", "delivery": "CI/CD", "research": "Archive & replay", "zoomOut": "Zoom out", "zoomIn": "Zoom in", "reset": "Fit", "hint": "Use + for details. Scroll inside the diagram on narrow screens. Each view has its own canvas.", "flowHeading": "Follow the service handoffs", "flowIntro": "Collectors, Core, Worker and Rust are concurrent owners. Expand a step to see the persistence boundary and source references.", "searchLabel": "Filter the walkthrough", "searchPlaceholder": "Search collectors, commit, Rust, archive…", "sources": "Source references", "referenceHeading": "The original HTML atlas", "referenceText": "Preserved original, in Chinese: 24 call flows, 72 key data-dictionary entries, module/type indexes, configuration and storage maps. Its links target the historical 97fc378 revision; optional paths and tracked units are not proof of current enablement.", "download": "Download original HTML", "viewSource": "View source and provenance", "downloadGuide": "Download this guide", "githubNote": "GitHub shows HTML source. Download the file and open it in a browser for the interactive view. Both HTML files work offline; only source links need a network.", "limitsHeading": "Reading boundaries", "limits": "No automated orders. Queue acceptance, report generation and delivery receipts are different states. Source-code availability is not deployment evidence. Replay is not an exact reconstruction of historical fills or proven performance.", "empty": "No matching steps."}, "zh-CN": {"eyebrow": "SPX SPARK / 架构", "title": "服务、数据与交付，分开看清楚。", "intro": "按源码核对 owner 与交接关系，每次只看一条流程；完整历史图册也一并保留。", "baseline": "现行说明：2026-10-17，核对源码 97a94f8。历史图册：97fc378。两者都不是实时健康监控。", "viewLabel": "选择视图", "overview": "环境分工", "runtime": "服务流转", "delivery": "CI/CD", "research": "归档与回放", "zoomOut": "缩小", "zoomIn": "放大", "reset": "适应宽度", "hint": "用 + 放大细节，窄屏可在图内滚动；每个视图独立显示。", "flowHeading": "沿服务交接阅读", "flowIntro": "采集器、Core、Worker 和 Rust 并发运行。展开步骤可查看持久化边界和源码入口。", "searchLabel": "筛选流程说明", "searchPlaceholder": "搜索采集、提交、Rust、归档…", "sources": "源码入口", "referenceHeading": "原始 HTML 架构图册", "referenceText": "原始中文文件完整保留：24 条调用流、72 项关键数据字典、模块/类型索引、配置与存储关系。链接固定到历史提交 97fc378，可选路径或服务定义不代表当前已经启用。", "download": "下载原始 HTML", "viewSource": "查看源码与来源说明", "downloadGuide": "下载本页", "githubNote": "GitHub 显示 HTML 源码。下载文件后用浏览器打开即可交互；两份 HTML 均可离线阅读，只有源码链接需要联网。", "limitsHeading": "阅读边界", "limits": "没有自动下单。入队成功、报告生成和投递回执是不同状态；代码存在不代表已经部署，回放不等于历史真实成交的完整还原或已证明盈利。", "empty": "没有匹配的流程。"}}</script>
+<script id="flow-data" type="application/json">[{"en": ["01 · Startup and configuration", "Configuration is composed at process startup. Python Core starts concurrent samplers, market-feature and shock runners, plus configuration-gated tasks. A service definition or code path does not prove a task is enabled.", "Runtime control files and explicit reload paths have their own readers; there is no implied global live configuration reload."], "zh": ["01 · 启动与配置", "配置在进程启动时组合。Python Core 并发启动采样、市场特征、shock runner 及受开关控制的任务。存在服务定义或代码路径不代表已经启用。", "运行控制文件和显式重载各有读取方，不存在隐含的全局配置热更新。"], "sources": ["src/spx_spark/core_main.py", "src/spx_spark/app_settings.py", "src/spx_spark/settings/loader.py"]}, {"en": ["02 · Collectors and normalized observations", "Schwab and IBKR own their broker sessions, contracts, quotas, and field clocks. Provider snapshots become normalized quotes before persistence. Exact-leg demand and subscription acknowledgements are not proof of fresh executable quotes.", "persist_provider_snapshot appends raw quotes before updating latest state. The raw history and latest projection are separate writes, not one cross-store transaction."], "zh": ["02 · 采集器与标准化观测", "Schwab 和 IBKR 各自负责券商会话、合约、配额与字段时钟。Provider 快照先转换为标准报价再持久化。Exact-leg 需求或订阅确认不代表执行报价已经新鲜。", "persist_provider_snapshot 先追加 raw 行情，再更新 latest。原始历史与最新投影是独立写入，不是跨存储事务。"], "sources": ["src/spx_spark/provider_adapter.py", "src/spx_spark/marketdata.py", "src/spx_spark/storage.py"]}, {"en": ["03 · Features and parallel analysis", "The market-feature runner reads normalized state and builds market/option evidence. The shock runner has its own loop and projected state; samplers run concurrently. These are not successive stages in one broker-to-notification loop.", "Optional context and research projections are advisory. Some research can run in real time; the weekend historical workload is separately isolated on the home laptop."], "zh": ["03 · 特征与并行分析", "市场特征 runner 读取标准状态，构建市场与期权证据。Shock runner 有独立循环和状态投影，采样任务同时运行，并非单个“券商到通知”大循环中的串行步骤。", "可选背景和研究投影只提供参考；部分研究可实时运行，周末历史计算则单独放在家庭笔记本。"], "sources": ["src/spx_spark/core_main.py", "src/spx_spark/application/market_features/service.py", "src/spx_spark/application/shock/service.py"]}, {"en": ["04 · Candidate authorization and commit", "build_strategy_decision combines facts and regime evidence, constructs and ranks candidates, and applies data, quote, policy and risk gates. It is the sole manual-candidate authorization point.", "The current feature service persists the decision, exports strategy_decision.json, then enqueues notifications. Persistence failure blocks READY. Optional explanatory context follows this boundary; multiple writes are not an atomic transaction."], "zh": ["04 · 候选授权与提交", "build_strategy_decision 组合事实与环境证据，构造和排序候选，执行数据、报价、策略和风险门控。它是唯一人工候选授权出口。", "现行特征服务先持久化决策，再导出 strategy_decision.json，随后入队通知。持久化失败阻止 READY；可选解释背景在此边界之后处理，多次写入不等于原子事务。"], "sources": ["src/spx_spark/application/order_map/strategy_select.py", "src/spx_spark/application/market_features/service.py", "src/spx_spark/infrastructure/operational_db.py"]}, {"en": ["05 · Python notifications and independent monitoring", "Python/Huey consumes notification work associated with event_id. Its queue database and the operational decision/notification database have different responsibilities. Enqueue acceptance is not a delivery receipt or an order.", "The existing Worker also owns scheduled maintenance and direct fault/recovery alerts. This monitoring path is independent of the Rust report-delivery path."], "zh": ["05 · Python 通知与独立监测", "Python/Huey 处理关联 event_id 的通知任务。队列数据库与运行决策/通知数据库职责不同；入队成功不等于送达回执，更不等于下单。", "既有 Worker 还负责定时维护及直接故障/恢复提醒，该监测路径独立于 Rust 报告投递。"], "sources": ["src/spx_spark/application/order_map/delivery.py", "src/spx_spark/infrastructure/jobs.py", "docs/notification-architecture.md"]}, {"en": ["06 · Desk Map and the Rust report lane", "Python Desk Map preparation reuses the committed strategy decision and rechecks current-time validity. The bridge consumes bounded normalized quote mirrors and desk_map_projection.v1; the complete Python strategy_decision does not cross it.", "Rust bridge, core, ledger, report and delivery retain typed readiness, scheduled/recovery reports, outbox state and per-target receipts. Rust neither opens broker sessions nor selects Python strategy legs. Reports do not grant new trade permission."], "zh": ["06 · Desk Map 与 Rust 报告路径", "Python Desk Map 复用已提交策略决策，并重验当前时间有效性。Bridge 消费有界标准报价镜像与 desk_map_projection.v1，不传递完整 Python strategy_decision。", "Rust bridge、core、ledger、report 和 delivery 保留类型化就绪判断、定时/恢复报告、outbox 和各目标回执；不连接券商，也不为 Python 策略选腿。报告不产生新交易权限。"], "sources": ["src/spx_spark/application/order_map/desk_projection_export.py", "contracts/README.md", "rust/docs/ARCHITECTURE.md", "docs/notification-architecture.md"]}, {"en": ["07 · Conditional research and model artifacts", "Stock/LEAPS scans, HMM context, scenario analysis and offline calibration have their own entry points and configuration gates. Shared data infrastructure is distinct from SPX candidate authorization.", "An available research artifact is not an automatically promoted model or proof of profitability. The historical atlas includes additional optional paths and a branch comparison; read its pinned revision and scope before interpreting them."], "zh": ["07 · 条件研究与模型产物", "股票/LEAPS 扫描、HMM 背景、情景分析与离线校准各有入口和配置门控。共享数据基础设施与 SPX 候选授权是不同职责。", "存在研究产物不等于模型自动推广，也不是盈利证明。历史 HTML 还包含其他可选路径和分支对照，应先核对固定版本与范围。"], "sources": ["module-architecture.md", "docs/monorepo-layout.md", "docs/architecture-simplification-execution-plan-v1.md"]}, {"en": ["08 · Archive, weekly replay and retention", "The Pi schedules incremental transfer of closed, verified Oracle quote partitions to NAS. NAS rereads hashes before publishing a snapshot. The laptop pins data, safe policy settings and a matching image, then runs isolated current-strategy replay.", "Reports, logs and lineage are verified on NAS after the run. Historical strategy cards and NO_TRADE records cannot select samples. Replay is counterfactual research; archive success does not introduce a new Oracle deletion policy."], "zh": ["08 · 归档、周回放与结果保存", "树莓派调度 Oracle 已关闭、已核验行情分区的增量传输；NAS 重读哈希后发布快照。笔记本固定数据、安全策略配置与同版本镜像，隔离回放当前策略。", "任务结束后在 NAS 核验报告、日志与来源清单。不能用历史策略卡或 NO_TRADE 记录筛选样本；回放是反事实研究，归档成功不新增 Oracle 删除规则。"], "sources": ["docs/architecture/README.md", "src/spx_spark/data_platform/lake/compact.py", "src/spx_spark/data_platform/replay_artifact.py"]}]</script>
+<script>
+'use strict';
+const content=JSON.parse(document.getElementById('content').textContent);
+const flows=JSON.parse(document.getElementById('flow-data').textContent);
+let lang='en',view='system-overview',zoom=1;
+const diagram=document.getElementById('diagram');
+function showDiagram(){diagram.replaceChildren(document.getElementById(view+'-'+lang).content.cloneNode(true));diagram.querySelector('svg').style.width=zoom===1?'100%':(Math.max(diagram.clientWidth-40,720)*zoom)+'px';document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));}
+function showFlows(){const host=document.getElementById('flows');host.replaceChildren();const query=document.getElementById('filter').value.toLowerCase();flows.forEach(f=>{if(![...f.en,...f.zh,...f.sources].join(' ').toLowerCase().includes(query))return;const d=document.createElement('details');const summary=document.createElement('summary');summary.textContent=f[lang==='en'?'en':'zh'][0];d.append(summary);const body=document.createElement('div');body.className='flow-body';f[lang==='en'?'en':'zh'].slice(1).forEach(text=>{const p=document.createElement('p');p.textContent=text;body.append(p);});const sources=document.createElement('div');sources.className='sources';const label=document.createElement('span');label.textContent=content[lang].sources+':';sources.append(label);f.sources.forEach(path=>{const a=document.createElement('a');a.textContent=path;a.href='https://github.com/hzy-hits/SpxOpDaily/blob/97a94f8220b65d498a18d421c2e4b4cd3ba581de/'+path;a.target='_blank';a.rel='noopener noreferrer';sources.append(a);});body.append(sources);d.append(body);host.append(d);});if(!host.children.length){const p=document.createElement('p');p.className='empty';p.textContent=content[lang].empty;host.append(p);}}
+function setLanguage(value){lang=value;document.documentElement.lang=lang;document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=content[lang][el.dataset.i18n]);document.getElementById('filter').placeholder=content[lang].searchPlaceholder;['en','zh-CN'].forEach(id=>document.getElementById(id).setAttribute('aria-pressed',String(id===lang)));showDiagram();showFlows();}
+['en','zh-CN'].forEach(id=>document.getElementById(id).addEventListener('click',()=>setLanguage(id)));
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;zoom=1;showDiagram();}));
+document.getElementById('in').addEventListener('click',()=>{zoom=Math.min(3,zoom+0.25);showDiagram();});
+document.getElementById('out').addEventListener('click',()=>{zoom=Math.max(1,zoom-0.25);showDiagram();});
+document.getElementById('fit').addEventListener('click',()=>{zoom=1;showDiagram();});
+document.getElementById('filter').addEventListener('input',showFlows);
+setLanguage('en');
+</script></body></html>

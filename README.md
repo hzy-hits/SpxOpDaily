@@ -11,6 +11,7 @@ All candidates require human decisions: `automatic_ordering=false`, with no live
 or paper order execution.
 
 [Architecture & diagrams](docs/architecture/README.md) ·
+[Interactive HTML guide](docs/architecture/service-flow.html) ·
 [Deployment](docs/headless-deployment.md#cloud-delivery-cutover-2026-10-17) ·
 [Data capabilities](docs/market-data-capability-matrix.md) ·
 [Document catalog](docs/README.md#document-catalog) · [Contributor rules](AGENTS.md)
@@ -45,6 +46,23 @@ and research paths; it is not a live health dashboard.
 | Linux research laptop | Replay and backtests using a pinned AMD64 container and the dedicated `/srv/research` disk |
 | NAS | Verified quote snapshots, manifests, research outputs, and backup receipts |
 | Mac | Review, operations, and on-demand research; not a registered scheduled worker |
+
+### Service and data flow
+
+The collectors, Python Core, Python Worker, and Rust report lane have separate
+owners. Core runs concurrent samplers, market-feature and shock tasks; the picture
+below follows the handoffs, not a single synchronous loop.
+
+![Service flow: independent collectors, concurrent Core tasks, decision commit, Python notifications and the separate Rust report lane](docs/architecture/diagrams/runtime.en.svg)
+
+[Open full-size diagram](docs/architecture/diagrams/runtime.en.svg) ·
+[Download interactive guide — English / 中文](https://raw.githubusercontent.com/hzy-hits/SpxOpDaily/master/docs/architecture/service-flow.html) ·
+[Original HTML atlas — Chinese historical snapshot](docs/architecture/reference/README.md)
+
+The interactive guide has separate views, zoom controls, searchable flow details,
+and source references. GitHub displays HTML source; download the file and open it
+in a browser. The original atlas is preserved at its `97fc378` source baseline;
+current cloud delivery and home research are documented separately in the guide.
 
 Python owns broker ingestion, analytics, research, and the final strategy decision.
 `build_strategy_decision` is the sole manual-candidate authorization point. Rust
@@ -129,7 +147,7 @@ validation and Rust commands are in the
 | `tests/`, `rust/crates/*/tests/` | Python/Rust behavior, causality, economics, and boundary checks |
 | `.github/workflows/ci.yml`, `Dockerfile`, `scripts/deploy-release.py` | Cloud build and guarded production delivery |
 | `config/`, `systemd/` | Tracked defaults, deployment examples, and service definitions |
-| `docs/architecture/` | English/Chinese architecture guide, SVG diagrams, and editable Mermaid sources |
+| `docs/architecture/` | English/Chinese guides, spaced SVG diagrams, interactive HTML, and the original source atlas |
 | `docs/`, `site/` | Contracts, operations, historical evidence, notification-image entry, and historical review pages |
 
 ## Interpretation and limits
