@@ -118,7 +118,17 @@ cargo run --locked -p spx-report -- check-config --config config/report.example.
 cargo run --locked -p spx-delivery -- check-config --config config/delivery.example.toml
 ```
 
-## Production source migration
+<a id="production-source-migration"></a>
+## Historical monorepo source migration
+
+The procedure below records the earlier source-checkout migration. It was
+superseded for normal updates by the
+[2026-10-17 cloud delivery cutover](headless-deployment.md#cloud-delivery-cutover-2026-10-17).
+Current releases are built in GitHub Actions and installed as prebuilt ARM64
+bundles; Oracle no longer builds from its source checkout. See the
+[delivery diagram](architecture/README.md#build-release-and-deployment).
+
+### Original migration procedure (historical)
 
 After the monorepo branch is reviewed and merged, a separately authorized
 deployment may update Oracle's source checkout. The intended source locations

@@ -1,0 +1,41 @@
+---
+config:
+  theme: base
+  layout: dagre
+  htmlLabels: false
+  themeVariables:
+    fontFamily: 'Arial, PingFang SC, Microsoft YaHei, sans-serif'
+    fontSize: '16px'
+    primaryTextColor: '#18344d'
+    lineColor: '#607487'
+    clusterBkg: '#f8fafc'
+    clusterBorder: '#cbd5e1'
+  flowchart:
+    wrappingWidth: 280
+    curve: linear
+    nodeSpacing: 30
+    rankSpacing: 45
+---
+flowchart TB
+    SCHEDULE["树莓派 / Prefect<br/>工作日美东 17:30"] -.-> PI["轻量归档 Worker<br/>直接流式写入已核验 NAS 挂载"]
+    ORACLE["Oracle 压缩任务<br/>已关闭 + 已核验报价分区"] -->|只读私网连接| PI
+    PI --> OBJECTS[("NAS 内容寻址对象<br/>仅新增或变更文件")]
+    OBJECTS --> VERIFY["NAS 本机重读<br/>SHA-256 + 大小 + 清单"]
+    VERIFY --> SNAPSHOT["发布不可变快照<br/>报价来源 + 安全策略配置"]
+    WEEKEND["树莓派 / Prefect<br/>周六北京时间 10:00"] -.-> PIN["笔记本 /srv/research<br/>固定数据 + 策略配置 + 代码身份"]
+    SNAPSHOT --> PIN
+    IMAGE["云端 AMD64 镜像<br/>匹配归档代码版本"] --> PIN
+    PIN --> REPLAY["隔离回放当前策略<br/>因果报价 · RTH / GTH 分开"]
+    REPLAY --> RESULTS["本地结果 + 日志 + 清单<br/>保留缺口和失败结果"]
+    RESULTS --> BACKUP["NAS 结果备份 + 本机核验<br/>补传待备份结果"]
+    BACKUP --> RECEIPT["核验回执 + 保留本地副本<br/>不新增 Oracle 删除规则"]
+    class ORACLE live
+    class SCHEDULE,PI,WEEKEND control
+    class OBJECTS,VERIFY,SNAPSHOT,PIN,RESULTS,BACKUP,RECEIPT store
+    class IMAGE,REPLAY cloud
+
+    classDef cloud fill:#e9f2ff,stroke:#477bb5,color:#173a61
+    classDef live fill:#e4f5f0,stroke:#378c77,color:#153f35
+    classDef control fill:#f0eaff,stroke:#9272c5,color:#3f2f60
+    classDef store fill:#fff4d9,stroke:#b89335,color:#5a4513
+    classDef warn fill:#fff0ec,stroke:#c77b62,color:#713f30

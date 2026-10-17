@@ -1,0 +1,44 @@
+---
+config:
+  theme: base
+  layout: dagre
+  htmlLabels: false
+  themeVariables:
+    fontFamily: 'Arial, PingFang SC, Microsoft YaHei, sans-serif'
+    fontSize: '16px'
+    primaryTextColor: '#18344d'
+    lineColor: '#607487'
+    clusterBkg: '#f8fafc'
+    clusterBorder: '#cbd5e1'
+  flowchart:
+    wrappingWidth: 280
+    curve: linear
+    nodeSpacing: 30
+    rankSpacing: 45
+---
+flowchart TB
+    PR["Pull request · one Python + Rust commit"] --> CHECK["Required CI checks<br/>Python · Rust · both architectures · packages"]
+    CHECK --> MERGE["Merge to master"]
+    MERGE --> BUILD["Eligible mainline CI<br/>Revalidate + build native bundles and images"]
+    BUILD --> ART["GitHub Releases + GHCR<br/>Commit SHA · SHA-256 · image digests"]
+    subgraph ORACLE["ORACLE · native ARM64 / systemd"]
+      GATE["Restricted receiver<br/>Commit + hash + migration + service checks"] --> SWITCH["Stage bundle · stop writers<br/>Switch existing service paths"]
+      SWITCH --> HEALTH{"Runtime acceptance"}
+      HEALTH -->|Pass| CURRENT["Retain new release<br/>Keep previous version for rollback"]
+      HEALTH -->|Fail| ROLLBACK["Restore previous program paths<br/>Database writes are not reversed"]
+    end
+    subgraph HOME["HOME · isolated AMD64 research"]
+      IMAGE["Load pinned image<br/>No production credentials"] --> REPLAY["Research disk + read-only inputs<br/>No network · bounded CPU / memory"]
+    end
+    ART -->|ARM64 runtime bundle| GATE
+    ART -->|Same-commit AMD64 image| IMAGE
+    class PR,CHECK,MERGE,BUILD,ART cloud
+    class GATE,SWITCH,HEALTH,CURRENT live
+    class IMAGE,REPLAY store
+    class ROLLBACK warn
+
+    classDef cloud fill:#e9f2ff,stroke:#477bb5,color:#173a61
+    classDef live fill:#e4f5f0,stroke:#378c77,color:#153f35
+    classDef control fill:#f0eaff,stroke:#9272c5,color:#3f2f60
+    classDef store fill:#fff4d9,stroke:#b89335,color:#5a4513
+    classDef warn fill:#fff0ec,stroke:#c77b62,color:#713f30

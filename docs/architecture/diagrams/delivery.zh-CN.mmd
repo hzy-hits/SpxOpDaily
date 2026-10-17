@@ -1,0 +1,44 @@
+---
+config:
+  theme: base
+  layout: dagre
+  htmlLabels: false
+  themeVariables:
+    fontFamily: 'Arial, PingFang SC, Microsoft YaHei, sans-serif'
+    fontSize: '16px'
+    primaryTextColor: '#18344d'
+    lineColor: '#607487'
+    clusterBkg: '#f8fafc'
+    clusterBorder: '#cbd5e1'
+  flowchart:
+    wrappingWidth: 280
+    curve: linear
+    nodeSpacing: 30
+    rankSpacing: 45
+---
+flowchart TB
+    PR["Pull request · 同一 Python + Rust 提交"] --> CHECK["必需 CI 检查<br/>Python · Rust · 双架构 · 运行包"]
+    CHECK --> MERGE["合并至 master"]
+    MERGE --> BUILD["符合条件的主线 CI<br/>重新验证 + 构建原生包和镜像"]
+    BUILD --> ART["GitHub Releases + GHCR<br/>提交 SHA · SHA-256 · 镜像 digest"]
+    subgraph ORACLE["ORACLE · 原生 ARM64 / systemd"]
+      GATE["受限部署接收器<br/>提交 + 哈希 + 迁移 + 服务检查"] --> SWITCH["准备运行包 · 停止写入方<br/>切换既有服务路径"]
+      SWITCH --> HEALTH{"运行验收"}
+      HEALTH -->|通过| CURRENT["保留新版本<br/>保留先前版本用于回滚"]
+      HEALTH -->|失败| ROLLBACK["恢复先前程序路径<br/>不会撤销数据库写入"]
+    end
+    subgraph HOME["家庭 · 隔离 AMD64 研究"]
+      IMAGE["加载固定镜像<br/>不含生产凭据"] --> REPLAY["研究盘 + 只读输入<br/>断网 · CPU / 内存限额"]
+    end
+    ART -->|ARM64 运行包| GATE
+    ART -->|同提交 AMD64 镜像| IMAGE
+    class PR,CHECK,MERGE,BUILD,ART cloud
+    class GATE,SWITCH,HEALTH,CURRENT live
+    class IMAGE,REPLAY store
+    class ROLLBACK warn
+
+    classDef cloud fill:#e9f2ff,stroke:#477bb5,color:#173a61
+    classDef live fill:#e4f5f0,stroke:#378c77,color:#153f35
+    classDef control fill:#f0eaff,stroke:#9272c5,color:#3f2f60
+    classDef store fill:#fff4d9,stroke:#b89335,color:#5a4513
+    classDef warn fill:#fff0ec,stroke:#c77b62,color:#713f30

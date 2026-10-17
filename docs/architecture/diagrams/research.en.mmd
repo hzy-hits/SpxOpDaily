@@ -1,0 +1,41 @@
+---
+config:
+  theme: base
+  layout: dagre
+  htmlLabels: false
+  themeVariables:
+    fontFamily: 'Arial, PingFang SC, Microsoft YaHei, sans-serif'
+    fontSize: '16px'
+    primaryTextColor: '#18344d'
+    lineColor: '#607487'
+    clusterBkg: '#f8fafc'
+    clusterBorder: '#cbd5e1'
+  flowchart:
+    wrappingWidth: 280
+    curve: linear
+    nodeSpacing: 30
+    rankSpacing: 45
+---
+flowchart TB
+    SCHEDULE["Pi / Prefect<br/>Weekdays 17:30 New York"] -.-> PI["Lightweight archive worker<br/>Stream directly to verified NAS mount"]
+    ORACLE["Oracle compactor<br/>Closed + verified quote partitions"] -->|Read-only private link| PI
+    PI --> OBJECTS[("NAS content-addressed objects<br/>New or changed files only")]
+    OBJECTS --> VERIFY["NAS local reread<br/>SHA-256 + size + manifest"]
+    VERIFY --> SNAPSHOT["Publish immutable snapshot<br/>Quote lineage + safe policy settings"]
+    WEEKEND["Pi / Prefect<br/>Saturday 10:00 Shanghai"] -.-> PIN["Laptop /srv/research<br/>Pin data + policy + code identity"]
+    SNAPSHOT --> PIN
+    IMAGE["Cloud-built AMD64 image<br/>Matching archived code version"] --> PIN
+    PIN --> REPLAY["Isolated current-strategy replay<br/>Causal quotes · separate RTH / GTH"]
+    REPLAY --> RESULTS["Local results + logs + manifests<br/>Keep gaps and failed outcomes"]
+    RESULTS --> BACKUP["NAS result backup + local verification<br/>Retry pending backups"]
+    BACKUP --> RECEIPT["Verified receipt + retained local copy<br/>No new Oracle deletion rule"]
+    class ORACLE live
+    class SCHEDULE,PI,WEEKEND control
+    class OBJECTS,VERIFY,SNAPSHOT,PIN,RESULTS,BACKUP,RECEIPT store
+    class IMAGE,REPLAY cloud
+
+    classDef cloud fill:#e9f2ff,stroke:#477bb5,color:#173a61
+    classDef live fill:#e4f5f0,stroke:#378c77,color:#153f35
+    classDef control fill:#f0eaff,stroke:#9272c5,color:#3f2f60
+    classDef store fill:#fff4d9,stroke:#b89335,color:#5a4513
+    classDef warn fill:#fff0ec,stroke:#c77b62,color:#713f30
