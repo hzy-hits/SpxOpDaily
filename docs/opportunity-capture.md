@@ -7,6 +7,12 @@
 
 ## 1. 现状
 
+现状（2026-10-18）：Worker 每分钟读取 `latest/strategy_decision.json`，按
+`decision_id + state` 去重，把最终决策写入
+`opportunities/date=YYYY-MM-DD.jsonl`（state = authorized / rejected，带 stage、
+reason codes、correlation_id）；`scripts/opportunity-capture-report.py` 输出当日
+capture summary。detected / delivered / acted 三个状态仍是目标。
+
 系统已经有足够的**原料**，但没有一个统一的机会台账：
 
 | 原料 | 位置 | 已能回答 |

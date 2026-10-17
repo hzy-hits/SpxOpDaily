@@ -106,6 +106,13 @@ def growth_dislocation_scan() -> None:
         raise RuntimeError("growth dislocation scan failed")
 
 
+@huey.periodic_task(crontab(minute="*", strict=True))
+def opportunity_ledger_snapshot() -> None:
+    from spx_spark.infrastructure.opportunity_ledger import record_current_decision
+
+    record_current_decision(_settings.data_root)
+
+
 @huey.periodic_task(crontab(minute="*", strict=True), priority=20)
 def desk_pipeline_health() -> None:
     import json
