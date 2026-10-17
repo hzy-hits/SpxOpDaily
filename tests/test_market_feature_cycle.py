@@ -115,14 +115,16 @@ def test_cycle_does_not_publish_or_deliver_when_commit_fails(cycle, monkeypatch,
 @pytest.mark.parametrize("failure", ["build_zero_dte_greeks_reference", "_process_spring_gamma_v3_shadow"])
 def test_research_failure_cannot_change_the_committed_decision(cycle, monkeypatch, failure, tmp_path):
     run, selected, emitted, frames, _, database = cycle
+    research_observations = []
 
     def fail(*args, **kwargs):
-        assert read_strategy_decisions(database_path=database) == (selected,)
+        research_observations.append(read_strategy_decisions(database_path=database))
         raise ValueError("research unavailable")
 
     monkeypatch.setattr(service, failure, fail)
     assert run() == 0
 
+    assert research_observations == [(selected,)]
     assert read_strategy_decisions(database_path=database) == (selected,)
     assert json.loads((tmp_path / "latest" / "strategy_decision.json").read_text()) == selected
     assert emitted == [(selected, NOW)]
