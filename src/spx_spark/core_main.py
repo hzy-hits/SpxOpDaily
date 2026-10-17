@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from functools import partial
 from spx_spark import alert_engine, provider_failover_controller
 from spx_spark.app_settings import get_settings
+from spx_spark.application import fast_lane
 from spx_spark.application.globex_trend import service as globex_trend
 from spx_spark.application.realtime.composition import run_realtime_engine_cycle
 from spx_spark.application.runtime import (
@@ -98,6 +99,9 @@ async def main() -> None:
             tasks.create_task(_run_owner("market_features_hot_worker", partial(
                 feature_runner, stop_event=stop_event, lock_path=str(
                     settings.core_lock_root / market_features_hot_worker.LOCK_FILE_NAME)), shutdown))
+            tasks.create_task(_run_periodic(
+                "fast_lane", partial(fast_lane.run_periodic, storage_settings=storage),
+                fast_lane.FAST_LANE_INTERVAL_SECONDS, shutdown, critical=False))
             tasks.create_task(_run_owner("intraday_shock_hot_worker", partial(
                 intraday_shock_hot_worker.run_with_stop, stop_event=stop_event,
                 lock_path=str(settings.core_lock_root / intraday_shock_hot_worker.LOCK_FILE_NAME),

@@ -121,6 +121,7 @@ from spx_spark.application.order_map.delivery import (
 )
 from spx_spark.application.order_map.models import level_decision_play
 from spx_spark.application.order_map.es_volume_attach import attach_es_volume_signal
+from spx_spark.application.order_map.strategy_plugins import run_shadow_strategies
 from spx_spark.application.order_map.strategy_select import build_strategy_decision
 from spx_spark.application.order_map.strategy_outcomes import (
     observe_due_strategy_outcomes,
@@ -166,6 +167,7 @@ def run(
     cycle_started = perf_counter()
     stage_started = cycle_started
     stage_durations_ms: dict[str, float] = {}
+    decision_latency_ms: float | None = None
     state_component_started = cycle_started
     state_component_durations_ms: dict[str, float] = {}
 
@@ -723,6 +725,8 @@ def run(
         probability_settings=app.strategy_distribution,
         background_models=True,
     )
+    run_shadow_strategies(storage.data_root, strategy_payload, now=action_now)
+    decision_latency_ms = round((perf_counter() - cycle_started) * 1000.0, 3)
     finish_research_component("strategy_build")
     finish_stage("research_and_strategy")
     try:
@@ -1020,6 +1024,7 @@ def run(
             "strategy_decision_delivery": strategy_delivery,
             "strategy_outcome_observation": strategy_outcome_observation,
             "stage_durations_ms": stage_durations_ms,
+            "decision_latency_ms": decision_latency_ms,
             "state_component_durations_ms": state_component_durations_ms,
             "research_component_durations_ms": research_component_durations_ms,
             "duration_ms": total_duration_ms,

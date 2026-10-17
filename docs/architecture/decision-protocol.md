@@ -114,6 +114,11 @@ class Strategy(Protocol):
 - 研究侧用同一个 Protocol 做 replay；回放输出 `Candidate` 和 `GateResult`，
   不允许直接产出 `READY`。
 - 新增策略不改 `strategy_select` 的 if/else；先在 shadow 跑，再切 owner。
+  现状（2026-10-18）：`domain/strategy.py` 定义 Protocol，`application/order_map/
+  strategy_plugins.py` 提供注册表、`SPX_STRATEGY_PLUGINS` 插件加载与 shadow runner；
+  插件只写 `latest/strategy_shadow.json`（`authority: none`），不参与授权。
+  `scripts/strategy-shadow-replay.py` 可对保存的 facts 做 replay。新增策略只需新增
+  模块并在 `SPX_STRATEGY_PLUGINS` 注册，不改 Core 文件。
 
 ## 6. 决策分层与延迟预算
 
@@ -125,6 +130,7 @@ class Strategy(Protocol):
 | Fast | 1s / quote tick | 价格触发、level 状态机 | `watch` / `armed` | ≤1s |
 | Slow | 5–15s | 链分析、概率、排序、gates | `ready` / `no_trade` | ≤2–3s |
 | Async | 分钟级 | LLM、Desk Map、研究 | 报告/卡片 | 不阻塞决策 |
+| Fast lane | 1s | 已提交 trigger/level 的 watch/armed 投影 | `latest/fast_lane.json` | ≤1s |
 
 规则：
 
@@ -134,6 +140,11 @@ class Strategy(Protocol):
    1 分钟粒度约 50 ms）。debit 分布复用 30s 内完成的快照，10s 后在后台刷新；冷 miss
    时同步回退（约 20–40 ms），避免授权等待或使用过期分布。
 3. 消息同时带 `decision_at` 与 `quote_as_of`，接收方能看到判断的时效。
+4. 现状（2026-10-18）：Core 已启动独立 1s fast lane（`application/fast_lane.py`），
+   只发布 armed/watch 投影、`authority: none`；ready 仍由 5s 慢 cycle 授权。
+   fast lane 输出 `latency_ms` / `evidence_age_ms` / `ready_budget_ms=3000`；慢 cycle
+   输出 `decision_latency_ms`（cycle 开始→decision 可发布）。P95 聚合与告警是运行侧
+   follow-up，不在本次代码内。
 
 ## 7. 观测接入
 
@@ -148,8 +159,8 @@ correlation_id 是日志、DB、消息共用的检索键；每个 owner 每 60s 
 | P0 | correlation_id + Envelope + Rust 改名 | 一条 decision 能反查到 quote/receipt |
 | P1 | 三个 payload 的 pydantic schema | schema 生成、未知版本 fail closed（Python 侧已做；Rust 对齐待做） |
 | P2 | Clock 端口 + 时间字段检查 | domain/analytics 无 `datetime.now()`（已做；Core/Worker 全链路注入待做） |
-| P3 | Strategy Protocol + shadow + replay | 新策略不改核心文件即可 shadow |
-| P4 | Fast/Slow 分层 | `armed` ≤1s、`ready` ≤3s |
+| P3 | Strategy Protocol + shadow + replay | 新策略不改核心文件即可 shadow（已做：插件模块 + env） |
+| P4 | Fast/Slow 分层 | `armed` ≤1s、`ready` ≤3s（fast lane 已做；ready P95/告警待接） |
 
 ## 9. 非目标
 

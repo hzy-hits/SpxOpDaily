@@ -16,6 +16,7 @@
 | HTTP 健康 | Schwab FastAPI `/healthz` | 只覆盖 OAuth/网关 |
 | 业务台账 | `spx.sqlite` events/decisions/outcomes/notification | 事实齐全，但不是指标 |
 | 回执 | Python/Rust delivery receipt | 能证明送达，不能证明延迟分布 |
+| Fast lane | `latest/fast_lane.json` | 1s 投影，带 latency/evidence_age，无聚合与告警 |
 | 故障监测 | Worker 每分钟 `monitor_desk_pipeline` | 只覆盖桌图链路 |
 
 缺口：没有 correlation_id 的日志检索、没有延迟/新鲜度的聚合指标、没有 SLO 告警、
@@ -59,7 +60,9 @@
 
 ## 4. 决策延迟的度量口径
 
-- `decision_latency_ms`：从 cycle 开始到 `strategy_decision` 可发布；
+- `decision_latency_ms`：从 cycle 开始到 `strategy_decision` 可发布；market_features
+  的 cycle summary 已输出该字段；fast lane 的 `latest/fast_lane.json` 输出自己的
+  `latency_ms` / `evidence_age_ms`；
 - `evidence_age_ms`：决策使用的报价/Greeks 年龄；
 - `time_to_ready`：detected→authorized（机会台账）；
 - `time_to_deliver`：authorized→receipt；
