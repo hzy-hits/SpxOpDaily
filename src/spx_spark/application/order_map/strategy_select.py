@@ -138,6 +138,7 @@ def _build_strategy_decision(
             latest,
             now=_utc(now),
             policy=DEFAULT_STRATEGY_POLICY,
+            structure=iron_condor_map,
         )
         facts[HUMAN_SESSION_STATE_KEY] = iron_condor_session_state(
             payload, facts, iron_condor_rows, now=_utc(now)
