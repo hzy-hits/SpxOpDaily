@@ -64,3 +64,15 @@ def migrate_operational_database(
     from spx_spark.app_settings import get_settings
 
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_options_snapshot_cache():
+    from spx_spark.application.order_map.options_cache import clear_options_snapshot_cache
+    from spx_spark.application.order_map.winner_distribution_cache import clear_path_distribution_cache
+
+    clear_options_snapshot_cache()
+    clear_path_distribution_cache()
+    yield
+    clear_options_snapshot_cache()
+    clear_path_distribution_cache()

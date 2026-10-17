@@ -133,7 +133,6 @@ from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
 from spx_spark.config import StorageSettings
-from spx_spark.features.exposure_map import build_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.infrastructure.operational_db import (
     persist_strategy_decision,
@@ -141,7 +140,7 @@ from spx_spark.infrastructure.operational_db import (
 )
 from spx_spark.macro_event_clock import macro_event_state
 from spx_spark.marketdata import as_utc
-from spx_spark.options_map import build_options_map, group_spxw_option_quotes
+from spx_spark.application.order_map.options_cache import options_snapshot
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
@@ -257,13 +256,9 @@ def run(
         else None
     )
     finish_state_component("latest_state_load")
-    grouped_quotes = group_spxw_option_quotes(latest, storage_settings=storage)
-    options_map = build_options_map(
-        latest,
-        storage_settings=storage,
-        grouped_quotes=grouped_quotes,
+    grouped_quotes, options_map, exposure_map = options_snapshot(
+        latest, storage_settings=storage
     )
-    exposure_map = build_exposure_map(latest, grouped_quotes=grouped_quotes)
     finish_state_component("option_analytics")
     option_history = _dict_list(persisted.get("option_history"))
     option_frame, contracts = build_option_structure_frame(

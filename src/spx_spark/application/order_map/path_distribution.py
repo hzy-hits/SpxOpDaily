@@ -41,6 +41,11 @@ from spx_spark.application.market_features.physical_followthrough import (
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.policy_replay import replay_paths
+from spx_spark.application.order_map.winner_distribution_cache import (
+    cached_winner_distribution,
+    store_winner_distribution,
+    winner_distribution_key,
+)
 from spx_spark.application.order_map.surface_path_distribution import (
     JOINT_SURFACE_CLEARING_METHOD,
     JOINT_SURFACE_METHOD,
@@ -77,9 +82,24 @@ def attach_path_distribution(
     policy: StrategyPolicy | None = None,
     paths: tuple[PhysicalSpotPath, ...] | None = None,
     clock_mode: str | None = None,
+    nonblocking: bool = False,
 ) -> dict[str, Any]:
-    """Copy ``candidate`` and hang the advisory distribution on ``edge``."""
+    """Copy ``candidate`` and hang the advisory distribution on ``edge``.
 
+    ``nonblocking`` reuses a completed snapshot for up to 30 seconds and falls
+    back to a synchronous estimate on a miss. A pure background refresh would
+    either skip a cycle or authorize on stale data, which is not acceptable for
+    a veto input; the vectorised replay makes the fallback cheap.
+    """
+
+    key = ""
+    if nonblocking:
+        key = winner_distribution_key(candidate, facts, data_root=data_root)
+        cached = cached_winner_distribution(key, now)
+        if cached is not None:
+            edge = dict(_map(candidate.get("edge")))
+            edge["path_distribution"] = cached
+            return {**dict(candidate), "edge": edge}
     distribution = estimate_path_distribution(
         candidate,
         facts,
@@ -90,6 +110,8 @@ def attach_path_distribution(
         paths=paths,
         clock_mode=clock_mode,
     )
+    if nonblocking:
+        store_winner_distribution(key, now, distribution)
     edge = dict(_map(candidate.get("edge")))
     edge["path_distribution"] = distribution
     return {**dict(candidate), "edge": edge}

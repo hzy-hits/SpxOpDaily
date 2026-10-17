@@ -775,7 +775,7 @@ def _attach_winner_path_distributions(
                 facts,
                 data_root=data_root,
                 probability_settings=probability_settings,
-                now=now,
+                now=now, nonblocking=bool(facts.get("history_preparation_nonblocking")),
             )
         except HistoryPreparing as exc:
             winner = {**first, "history_preparation_pending": str(exc)}

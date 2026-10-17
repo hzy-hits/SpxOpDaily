@@ -28,7 +28,8 @@ from spx_spark.iv_surface import (
     summarize_surface_history,
 )
 from spx_spark.market_context import build_market_context
-from spx_spark.options_map import OptionsMap, build_options_map
+from spx_spark.application.order_map.options_cache import options_snapshot
+from spx_spark.options_map import OptionsMap
 from spx_spark.position_alerts import position_holdings_alerts
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import (
@@ -86,7 +87,7 @@ def evaluate_alerts(
 
     alerts.extend(
         option_map_alerts(
-            options_map or build_options_map(state),
+            options_map or options_snapshot(state)[1],
             window=window,
             settings=alert_settings,
         )
@@ -154,7 +155,7 @@ def evaluate_payload(
     policy = alert_settings or DEFAULT_ALERT_SETTINGS
     window = active_window(now)
     window_payload = window.to_dict(now=now)
-    options_map = build_options_map(state)
+    options_map = options_snapshot(state)[1]
     if persist_gamma_regime:
         # Record observations before alert evaluation: a state seen for the
         # first time starts its hysteresis clock now and only alerts once it
