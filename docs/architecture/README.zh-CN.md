@@ -8,17 +8,28 @@
 验证和仍未证明的研究结论。家庭基础设施由独立运维工作区管理；本仓库包含应用、交付流水线
 和接入说明，不包含完整家庭节点安装器。
 
+## 交互说明与原始 HTML
+
+[下载中英双语交互说明](https://raw.githubusercontent.com/hzy-hits/SpxOpDaily/master/docs/architecture/service-flow.html)
+（[HTML 源码](service-flow.html)），可单独切换视图、缩放、检索服务交接并查看源码入口。
+默认英文，可切换中文。GitHub 展示 HTML 源码，下载后用浏览器打开即可交互。
+
+[原始中文图册](reference/README.md)也完整保留，包含 24 条调用流、72 项关键数据字典、
+模块/类型索引及交互检查器。它是固定在 `97fc378` 的历史源码图，不是当前生产审计。
+新版服务图参考其 owner、提交和导出边界，并与现行源码核对；云端/家庭图说明之后已部署的接入。
+
 ## 图表目录
 
 | 视图 | 英文 | 中文 |
 | --- | --- | --- |
-| 系统总览 | [SVG](diagrams/system-overview.en.svg) · [Mermaid 源码](diagrams/system-overview.en.mmd) | [SVG](diagrams/system-overview.zh-CN.svg) · [源码](diagrams/system-overview.zh-CN.mmd) |
-| 运行时与数据归属 | [SVG](diagrams/runtime.en.svg) · [Mermaid 源码](diagrams/runtime.en.mmd) | [SVG](diagrams/runtime.zh-CN.svg) · [源码](diagrams/runtime.zh-CN.mmd) |
-| 构建、发布与部署 | [SVG](diagrams/delivery.en.svg) · [Mermaid 源码](diagrams/delivery.en.mmd) | [SVG](diagrams/delivery.zh-CN.svg) · [源码](diagrams/delivery.zh-CN.mmd) |
-| 归档与研究生命周期 | [SVG](diagrams/research.en.svg) · [Mermaid 源码](diagrams/research.en.mmd) | [SVG](diagrams/research.zh-CN.svg) · [源码](diagrams/research.zh-CN.mmd) |
+| 系统总览 | [SVG](diagrams/system-overview.en.svg) | [SVG](diagrams/system-overview.zh-CN.svg) |
+| 运行时与数据归属 | [SVG](diagrams/runtime.en.svg) | [SVG](diagrams/runtime.zh-CN.svg) |
+| 构建、发布与部署 | [SVG](diagrams/delivery.en.svg) | [SVG](diagrams/delivery.zh-CN.svg) |
+| 归档与研究生命周期 | [SVG](diagrams/research.en.svg) | [SVG](diagrams/research.zh-CN.svg) |
 
-SVG 可直接在 GitHub 阅读，也可打开原图。实线表示数据或产物流动；虚线表示控制、调度或
-健康检查。箭头概括接口关系，不表示共享数据库写入权。
+SVG 可直接在 GitHub 阅读，也可打开完整尺寸。环境图将职责卡片与四条交接路径分开；
+其他图按阶段预留空间，运行图中的虚线表示报价文件和 IPC 交接。箭头表示具体调用或数据/产物
+流动，不代表全系统同步循环或共享数据库写入权。
 
 <a id="system-overview"></a>
 ## 系统总览
@@ -43,7 +54,13 @@ OCI 保留基础设施监控职责，Prefect 跟踪任务执行和归档/研究�
 <a id="runtime-and-data-ownership"></a>
 ## 运行时与数据归属
 
-![Python 策略授权、Rust 定时报告和独立通知路径](diagrams/runtime.zh-CN.svg)
+![独立采集、并发 Core、提交与通知边界及 Rust 报告](diagrams/runtime.zh-CN.svg)
+
+采集器在 Core 之外拥有券商会话；Core 内部采样、市场特征与 shock runner 并发运行。
+原始标准行情先追加，再更新 latest 投影，两者独立写入。决策路径先提交运行状态，再导出决策，
+最后入队通知；持久化失败阻止 READY，可选解释背景在此边界之后处理。采集双写与
+提交/导出/入队均非跨存储原子事务。具体调用路径见[交互说明](service-flow.html)和
+[历史源码图册](reference/README.md)。
 
 | 职责 | 负责方 | 合同边界 |
 | --- | --- | --- |
@@ -141,23 +158,21 @@ NAS 结果核验，两个家庭定时计划已启用。这些接入验证不代�
 - **恢复：** Prefect 元数据卷尚需异机备份和恢复演练；NAS 历史数据也需要独立的额外副本。
 - **主机验收：** 研究盘和服务恢复已检查，笔记本整机重启验收仍待完成；树莓派当前内核不执行整容器内存 cgroup 上限，其他限制不能视为同等保证。
 
-## 图表维护
+## 图表与 HTML 维护
 
-成对修改 `.en.mmd` 与 `.zh-CN.mmd`，再重新生成 SVG。两种语言的标签、连线含义、范围和
-限制须一致。SVG 随仓库提交，阅读不依赖渲染器或外部服务。
-
-当前导出使用 Mermaid CLI **12.0.0**。在已安装 Node.js/npm 和可用 Chromium 的文档设备上，
-从仓库根目录执行：
+[标准库 SVG 渲染器](render_diagrams.py)是四组中英文设计图的可编辑源文件，固定卡片位置，
+将阶段标题与连线路径分开，并在写出前检查文字高度。旧的自动排版 Mermaid 源已被替换，
+避免文字与连线碰撞。
 
 ```bash
-# 中文导出需要支持中文字符的 UTF-8 字体。
-for source in docs/architecture/diagrams/*.mmd; do
-  npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc \
-    -i "$source" -o "${source%.mmd}.svg" -b white --no-font-embed
-done
+python3 docs/architecture/render_diagrams.py
 git diff --check
 ```
 
-Mermaid CLI/Chromium 是文档工具，不是应用依赖。逐图检查裁切和文字重叠，核对相对链接；
-公开图表不包含私有主机地址、凭据或运维原始记录。仅在重新核对实现后更新基准日期，
-保留历史验收限制，不把历史结果改写成实时状态。
+渲染器也同步更新 [service-flow.html](service-flow.html) 中内嵌的图。交互说明为独立文件，
+翻译、视图、筛选和缩放均在本地运行，无外部资源依赖；修改时同步维护两种语言。
+`reference/` 中原始图册保留为历史证据，不改写其基准，也不把其中可选源码路径当作已部署服务。
+
+在 README 常见宽度下检查 SVG，并检查 HTML 桌面/手机布局、文字边界、链接、检索、
+视图/语言切换及缩放。现行公开图中不含私有地址、凭据或运维原始记录；原图册的历史源码示例
+保留固定版本语境。

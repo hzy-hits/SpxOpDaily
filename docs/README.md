@@ -108,6 +108,7 @@ OI/Gamma、L1 资金流仍是代理，不是真实参与者持仓/完整买卖�
 | [SPX Spark 中文说明](../README.zh-CN.md) | `README.zh-CN.md` |
 | [Architecture guide and diagrams](architecture/README.md) | `docs/architecture/README.md` |
 | [架构说明与设计图](architecture/README.zh-CN.md) | `docs/architecture/README.zh-CN.md` |
+| [Historical HTML source atlas](architecture/reference/README.md) | `docs/architecture/reference/README.md` |
 | [Shared wire-contract registry](../contracts/README.md) | `contracts/README.md` |
 | [SPX Spark 架构简化与第三方能力替代总方案 v1](architecture-simplification-blueprint-v1.md) | `docs/architecture-simplification-blueprint-v1.md` |
 | [SPX Spark 架构简化执行方案 v1（面向执行 Agent 的施工图与硬约束）](architecture-simplification-execution-plan-v1.md) | `docs/architecture-simplification-execution-plan-v1.md` |
