@@ -30,6 +30,10 @@ GTH 的可执行建议依赖 IBKR SPXW；Schwab 的 frozen 行不能替代。当
 
 ## 3. LaneContinuity 状态机
 
+现状（2026-10-18）：`ibkr_stream_health.json` 每次写入都会推进
+`latest/ibkr_continuity.json`，状态转移追加 `audit/ibkr_continuity.jsonl`。
+准入仍只按 health 判定；把 `GAP` / `RECOVERING` 接入策略是下一步。
+
 ```mermaid
 stateDiagram-v2
     [*] --> HEALTHY
