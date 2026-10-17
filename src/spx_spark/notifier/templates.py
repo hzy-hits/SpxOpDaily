@@ -17,6 +17,7 @@ class RenderedMessage:
     title: str
     text: str
     feishu_text: str | None = None
+    sections: tuple[Mapping[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

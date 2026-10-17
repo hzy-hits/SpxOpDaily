@@ -317,19 +317,23 @@ def notification_payload(
     text: str,
     friend: bool,
     feishu_text: str | None,
+    sections: Sequence[Mapping[str, str]] | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "envelope": _envelope_to_dict(envelope),
         "title": title,
         "text": text,
         "friend": friend,
         "feishu_text": feishu_text,
     }
+    if sections:
+        payload["feishu_sections"] = [dict(section) for section in sections]
+    return payload
 
 
 def notification_payload_fingerprint(payload: Mapping[str, object]) -> str:
     encoded = json.dumps(
-        dict(payload),
+        {key: value for key, value in payload.items() if key != "feishu_sections"},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -346,6 +350,7 @@ def enqueue_final_notification(
     text: str,
     friend: bool = False,
     feishu_text: str | None = None,
+    sections: Sequence[Mapping[str, str]] | None = None,
     enqueued_at: datetime | None = None,
     engine: Engine | None = None,
     schedule: Callable[[int], object] | None = None,
@@ -361,6 +366,7 @@ def enqueue_final_notification(
         text=text,
         friend=friend,
         feishu_text=feishu_text,
+        sections=sections,
     )
     batch = enqueue(
         engine or default_engine(),
@@ -722,6 +728,12 @@ def _deliver_one(
     text = str(payload.get("text") or "")
     if channel == "rust_ingress":
         return rust_deliver(settings, envelope=envelope, title=title, text=text)
+    raw_sections = payload.get("feishu_sections")
+    sections = (
+        tuple(dict(section) for section in raw_sections if isinstance(section, Mapping))
+        if isinstance(raw_sections, Sequence) and not isinstance(raw_sections, str)
+        else ()
+    )
     sinks = direct_deliver(
         settings,
         title=title,
@@ -732,6 +744,7 @@ def _deliver_one(
         feishu_text=(
             str(payload["feishu_text"]) if payload.get("feishu_text") is not None else None
         ),
+        sections=sections,
         targets=frozenset({channel}),
     )
     return next(

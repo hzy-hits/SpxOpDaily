@@ -132,7 +132,7 @@ def _now(value: datetime | None = None) -> datetime:
 
 def _payload(value: Mapping[str, object]) -> tuple[str, str]:
     text = json.dumps(
-        dict(value),
+        {key: item for key, item in value.items() if key != "feishu_sections"},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

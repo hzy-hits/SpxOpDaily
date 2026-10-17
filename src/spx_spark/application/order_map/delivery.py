@@ -113,6 +113,7 @@ def enqueue_pin_stable_watch(decision: Mapping[str, Any], *, now: datetime) -> d
         title=rendered.title,
         text=rendered.text,
         feishu_text=rendered.feishu_text,
+        sections=rendered.sections,
         friend=True,
         enqueued_at=now,
     )
@@ -213,6 +214,7 @@ def enqueue_strategy_decision(
         title=rendered.title,
         text=rendered.text,
         feishu_text=rendered.feishu_text,
+        sections=rendered.sections,
         friend=True,
         enqueued_at=enqueue_at,
     )

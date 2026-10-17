@@ -41,6 +41,9 @@ channels/render），`trade_ready` 与 `pin_stable_watch` 的渲染已迁入注�
 已有 `llm_writer.narrative_numbers_locked`（所有自由文本数字必须来自 decision，idea
 memo 已在用）。通知事件表持久化 `correlation_id`，入队时另写
 `audit/notification_correlations.jsonl` 供 Rust receipt 按 event_id 关联。
+模板现在同时输出 `sections`，`build_feishu_card` 优先用结构化 sections，决策卡不再由
+sink 解析 Markdown；`trade_ready.v1` / `pin_stable_watch.v1` 均有 golden 输出。
+其他卡片（scheduled report 等）仍走旧的 Markdown 解析路径。
 
 ```python
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
@@ -213,6 +214,7 @@ def enqueue_notification(
     friend: bool = False,
     feishu_text: str | None = None,
     enqueued_at: datetime | None = None,
+    sections: Sequence[Mapping[str, str]] | None = None,
 ) -> EnqueueResult:
     at = enqueued_at or datetime.now(tz=timezone.utc)
     if quiet_window_suppresses(envelope, now=at):
@@ -235,6 +237,7 @@ def enqueue_notification(
         text=text,
         friend=friend,
         feishu_text=feishu_text,
+        sections=sections,
         enqueued_at=at,
         engine=_store(settings),
         schedule=lambda event_id: _schedule_event(settings, event_id),

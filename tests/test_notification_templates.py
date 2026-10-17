@@ -21,6 +21,16 @@ def test_template_registry_versions_channels_and_builtins() -> None:
         render_message("test_card", channel="feishu", context={})
 
     import spx_spark.application.order_map.delivery_templates  # noqa: F401
+    from spx_spark.notifier.format_push import build_feishu_card
 
     builtins = {(item.template_id, item.version) for item in registered_templates()}
     assert {("trade_ready", 1), ("pin_stable_watch", 1)} <= builtins
+    card = build_feishu_card(
+        "fallback",
+        title="t",
+        sections=({"title": "结论", "content": "只许限价"},),
+    )
+    assert card["body"]["elements"] == [
+        {"tag": "markdown", "content": "**结论**"},
+        {"tag": "markdown", "content": "只许限价"},
+    ]

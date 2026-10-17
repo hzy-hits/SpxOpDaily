@@ -55,3 +55,53 @@ def test_pin_stable_watch_v1_matches_golden_output() -> None:
         Path(__file__).parent / "golden" / "templates" / "pin_stable_watch.v1.txt"
     ).read_text(encoding="utf-8")
     assert rendered.text == golden.rstrip("\n")
+
+
+def test_trade_ready_v1_matches_golden_output() -> None:
+    now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+    decision = {
+        "decision_id": "strategy:test",
+        "decision_at": now.isoformat(),
+        "policy_version": "v69",
+        "market_facts": {"session": {"mode": "rth"}},
+        "regime": {},
+    }
+    candidate = {
+        "strategy_type": "CALL_DEBIT_VERTICAL",
+        "direction": "UP",
+        "setup_kind": "TREND_PULLBACK",
+        "long": {
+            "contract_id": "option:SPX:SPXW:20260807:7710:C",
+            "strike": 7710.0,
+            "right": "C",
+            "bid": 3.8,
+            "ask": 4.0,
+        },
+        "short": {
+            "contract_id": "option:SPX:SPXW:20260807:7720:C",
+            "strike": 7720.0,
+            "right": "C",
+            "bid": 1.0,
+            "ask": 1.2,
+        },
+        "quote": {"bid": 2.8, "ask": 3.1, "mid": 2.95},
+        "economics": {"max_loss_points": 10.0, "max_profit_points": 20.0},
+        "opportunity_valid_until": now.replace(minute=5).isoformat(),
+        "target_spx": 7730.0,
+        "invalidation_spx": 7700.0,
+    }
+    rendered = render_message(
+        "trade_ready",
+        channel="feishu",
+        context={
+            "decision": decision,
+            "candidate": candidate,
+            "extra": "",
+            "quote_status": "ready",
+        },
+    )
+    golden = (
+        Path(__file__).parent / "golden" / "templates" / "trade_ready.v1.txt"
+    ).read_text(encoding="utf-8")
+    assert rendered.text == golden.rstrip("\n")
+    assert rendered.sections
