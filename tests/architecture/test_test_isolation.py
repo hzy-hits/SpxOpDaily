@@ -40,5 +40,4 @@ def test_app_settings_match_fixture_defaults() -> None:
     fixture = Path(__file__).resolve().parents[1] / "fixtures" / "runtime.defaults.toml"
     settings = load_settings(defaults_path=fixture, environ={})
     assert settings.runtime.control_ibkr_stream_enabled is False
-    assert settings.alerts.steven_enabled is False
     assert settings.alerts.require_schwab_streaming_anchors is True

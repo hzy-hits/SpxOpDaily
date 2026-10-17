@@ -51,6 +51,12 @@ Python 的 `build_strategy_decision` 是唯一人工候选授权出口。报告�
 [图片入口](site/spxw-surface/README.md)和[历史策略复盘页](site/strategy-review/README.md)
 不能当作实时完整行情或账户持仓界面。
 
+Steven observe-only guidance、专用 replay 与 episode 复盘已在源码退役
+（2026-10-17）；共享 gamma/exposure 与股票/低 IV + LEAPS 扫描保留。
+`spx replay steven` 不再提供；升级前须清理旧 `steven.*` 部署配置。
+见[退役边界](docs/steven-framework-integration.md)与
+[共享 pin-distance 配置迁移](docs/runtime-configuration.md#scope)。此变更不代表已部署 VPS。
+
 ## 策略与数据状态
 
 当前全局策略合同为 `strategy_policy.bootstrap.v69`，后续局部修复见

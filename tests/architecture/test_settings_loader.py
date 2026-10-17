@@ -40,7 +40,6 @@ def test_load_settings_from_fixture_is_stable(
 ) -> None:
     monkeypatch.delenv("MARKET_DATA_PROVIDER_PRIORITY", raising=False)
     monkeypatch.delenv("IBKR_BROKER_ACCOUNT_READ_ENABLED", raising=False)
-    monkeypatch.delenv("SPX_STEVEN_ENABLED", raising=False)
 
     settings = load_settings(defaults_path=FIXTURE, environ={})
 
@@ -50,7 +49,6 @@ def test_load_settings_from_fixture_is_stable(
     assert settings.market_context.sector_breadth_min_usable == 8
     assert settings.market_context.hyperliquid_proxy_basis_warn_bps == 50.0
     assert settings.ibkr.account_read_enabled is False
-    assert settings.alerts.steven_enabled is False
     assert settings.runtime.control_ibkr_stream_enabled is False
     assert settings.schwab.streaming_mode == "live"
     assert settings.schwab.service_loop_enabled is False
@@ -83,7 +81,7 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     settings = load_settings(
         defaults_path=FIXTURE,
         environ={
-            "SPX_STEVEN_ENABLED": "true",
+            "IBKR_BROKER_ACCOUNT_READ_ENABLED": "true",
             "MARKET_DATA_PROVIDER_PRIORITY": "ibkr,schwab",
             "SPX_STANDARDIZED_MINUTE_MAX_AGE_SECONDS": "120",
             "ALERT_INTRADAY_ANCHOR_PROVIDER_PRIORITY": "ibkr,schwab",
@@ -101,7 +99,7 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
             "MICOPEDIA_EVENT_TAGS": "FOMC,cpi",
         },
     )
-    assert settings.alerts.steven_enabled is True
+    assert settings.ibkr.account_read_enabled is True
     assert settings.market_data.provider_priority == ("ibkr", "schwab")
     assert settings.market_data.standardized_minute_max_age_seconds == 120.0
     assert settings.shock.anchor_provider_priority == ("ibkr", "schwab")
@@ -117,7 +115,7 @@ def test_environment_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.market_context.hyperliquid_proxy_basis_warn_bps == 55.0
     assert settings.market_context.hyperliquid_es_carry_annual_rate == 0.04
     assert settings.market_context.human_focus_event_tags == ("fomc", "cpi")
-    assert settings.sources["steven.enabled"].origin == "environment"
+    assert settings.sources["ibkr_broker.account_read_enabled"].origin == "environment"
     assert settings.sources["market_data.provider_priority"].origin == "environment"
     assert settings.sources["intraday_shock.max_spx_age_seconds"].origin == "environment"
     assert settings.sources["alerts.gamma_regime_hysteresis_seconds"].origin == "environment"
@@ -172,15 +170,15 @@ def test_provider_failover_environment_overrides_resolve_in_typed_policy() -> No
 
 def test_deployment_overlay_beats_defaults(tmp_path: Path) -> None:
     deployment = tmp_path / "deployment.toml"
-    deployment.write_text("[steven.enabled]\nvalue = true\n", encoding="utf-8")
+    deployment.write_text("[ibkr_broker.account_read_enabled]\nvalue = true\n", encoding="utf-8")
 
     settings = load_settings(
         defaults_path=FIXTURE,
         deployment_path=deployment,
         environ={},
     )
-    assert settings.alerts.steven_enabled is True
-    assert settings.sources["steven.enabled"].origin == "deployment"
+    assert settings.ibkr.account_read_enabled is True
+    assert settings.sources["ibkr_broker.account_read_enabled"].origin == "deployment"
 
 
 def test_level_decision_gth_timeout_follows_typed_precedence(tmp_path: Path) -> None:
@@ -249,7 +247,16 @@ def test_spring_gamma_v3_deployment_overlay_remains_shadow_only(tmp_path: Path) 
 
 def test_deployment_overlay_rejects_unknown_paths(tmp_path: Path) -> None:
     deployment = tmp_path / "deployment.toml"
-    deployment.write_text("[steven.typo]\nvalue = true\n", encoding="utf-8")
+    deployment.write_text("[ibkr_broker.typo]\nvalue = true\n", encoding="utf-8")
+
+    with pytest.raises(KeyError, match="Unknown deployment settings"):
+        load_settings(defaults_path=FIXTURE, deployment_path=deployment, environ={})
+
+
+@pytest.mark.parametrize("key", ("enabled", "alert_context_enabled", "pin_max_distance_points"))
+def test_retired_steven_overlay_is_rejected(tmp_path: Path, key: str) -> None:
+    deployment = tmp_path / "deployment.toml"
+    deployment.write_text(f"[steven.{key}]\nvalue = false\n", encoding="utf-8")
 
     with pytest.raises(KeyError, match="Unknown deployment settings"):
         load_settings(defaults_path=FIXTURE, deployment_path=deployment, environ={})
@@ -258,7 +265,7 @@ def test_deployment_overlay_rejects_unknown_paths(tmp_path: Path) -> None:
 def test_deployment_overlay_cannot_replace_descriptions(tmp_path: Path) -> None:
     deployment = tmp_path / "deployment.toml"
     deployment.write_text(
-        "[steven.enabled]\n"
+        "[ibkr_broker.account_read_enabled]\n"
         "value = true\n"
         'description = "Local description must not replace the tracked one."\n',
         encoding="utf-8",
@@ -270,7 +277,7 @@ def test_deployment_overlay_cannot_replace_descriptions(tmp_path: Path) -> None:
 
 def test_deployment_overlay_rejects_value_type_changes(tmp_path: Path) -> None:
     deployment = tmp_path / "deployment.toml"
-    deployment.write_text('[steven.enabled]\nvalue = "true"\n', encoding="utf-8")
+    deployment.write_text('[ibkr_broker.account_read_enabled]\nvalue = "true"\n', encoding="utf-8")
 
     with pytest.raises(TypeError, match="must match bool"):
         load_settings(defaults_path=FIXTURE, deployment_path=deployment, environ={})
@@ -293,7 +300,7 @@ def test_cwd_does_not_change_fixture_settings(
     first = load_settings(defaults_path=FIXTURE, environ={})
     second = load_settings(defaults_path=FIXTURE, environ={})
     assert first.market_data.provider_priority == second.market_data.provider_priority
-    assert first.alerts.steven_enabled == second.alerts.steven_enabled
+    assert first.ibkr.account_read_enabled == second.ibkr.account_read_enabled
 
 
 def test_gth_spread_and_exit_clock_settings_load() -> None:

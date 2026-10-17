@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
+from spx_spark.app_settings import get_settings
 from spx_spark.analytics.greeks.black_scholes import bs_delta, bs_gamma
 from spx_spark.analytics.greeks.higher_order import (
     bs_charm_per_minute,
@@ -75,7 +76,6 @@ from spx_spark.features.exposure_schema import (
 from spx_spark.config import current_storage_settings
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.marketdata import Quote
-from spx_spark.settings import settings_value
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
 # Re-export shared GEX types/helpers for existing import paths.
@@ -805,7 +805,7 @@ def _build_expiry_exposure(
             call_walls, put_walls = build_wall_ladder(
                 gex_rows, underlier=spot, strike_step=strike_step
             )
-            pin_max = float(settings_value("steven.pin_max_distance_points"))
+            pin_max = get_settings().exposure_pin_max_distance_points
             candidates = [
                 strike
                 for strike in strike_rows

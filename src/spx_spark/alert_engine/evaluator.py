@@ -39,10 +39,6 @@ from spx_spark.settings import (
 )
 from spx_spark.state_io import read_json_object
 from spx_spark.storage import LatestState
-from spx_spark.strategy.steven import (
-    annotate_alerts_with_steven_context,
-    load_steven_state_for_alerts,
-)
 
 
 def evaluate_alerts(
@@ -188,17 +184,6 @@ def evaluate_payload(
     )
     if iv_stale_alert is not None:
         alerts.append(iv_stale_alert)
-    # Steven observe-only context: read-only note on selected alert kinds.
-    if policy.steven_alert_context_enabled:
-        try:
-            steven_state = load_steven_state_for_alerts(StorageSettings.from_env().data_root)
-            alerts = annotate_alerts_with_steven_context(
-                alerts,
-                steven_state,
-                as_of=state.as_of,
-            )
-        except Exception:  # noqa: BLE001 — never block alerts on context failure
-            pass
     storage = StorageSettings.from_env()
     decision_context = read_json_object(
         Path(storage.data_root).expanduser() / "latest" / "decision_context.json"

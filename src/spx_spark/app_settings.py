@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -22,6 +23,10 @@ class AppSettings(BaseSettings):
     data_root: Path = Path("/srv/data/spx-spark")
     log_level: str = "INFO"
     core_lock_root: Path = Path("/tmp")
+    exposure_pin_max_distance_points: float = Field(
+        default=25.0, ge=0, allow_inf_nan=False,
+        description="Maximum SPX point distance for the shared exposure pin candidate.",
+    )
 
     @classmethod
     def settings_customise_sources(

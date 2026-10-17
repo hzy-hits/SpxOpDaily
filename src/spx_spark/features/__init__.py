@@ -1,1 +1,1 @@
-"""Feature extraction modules for Steven framework and shared greek aggregation."""
+"""Shared exposure and greek aggregation features."""

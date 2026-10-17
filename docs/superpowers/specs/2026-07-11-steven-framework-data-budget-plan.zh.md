@@ -4,6 +4,11 @@
 > **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
 > [全仓文档、当前运行状态与合同优先级](../../README.md)（目录核对：2026-10-05）。
 
+> **2026-10-17 source retirement:** Steven guidance and its dedicated bar/replay
+> pipeline are removed; shared exposure and provider collection remain. The
+> implementation snapshot below is historical, not a deployment checklist.
+> See [retirement boundary](../../steven-framework-integration.md).
+
 日期：2026-07-11
 状态：规划文档（部分已落地；见下方「实施快照」）
 范围：原为计划与架构；代码落地后本文保留为预算/阶段依据，以 `config/runtime.yaml` 与实现模块为准。
