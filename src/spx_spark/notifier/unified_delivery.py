@@ -372,6 +372,7 @@ def enqueue_final_notification(
             payload=payload,
             channels=targets,
             expires_at=routed.expires_at,
+            correlation_id=routed.correlation_id,
         ),
         now=at,
     )
@@ -427,6 +428,7 @@ def enqueue_frozen_notification(
             ),
             channels=normalized,
             expires_at=envelope.expires_at,
+            correlation_id=envelope.correlation_id,
         ),
         now=enqueued_at,
     )

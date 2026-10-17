@@ -60,6 +60,15 @@ def envelope(event_id: str, lane: str = "trade_ready") -> NotificationEnvelope:
     )
 
 
+def test_enqueue_persists_the_decision_correlation(store, settings: NotificationSettings) -> None:
+    correlated = replace(envelope("corr-event"), correlation_id="corr:test")
+    dispatcher.enqueue_notification(
+        settings, correlated, title="READY", text="A", enqueued_at=NOW
+    )
+    rows = event_rows(store, "corr-event")
+    assert rows and all(row["correlation_id"] == "corr:test" for row in rows)
+
+
 def test_duplicate_is_idempotent_and_payload_collision_is_rejected(
     store,
     settings: NotificationSettings,

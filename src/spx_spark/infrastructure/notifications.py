@@ -37,6 +37,7 @@ events = sa.Table(
     sa.Column("source", sa.Text(), nullable=False),
     sa.Column("kind", sa.Text(), nullable=False),
     sa.Column("lane", sa.Text(), nullable=False),
+    sa.Column("correlation_id", sa.Text(), nullable=True),
     sa.Column("channel", sa.Text(), nullable=False),
     sa.Column("payload_json", sa.Text(), nullable=False),
     sa.Column("payload_sha256", sa.Text(), nullable=False),
@@ -73,6 +74,7 @@ class NotificationDraft:
     payload: Mapping[str, object]
     channels: tuple[str, ...]
     expires_at: datetime | None = None
+    correlation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +252,7 @@ def enqueue(
                     source=draft.source,
                     kind=draft.kind,
                     lane=draft.lane,
+                    correlation_id=draft.correlation_id,
                     channel=channel,
                     payload_json=payload_json,
                     payload_sha256=fingerprint,
