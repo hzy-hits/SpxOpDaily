@@ -21,11 +21,10 @@ from spx_spark.analytics.options.pricing import time_to_expiry_years
 from spx_spark.analytics.options.strategy_payoff import (
     IRON_CONDOR_MANAGEMENT_POLICY,
     ManagementPolicy,
-    PolicyMark,
     policy_mark_horizon_end,
     risk_adjusted_cvar_objective,
-    simulate_management_policy,
 )
+from spx_spark.application.order_map.policy_replay import simulate_paths
 from spx_spark.iv_surface import IvSurfaceExpiry, IvSurfaceSnapshot, snapshot_from_dict
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.application.market_features.physical_followthrough import HistoryPreparation
@@ -638,43 +637,24 @@ def _simulate(
     invalidation: Any,
     session_date: date | None = None,
 ) -> dict[str, Any]:
-    pnls: list[float] = []
-    holds: list[float] = []
-    counters = {
-        "invalidation": 0,
-        "tp": 0,
-        "premium_stop": 0,
-        "stop_loss": 0,
-        "hard_close": 0,
-        "time_stop": 0,
-    }
+    values = combo["liquidation_values"]
     horizon_end = policy_mark_horizon_end(now, policy, session_date=session_date)
-    for index in range(len(combo["liquidation_values"])):
-        projected = tuple(float(value) for value in combo["spots"][index])
-        if invalidation is not None and invalidation(projected):
-            counters["invalidation"] += 1
-        marks = [
-            PolicyMark(min(now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES), horizon_end), float(bid))
-            for offset, bid in enumerate(combo["liquidation_values"][index])
-        ]
-        label = simulate_management_policy(
-            marks,
-            entry_price=entry,
-            contract_count=leg_count,
-            entry_at=now,
-            policy=policy,
-            session_date=session_date,
-            max_quote_gap_seconds=SURFACE_CADENCE_MINUTES * 60,
-        )
-        if label.policy_pnl_points is None:
-            return {"pnls": [], "holds": [], "counters": counters, "reason": label.exit_reason}
-        pnls.append(label.policy_pnl_points)
-        if label.exit_at is not None:
-            holds.append((label.exit_at - now).total_seconds() / 60.0)
-        counters["tp"] += int(label.tp_before_stop)
-        if label.exit_reason in counters:
-            counters[label.exit_reason] += 1
-    return {"pnls": pnls, "holds": holds, "counters": counters}
+    mark_times = [
+        min(now + timedelta(minutes=offset * SURFACE_CADENCE_MINUTES), horizon_end)
+        for offset in range(values.shape[1])
+    ]
+    return simulate_paths(
+        values,
+        combo["spots"],
+        mark_times,
+        entry_price=entry,
+        contract_count=leg_count,
+        entry_at=now,
+        policy=policy,
+        session_date=session_date,
+        max_quote_gap_seconds=SURFACE_CADENCE_MINUTES * 60,
+        invalidation=invalidation,
+    )
 
 
 def _distribution(

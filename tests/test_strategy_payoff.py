@@ -23,6 +23,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     management_policy_for_candidate,
     risk_adjusted_cvar_objective,
     simulate_management_policy,
+    simulate_management_policy_batch,
     vertical_economics,
     vertical_payoff,
     vertical_width_path_reasons,
@@ -5674,3 +5675,52 @@ def test_session_metadata_snapshot_is_reused_only_within_decision(monkeypatch):
     for expected in (1, 2):
         build_strategy_decision(_decision_payload(now), _state(now), now)
         assert len(loads) == expected
+
+def test_batch_policy_replay_matches_scalar_for_debit_and_credit() -> None:
+    now = datetime(2026, 10, 16, 13, 30, tzinfo=timezone.utc)
+    times = [now + timedelta(minutes=5 * index) for index in range(12)]
+    cases = (
+        (
+            DEFAULT_MANAGEMENT_POLICY,
+            3.2,
+            (
+                [3.2, 3.2, 3.3, 3.6, 4.0, 4.6, 5.0, 4.9, 4.2, 3.8, 3.5, 3.2],
+                [3.2, 3.0, 2.4, 2.0, 1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9],
+                [3.2, 3.1, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+            ),
+        ),
+        (
+            RTH_IRON_CONDOR_MANAGEMENT_POLICY,
+            1.8,
+            (
+                [-1.8, -1.6, -1.2, -0.8, -0.5, -0.4, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3],
+                [-1.8, -2.0, -3.0, -4.0, -5.0, -5.6, -6.0, -6.0, -6.0, -6.0, -6.0, -6.0],
+                [-1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8],
+            ),
+        ),
+    )
+    for policy, entry_price, rows in cases:
+        labels = simulate_management_policy_batch(
+            rows,
+            times,
+            entry_price=entry_price,
+            contract_count=2,
+            entry_at=now,
+            policy=policy,
+            session_date=now.date(),
+            max_quote_gap_seconds=300,
+        )
+        scalar = [
+            simulate_management_policy(
+                [PolicyMark(at, value) for at, value in zip(times, row)],
+                entry_price=entry_price,
+                contract_count=2,
+                entry_at=now,
+                policy=policy,
+                session_date=now.date(),
+                max_quote_gap_seconds=300,
+            )
+            for row in rows
+        ]
+        assert labels == scalar
+

@@ -702,12 +702,17 @@ def test_partial_final_minute_uses_exact_exit_clock(tmp_path: Path) -> None:
 def test_management_probability_does_not_count_break_even_as_profit(monkeypatch):
     from dataclasses import replace
     import spx_spark.application.order_map.path_distribution as module
+    import spx_spark.application.order_map.policy_replay as replay_module
     from spx_spark.application.market_features.physical_followthrough import PhysicalSpotPath
 
-    simulate = module.simulate_management_policy
+    simulate = replay_module.simulate_management_policy
     def break_even(*args, **kwargs):
         return replace(simulate(*args, **kwargs), policy_pnl_points=0.0)
-    monkeypatch.setattr(module, "simulate_management_policy", break_even)
+    monkeypatch.setattr(replay_module, "simulate_management_policy", break_even)
+    simulate_batch = replay_module.simulate_management_policy_batch
+    def break_even_batch(*args, **kwargs):
+        return [replace(label, policy_pnl_points=0.0) for label in simulate_batch(*args, **kwargs)]
+    monkeypatch.setattr(replay_module, "simulate_management_policy_batch", break_even_batch)
     result = module.estimate_path_distribution(
         _iron_condor(session_mode="rth"), _facts(now=RTH_NOW),
         now=RTH_NOW, data_root=None, probability_settings=None,

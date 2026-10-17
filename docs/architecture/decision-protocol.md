@@ -117,7 +117,8 @@ class Strategy(Protocol):
 规则：
 
 1. `armed` 可以早发，但必须带 `evidence_age` 与 `valid_until`；`ready` 才代表证据齐全。
-2. 链分析增量更新 + 按 snapshot 版本缓存；路径回放向量化或非阻塞。
+2. 链分析增量更新 + 按 snapshot 版本缓存；路径回放已批量化（4,000 路径、
+   5 分钟粒度约 20–40 ms，1 分钟粒度约 50 ms），非阻塞化仍待做。
 3. 消息同时带 `decision_at` 与 `quote_as_of`，接收方能看到判断的时效。
 
 ## 7. 观测接入
