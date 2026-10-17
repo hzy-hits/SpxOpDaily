@@ -8,6 +8,31 @@ from datetime import datetime
 
 CommandRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 
+MESSAGE_CLASSES = frozenset(
+    {
+        "watch",
+        "armed",
+        "ready",
+        "no_trade",
+        "execution",
+        "management",
+        "exit",
+        "post_mortem",
+        "ops",
+        "data_quality",
+        "market_warning",
+        "scheduled_report",
+    }
+)
+LANE_MESSAGE_CLASS = {
+    "ops_transition": "ops",
+    "market_warning": "market_warning",
+    "trade_ready": "ready",
+    "position_safety": "management",
+    "scheduled_report": "scheduled_report",
+    "strategy_watch": "watch",
+}
+
 
 @dataclass(frozen=True)
 class NotificationEnvelope:
@@ -21,6 +46,13 @@ class NotificationEnvelope:
     operator_opportunity_id: str | None = None
     operator_generation: int = 0
     correlation_id: str | None = None
+    message_class: str | None = None
+    template_id: str | None = None
+    template_version: int = 1
+
+    @property
+    def effective_message_class(self) -> str:
+        return self.message_class or LANE_MESSAGE_CLASS.get(self.lane, "ops")
 
     def validate(self) -> None:
         for label, value in (
@@ -57,6 +89,12 @@ class NotificationEnvelope:
                 raise ValueError("operator_opportunity_id contains NUL")
             if len(self.operator_opportunity_id.encode("utf-8")) > 4_096:
                 raise ValueError("operator_opportunity_id exceeds 4096 UTF-8 bytes")
+        if self.message_class is not None and self.message_class not in MESSAGE_CLASSES:
+            raise ValueError(f"unsupported message_class: {self.message_class}")
+        if self.template_id is not None and not self.template_id.strip():
+            raise ValueError("template_id cannot be blank")
+        if isinstance(self.template_version, bool) or self.template_version < 1:
+            raise ValueError("template_version must be >= 1")
         if self.correlation_id is not None:
             if not self.correlation_id.strip():
                 raise ValueError("correlation_id cannot be blank")

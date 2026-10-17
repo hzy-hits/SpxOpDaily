@@ -33,6 +33,10 @@
 
 ## 3. MessageIntent（事实）
 
+现状（2026-10-18）：`NotificationEnvelope` 已带 `message_class`、`template_id`、
+`template_version`，lane→class 有默认映射；人工交易卡已标注 `ready` / `watch`。
+模板注册表与数字锁定仍是目标。
+
 ```python
 @dataclass(frozen=True)
 class MessageIntent:

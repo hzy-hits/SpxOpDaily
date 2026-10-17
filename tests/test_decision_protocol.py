@@ -45,3 +45,25 @@ def test_decision_envelope_carries_one_utc_correlation_id() -> None:
     )
     with pytest.raises(ValueError):
         blank.validate()
+
+def test_notification_envelope_maps_lane_to_message_class() -> None:
+    now = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
+    envelope = NotificationEnvelope(
+        event_id="evt",
+        source="core",
+        kind="trade_intent",
+        lane="trade_ready",
+        occurred_at=now,
+    )
+    assert envelope.effective_message_class == "ready"
+    envelope.validate()
+    invalid = NotificationEnvelope(
+        event_id="evt",
+        source="core",
+        kind="trade_intent",
+        lane="trade_ready",
+        occurred_at=now,
+        message_class="definitely_not_a_class",
+    )
+    with pytest.raises(ValueError):
+        invalid.validate()
