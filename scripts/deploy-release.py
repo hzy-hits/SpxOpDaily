@@ -74,6 +74,21 @@ def verify_health(started):
             raise RuntimeError('Normalized bridge has not reconnected')
 
 
+def wait_ready(started, processes, timeout=105):
+    """Allow cold replay/resync while rejecting crashes and a stale health file."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if any(pid == '0' or run(*args) != pid for args, pid in processes.items()):
+            raise RuntimeError('A production process restarted during validation')
+        try:
+            verify_health(started)
+            return
+        except (RuntimeError, OSError, ValueError, KeyError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(2)
+
+
 def install(sha, digest):
     if run('uname', '-m') != 'aarch64':
         raise ValueError('This receiver requires Ubuntu 24.04 ARM64')
@@ -169,12 +184,10 @@ def install(sha, digest):
                 args = (*prefix, 'show', name, '-p', 'MainPID', '--value')
                 processes[args] = run(*args)
         time.sleep(15)
-        if any(pid == '0' or run(*args) != pid for args, pid in processes.items()):
-            raise RuntimeError('A production process restarted during validation')
         if (set(active(True, running_python)) != set(running_python)
                 or set(active(False, running_rust)) != set(running_rust)):
             raise RuntimeError('Post-deployment service validation failed')
-        verify_health(started)
+        wait_ready(started, processes)
         ROOT.joinpath('previous.json').write_text(json.dumps({
             'python': str(previous), 'rust': str(previous_rust), 'release': sha,
             'dropins': {str(p): v.decode() if v is not None else None for p, v in changes.items()}
@@ -204,7 +217,8 @@ def install(sha, digest):
             run('systemctl', '--user', 'start', *timers)
     run('systemctl', '--user', 'disable', '--now', 'spx-spark-backtest-weekly.timer')
     print(json.dumps({'status': 'deployed', 'revision': sha, 'archive_sha256': digest,
-                      'previous_python': str(previous), 'previous_rust': str(previous_rust)}))
+                      'previous_python': str(previous), 'previous_rust': str(previous_rust),
+                      'cutover_seconds': round(time.time() - started, 1)}))
 
 
 if __name__ == '__main__':

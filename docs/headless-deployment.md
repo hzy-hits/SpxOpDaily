@@ -50,6 +50,10 @@ on master to retry a release; published release assets are never overwritten.
 Acceptance: clean CI on both architectures, isolated relocated-package startup,
 verified archive downloaded by Oracle, successful switch of existing services,
 advancing bridge/report health timestamps and independent provider/source checks.
+After a 15-second stability interval the receiver allows up to 105 more seconds
+for cold bridge resynchronization, continuing to reject PID changes and stale
+health records. The first 2026-10-17 rollout exercised automatic rollback; the
+previous version also needed about 52 seconds to reconnect after restart.
 Closed-market stale quotes are reported as such, never treated as fresh market data.
 Deployment status is evidence of installation and runtime health, not trading readiness.
 

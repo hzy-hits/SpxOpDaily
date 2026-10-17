@@ -119,3 +119,42 @@ def test_repeated_deploy_preserves_the_original_rollback_point(host):
     release.install(SHA, DIGEST)
     assert (root / 'previous.json').read_bytes() == before
     assert calls == [('uname', '-m')]
+
+
+def test_cold_start_waits_for_real_readiness_without_weakening_health(monkeypatch):
+    now = [0]
+    attempts = []
+    monkeypatch.setattr(release.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(release.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(release, 'run', lambda *args: '100')
+
+    def health(started):
+        attempts.append(started)
+        if len(attempts) == 1:
+            raise RuntimeError('Normalized bridge has not reconnected')
+
+    monkeypatch.setattr(release, 'verify_health', health)
+    release.wait_ready(0, {('pid',): '100'}, timeout=5)
+    assert len(attempts) == 2
+    assert now[0] == 2
+
+
+def test_never_ready_still_fails_after_bounded_wait(monkeypatch):
+    now = [0]
+    monkeypatch.setattr(release.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(release.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(release, 'run', lambda *args: '100')
+
+    def health(started):
+        raise RuntimeError('Normalized bridge has not reconnected')
+
+    monkeypatch.setattr(release, 'verify_health', health)
+    with pytest.raises(RuntimeError, match='not reconnected'):
+        release.wait_ready(0, {('pid',): '100'}, timeout=4)
+    assert now[0] == 4
+
+
+def test_crashing_process_is_not_tolerated_during_readiness_wait(monkeypatch):
+    monkeypatch.setattr(release, 'run', lambda *args: '101')
+    with pytest.raises(RuntimeError, match='process restarted'):
+        release.wait_ready(0, {('pid',): '100'})
