@@ -105,7 +105,8 @@ systemctl --user enable spx-spark-morning-map.timer
 systemctl --user enable --now spx-spark-maintenance-weekly.timer
 systemctl --user enable --now spx-spark-data-compact.timer
 systemctl --user enable --now spx-spark-data-compact-weekend.timer
-systemctl --user enable --now spx-spark-backtest-weekly.timer
+# Offline backtests belong to the home research worker, not production.
+systemctl --user disable --now spx-spark-backtest-weekly.timer
 
 echo "Installed user services:"
 echo "  spx-core.service (enabled only by --now owner cutover)"
@@ -121,7 +122,7 @@ echo "  spx-spark-morning-map.timer"
 echo "  spx-spark-maintenance-weekly.timer (Sun 13:00 CST non-destructive audit)"
 echo "  spx-spark-data-compact.timer (hourly at :08 + jitter; never deletes raw)"
 echo "  spx-spark-data-compact-weekend.timer (Sat/Sun 08:30 CST bulk catch-up)"
-echo "  spx-spark-backtest-weekly.timer (Mon 09:17 CST 0DTE level backtest)"
+echo "  spx-spark-backtest-weekly.timer (disabled; run on the home research worker)"
 
 if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
   echo "WARNING: user lingering is off; user services stop at logout and do not start at boot."

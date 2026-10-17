@@ -1,5 +1,57 @@
 # Headless Deployment Notes
 
+## Cloud delivery cutover (2026-10-17)
+
+User-authorized delivery change: move development, builds and offline research off Oracle.
+This extends the Phase 0 owner inventory / Phase 1 delivery infrastructure; the Rust
+lockfile update is a Phase 6 security exception. It does not move strategy, report,
+notification or database ownership. The existing weekly backtest timer is disabled;
+raw-data replay runs on the home research worker and results are verified on NAS.
+
+Change Brief: `.github/workflows/ci.yml` remains the CI owner. Docker/BuildKit, uv,
+Cargo, GitHub Releases/GHCR, SSH and existing systemd units supply the complete path.
+New files are `Dockerfile`, `.dockerignore`, `scripts/deploy-release.py` and boundary
+tests; no new application dependency, service, timer, database or configuration key
+is required. Existing source-based install instructions below are legacy bootstrap,
+not the production update path. Old release directories are retained for rollback.
+
+PRs run Python tests, native AMD64/ARM64 Rust checks and dependency audit, then build
+and test both OCI images and relocatable Ubuntu 24.04 / Python 3.12 bundles. Main
+branch builds publish `runtime-<full SHA>` GitHub Releases with archive SHA-256 and
+GHCR digest references. Packages are private by default; no package visibility is
+changed. Images can serve research workers; Oracle uses the prebuilt ARM64 bundle.
+The image never receives host secrets or production data and defaults to non-root.
+
+Oracle's restricted SSH key accepts only `deploy <40-char SHA> <64-char SHA256>`.
+It rejects unmerged/stale commits, checksum mismatch, changed database migrations,
+missing baseline services and concurrent scheduled work before stopping services.
+The receiver stages an immutable release under `/home/ubuntu/spx-runtime/releases`,
+then redirects existing Python service executables via `90-cloud-release.conf`.
+Existing local hardening drop-ins and EnvironmentFiles remain. Rust binaries retain
+`/opt/spx-spark-core-shadow/releases/<SHA>/bin` and the existing `current` selector.
+No Git checkout, uv sync, cargo build or compiler executes on Oracle.
+
+Host-only configuration and secrets stay in the old protected locations; existing
+data/log paths are linked into the release. No service is enabled for the first time,
+no broker Gateway restart occurs, and writer ownership does not change. Deployment
+serializes with a host lock, stops writers before switching and restores prior unit
+paths/binaries on failed validation. A successful switch records `previous.json`.
+Database revision changes stop deployment: binary rollback does not roll back data.
+
+GitHub environment `oracle-production` is restricted to master. Its secrets contain
+only a dedicated forced-command key and pinned host key; the ordinary Mac SSH key
+and broker credentials never leave their current hosts. Repository variables are
+`ORACLE_HOST` and `ORACLE_DEPLOY_ENABLED`; deployment starts only when the latter is
+`true`. Disable it to suspend rollout while CI and publication continue. Rerun CI
+on master to retry a release; published release assets are never overwritten.
+
+Acceptance: clean CI on both architectures, isolated relocated-package startup,
+verified archive downloaded by Oracle, successful switch of existing services,
+advancing bridge/report health timestamps and independent provider/source checks.
+Closed-market stale quotes are reported as such, never treated as fresh market data.
+Deployment status is evidence of installation and runtime health, not trading readiness.
+
+
 <!-- documentation-status: 2026-10-05 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
