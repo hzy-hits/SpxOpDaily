@@ -118,7 +118,11 @@ def test_repeated_deploy_preserves_the_original_rollback_point(host):
     calls.clear()
     release.install(SHA, DIGEST)
     assert (root / 'previous.json').read_bytes() == before
-    assert calls == [('uname', '-m')]
+    assert calls == [
+        ('uname', '-m'),
+        ('systemctl', '--user', 'show', 'spx-spark-backtest-weekly.timer', '-p', 'LoadState', '--value'),
+        ('systemctl', '--user', 'disable', '--now', 'spx-spark-backtest-weekly.timer'),
+    ]
 
 
 def test_cold_start_waits_for_real_readiness_without_weakening_health(monkeypatch):
@@ -235,3 +239,33 @@ def test_partial_migration_failure_restores_database(migration_host, monkeypatch
         assert "correlation_id" not in {row[1] for row in connection.execute("PRAGMA table_info(notification_events)")}
         assert connection.execute("SELECT value FROM review_preserved").fetchall() == [("before",)]
         assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.parametrize("state", ["not-found", "masked"])
+def test_retired_research_timer_does_not_fail_successful_release(host, monkeypatch, state):
+    original = release.run
+
+    def run(*args, **kwargs):
+        if args[-3:] == ("-p", "LoadState", "--value"):
+            return state
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(release, "run", run)
+    release.install(SHA, DIGEST)
+    assert json.loads((host[0] / "previous.json").read_text())["release"] == SHA
+    assert not any("disable" in call for call in host[-1])
+
+
+def test_real_timer_cleanup_failure_still_rolls_back_before_success_receipt(host, monkeypatch):
+    original = release.run
+
+    def run(*args, **kwargs):
+        if "disable" in args:
+            raise RuntimeError("timer cleanup failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(release, "run", run)
+    with pytest.raises(RuntimeError, match="timer cleanup failed"):
+        release.install(SHA, DIGEST)
+    assert not (host[0] / "current").is_symlink()
+    assert not (host[0] / "previous.json").exists()
