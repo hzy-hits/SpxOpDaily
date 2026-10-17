@@ -120,6 +120,12 @@ git diff --check
 
 ## 6. 远端检查与部署
 
+2026-10-17 起的云端交付入口见 [部署文档](docs/headless-deployment.md#cloud-delivery-cutover-2026-10-17)。
+日常发布由 CI 生成并校验固定 SHA 的运行包，再由受限 SSH 接收器切换既有服务。
+生产不执行 `git pull`、`uv sync` 或 `cargo build`；开发与编译在云端，离线研究在家庭节点。
+下文旧源码目录保留用于只读检查、机器配置及首次切换回滚，不能作为新版本更新入口。
+新服务、数据迁移和 owner 转移仍须单独验收，不能借普通发布顺带执行。
+
 未得到明确部署授权时，只做远端只读检查，不执行 `pull`、restart、enable/disable、配置写入或数据迁移。
 
 常用只读检查：

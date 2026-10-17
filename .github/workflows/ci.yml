@@ -3,6 +3,20 @@ name: CI
 on:
   push:
     branches: [master]
+    paths:
+      - src/**
+      - rust/crates/**
+      - rust/Cargo.*
+      - config/**
+      - systemd/**
+      - scripts/**
+      - alembic/**
+      - alembic.ini
+      - pyproject.toml
+      - uv.lock
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/ci.yml
   pull_request:
   workflow_dispatch:
 
@@ -102,7 +116,6 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
-      packages: write
     env:
       IMAGE: ghcr.io/hzy-hits/spx-runtime
     steps:
@@ -131,15 +144,13 @@ jobs:
             'cd /relocated; PYTHONPATH=/relocated/src .venv/bin/spx --help >/dev/null; .venv/bin/python -c "import scipy, duckdb"; for b in bin/*; do "$b" --help >/dev/null; done'
           tar -C "$RUNNER_TEMP/relocated" -czf "dist/spx-runtime-$ARCH.tar.gz" .
           (cd dist && sha256sum "spx-runtime-$ARCH.tar.gz" > "spx-runtime-$ARCH.sha256")
-      - name: Publish immutable image reference
+      - name: Export tested image for the trusted publisher
         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARCH: ${{ matrix.arch }}
         run: |
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker push "$IMAGE:sha-$GITHUB_SHA-$ARCH"
-          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:sha-$GITHUB_SHA-$ARCH" > "dist/image-$ARCH.txt"
+          docker save "$IMAGE:sha-$GITHUB_SHA-$ARCH" | gzip > "dist/spx-image-$ARCH.tar.gz"
+          (cd dist && sha256sum "spx-image-$ARCH.tar.gz" > "spx-image-$ARCH.sha256")
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-${{ matrix.arch }}
@@ -166,16 +177,23 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          if gh release view "runtime-$GITHUB_SHA" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to overwrite published images or bundles.'
+            exit 0
+          fi
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for arch in amd64 arm64; do
+            (cd dist && sha256sum -c "spx-runtime-$arch.sha256" && sha256sum -c "spx-image-$arch.sha256")
+            gzip -dc "dist/spx-image-$arch.tar.gz" | docker load
+            image="ghcr.io/hzy-hits/spx-runtime:sha-$GITHUB_SHA-$arch"
+            docker push "$image"
+            docker inspect --format '{{index .RepoDigests 0}}' "$image" > "dist/image-$arch.txt"
+          done
           docker buildx imagetools create -t "ghcr.io/hzy-hits/spx-runtime:sha-$GITHUB_SHA" \
             "$(cat dist/image-amd64.txt)" "$(cat dist/image-arm64.txt)"
-          if gh release view "runtime-$GITHUB_SHA" >/dev/null 2>&1; then
-            echo 'Release already exists; refusing to overwrite published bundles.'
-          else
-            gh release create "runtime-$GITHUB_SHA" dist/* --target "$GITHUB_SHA" \
-              --title "Runtime $GITHUB_SHA" \
-              --notes "Python and Rust tested on native AMD64/ARM64. Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Oracle installs the ARM64 bundle without compiling. Image digests and archive checksums are attached."
-          fi
+          gh release create "runtime-$GITHUB_SHA" dist/spx-runtime-* dist/image-*.txt dist/spx-image-amd64.* \
+            --target "$GITHUB_SHA" --title "Runtime $GITHUB_SHA" \
+            --notes "Python and Rust tested on native AMD64/ARM64. Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Oracle installs the ARM64 bundle without compiling. Image digests and archive checksums are attached."
 
   deploy:
     needs: publish
@@ -186,10 +204,11 @@ jobs:
       group: oracle-production
       cancel-in-progress: false
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime-arm64
-          path: dist
+      - name: Read checksum of the immutable published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release download "runtime-$GITHUB_SHA" -p spx-runtime-arm64.sha256 -D dist
       - name: Deploy verified release over restricted SSH
         env:
           DEPLOY_KEY: ${{ secrets.ORACLE_DEPLOY_KEY }}

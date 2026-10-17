@@ -111,6 +111,13 @@ def install(sha, digest):
             payload.rename(target)
     current = ROOT / 'current'
     previous = current.resolve() if current.is_symlink() else LEGACY
+    if previous == target:
+        if (set(active(True, PYTHON_UNITS)) != set(PYTHON_UNITS)
+                or set(active(False, RUST_UNITS)) != set(RUST_UNITS)):
+            raise RuntimeError('Installed release is unhealthy; operator recovery required')
+        verify_health(time.time() - 60)
+        print(json.dumps({'status': 'already_deployed', 'revision': sha}))
+        return
     if schema_files(previous) != schema_files(target):
         raise ValueError('Database migration changed; separate migration review required')
     old_rust = RUST / 'current'
@@ -155,7 +162,15 @@ def install(sha, digest):
         run('systemctl', '--user', 'daemon-reload')
         run('systemctl', '--user', 'start', *running_python)
         run('sudo', '-n', 'systemctl', 'start', *running_rust)
+        processes = {}
+        for prefix, names in [(['systemctl', '--user'], running_python),
+                              (['systemctl'], running_rust)]:
+            for name in names:
+                args = (*prefix, 'show', name, '-p', 'MainPID', '--value')
+                processes[args] = run(*args)
         time.sleep(15)
+        if any(pid == '0' or run(*args) != pid for args, pid in processes.items()):
+            raise RuntimeError('A production process restarted during validation')
         if (set(active(True, running_python)) != set(running_python)
                 or set(active(False, running_rust)) != set(running_rust)):
             raise RuntimeError('Post-deployment service validation failed')

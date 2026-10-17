@@ -46,7 +46,7 @@ def host(tmp_path, monkeypatch):
 
     def run(*args, **kwargs):
         calls.append(args)
-        return 'aarch64' if args == ('uname', '-m') else ''
+        return 'aarch64' if args == ('uname', '-m') else '100'
 
     monkeypatch.setattr(release, 'run', run)
     monkeypatch.setattr(release, 'urlopen', lambda *a, **kw: io.BytesIO(json.dumps({'sha': SHA}).encode()))
@@ -109,3 +109,13 @@ def test_stale_health_is_not_mistaken_for_success(tmp_path, monkeypatch):
     monkeypatch.setattr(release, 'HEALTH_FILES', [path])
     with pytest.raises(RuntimeError, match='health did not advance'):
         release.verify_health(1700000000)
+
+
+def test_repeated_deploy_preserves_the_original_rollback_point(host):
+    root, legacy, target, units, calls = host
+    release.install(SHA, DIGEST)
+    before = (root / 'previous.json').read_bytes()
+    calls.clear()
+    release.install(SHA, DIGEST)
+    assert (root / 'previous.json').read_bytes() == before
+    assert calls == [('uname', '-m')]

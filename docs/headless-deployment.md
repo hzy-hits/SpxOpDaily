@@ -19,7 +19,9 @@ PRs run Python tests, native AMD64/ARM64 Rust checks and dependency audit, then 
 and test both OCI images and relocatable Ubuntu 24.04 / Python 3.12 bundles. Main
 branch builds publish `runtime-<full SHA>` GitHub Releases with archive SHA-256 and
 GHCR digest references. Packages are private by default; no package visibility is
-changed. Images can serve research workers; Oracle uses the prebuilt ARM64 bundle.
+changed. Images serve research workers; the AMD64 image archive is also attached to the
+release so the home worker can load the exact image without sharing a GHCR token
+or rebuilding. Oracle uses the prebuilt ARM64 bundle.
 The image never receives host secrets or production data and defaults to non-root.
 
 Oracle's restricted SSH key accepts only `deploy <40-char SHA> <64-char SHA256>`.

@@ -25,7 +25,8 @@ ENV PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin" \
 RUN printf '%s\n' "$REVISION" > REVISION \
     && python -c 'import spx_spark, scipy, duckdb; assert spx_spark.__file__.startswith("/app/src/")' \
     && spx --help >/dev/null \
-    && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin spx
+    && python -c 'from pathlib import Path; from spx_spark.settings import load_app_settings; load_app_settings(); assert Path("config/growth_dislocation_universe.csv").is_file()' \
+    && /usr/sbin/useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin spx
 USER 10001:10001
 ENTRYPOINT ["/app/.venv/bin/spx"]
 CMD ["--help"]

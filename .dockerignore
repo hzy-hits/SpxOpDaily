@@ -7,6 +7,7 @@
 !src/**
 !config/
 !config/*.toml
+!config/growth_dislocation_universe.csv
 !alembic.ini
 !alembic/
 !alembic/**
