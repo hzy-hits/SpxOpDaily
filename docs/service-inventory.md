@@ -19,6 +19,12 @@
 
 ## 当前应用服务（5 Python + 4 Rust）
 
+2026-10-18 00:08 Asia/Shanghai 现场核验：以下 9 个服务均运行应用版本
+`1618abce638b42e9f98013914b3f18fa919aa436`，重启计数为 0。38 个旧发布目录
+已清理，当前服务进程未重启；数据库迁移备份保留，本机已无上一版运行包。
+`shadow` 是现有 Rust unit 的保留名称，不代表另有一套应下线的旧服务。
+核验范围、行情限制和恢复条件见[部署及退役记录](headless-deployment.md#verified-deployment-and-release-retirement-2026-10-18)。
+
 | Owner | unit | 启动命令 | 状态 |
 | --- | --- | --- | --- |
 | Python Core | `spx-core.service` | `spx core run` | `current`（owner cutover 时 `--now` 启用） |

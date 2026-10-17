@@ -26,6 +26,10 @@
 <a id="current-state"></a>
 ## 当前运行状态与数据边界
 
+- 2026-10-18 00:08 Asia/Shanghai [部署及退役核验](headless-deployment.md#verified-deployment-and-release-retirement-2026-10-18)：
+  PR #16/#17 已合并，Oracle 应用版本为 `1618abce`，9 个服务运行正常且决策持续落库。
+  已清理 38 个旧发布目录（约 2.42 GiB），数据库迁移备份保留；本机不再保留即时回退包。
+  休市时 IBKR 行情未就绪，开市验收仍未完成；后续纯文档提交不要求重部署应用。
 - 2026-10-17 [云端交付](headless-deployment.md#cloud-delivery-cutover-2026-10-17)已接通：
   GitHub 构建双架构产物，Oracle 使用固定 ARM64 原生包，研究笔记本使用同提交 AMD64 镜像。
   树莓派日归档与周研究计划已启用，短窗口回放及 NAS 核验已通过；完整周研究效果、调度库异机

@@ -1,5 +1,59 @@
 # Headless Deployment Notes
 
+## Verified deployment and release retirement (2026-10-18)
+
+This is a dated operational snapshot, verified at **2026-10-18 00:08:57 Asia/Shanghai**
+(2026-10-17 16:08:57 UTC). Future documentation-only commits do not change the
+installed application revision or require a production restart.
+
+| Item | Verified state |
+| --- | --- |
+| Installed application | `1618abce638b42e9f98013914b3f18fa919aa436`, including merged PRs [#16](https://github.com/hzy-hits/SpxOpDaily/pull/16) and [#17](https://github.com/hzy-hits/SpxOpDaily/pull/17) |
+| Cloud delivery | [CI, publication and Oracle deployment succeeded](https://github.com/hzy-hits/SpxOpDaily/actions/runs/39046638758); deployment completed on October 17 at 23:54:22 Asia/Shanghai |
+| Release artifact | [Immutable runtime release](https://github.com/hzy-hits/SpxOpDaily/releases/tag/runtime-1618abce638b42e9f98013914b3f18fa919aa436); ARM64 archive SHA-256 `f9aca5629c2e0f8ec3fa39427f8b0d54abfa7808331798d2a97f759b61525668` |
+| Python / Rust selectors | Both `current` links resolve to the installed revision; all five Python and four Rust processes use it |
+| Runtime acceptance | Nine services active, restart counts zero; process IDs unchanged throughout retirement; bridge connected and bridge/report health timestamps advancing |
+| Persistence | `0005_notification_correlation`, nullable column and index present; sampled decision and opportunity-ledger IDs persisted with correlation IDs; `automatic_ordering=false` |
+| Retired research timer | `spx-spark-backtest-weekly.timer` is absent and inactive on Oracle |
+
+At 00:08:34 Asia/Shanghai, the operator-authorized retirement removed **3 inactive
+Python release directories and 35 inactive Rust release directories**, plus four
+obsolete `previous-before-*` selectors. Their allocated size was **2,603,233,280
+bytes (2.42 GiB)**. Root filesystem availability increased from approximately
+16.30 to 18.70 GiB during the operation. The deployment lock was held; process
+executable/memory-map paths and installed unit references were checked before
+deletion. No service restart, unit/configuration change or database write was needed.
+
+The host audit is `/home/ubuntu/spx-runtime/retirements/20261017T160834Z/manifest.json`.
+The old `previous.json` receipt was moved beside it as
+`previous-before-retirement.json`, so it is historical evidence rather than a live
+rollback pointer. **There is now no previous runtime available locally.** A subsequent
+deployment still uses the running revision as its automatic rollback target and
+creates a new receipt after success; the receiver does not read the archived receipt.
+
+The current runtime, `/home/ubuntu/spx-spark` host configuration/data links, IB
+Gateway, and cloud release artifacts were retained. In particular, the pre-migration
+database backup remains at
+`/home/ubuntu/spx-runtime/backups/3880b917e1694c6a49f37fbf47234cdd2f094e37-1792251432531000265.sqlite`,
+with its original integrity/checksum receipt (SHA-256
+`6a3f9bc7ab8d5ef6552e9acef3c572c51e3ecd9d054b3623285cbbec16b1ecea`).
+Retirement rechecked the backup's existence and unchanged size; the original
+migration acceptance performed the SQLite integrity and checksum checks.
+
+Recovery now requires preparing a cloud release again. Prefer a reviewed corrective
+commit on master, retaining the compatible `0005` schema, followed by the normal CI
+delivery path. The [previous cloud release](https://github.com/hzy-hits/SpxOpDaily/releases/tag/runtime-3880b917e1694c6a49f37fbf47234cdd2f094e37)
+remains available for controlled recovery, but the restricted receiver rejects stale
+SHAs: rerunning an old deployment or repointing a deleted directory is not a rollback
+procedure. Database restoration requires stopping writers, preserving current data
+and reconciling later rows; it is not part of application retirement.
+
+Acceptance limits remain explicit: IBKR was connected but reported `IBKR market
+data farms not ready`, continuity was `gap`, the bridge was degraded and the current
+decision was `NO_TRADE`. Fresh market-open quotes, peak-load behavior and delivery
+of an executable candidate are not proven by this closed-market check. P95 aggregate
+alerts and fully fact-built notification sections remain follow-up work.
+
 ## Cloud delivery cutover (2026-10-17)
 
 User-authorized delivery change: move development, builds and offline research off Oracle.
@@ -13,7 +67,8 @@ Cargo, GitHub Releases/GHCR, SSH and existing systemd units supply the complete 
 New files are `Dockerfile`, `.dockerignore`, `scripts/deploy-release.py` and boundary
 tests; no new application dependency, service, timer, database or configuration key
 is required. Existing source-based install instructions below are legacy bootstrap,
-not the production update path. Old release directories are retained for rollback.
+not the production update path. A previous release is retained after a cutover unless
+separately retired; see the dated retirement record above for current availability.
 
 PRs run Python tests, native AMD64/ARM64 Rust checks and dependency audit, then build
 and test both OCI images and relocatable Ubuntu 24.04 / Python 3.12 bundles. Main
@@ -55,8 +110,9 @@ reserve. Install the reviewed receiver before the master deployment job runs.
 
 Acceptance for this exception includes migration interruption recovery, old-writer
 compatibility, and a real post-cutover check of revision/column/index and decision
-persistence. Retain the database backup and previous runtime until market-open
-acceptance; never restore an old database over later production data without first
+persistence. Retain the database backup. Normally keep the previous runtime until
+market-open acceptance; the explicit October 18 retirement above is an operator-authorized
+exception for runtime files only. Never restore an old database over later production data without first
 stopping writers, backing up the current database and reconciling new rows.
 
 GitHub environment `oracle-production` is restricted to master. Its secrets contain
