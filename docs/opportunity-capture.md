@@ -1,7 +1,7 @@
 # 机会捕捉台账与归因
 
 <!-- documentation-status: 2026-10-18 -->
-> **文档定位：现行设计合同（待实施）。** 把“为什么没发”与“有没有抓到”分开度量。
+> **文档定位：现行设计合同（第一阶段已实施）。** 把“为什么没发”与“有没有抓到”分开度量。
 > [全仓文档目录](README.md) · [决策协议](architecture/decision-protocol.md) ·
 > [GTH 连续性](gth-continuity-recovery.md)
 
@@ -9,9 +9,11 @@
 
 现状（2026-10-18）：Worker 每分钟读取 `latest/strategy_decision.json`，按
 `decision_id + state` 去重，把最终决策写入
-`opportunities/date=YYYY-MM-DD.jsonl`（state = authorized / rejected，带 stage、
-reason codes、correlation_id）；`scripts/opportunity-capture-report.py` 输出当日
-capture summary。detected / delivered / acted 三个状态仍是目标。
+`opportunities/date=YYYY-MM-DD.jsonl`（state = authorized / detected / rejected，
+带 stage、reason codes、correlation_id）。报告用 `notification_events.correlation_id`
+与 `status='delivered'` 计算 authorized_delivered / authorized_not_delivered；
+acted 没有执行回执，固定为 0，绝不推断。`scripts/opportunity-capture-report.py`
+输出当日或 `--week-ending` 的周报（`capture_week_summary`）。
 
 系统已经有足够的**原料**，但没有一个统一的机会台账：
 

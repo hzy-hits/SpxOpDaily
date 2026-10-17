@@ -39,9 +39,11 @@ class Envelope:
 
 1. `correlation_id` 从采集快照开始生成，写入 `latest` 投影、decision、notification、
    receipt 和日志；任何一段都可以用它反查整条链路。现状（2026-10-18）：决策出口与
-   人工交易通知已带 correlation_id，并在入队时写
-   `audit/notification_correlations.jsonl`（event_id → correlation_id）；Rust receipt /
-   DB 列持久化尚未接入。
+   人工交易通知已带 correlation_id；`notification_events` 表已加
+   `correlation_id` 列（alembic `0005_notification_correlation`），Python 回执与机会
+   台账可按列 join。Rust 账本 schema 仍在冻结期，Rust receipt 通过入队时写的
+   `audit/notification_correlations.jsonl`（event_id → correlation_id）关联，不改
+   Rust 表结构。
 2. `type + version` 唯一确定 payload schema；未知 type/version 必须 fail closed。
 3. schema 由 pydantic 生成（`model_json_schema()`），Rust 用 `schemars` 对齐；
    golden fixture 只保留跨语言必需的用例。
@@ -120,8 +122,10 @@ class Strategy(Protocol):
 规则：
 
 1. `armed` 可以早发，但必须带 `evidence_age` 与 `valid_until`；`ready` 才代表证据齐全。
-2. 链分析增量更新 + 按 snapshot 版本缓存；路径回放已批量化（4,000 路径、
-   5 分钟粒度约 20–40 ms，1 分钟粒度约 50 ms），非阻塞化仍待做。
+2. 链分析按 snapshot 内容指纹在 Core 内共享 OptionsMap/曝光快照（market features /
+   shock / alert 只构建一次）；路径回放已批量化（4,000 路径、5 分钟粒度约 20–40 ms，
+   1 分钟粒度约 50 ms）。debit 分布复用 30s 内完成的快照，miss 时同步回退，避免授权
+   使用陈旧分布；纯异步回放不作为授权输入。
 3. 消息同时带 `decision_at` 与 `quote_as_of`，接收方能看到判断的时效。
 
 ## 7. 观测接入
