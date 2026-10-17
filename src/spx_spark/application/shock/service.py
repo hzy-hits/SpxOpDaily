@@ -89,7 +89,7 @@ from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
 from spx_spark.options_map import build_options_map
 from spx_spark.options_map.net_premium_render import write_net_premium_flow_png
-from spx_spark.settings import AppSettings, DEFAULT_ALERT_SETTINGS, current_app_settings
+from spx_spark.settings import AppSettings, current_app_settings
 from spx_spark.state_io import (
     atomic_write_json_secure,
     exclusive_state_lock,
@@ -97,10 +97,6 @@ from spx_spark.state_io import (
 )
 from spx_spark.storage import LatestState, LatestStateStore, parse_option_expiry_date
 from spx_spark.strategy_contract import policy_version
-from spx_spark.strategy.steven import (
-    annotate_alerts_with_steven_context,
-    load_steven_state_for_alerts,
-)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -230,17 +226,6 @@ def run(
                         delivered=False,
                     )
                 atomic_write_json_secure(state_path, monitor_state)
-
-            if alerts and DEFAULT_ALERT_SETTINGS.steven_alert_context_enabled:
-                try:
-                    steven_state = load_steven_state_for_alerts(storage_settings.data_root)
-                    alerts = annotate_alerts_with_steven_context(
-                        alerts,
-                        steven_state,
-                        as_of=sample.at,
-                    )
-                except Exception:  # noqa: BLE001 — never block shock alerts
-                    pass
 
             prepared_research = None
             research_result = None

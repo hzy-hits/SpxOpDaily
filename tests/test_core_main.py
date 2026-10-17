@@ -69,8 +69,7 @@ def test_slow_strategy_cycle_does_not_stop_shock_sampling(monkeypatch, tmp_path)
     observed = threading.Event()
     monkeypatch.setattr(core_main, 'get_settings', lambda: SimpleNamespace(log_level='INFO', core_lock_root=tmp_path))
     app = SimpleNamespace(runtime=SimpleNamespace(provider_failover_enabled=False, realtime_engine_enabled=False,
-                         alerts_enabled=False), globex_trend=SimpleNamespace(enabled=False),
-                         alerts=SimpleNamespace(steven_enabled=False))
+                         alerts_enabled=False), globex_trend=SimpleNamespace(enabled=False))
     monkeypatch.setattr(core_main, 'current_app_settings', lambda: app)
     monkeypatch.setattr(core_main, 'configure_logging', lambda *a: None)
     monkeypatch.setattr(core_main, '_regime_publisher', lambda: None)

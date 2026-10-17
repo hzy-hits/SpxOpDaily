@@ -4,6 +4,12 @@
 > **文档定位：历史设计与迁移基线。** 历史设计/迁移记录；不构成当前施工或部署授权。Phase 6/7 延期，现行 owner 见统一目录。
 > [全仓文档、当前运行状态与合同优先级](../../README.md)（目录核对：2026-10-05）。
 
+> **2026-10-17 source retirement:** The four dedicated Steven/bar test suites
+> below are removed with the feature. Shared exposure and settings validation
+> tests remain, including Core exposure-export / OI-mirror acceptance. This is
+> a historical matrix, not current test instructions; see
+> [retirement boundary](../../steven-framework-integration.md).
+
 日期：2026-07-11
 状态：验收矩阵（对应测试文件已合入 `51aefde`；盘中/多日 episode 验收仍待交易日）
 前置阅读：`docs/greeks-definitions.md`（公式与 golden 数值）、`docs/steven-framework-integration.md`（schema 与状态机）

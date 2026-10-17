@@ -41,9 +41,18 @@ The transitional TOML file is the documented source for legacy mutable, non-secr
 market data and operations: Schwab, IBKR snapshot/stream/positions, runtime
 policy, Hyperliquid, Polymarket, maintenance, storage, IV surface generation,
 notification delivery policy, SPXW sampling, alert thresholds, intraday
-shock/strategy windows, post-close review, scheduled push LLM writing, the
-Steven observe-only guidance block (`steven.*`, default disabled), and the
+shock/strategy windows, post-close review, scheduled push LLM writing, and the
 research data platform.
+
+Steven guidance is retired in source (2026-10-17). All 27 `steven.*` leaves
+are removed; remove them from deployment overlays before upgrading, since
+unknown paths still fail at startup. The shared exposure pin-distance setting
+is retained as `AppSettings.exposure_pin_max_distance_points` (25 SPX points,
+finite and non-negative), configurable through `SPX_EXPOSURE_PIN_MAX_DISTANCE_POINTS`
+or the existing minimal application TOML files (`config/defaults.toml` /
+`config/production.toml`). A former `steven.pin_max_distance_points` override
+must be moved explicitly; it is not silently inherited. No compatibility loader
+or replacement guidance flag is introduced.
 
 The option allocation owner is `ibkr/stream/quota_plan.py`. GTH/fallback targets
 `46` hot + `38` rotation lines (84 option lines); normal RTH validation targets
@@ -220,8 +229,8 @@ remain in the tracked base file. Unknown paths, missing explicit files, and
 attempts to replace descriptions fail at startup. Example:
 
 ```toml
-[steven.enabled]
-value = true
+[ibkr_broker.account_read_enabled]
+value = false
 ```
 Production uses `schwab,ibkr,...` provider priority. Freshness and quality are
 still evaluated before provider preference, so missing or stale Schwab data

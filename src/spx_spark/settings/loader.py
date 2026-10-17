@@ -562,8 +562,6 @@ def load_settings(
     )
     growth_dislocation = load_growth_dislocation_settings(get)
     alerts = AlertSettings(
-        steven_enabled=bool(get("steven.enabled")),
-        steven_alert_context_enabled=bool(get("steven.alert_context_enabled")),
         require_schwab_streaming_anchors=bool(
             get("intraday_shock.require_schwab_streaming_anchors")
         ),
