@@ -1,6 +1,6 @@
 # SPX Spark 模块架构与分层协议
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-18 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](docs/README.md)（目录核对：2026-10-05）。
 
@@ -48,6 +48,7 @@ Python Core 拥有最终策略，报告复用其导出；Rust 保留定时桌图
 
 配套：
 
+- 决策协议与时间/存储 owner：[docs/architecture/decision-protocol.md](docs/architecture/decision-protocol.md)
 - 当前依赖检查：`uv run lint-imports`，合同位于 `pyproject.toml`
 - 验收计划: `docs/refactor-architecture-acceptance-plan.md`
 - 首个 RTH 前实施计划: `docs/pre-rth-refactor-implementation-plan.md`

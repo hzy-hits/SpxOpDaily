@@ -1,5 +1,7 @@
 # Architecture guide
 
+<!-- documentation-status: 2026-10-18 -->
+
 [English](README.md) · [简体中文](README.zh-CN.md) · [Project home](../../README.md)
 
 **Develop and build in the cloud. Run production on Oracle. Schedule at home,
@@ -90,7 +92,7 @@ decision status, report generation, and per-target delivery receipts are separat
 acceptance conditions.
 
 Source of truth: [module architecture](../../module-architecture.md),
-[Python/Rust ownership](../monorepo-layout.md),
+[decision protocol](decision-protocol.md), [Python/Rust ownership](../monorepo-layout.md),
 [wire registry](../../contracts/README.md),
 [notification lanes](../notification-architecture.md), and
 [strategy contracts](../README.md#strategy-contracts).

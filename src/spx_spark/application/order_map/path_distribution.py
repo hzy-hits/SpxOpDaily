@@ -10,7 +10,6 @@ forward-unvalidated winner through reject_adverse_forward_path.
 from __future__ import annotations
 
 import math
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -30,10 +29,8 @@ from spx_spark.analytics.options.strategy_payoff import (
     DEFAULT_MANAGEMENT_POLICY,
     ManagementPolicy,
     IRON_CONDOR_MANAGEMENT_POLICY,
-    PolicyMark,
     management_policy_for_candidate,
     policy_mark_horizon_end,
-    simulate_management_policy,
 )
 from spx_spark.application.market_features.physical_followthrough import (
     ClearingSpotPath, HistoryPreparation, HistoryPreparing,
@@ -43,6 +40,7 @@ from spx_spark.application.market_features.physical_followthrough import (
     load_physical_spot_paths,
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
+from spx_spark.application.order_map.policy_replay import replay_paths
 from spx_spark.application.order_map.surface_path_distribution import (
     JOINT_SURFACE_CLEARING_METHOD,
     JOINT_SURFACE_METHOD,
@@ -80,17 +78,11 @@ def attach_path_distribution(
     paths: tuple[PhysicalSpotPath, ...] | None = None,
     clock_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Copy ``candidate`` and hang the advisory distribution on ``edge``."""
-
+    """Price the current candidate; its risk veto must not reuse older economics."""
     distribution = estimate_path_distribution(
-        candidate,
-        facts,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=now,
-        policy=policy,
-        paths=paths,
-        clock_mode=clock_mode,
+        candidate, facts, data_root=data_root,
+        probability_settings=probability_settings, now=now, policy=policy,
+        paths=paths, clock_mode=clock_mode,
     )
     edge = dict(_map(candidate.get("edge")))
     edge["path_distribution"] = distribution
@@ -327,36 +319,28 @@ def estimate_path_distribution(
         candidate, credit=iron_condor, spot=spot
     )
 
-    pnls: list[float] = []
-    hold_minutes: list[float] = []
-    hit_invalidation = 0
-    tp_before_stop = 0
-    exit_reasons: Counter[str] = Counter()
-    for index in range(len(paths)):
-        projected = tuple(float(value) for value in combo_bids["spots"][index])
-        if invalidation is not None and invalidation(projected):
-            hit_invalidation += 1
-        marks = [
-            PolicyMark(at=min(now_utc + timedelta(minutes=offset), horizon_end), liquidation_value=float(bid))
-            for offset, bid in enumerate(combo_bids["liquidation_values"][index])
-        ]
-        label = simulate_management_policy(
-            marks,
-            entry_price=entry,
-            contract_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
-            entry_at=now_utc,
-            policy=management_policy,
-            session_date=session_date,
-            max_quote_gap_seconds=60,
-        )
-        if label.policy_pnl_points is None:
-            return _unavailable(label.exit_reason)
-        pnls.append(label.policy_pnl_points)
-        if label.exit_at is not None:
-            hold_minutes.append((label.exit_at - now_utc).total_seconds() / 60.0)
-        if label.tp_before_stop:
-            tp_before_stop += 1
-        exit_reasons[label.exit_reason] += 1
+    outcome = replay_paths(
+        combo_bids["liquidation_values"],
+        combo_bids["spots"],
+        [
+            min(now_utc + timedelta(minutes=offset), horizon_end)
+            for offset in range(combo_bids["liquidation_values"].shape[1])
+        ],
+        entry_price=entry,
+        contract_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
+        entry_at=now_utc,
+        policy=management_policy,
+        session_date=session_date,
+        max_quote_gap_seconds=60,
+        invalidation=invalidation,
+    )
+    if outcome.failure_reason is not None:
+        return _unavailable(outcome.failure_reason)
+    pnls = outcome.pnls
+    hold_minutes = outcome.holds
+    hit_invalidation = outcome.invalidation_hits
+    tp_before_stop = outcome.tp_before_stop
+    exit_reasons = outcome.exit_reasons
 
     count = len(pnls)
     p10, p50, p90 = _percentiles(pnls, (10.0, 50.0, 90.0))
@@ -512,36 +496,25 @@ def estimate_iron_condor_clearing_distribution(
     invalidation, invalidation_reason = _invalidation_touch(
         candidate, credit=True, spot=spot
     )
-    pnls: list[float] = []
-    hold_minutes: list[float] = []
-    hit_invalidation = 0
-    tp_before_stop = 0
-    exit_reasons: Counter[str] = Counter()
-    for index in range(len(paths)):
-        projected = tuple(float(value) for value in combo_bids["spots"][index])
-        if invalidation is not None and invalidation(projected):
-            hit_invalidation += 1
-        marks = [
-            PolicyMark(at=clock, liquidation_value=float(bid))
-            for clock, bid in zip(clocks, combo_bids["liquidation_values"][index], strict=True)
-        ]
-        label = simulate_management_policy(
-            marks,
-            entry_price=entry,
-            contract_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
-            entry_at=now_utc,
-            policy=IRON_CONDOR_MANAGEMENT_POLICY,
-            session_date=session_date,
-            max_quote_gap_seconds=60,
-        )
-        if label.policy_pnl_points is None:
-            return _unavailable(label.exit_reason)
-        pnls.append(label.policy_pnl_points)
-        if label.exit_at is not None:
-            hold_minutes.append((label.exit_at - now_utc).total_seconds() / 60.0)
-        if label.tp_before_stop:
-            tp_before_stop += 1
-        exit_reasons[label.exit_reason] += 1
+    outcome = replay_paths(
+        combo_bids["liquidation_values"],
+        combo_bids["spots"],
+        clocks,
+        entry_price=entry,
+        contract_count=sum(abs(int(leg["quantity"])) for leg in priced_legs),
+        entry_at=now_utc,
+        policy=IRON_CONDOR_MANAGEMENT_POLICY,
+        session_date=session_date,
+        max_quote_gap_seconds=60,
+        invalidation=invalidation,
+    )
+    if outcome.failure_reason is not None:
+        return _unavailable(outcome.failure_reason)
+    pnls = outcome.pnls
+    hold_minutes = outcome.holds
+    hit_invalidation = outcome.invalidation_hits
+    tp_before_stop = outcome.tp_before_stop
+    exit_reasons = outcome.exit_reasons
 
     count = len(pnls)
     p10, p50, p90 = _percentiles(pnls, (10.0, 50.0, 90.0))

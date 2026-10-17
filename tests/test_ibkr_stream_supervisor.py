@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -881,3 +882,15 @@ def test_explicit_futures_pin_survives_automatic_rollover(monkeypatch):
     collector.ibkr_settings = replace(collector.ibkr_settings, es_expiry="202609", mes_expiry="202609")
     assert collector.refresh_futures_month() is False
     assert collector.ibkr_settings.es_expiry == "202609"
+
+def test_gth_entry_control_blocks_during_continuity_gap(tmp_path) -> None:
+    _storage, healthy_at = _seed_healthy_stream_health(tmp_path)
+    continuity = tmp_path / "latest" / "ibkr_continuity.json"
+    continuity.write_text(
+        json.dumps({"schema_version": 1, "state": "gap", "gap_start": healthy_at.isoformat()})
+    )
+    result = gth_ibkr_entry_control(tmp_path, now=healthy_at)
+    assert result["allowed"] is False
+    assert result["reason"] == "ibkr_continuity_gap"
+    assert result["continuity_state"] == "gap"
+

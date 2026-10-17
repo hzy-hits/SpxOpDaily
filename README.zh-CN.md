@@ -1,5 +1,7 @@
 # SPX Spark
 
+<!-- documentation-status: 2026-10-18 -->
+
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 **面向人工决策的 SPX/SPXW 行情、策略研究与 Desk Map 系统。**
@@ -55,6 +57,7 @@ Schwab 负责常规交易时段（RTH），IBKR Paper 负责全球交易时段�
 Python 负责券商采集、分析、研究和最终策略决策，`build_strategy_decision` 是唯一
 人工候选授权出口。Rust 保留 typed readiness、frames、定时 Desk Map 和报告投递路径；
 不连接券商、不为 Python 策略选腿，完整 `strategy_decision` 不进入 Rust wire。
+协议、时间与分层见 [决策协议](docs/architecture/decision-protocol.md)。
 
 具体边界见[运行时架构图](docs/architecture/README.zh-CN.md#runtime-and-data-ownership)、
 [单仓库合同](docs/monorepo-layout.md)与[通知合同](docs/notification-architecture.md)。

@@ -1,5 +1,7 @@
 # SPX Spark 文档目录与当前状态
 
+<!-- documentation-status: 2026-10-18 -->
+
 入口：[English project README](../README.md) · [中文项目说明](../README.zh-CN.md) ·
 [Architecture & diagrams](architecture/README.md) · [中文架构与设计图](architecture/README.zh-CN.md)。
 
@@ -28,6 +30,10 @@
   GitHub 构建双架构产物，Oracle 使用固定 ARM64 原生包，研究笔记本使用同提交 AMD64 镜像。
   树莓派日归档与周研究计划已启用，短窗口回放及 NAS 核验已通过；完整周研究效果、调度库异机
   备份等限制见[双语架构说明](architecture/README.zh-CN.md)。以下旧事件保留原验收时点。
+- 2026-10-18 补充现行设计合同：[决策协议](architecture/decision-protocol.md)、
+  [GTH 连续性](gth-continuity-recovery.md)、[机会捕捉](opportunity-capture.md)、
+  [通知消息契约](notification-message-contract.md)、[服务清单](service-inventory.md)、
+  [运行观测](observability.md)。
 - 生产主机的 Python `spx-core` / `spx-worker` 和两套券商采集继续运行；
   Rust core/bridge/report/delivery 仍承担冻结职责。Phase 6 Rust 退出和 Phase 7
   数据平台重写延期；旧 24h/hot-worker 独立服务不是当前启动入口。
@@ -107,6 +113,7 @@ OI/Gamma、L1 资金流仍是代理，不是真实参与者持仓/完整买卖�
 | [SPX Spark](../README.md) | `README.md` |
 | [SPX Spark 中文说明](../README.zh-CN.md) | `README.zh-CN.md` |
 | [Architecture guide and diagrams](architecture/README.md) | `docs/architecture/README.md` |
+| [决策协议、时间契约与实时分层](architecture/decision-protocol.md) | `docs/architecture/decision-protocol.md` |
 | [架构说明与设计图](architecture/README.zh-CN.md) | `docs/architecture/README.zh-CN.md` |
 | [Historical HTML source atlas](architecture/reference/README.md) | `docs/architecture/reference/README.md` |
 | [Shared wire-contract registry](../contracts/README.md) | `contracts/README.md` |
@@ -115,11 +122,16 @@ OI/Gamma、L1 资金流仍是代理，不是真实参与者持仓/完整买卖�
 | [SPX Spark 希腊字母与曝露代理指标定义（exposure_map 规范）](greeks-definitions.md) | `docs/greeks-definitions.md` |
 | [Headless Deployment Notes](headless-deployment.md) | `docs/headless-deployment.md` |
 | [Market-data capability matrix](market-data-capability-matrix.md) | `docs/market-data-capability-matrix.md` |
+| [GTH IBKR 数据中断的连续性与恢复](gth-continuity-recovery.md) | `docs/gth-continuity-recovery.md` |
+| [机会捕捉台账与归因](opportunity-capture.md) | `docs/opportunity-capture.md` |
 | [Market Data Normalization Model](market-data-model.md) | `docs/market-data-model.md` |
 | [Unified Market Feature Frames](market-feature-frames.md) | `docs/market-feature-frames.md` |
 | [SPX Spark monorepo contract](monorepo-layout.md) | `docs/monorepo-layout.md` |
 | [Notification architecture](notification-architecture.md) | `docs/notification-architecture.md` |
+| [通知消息契约与模板协议](notification-message-contract.md) | `docs/notification-message-contract.md` |
 | [Operations Schedule](operations-schedule.md) | `docs/operations-schedule.md` |
+| [服务与定时任务清单](service-inventory.md) | `docs/service-inventory.md` |
+| [运行观测与决策延迟指标](observability.md) | `docs/observability.md` |
 | [RTH report clock contract](rth-report-clock.md) | `docs/rth-report-clock.md` |
 | [RTH runtime clock and end-to-end acceptance](rth-runtime-clock-and-acceptance.md) | `docs/rth-runtime-clock-and-acceptance.md` |
 | [Runtime configuration](runtime-configuration.md) | `docs/runtime-configuration.md` |

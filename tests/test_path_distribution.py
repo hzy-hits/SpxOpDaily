@@ -702,12 +702,17 @@ def test_partial_final_minute_uses_exact_exit_clock(tmp_path: Path) -> None:
 def test_management_probability_does_not_count_break_even_as_profit(monkeypatch):
     from dataclasses import replace
     import spx_spark.application.order_map.path_distribution as module
+    import spx_spark.application.order_map.policy_replay as replay_module
     from spx_spark.application.market_features.physical_followthrough import PhysicalSpotPath
 
-    simulate = module.simulate_management_policy
+    simulate = replay_module.simulate_management_policy
     def break_even(*args, **kwargs):
         return replace(simulate(*args, **kwargs), policy_pnl_points=0.0)
-    monkeypatch.setattr(module, "simulate_management_policy", break_even)
+    monkeypatch.setattr(replay_module, "simulate_management_policy", break_even)
+    simulate_batch = replay_module.simulate_management_policy_batch
+    def break_even_batch(*args, **kwargs):
+        return [replace(label, policy_pnl_points=0.0) for label in simulate_batch(*args, **kwargs)]
+    monkeypatch.setattr(replay_module, "simulate_management_policy_batch", break_even_batch)
     result = module.estimate_path_distribution(
         _iron_condor(session_mode="rth"), _facts(now=RTH_NOW),
         now=RTH_NOW, data_root=None, probability_settings=None,
@@ -805,3 +810,27 @@ def test_condor_bucket_refresh_keeps_only_recent_same_structure_probability(monk
         clock.sleep(.01)
     assert updated["entry_credit_basis"] == .4 and updated["net_profit_rate"] == .4
     assert updated["probability_as_of"] == refresh_at.isoformat()
+
+
+def test_winner_risk_distribution_uses_current_economics(monkeypatch) -> None:
+    from spx_spark.application.order_map import path_distribution as module
+
+    def estimate(candidate, facts, **kwargs):
+        return {"status": "ready", "entry": candidate["entry"],
+                "spot": facts["spot"], "as_of": kwargs["now"]}
+
+    monkeypatch.setattr(module, "estimate_path_distribution", estimate)
+    candidate = {"candidate_id": "same-legs", "entry": 1.0}
+    facts = {"spot": 7700.0}
+    now = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
+    first = module.attach_path_distribution(
+        candidate, facts, data_root=None, probability_settings=None, now=now
+    )["edge"]["path_distribution"]
+    candidate["entry"] = 2.0
+    facts["spot"] = 7710.0
+    later = now + timedelta(seconds=5)
+    second = module.attach_path_distribution(
+        candidate, facts, data_root=None, probability_settings=None, now=later
+    )["edge"]["path_distribution"]
+    assert first["entry"] == 1.0
+    assert second == {"status": "ready", "entry": 2.0, "spot": 7710.0, "as_of": later}

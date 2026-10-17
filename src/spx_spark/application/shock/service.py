@@ -87,7 +87,7 @@ from spx_spark.intraday_strategy import (
 from spx_spark.notifier import notify_payload
 from spx_spark.notifier.policy import alert_key
 from spx_spark.notifier.state import load_acknowledged_event_ids
-from spx_spark.options_map import build_options_map
+from spx_spark.application.order_map.options_cache import options_snapshot
 from spx_spark.options_map.net_premium_render import write_net_premium_flow_png
 from spx_spark.settings import AppSettings, DEFAULT_ALERT_SETTINGS, current_app_settings
 from spx_spark.state_io import (
@@ -158,7 +158,7 @@ def run(
             option_structure_error: str | None = None
             try:
                 if options_map is None:
-                    options_map = build_options_map(latest)
+                    options_map = options_snapshot(latest, storage_settings=storage_settings)[1]
                 structure = structure_from_options_map(
                     options_map,
                     session_date=session_date,
@@ -536,7 +536,7 @@ def _run_gth_dip_reclaim(
     expected_move: float | None = None
     try:
         if options_map is None:
-            options_map = build_options_map(latest)
+            options_map = options_snapshot(latest, storage_settings=storage_settings)[1]
         if options_map.expiries:
             raw_expected_move = options_map.expiries[0].expected_move_points
             if isinstance(raw_expected_move, int | float) and raw_expected_move > 0:

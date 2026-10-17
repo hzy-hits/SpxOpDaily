@@ -1,6 +1,6 @@
 # SPX Spark monorepo contract
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-18 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 

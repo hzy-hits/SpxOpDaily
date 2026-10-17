@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from spx_spark.config import NotificationSettings
@@ -408,6 +408,7 @@ def deliver_trade_push(
     lane: str = "trade",
     friend: bool = False,
     feishu_text: str | None = None,
+    sections: Sequence[Mapping[str, object]] | None = None,
     runner: CommandRunner = default_runner,
     targets: frozenset[str] | set[str] | None = None,
 ) -> list[SinkResult]:
@@ -435,7 +436,9 @@ def deliver_trade_push(
         return allowed is None or name in allowed
 
     if settings.feishu_enabled and is_trade and target_enabled("feishu"):
-        card = build_feishu_card(feishu_text or text, title=title, kind=kind, lane=lane)
+        card = build_feishu_card(
+            feishu_text or text, title=title, kind=kind, lane=lane, sections=sections
+        )
         sinks.append(send_feishu_card(settings, card))
 
     if settings.bark_enabled and target_enabled("bark"):

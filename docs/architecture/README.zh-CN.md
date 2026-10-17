@@ -1,5 +1,7 @@
 # 架构说明
 
+<!-- documentation-status: 2026-10-18 -->
+
 [English](README.md) · [简体中文](README.zh-CN.md) · [项目主页](../../README.zh-CN.md)
 
 **云端开发与构建，Oracle 运行生产；家庭统一调度，研究笔记本计算，NAS 保存已核验数据。**
@@ -75,9 +77,9 @@ OCI 保留基础设施监控职责，Prefect 跟踪任务执行和归档/研究�
 数据恢复可以在半小时定时报告之间触发更新，但不授予策略权限。进程健康、源时钟、exact-leg
 完整性、决策状态、报告生成和各目标投递回执，是彼此独立的验收条件。
 
-权威入口：[模块架构](../../module-architecture.md)、[Python/Rust 分工](../monorepo-layout.md)、
-[wire 合同](../../contracts/README.md)、[通知路径](../notification-architecture.md)、
-[策略合同](../README.md#strategy-contracts)。
+权威入口：[模块架构](../../module-architecture.md)、[决策协议](decision-protocol.md)、
+[Python/Rust 分工](../monorepo-layout.md)、[wire 合同](../../contracts/README.md)、
+[通知路径](../notification-architecture.md)、[策略合同](../README.md#strategy-contracts)。
 
 ### 存储边界
 

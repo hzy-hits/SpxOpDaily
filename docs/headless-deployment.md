@@ -25,7 +25,7 @@ or rebuilding. Oracle uses the prebuilt ARM64 bundle.
 The image never receives host secrets or production data and defaults to non-root.
 
 Oracle's restricted SSH key accepts only `deploy <40-char SHA> <64-char SHA256>`.
-It rejects unmerged/stale commits, checksum mismatch, changed database migrations,
+It rejects unmerged/stale commits, checksum mismatch, unreviewed database migrations,
 missing baseline services and concurrent scheduled work before stopping services.
 The receiver stages an immutable release under `/home/ubuntu/spx-runtime/releases`,
 then redirects existing Python service executables via `90-cloud-release.conf`.
@@ -38,7 +38,23 @@ data/log paths are linked into the release. No service is enabled for the first 
 no broker Gateway restart occurs, and writer ownership does not change. Deployment
 serializes with a host lock, stops writers before switching and restores prior unit
 paths/binaries on failed validation. A successful switch records `previous.json`.
-Database revision changes stop deployment: binary rollback does not roll back data.
+Database revision changes normally stop deployment: binary rollback does not roll back data.
+The reviewed exception in PR #16 is `0004_session_card_cover` ->
+`0005_notification_correlation`: one nullable column and its index, without a data rewrite.
+The receiver permits only the exact SHA-256 of that migration and unchanged existing
+migration files. It stops writers, makes a SQLite backup with integrity check and
+SHA-256 receipt under `/home/ubuntu/spx-runtime/backups`, then invokes Alembic from
+the prebuilt release. A migration failure restores that backup before old writers restart.
+An application health failure restores old binaries while retaining the compatible
+additive schema; it does not discard post-migration writes. Any future schema change
+still requires separate review. Backup capacity requires database size plus 3 GiB
+reserve. Install the reviewed receiver before the master deployment job runs.
+
+Acceptance for this exception includes migration interruption recovery, old-writer
+compatibility, and a real post-cutover check of revision/column/index and decision
+persistence. Retain the database backup and previous runtime until market-open
+acceptance; never restore an old database over later production data without first
+stopping writers, backing up the current database and reconciling new rows.
 
 GitHub environment `oracle-production` is restricted to master. Its secrets contain
 only a dedicated forced-command key and pinned host key; the ordinary Mac SSH key
@@ -58,7 +74,7 @@ Closed-market stale quotes are reported as such, never treated as fresh market d
 Deployment status is evidence of installation and runtime health, not trading readiness.
 
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-18 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 

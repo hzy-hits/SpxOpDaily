@@ -17,7 +17,8 @@ from spx_spark.alert_profile import AlertWindow, active_window
 from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
 from spx_spark.market_context import build_market_context
 from spx_spark.marketdata import Quote
-from spx_spark.options_map import OptionsMap, build_options_map
+from spx_spark.application.order_map.options_cache import options_snapshot
+from spx_spark.options_map import OptionsMap
 from spx_spark.settings import DEFAULT_ALERT_SETTINGS, AlertSettings
 from spx_spark.storage import LatestState, configured_quote_use_decision
 
@@ -185,7 +186,7 @@ def persist_movement_state_snapshot(
     if market_context is None:
         market_context = build_market_context(state)
     if options_map is None:
-        options_map = build_options_map(state)
+        options_map = options_snapshot(state)[1]
     save_movement_state(
         movement_state_path(),
         build_movement_state_payload(

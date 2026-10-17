@@ -28,7 +28,6 @@ from spx_spark.application.order_map.image_delivery import (
     publish_open_interest_image,
     publish_strategy_risk_image,
 )
-from spx_spark.application.order_map.guidance import price_action_playbook_text
 from spx_spark.application.order_map.models import SHANGHAI_TZ
 from spx_spark.application.order_map.render import render_template
 from spx_spark.application.order_map.strategy_ranker import (
@@ -52,6 +51,7 @@ from spx_spark.notifier.llm_writer import (
 from spx_spark.notifier.dispatcher import enqueue_notification, notification_event_exists
 from spx_spark.notifier.model import CommandRunner, default_runner
 from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.templates import render_message
 
 
 def enqueue_pin_stable_watch(decision: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
@@ -84,7 +84,18 @@ def enqueue_pin_stable_watch(decision: Mapping[str, Any], *, now: datetime) -> d
             "outcome": "outbox_already_accepted",
             "event_id": event_id,
         }
-    text = _render_pin_stable_watch(decision, center=center, minutes=minutes, phase=phase)
+    _ensure_templates()
+    rendered = render_message(
+        "pin_stable_watch",
+        channel="feishu",
+        context={
+            "decision": decision,
+            "regime": regime,
+            "center": center,
+            "minutes": minutes,
+            "phase": phase,
+        },
+    )
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -94,10 +105,15 @@ def enqueue_pin_stable_watch(decision: Mapping[str, Any], *, now: datetime) -> d
             lane="strategy_watch",
             occurred_at=occurred_at,
             expires_at=expires_at,
+            correlation_id=_correlation_id(decision),
+            message_class="watch",
+            template_id="pin_stable_watch",
+            template_version=1,
         ),
-        title=_pin_watch_title(regime, center),
-        text=text,
-        feishu_text=text,
+        title=rendered.title,
+        text=rendered.text,
+        feishu_text=rendered.feishu_text,
+        sections=rendered.sections,
         friend=True,
         enqueued_at=now,
     )
@@ -147,36 +163,39 @@ def enqueue_strategy_decision(
     flood = _flood_control_block(decision, candidate, settings, now=now)
     if flood is not None:
         return flood
-    text = _render_strategy_candidate(decision, candidate)
+    extra = ""
     strategy_risk_image = None
     if storage_settings is not None:
         strategy_risk_image = publish_strategy_risk_image(
             storage_settings, decision=decision, now=now
         )
         if strategy_risk_image.get("status") == "published":
-            text += (
+            extra += (
                 "\n\n## 策略图\n"
                 f"[查看概率、结构与损益图]({strategy_risk_image['public_url']})"
             )
-        text += (
+        extra += (
             "\n\n## 实时仪表盘（持续更新）\n"
             f"[查看最新 OI 墙位图]({OPEN_INTEREST_IMAGE_PUBLIC_URL})\n"
             f"[查看 0DTE 资金流图]({NET_PREMIUM_FLOW_IMAGE_PUBLIC_URL})"
         )
-    text = (
-        f"{text}\n\n## 决策参考\n"
-        f"盘型：{price_action_playbook_text(decision)}\n"
-        f"{_gamma_proxy_line(decision)}\n"
-        f"{_ict_liquidity_line(decision, candidate)}"
-    )
     enqueue_at = clock()
     available_at = _timestamp(decision.get("available_at")) or occurred_at
     if expires_at <= enqueue_at or occurred_at > enqueue_at or available_at > enqueue_at:
         return {"accepted": False, "outcome": "candidate_expired_during_preparation"}
     quote_until = _timestamp(candidate.get("quote_valid_until"))
     quote_status = "ready" if quote_until is not None and quote_until > enqueue_at else "refresh_required"
-    if quote_status == "refresh_required":
-        text = "本次报价已过期；刷新组合报价并重新确认后才可提交限价单。\n\n" + text
+    _ensure_templates()
+    rendered = render_message(
+        "trade_ready",
+        channel="feishu",
+        context={
+            "decision": decision,
+            "candidate": candidate,
+            "extra": extra,
+            "quote_status": quote_status,
+        },
+    )
     result = enqueue_notification(
         settings,
         NotificationEnvelope(
@@ -187,10 +206,15 @@ def enqueue_strategy_decision(
             occurred_at=occurred_at,
             expires_at=expires_at,
             operator_opportunity_id=opportunity_id,
+            correlation_id=_correlation_id(decision),
+            message_class="ready",
+            template_id="trade_ready",
+            template_version=1,
         ),
-        title=_strategy_card_title(candidate),
-        text=text,
-        feishu_text=text,
+        title=rendered.title,
+        text=rendered.text,
+        feishu_text=rendered.feishu_text,
+        sections=rendered.sections,
         friend=True,
         enqueued_at=enqueue_at,
     )
@@ -218,6 +242,15 @@ def enqueue_strategy_decision(
     if net_premium_flow_image is not None:
         outcome["net_premium_flow_image"] = net_premium_flow_image
     return outcome
+
+
+def _ensure_templates() -> None:
+    from spx_spark.application.order_map import delivery_templates  # noqa: F401
+
+
+def _correlation_id(value: Mapping[str, Any]) -> str | None:
+    text = str(value.get("correlation_id") or "").strip()
+    return text or None
 
 
 def _pin_watch_title(regime: Mapping[str, Any], center: float) -> str:

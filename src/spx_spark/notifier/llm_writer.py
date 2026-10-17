@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -388,6 +389,19 @@ def _normalize_memo_text(text: str) -> str:
     return " ".join(normalized.split())
 
 
+def narrative_numbers_locked(text: str, decision: Mapping[str, Any]) -> bool:
+    """Every numeric literal in free-form narrative must exist in the decision."""
+
+    decision_numbers = _decision_numeric_values(decision)
+    scrubbed = _CONTRACT_ID_RE.sub(" ", text)
+    try:
+        return all(
+            float(raw) in decision_numbers for raw in _NUMERIC_LITERAL_RE.findall(scrubbed)
+        )
+    except ValueError:
+        return False
+
+
 def idea_memo_output_valid(memo: object, decision: dict[str, Any]) -> bool:
     if not isinstance(memo, dict) or set(memo) != STRATEGY_IDEA_MEMO_REQUIRED_KEYS:
         return False
@@ -433,14 +447,7 @@ def idea_memo_output_valid(memo: object, decision: dict[str, Any]) -> bool:
         ):
             return False
 
-    scrubbed = _CONTRACT_ID_RE.sub(" ", full_text)
-    for raw in _NUMERIC_LITERAL_RE.findall(scrubbed):
-        try:
-            if float(raw) not in decision_numbers:
-                return False
-        except ValueError:
-            return False
-    return True
+    return narrative_numbers_locked(full_text, decision)
 
 
 def call_strategy_idea_memo(
