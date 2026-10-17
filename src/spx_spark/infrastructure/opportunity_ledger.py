@@ -32,15 +32,20 @@ def decision_opportunity_row(
         return None
     candidate = _mapping(decision.get("candidate"))
     decision_type = str(decision.get("decision_type") or "")
-    authorized = bool(candidate) and decision_type != "NO_TRADE"
     funnel = _mapping(decision.get("rejection_funnel"))
+    if bool(candidate) and decision_type != "NO_TRADE":
+        state = "authorized"
+    elif funnel.get("setup_detected"):
+        state = "detected"
+    else:
+        state = "rejected"
     session_date = str(decision.get("session_date") or now.date().isoformat())
     return {
         "schema_version": 1,
         "opportunity_id": str(candidate.get("opportunity_id") or decision_id),
         "decision_id": decision_id,
         "session_date": session_date,
-        "state": "authorized" if authorized else "rejected",
+        "state": state,
         "decision_type": decision_type,
         "strategy_type": str(candidate.get("strategy_type") or decision_type),
         "direction": str(candidate.get("direction") or "none").lower(),
@@ -98,8 +103,80 @@ def record_current_decision(
     return record_decision(root, decision, now=now or datetime.now(tz=timezone.utc))
 
 
-def capture_summary(data_root: str | Path, session_date: str) -> dict[str, Any]:
-    path = Path(data_root) / LEDGER_DIR / f"date={session_date}.jsonl"
+def capture_summary(
+    data_root: str | Path,
+    session_date: str,
+    *,
+    database_path: str | Path | None = None,
+) -> dict[str, Any]:
+    rows = _read_rows(Path(data_root) / LEDGER_DIR / f"date={session_date}.jsonl")
+    delivered = _delivered_correlations(
+        Path(database_path) if database_path is not None else Path(data_root) / "spx.sqlite"
+    )
+    authorized = [row for row in rows if row.get("state") == "authorized"]
+    delivered_authorized = sum(
+        1
+        for row in authorized
+        if row.get("correlation_id") and row["correlation_id"] in delivered
+    )
+    return {
+        "session_date": session_date,
+        "total": len(rows),
+        "by_state": _counts(rows, "state"),
+        "by_stage": _counts(rows, "stage"),
+        "by_strategy": _counts(rows, "strategy_type"),
+        "top_blockers": _blockers(rows),
+        "authorized_delivered": delivered_authorized,
+        "authorized_not_delivered": len(authorized) - delivered_authorized,
+        "acted": 0,  # phase 1 has no execution acknowledgement; never infer it
+    }
+
+
+def capture_week_summary(
+    data_root: str | Path,
+    end_date: str,
+    *,
+    days: int = 7,
+    database_path: str | Path | None = None,
+) -> dict[str, Any]:
+    from datetime import date, timedelta
+
+    end = date.fromisoformat(end_date)
+    dates = [(end - timedelta(days=offset)).isoformat() for offset in range(days)]
+    summaries = [
+        capture_summary(data_root, value, database_path=database_path) for value in dates
+    ]
+    totals = {
+        "total": sum(item["total"] for item in summaries),
+        "authorized_delivered": sum(item["authorized_delivered"] for item in summaries),
+        "authorized_not_delivered": sum(
+            item["authorized_not_delivered"] for item in summaries
+        ),
+        "acted": 0,
+    }
+    by_state: dict[str, int] = {}
+    by_stage: dict[str, int] = {}
+    blockers: dict[str, int] = {}
+    for item in summaries:
+        for key, value in item["by_state"].items():
+            by_state[key] = by_state.get(key, 0) + value
+        for key, value in item["by_stage"].items():
+            by_stage[key] = by_stage.get(key, 0) + value
+        for key, value in item["top_blockers"].items():
+            blockers[key] = blockers.get(key, 0) + value
+    return {
+        "week_ending": end_date,
+        "days": days,
+        **totals,
+        "by_state": dict(sorted(by_state.items(), key=lambda item: item[1], reverse=True)),
+        "by_stage": dict(sorted(by_stage.items(), key=lambda item: item[1], reverse=True)),
+        "top_blockers": dict(
+            sorted(blockers.items(), key=lambda item: item[1], reverse=True)[:10]
+        ),
+    }
+
+
+def _read_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -108,23 +185,36 @@ def capture_summary(data_root: str | Path, session_date: str) -> dict[str, Any]:
                 rows.append(parsed)
     except OSError:
         pass
-    by_state = _counts(rows, "state")
-    by_stage = _counts(rows, "stage")
-    by_strategy = _counts(rows, "strategy_type")
+    return rows
+
+
+def _delivered_correlations(database_path: Path) -> set[str]:
+    import sqlite3
+
+    if not database_path.exists():
+        return set()
+    try:
+        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return set()
+    try:
+        rows = connection.execute(
+            "SELECT DISTINCT correlation_id FROM notification_events "
+            "WHERE status='delivered' AND correlation_id IS NOT NULL"
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    finally:
+        connection.close()
+    return {str(row[0]) for row in rows}
+
+
+def _blockers(rows: list[Mapping[str, Any]]) -> dict[str, int]:
     blockers: dict[str, int] = {}
     for row in rows:
         for code in row.get("reason_codes") or ():
             blockers[str(code)] = blockers.get(str(code), 0) + 1
-    return {
-        "session_date": session_date,
-        "total": len(rows),
-        "by_state": by_state,
-        "by_stage": by_stage,
-        "by_strategy": by_strategy,
-        "top_blockers": dict(
-            sorted(blockers.items(), key=lambda item: item[1], reverse=True)[:10]
-        ),
-    }
+    return dict(sorted(blockers.items(), key=lambda item: item[1], reverse=True)[:10])
 
 
 def _reason_codes(
