@@ -1370,12 +1370,13 @@ mod tests {
 
         assert!(runtime.state.pending.is_none());
         assert!(runtime.state.active_source_failure.is_none());
+        let before_disconnect = Instant::now();
         runtime.disconnect("test transport uncertainty");
-        assert!(
-            runtime
-                .next_connect_not_before
-                .is_some_and(|not_before| not_before > Instant::now())
-        );
+        let after_disconnect = Instant::now();
+        let backoff = Duration::from_millis(config.reconnect_backoff_ms);
+        assert!(runtime.next_connect_not_before.is_some_and(|not_before| {
+            not_before >= before_disconnect + backoff && not_before <= after_disconnect + backoff
+        }));
         drop(runtime);
         server.join().unwrap();
         let observed = observed.lock().unwrap();

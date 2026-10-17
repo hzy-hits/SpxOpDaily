@@ -2,7 +2,27 @@ name: CI
 
 on:
   push:
+    branches: [master]
+    paths:
+      - src/**
+      - rust/crates/**
+      - rust/Cargo.*
+      - config/**
+      - systemd/**
+      - scripts/**
+      - alembic/**
+      - alembic.ini
+      - pyproject.toml
+      - uv.lock
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/ci.yml
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 permissions:
   contents: read
@@ -69,3 +89,140 @@ jobs:
           cargo run --locked -p spx-bridge -- check-config --config config/bridge.example.toml
           cargo run --locked -p spx-report -- check-config --config config/report.example.toml
           cargo run --locked -p spx-delivery -- check-config --config config/delivery.example.toml
+
+      - name: Build native release binaries
+        run: |
+          cargo build --locked --release --workspace
+          mkdir -p ../out/bin
+          for binary in spx-core spx-bridge spx-report spx-delivery; do
+            install -m 755 "target/release/$binary" "../out/bin/$binary"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-${{ matrix.runner }}
+          path: out/bin/
+          retention-days: 7
+
+  package:
+    name: package (${{ matrix.arch }})
+    needs: [test, rust]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64}
+          - {runner: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      IMAGE: ghcr.io/hzy-hits/spx-runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-${{ matrix.runner }}
+          path: out/bin
+      - run: chmod 755 out/bin/*
+      - name: Build production runtime without credentials
+        run: docker build --build-arg REVISION="$GITHUB_SHA" -t "$IMAGE:sha-$GITHUB_SHA-${{ matrix.arch }}" .
+      - name: Check image and relocatable native package
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          image="$IMAGE:sha-$GITHUB_SHA-$ARCH"
+          docker run --rm --network none --read-only "$image" --help >/dev/null
+          cid=$(docker create "$image")
+          mkdir -p "$RUNNER_TEMP/relocated" dist
+          docker cp "$cid:/app/." "$RUNNER_TEMP/relocated/"
+          docker rm "$cid"
+          # Run at a DIFFERENT path to detect absolute venv shebangs/imports.
+          docker run --rm --network none --read-only --entrypoint /bin/sh \
+            -v "$RUNNER_TEMP/relocated:/relocated:ro" "$image" -ec \
+            'cd /relocated; PYTHONPATH=/relocated/src .venv/bin/spx --help >/dev/null; .venv/bin/python -c "import scipy, duckdb"; for b in bin/*; do "$b" --help >/dev/null; done'
+          tar -C "$RUNNER_TEMP/relocated" -czf "dist/spx-runtime-$ARCH.tar.gz" .
+          (cd dist && sha256sum "spx-runtime-$ARCH.tar.gz" > "spx-runtime-$ARCH.sha256")
+      - name: Export tested image for the trusted publisher
+        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker save "$IMAGE:sha-$GITHUB_SHA-$ARCH" | gzip > "dist/spx-image-$ARCH.tar.gz"
+          (cd dist && sha256sum "spx-image-$ARCH.tar.gz" > "spx-image-$ARCH.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.arch }}
+          path: dist/
+          retention-days: 14
+
+  publish:
+    needs: [test, rust, package]
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: dist
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - name: Publish multi-platform image and versioned install bundles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "runtime-$GITHUB_SHA" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to overwrite published images or bundles.'
+            exit 0
+          fi
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for arch in amd64 arm64; do
+            (cd dist && sha256sum -c "spx-runtime-$arch.sha256" && sha256sum -c "spx-image-$arch.sha256")
+            gzip -dc "dist/spx-image-$arch.tar.gz" | docker load
+            image="ghcr.io/hzy-hits/spx-runtime:sha-$GITHUB_SHA-$arch"
+            docker push "$image"
+            docker inspect --format '{{index .RepoDigests 0}}' "$image" > "dist/image-$arch.txt"
+          done
+          docker buildx imagetools create -t "ghcr.io/hzy-hits/spx-runtime:sha-$GITHUB_SHA" \
+            "$(cat dist/image-amd64.txt)" "$(cat dist/image-arm64.txt)"
+          gh release create "runtime-$GITHUB_SHA" dist/spx-runtime-* dist/image-*.txt dist/spx-image-amd64.* \
+            --target "$GITHUB_SHA" --title "Runtime $GITHUB_SHA" \
+            --notes "Python and Rust tested on native AMD64/ARM64. Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Oracle installs the ARM64 bundle without compiling. Image digests and archive checksums are attached."
+
+  deploy:
+    needs: publish
+    if: github.ref == 'refs/heads/master' && vars.ORACLE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: oracle-production
+    concurrency:
+      group: oracle-production
+      cancel-in-progress: false
+    steps:
+      - name: Read checksum of the immutable published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release download "runtime-$GITHUB_SHA" -p spx-runtime-arm64.sha256 -D dist
+      - name: Deploy verified release over restricted SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.ORACLE_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+          ORACLE_HOST: ${{ vars.ORACLE_HOST }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/oracle_release
+          chmod 600 ~/.ssh/oracle_release
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          checksum=$(cut -d ' ' -f1 dist/spx-runtime-arm64.sha256)
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+            -i ~/.ssh/oracle_release "ubuntu@$ORACLE_HOST" "deploy $GITHUB_SHA $checksum"
+      - name: Remove ephemeral deployment key
+        if: always()
+        run: rm -f ~/.ssh/oracle_release
