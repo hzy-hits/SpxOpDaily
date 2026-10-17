@@ -20,6 +20,7 @@ class NotificationEnvelope:
     operator_targets: tuple[tuple[str, str], ...] = ()
     operator_opportunity_id: str | None = None
     operator_generation: int = 0
+    correlation_id: str | None = None
 
     def validate(self) -> None:
         for label, value in (
@@ -56,6 +57,11 @@ class NotificationEnvelope:
                 raise ValueError("operator_opportunity_id contains NUL")
             if len(self.operator_opportunity_id.encode("utf-8")) > 4_096:
                 raise ValueError("operator_opportunity_id exceeds 4096 UTF-8 bytes")
+        if self.correlation_id is not None:
+            if not self.correlation_id.strip():
+                raise ValueError("correlation_id cannot be blank")
+            if "\0" in self.correlation_id:
+                raise ValueError("correlation_id contains NUL")
         if (
             isinstance(self.operator_generation, bool)
             or not isinstance(self.operator_generation, int)

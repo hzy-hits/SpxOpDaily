@@ -38,7 +38,8 @@ class Envelope:
 规则：
 
 1. `correlation_id` 从采集快照开始生成，写入 `latest` 投影、decision、notification、
-   receipt 和日志；任何一段都可以用它反查整条链路。
+   receipt 和日志；任何一段都可以用它反查整条链路。现状（2026-10-18）：决策出口与
+   人工交易通知已带 correlation_id；Rust receipt / DB 持久化尚未接入。
 2. `type + version` 唯一确定 payload schema；未知 type/version 必须 fail closed。
 3. schema 由 pydantic 生成（`model_json_schema()`），Rust 用 `schemars` 对齐；
    golden fixture 只保留跨语言必需的用例。

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from spx_spark.analytics.options.density import summarize_strike_surface_shape
+from spx_spark.domain.protocol import ensure_correlation_id
 from spx_spark.analytics.options.strategy_payoff import management_policy_for_candidate
 from spx_spark.application.market_features.physical_followthrough import HistoryPreparing
 from spx_spark.application.market_features.physical_close_convergence import (
@@ -62,7 +63,6 @@ from spx_spark.application.order_map.strategy_ranker import (
 from spx_spark.settings.strategy_distribution import StrategyDistributionSettings
 from spx_spark.storage import LatestState
 
-
 _SESSION_CARDS = ContextVar("session_cards", default=None)
 
 def build_strategy_decision(
@@ -73,10 +73,12 @@ def build_strategy_decision(
 ) -> dict[str, Any]:
     token = _SESSION_CARDS.set({})
     try:
-        return _build_strategy_decision(payload, latest, now, data_root=data_root,
+        decision = _build_strategy_decision(payload, latest, now, data_root=data_root,
             probability_settings=probability_settings, background_models=background_models)
     finally:
         _SESSION_CARDS.reset(token)
+    decision.setdefault("correlation_id", ensure_correlation_id(payload))
+    return decision
 
 def _build_strategy_decision(
     payload: Mapping[str, Any], latest: LatestState, now: datetime, *,

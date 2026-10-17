@@ -25,7 +25,11 @@ def committed_strategy_decision(decision: Mapping[str, Any], *, now: datetime) -
         return {}
     manifest = decision.get("decision_manifest")
     if isinstance(manifest, Mapping):
-        content = {key: value for key, value in decision.items() if key != "decision_manifest"}
+        content = {
+            key: value
+            for key, value in decision.items()
+            if key not in {"decision_manifest", "correlation_id"}
+        }
         encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         if hashlib.sha256(encoded.encode()).hexdigest() != manifest.get("content_sha256"):
             return {}

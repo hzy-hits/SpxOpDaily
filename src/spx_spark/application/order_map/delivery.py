@@ -94,6 +94,7 @@ def enqueue_pin_stable_watch(decision: Mapping[str, Any], *, now: datetime) -> d
             lane="strategy_watch",
             occurred_at=occurred_at,
             expires_at=expires_at,
+            correlation_id=_correlation_id(decision),
         ),
         title=_pin_watch_title(regime, center),
         text=text,
@@ -187,6 +188,7 @@ def enqueue_strategy_decision(
             occurred_at=occurred_at,
             expires_at=expires_at,
             operator_opportunity_id=opportunity_id,
+            correlation_id=_correlation_id(decision),
         ),
         title=_strategy_card_title(candidate),
         text=text,
@@ -218,6 +220,11 @@ def enqueue_strategy_decision(
     if net_premium_flow_image is not None:
         outcome["net_premium_flow_image"] = net_premium_flow_image
     return outcome
+
+
+def _correlation_id(value: Mapping[str, Any]) -> str | None:
+    text = str(value.get("correlation_id") or "").strip()
+    return text or None
 
 
 def _pin_watch_title(regime: Mapping[str, Any], center: float) -> str:
