@@ -52,7 +52,9 @@ def test_fast_lane_publishes_armed_and_watch_without_authority(tmp_path) -> None
     )
     assert armed["state"] == "armed"
     assert armed["authority"] == "none"
-    assert armed["latency_ms"] >= 0.0
+    assert 0.0 <= armed["latency_ms"] <= 1000.0
+    assert armed["ready_budget_ms"] == 3000.0
+    assert armed["fast_interval_ms"] == 1000.0
     assert armed["evidence_age_ms"] == 0.0
     assert json.loads((tmp_path / "latest" / "fast_lane.json").read_text())["state"] == "armed"
 
