@@ -87,7 +87,10 @@ observable lineage, and an executable rollback.
 ## CI and local validation
 
 The only active GitHub Actions workflow is the root `.github/workflows/ci.yml`.
-It runs Python tests plus the locked Rust workspace on native x86-64 and ARM64.
+It runs Python tests plus the locked Rust workspace on native x86-64 and ARM64,
+then validates OCI images and relocatable runtime bundles. Trusted master builds
+publish GHCR digests and GitHub Release assets; the guarded deploy job installs the
+prebuilt ARM64 bundle on Oracle. See [cloud delivery](headless-deployment.md#cloud-delivery-cutover-2026-10-17).
 A workflow under `rust/.github/` would be ignored by GitHub and must not be
 reintroduced.
 
