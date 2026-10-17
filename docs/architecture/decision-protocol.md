@@ -116,7 +116,8 @@ class Strategy(Protocol):
 - 新增策略不改 `strategy_select` 的 if/else；先在 shadow 跑，再切 owner。
   现状（2026-10-18）：`domain/strategy.py` 定义 Protocol，`application/order_map/
   strategy_plugins.py` 提供注册表、`SPX_STRATEGY_PLUGINS` 插件加载与 shadow runner；
-  插件只写 `latest/strategy_shadow.json`（`authority: none`），不参与授权。
+  插件只在独立研究脚本中运行，写 `latest/strategy_shadow.json`（`authority: none`），
+  生产 Core 不加载插件，避免同步研究计算或异常拖住决策提交。
   `scripts/strategy-shadow-replay.py` 可对保存的 facts 做 replay。新增策略只需新增
   模块并在 `SPX_STRATEGY_PLUGINS` 注册，不改 Core 文件。
 

@@ -15,6 +15,7 @@ def _state(now: datetime, spot: float) -> LatestState:
         instrument=InstrumentId.index("SPX"),
         provider=Provider.INTERNAL,
         received_at=now,
+        quote_time=now,
         quality=MarketDataQuality.LIVE,
         last=spot,
     )
@@ -40,7 +41,7 @@ def _decision(now: datetime, direction: str) -> dict[str, object]:
 
 def test_fast_lane_publishes_armed_and_watch_without_authority(tmp_path) -> None:
     now = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
-    storage = SimpleNamespace(data_root=str(tmp_path))
+    storage = SimpleNamespace(data_root=str(tmp_path), latest_stale_after_seconds=15)
     clock = FixedClock(now)
 
     armed = run_fast_lane_cycle(
@@ -67,3 +68,26 @@ def test_fast_lane_publishes_armed_and_watch_without_authority(tmp_path) -> None
     )
     assert watch["state"] == "watch"
     assert watch["trigger_level"] == 7700.0
+
+
+def test_fast_lane_rejects_wrong_coordinate_stale_and_future_quotes(tmp_path):
+    from dataclasses import replace
+
+    now = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
+    storage = SimpleNamespace(data_root=str(tmp_path), latest_stale_after_seconds=15)
+    state = _state(now, 7701.0)
+    quote = state.quotes[0]
+    variants = [
+        replace(quote, instrument=InstrumentId.equity("SPY")),
+        replace(quote, quote_time=now - timedelta(seconds=16)),
+        replace(quote, quote_time=now + timedelta(seconds=1)),
+        replace(quote, quote_time=None),
+        replace(quote, quality=MarketDataQuality.FROZEN),
+    ]
+    for altered in variants:
+        result = run_fast_lane_cycle(
+            storage_settings=storage, state=replace(state, quotes=(altered,), best_quotes=(altered,)),
+            decision=_decision(now, "UP"), now=now, persist=False,
+        )
+        assert result["state"] == "none"
+        assert result["authority"] == "none"

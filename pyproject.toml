@@ -11,6 +11,7 @@ dependencies = [
   "ib-async>=2.0.0",
   "numpy>=2.0,<3",
   "openai>=2,<3",
+  "pydantic>=2.13,<3",
   "pydantic-settings>=2.14.2",
   "pytz>=2025.2",
   "schwab-py==1.5.1",

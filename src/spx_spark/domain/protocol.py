@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from spx_spark.clock import Clock, SystemClock
 
@@ -29,7 +29,12 @@ def ensure_correlation_id(payload: Mapping[str, Any]) -> str:
     """Reuse a producer correlation id or create one at the decision boundary."""
 
     text = str(payload.get("correlation_id") or "").strip()
-    return text or new_correlation_id()
+    if text:
+        return text
+    decision_id = str(payload.get("decision_id") or "").strip()
+    if decision_id:
+        return f"corr:{uuid5(NAMESPACE_URL, 'spx:decision:' + decision_id).hex}"
+    return new_correlation_id()
 
 
 def _require_utc(label: str, value: datetime) -> None:

@@ -108,9 +108,10 @@ def growth_dislocation_scan() -> None:
 
 @huey.periodic_task(crontab(minute="*", strict=True))
 def opportunity_ledger_snapshot() -> None:
+    from spx_spark.config import StorageSettings
     from spx_spark.infrastructure.opportunity_ledger import record_current_decision
 
-    record_current_decision(_settings.data_root)
+    record_current_decision(StorageSettings.from_env().data_root)
 
 
 @huey.periodic_task(crontab(minute="*", strict=True), priority=20)

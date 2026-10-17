@@ -89,3 +89,12 @@ def test_notification_envelope_maps_lane_to_message_class() -> None:
     assert intent.provenance["correlation_id"] == "corr:test"
     assert intent.economics == {"max_loss_points": 10.0}
     assert intent.template_version == 1
+
+
+def test_decision_correlation_is_stable_across_retries():
+    from spx_spark.domain.protocol import ensure_correlation_id
+
+    first = ensure_correlation_id({"decision_id": "decision:1"})
+    assert first == ensure_correlation_id({"decision_id": "decision:1"})
+    assert first != ensure_correlation_id({"decision_id": "decision:2"})
+    assert ensure_correlation_id({"correlation_id": first}) == first

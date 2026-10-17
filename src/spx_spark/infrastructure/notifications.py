@@ -132,13 +132,16 @@ def _now(value: datetime | None = None) -> datetime:
 
 def _payload(value: Mapping[str, object]) -> tuple[str, str]:
     text = json.dumps(
+        dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    fingerprint_text = json.dumps(
         {key: item for key, item in value.items() if key != "feishu_sections"},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     )
-    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return text, hashlib.sha256(fingerprint_text.encode("utf-8")).hexdigest()
 
 
 def _key(logical_event_id: str, channel: str) -> str:

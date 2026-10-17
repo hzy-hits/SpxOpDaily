@@ -818,6 +818,9 @@ def simulate_management_policy_batch(
     pnl_marks = entry_cashflow + values
     mfe = np.maximum(0.0, np.maximum.accumulate(pnl_marks, axis=1)[rows, value_index])
     mae = np.minimum(0.0, np.minimum.accumulate(pnl_marks, axis=1)[rows, value_index])
+    # A gap before the first accepted mark contributes no observed excursion.
+    mfe = np.where(gap_exit & (exit_index == 0), 0.0, mfe)
+    mae = np.where(gap_exit & (exit_index == 0), 0.0, mae)
     gap_total = np.where(gap_exit, gap_cumulative[np.minimum(exit_index, mark_count - 1)], gap_cumulative[value_index])
     pnl = entry_cashflow + exit_values - fees_points
 

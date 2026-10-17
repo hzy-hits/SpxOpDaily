@@ -41,11 +41,6 @@ from spx_spark.application.market_features.physical_followthrough import (
 )
 from spx_spark.application.order_map.strategy_regime import StrategyPolicy
 from spx_spark.application.order_map.policy_replay import replay_paths
-from spx_spark.application.order_map.winner_distribution_cache import (
-    cached_winner_distribution,
-    store_winner_distribution,
-    winner_distribution_key,
-)
 from spx_spark.application.order_map.surface_path_distribution import (
     JOINT_SURFACE_CLEARING_METHOD,
     JOINT_SURFACE_METHOD,
@@ -82,33 +77,13 @@ def attach_path_distribution(
     policy: StrategyPolicy | None = None,
     paths: tuple[PhysicalSpotPath, ...] | None = None,
     clock_mode: str | None = None,
-    nonblocking: bool = False,
 ) -> dict[str, Any]:
-    """Copy ``candidate`` and hang the advisory distribution on ``edge``.
-
-    ``nonblocking`` returns a completed snapshot for up to 30 seconds, refreshes
-    it in the background after 10 seconds, and falls back to the vectorised
-    estimate on a cold miss.
-    """
-
-    def build() -> dict[str, Any]:
-        return estimate_path_distribution(
-            candidate, facts, data_root=data_root,
-            probability_settings=probability_settings, now=now, policy=policy,
-            paths=paths, clock_mode=clock_mode,
-        )
-
-    key = ""
-    if nonblocking:
-        key = winner_distribution_key(candidate, facts, data_root=data_root)
-        cached = cached_winner_distribution(key, now, refresh=build)
-        if cached is not None:
-            edge = dict(_map(candidate.get("edge")))
-            edge["path_distribution"] = cached
-            return {**dict(candidate), "edge": edge}
-    distribution = build()
-    if nonblocking:
-        store_winner_distribution(key, now, distribution)
+    """Price the current candidate; its risk veto must not reuse older economics."""
+    distribution = estimate_path_distribution(
+        candidate, facts, data_root=data_root,
+        probability_settings=probability_settings, now=now, policy=policy,
+        paths=paths, clock_mode=clock_mode,
+    )
     edge = dict(_map(candidate.get("edge")))
     edge["path_distribution"] = distribution
     return {**dict(candidate), "edge": edge}

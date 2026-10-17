@@ -40,3 +40,30 @@ def test_options_snapshot_reuses_one_state_and_rebuilds_on_new_version(monkeypat
     )
     options_cache.options_snapshot(newer)
     assert calls == {"group": 2, "map": 2, "exposure": 2}
+
+
+def test_changed_greeks_source_clock_and_best_spot_invalidate_snapshot(monkeypatch):
+    from dataclasses import replace
+    from spx_spark.marketdata import InstrumentId, MarketDataQuality, OptionGreeks, Provider, Quote
+
+    now = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
+    quote = Quote(instrument=InstrumentId.index("SPX"), provider=Provider.INTERNAL,
+                  received_at=now, quality=MarketDataQuality.LIVE, last=7700.0,
+                  greeks=OptionGreeks(delta=0.2))
+    state = LatestState(created_at=now, as_of=now, quotes=(quote,), best_quotes=(quote,))
+    # Expose actual inputs in the returned analytics so stale reuse is observable.
+    monkeypatch.setattr(options_cache, "group_spxw_option_quotes", lambda state, **kw: state.quotes)
+    monkeypatch.setattr(options_cache, "build_options_map", lambda state, **kw: state.best_quotes)
+    monkeypatch.setattr(options_cache, "build_exposure_map", lambda state, **kw: state.quotes)
+    first = options_cache.options_snapshot(state)
+    variants = [replace(quote, greeks=OptionGreeks(delta=0.4)),
+                replace(quote, quote_time=now - timedelta(seconds=20)),
+                replace(quote, last=7710.0),
+                replace(quote, raw={"analytical_only": True})]
+    for changed in variants:
+        current = replace(state, quotes=(changed,), best_quotes=(changed,))
+        result = options_cache.options_snapshot(current)
+        assert result[0] == current.quotes and result[1] == current.best_quotes
+        assert result != first
+    routed = replace(state, best_quotes=(replace(quote, last=7720.0),))
+    assert options_cache.options_snapshot(routed)[1] == routed.best_quotes

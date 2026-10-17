@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 from spx_spark.clock import Clock, SystemClock
 from spx_spark.config import StorageSettings
-from spx_spark.marketdata import Quote
+from spx_spark.marketdata import MarketDataQuality, Quote
 from spx_spark.state_io import atomic_write_json_secure, read_json_object
 from spx_spark.storage import LatestState, LatestStateStore
 
@@ -44,11 +44,20 @@ def run_fast_lane_cycle(
     direction = str(candidate.get("direction") or "").upper()
     trigger = _number(candidate.get("trigger_level"))
     spot = _price(quote)
+    evidence_age_ms = _age_ms(quote, now)
     valid_until = _time(candidate.get("opportunity_valid_until"))
     state_name = "none"
     reason = "no_candidate"
     if candidate and spot is None:
         reason = "spot_unavailable"
+    elif candidate and (
+        quote.quality != MarketDataQuality.LIVE
+        or evidence_age_ms is None
+        or not 0 <= evidence_age_ms <= storage_settings.latest_stale_after_seconds * 1000
+    ):
+        reason = "spot_not_fresh"
+    elif candidate and valid_until is None:
+        reason = "opportunity_expiry_missing"
     elif valid_until is not None and valid_until <= now:
         state_name = "expired"
         reason = "opportunity_expired"
@@ -71,7 +80,7 @@ def run_fast_lane_cycle(
         "direction": direction or None,
         "trigger_level": trigger,
         "spot": spot,
-        "evidence_age_ms": _age_ms(quote, now),
+        "evidence_age_ms": evidence_age_ms,
         "decision_age_ms": _decision_age_ms(decision, now),
         "valid_until": valid_until.isoformat() if valid_until else None,
         "latency_ms": round((clock.monotonic() - started) * 1000.0, 3),
@@ -90,11 +99,8 @@ def run_periodic(storage_settings: StorageSettings) -> int:
 
 
 def _spot_quote(state: LatestState) -> Quote | None:
-    for instrument_id in ("index:SPX", "equity:SPY", "future:ES"):
-        quote = state.best_quote(instrument_id)
-        if quote is not None and _price(quote) is not None:
-            return quote
-    return None
+    # Trigger levels are SPX coordinates; SPY and unadjusted ES are not substitutes.
+    return state.best_quote("index:SPX")
 
 
 def _price(quote: Quote | None) -> float | None:
@@ -109,10 +115,12 @@ def _price(quote: Quote | None) -> float | None:
 def _age_ms(quote: Quote | None, now: datetime) -> float | None:
     if quote is None:
         return None
-    received = quote.received_at
-    if received.tzinfo is None:
-        received = received.replace(tzinfo=timezone.utc)
-    return round((now - received.astimezone(timezone.utc)).total_seconds() * 1000.0, 3)
+    source = quote.quote_time or quote.trade_time
+    if source is None:
+        return None
+    if source.tzinfo is None:
+        source = source.replace(tzinfo=timezone.utc)
+    return round((now - source.astimezone(timezone.utc)).total_seconds() * 1000.0, 3)
 
 
 def _decision_age_ms(decision: Mapping[str, Any], now: datetime) -> float | None:

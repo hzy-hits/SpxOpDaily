@@ -75,7 +75,7 @@ def health_status(
         return "unhealthy", "health_missing", None
     age = (now - observed).total_seconds()
     max_age = _number(health.get("max_age_seconds")) or 90.0
-    if age > max_age:
+    if age < 0 or age > max_age:
         return "unhealthy", "health_stale", observed
     if bool(health.get("policy_blocked")):
         return "unhealthy", "policy_blocked", observed
@@ -108,6 +108,8 @@ def advance_continuity(
     kind, reason, observed = health_status(health, now=now, policy=policy)
     if kind == "healthy":
         if prior.state in {GAP, RECOVERING}:
+            if prior.last_good_at is not None and observed <= prior.last_good_at:
+                return prior, None
             samples = prior.healthy_samples + 1
             gap_start = prior.gap_start or now
             state = ContinuityState(
@@ -129,6 +131,8 @@ def advance_continuity(
             return state, event
         return ContinuityState(HEALTHY, None, observed or now, 0, now), None
     if kind == "suspect":
+        if prior.state in {GAP, RECOVERING}:
+            return ContinuityState(GAP, prior.gap_start, prior.last_good_at, 0, now), None
         return ContinuityState(SUSPECT, prior.gap_start, prior.last_good_at, 0, now), None
     gap_start = prior.gap_start or now
     state = ContinuityState(GAP, gap_start, prior.last_good_at, 0, now)

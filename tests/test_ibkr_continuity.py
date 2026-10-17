@@ -54,3 +54,20 @@ def test_continuity_records_gap_and_rearm(tmp_path) -> None:
     events = [json.loads(line)["event"] for line in ledger.read_text().splitlines()]
     assert events[0] == "gap_start"
     assert events[-1] == "gap_end"
+
+
+def test_recovery_requires_distinct_fresh_samples_and_cannot_escape_through_suspect():
+    now = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
+    gap, _ = advance_continuity(None, _health(now, healthy=False), now=now)
+    at = now + timedelta(seconds=1)
+    recovering, _ = advance_continuity(gap.to_dict(), _health(at), now=at)
+    for _ in range(3):
+        recovering, _ = advance_continuity(recovering.to_dict(), _health(at), now=at)
+    assert recovering.state == "recovering"
+    assert recovering.healthy_samples == 1
+    aged_at = at + timedelta(seconds=21)
+    suspect, _ = advance_continuity(recovering.to_dict(), _health(at), now=aged_at)
+    assert suspect.state == "gap"
+    next_state, _ = advance_continuity(suspect.to_dict(), _health(aged_at), now=aged_at)
+    assert next_state.state == "recovering"
+    assert next_state.healthy_samples == 1

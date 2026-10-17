@@ -114,7 +114,7 @@ def capture_summary(
         Path(database_path) if database_path is not None else Path(data_root) / "spx.sqlite"
     )
     authorized = [row for row in rows if row.get("state") == "authorized"]
-    delivered_authorized = sum(
+    delivered_authorized = None if delivered is None else sum(
         1
         for row in authorized
         if row.get("correlation_id") and row["correlation_id"] in delivered
@@ -127,8 +127,12 @@ def capture_summary(
         "by_strategy": _counts(rows, "strategy_type"),
         "top_blockers": _blockers(rows),
         "authorized_delivered": delivered_authorized,
-        "authorized_not_delivered": len(authorized) - delivered_authorized,
-        "acted": 0,  # phase 1 has no execution acknowledgement; never infer it
+        "authorized_not_delivered": (
+            len(authorized) - delivered_authorized if delivered_authorized is not None else None
+        ),
+        "delivery_scope": "python_status_including_rust_handoff_not_final_receipt",
+        "acted": None,  # No acknowledgement means unknown, not zero executions.
+        "coverage": "minute_sampled_latest_decision",
     }
 
 
@@ -148,11 +152,13 @@ def capture_week_summary(
     ]
     totals = {
         "total": sum(item["total"] for item in summaries),
-        "authorized_delivered": sum(item["authorized_delivered"] for item in summaries),
-        "authorized_not_delivered": sum(
-            item["authorized_not_delivered"] for item in summaries
-        ),
-        "acted": 0,
+        "authorized_delivered": (sum(item["authorized_delivered"] for item in summaries)
+                                 if all(item["authorized_delivered"] is not None for item in summaries) else None),
+        "authorized_not_delivered": (sum(item["authorized_not_delivered"] for item in summaries)
+                                     if all(item["authorized_not_delivered"] is not None for item in summaries) else None),
+        "delivery_scope": "python_status_including_rust_handoff_not_final_receipt",
+        "acted": None,
+        "coverage": "minute_sampled_latest_decision",
     }
     by_state: dict[str, int] = {}
     by_stage: dict[str, int] = {}
@@ -188,22 +194,22 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _delivered_correlations(database_path: Path) -> set[str]:
+def _delivered_correlations(database_path: Path) -> set[str] | None:
     import sqlite3
 
     if not database_path.exists():
-        return set()
+        return None
     try:
         connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
     except sqlite3.Error:
-        return set()
+        return None
     try:
         rows = connection.execute(
             "SELECT DISTINCT correlation_id FROM notification_events "
             "WHERE status='delivered' AND correlation_id IS NOT NULL"
         ).fetchall()
     except sqlite3.Error:
-        return set()
+        return None
     finally:
         connection.close()
     return {str(row[0]) for row in rows}

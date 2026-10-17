@@ -77,7 +77,7 @@ def build_strategy_decision(
             probability_settings=probability_settings, background_models=background_models)
     finally:
         _SESSION_CARDS.reset(token)
-    decision.setdefault("correlation_id", ensure_correlation_id(payload))
+    decision.setdefault("correlation_id", ensure_correlation_id(decision))
     return decision
 
 def _build_strategy_decision(
@@ -775,7 +775,7 @@ def _attach_winner_path_distributions(
                 facts,
                 data_root=data_root,
                 probability_settings=probability_settings,
-                now=now, nonblocking=bool(facts.get("history_preparation_nonblocking")),
+                now=now,
             )
         except HistoryPreparing as exc:
             winner = {**first, "history_preparation_pending": str(exc)}

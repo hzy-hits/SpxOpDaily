@@ -84,7 +84,33 @@ def test_opportunity_ledger_records_one_row_per_decision_state(tmp_path) -> None
     }
     assert summary["authorized_delivered"] == 1
     assert summary["authorized_not_delivered"] == 0
-    assert summary["acted"] == 0
+    assert summary["acted"] is None
+    assert summary["coverage"] == "minute_sampled_latest_decision"
     assert capture_week_summary(tmp_path, "2026-10-16")["total"] == 3
     ledger = tmp_path / "opportunities" / "date=2026-10-16.jsonl"
     assert len(ledger.read_text().splitlines()) == 3
+
+
+def test_missing_delivery_database_is_unknown_not_proof_of_failed_delivery(tmp_path):
+    summary = capture_summary(tmp_path, "2026-10-16")
+    assert summary["authorized_delivered"] is None
+    assert summary["authorized_not_delivered"] is None
+    assert summary["acted"] is None
+
+
+def test_worker_uses_market_data_root_separate_from_operational_database(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from spx_spark.app_settings import get_settings
+    from spx_spark.config import StorageSettings
+    monkeypatch.setenv("SPX_DATA_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    from spx_spark.infrastructure import jobs
+
+    market_root = tmp_path / "market"
+    _write_decision(market_root, {"decision_id": "separate-root", "decision_type": "NO_TRADE",
+                                  "session_date": "2026-10-16"})
+    monkeypatch.setattr(StorageSettings, "from_env", lambda: SimpleNamespace(data_root=str(market_root)))
+    jobs.opportunity_ledger_snapshot.call_local()
+    rows = (market_root / "opportunities/date=2026-10-16.jsonl").read_text().splitlines()
+    assert len(rows) == 1
+    assert json.loads(rows[0])["decision_id"] == "separate-root"

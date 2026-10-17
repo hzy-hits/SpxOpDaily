@@ -54,45 +54,10 @@ def clear_options_snapshot_cache() -> None:
 
 
 def _fingerprint(state: LatestState, settings: StorageSettings) -> str:
-    digest = hashlib.blake2b(digest_size=16)
-    digest.update(
-        repr(
-            (
-                state.as_of.isoformat(),
-                state.failover_mode,
-                len(state.quotes),
-                settings.latest_stale_after_seconds,
-                settings.rotation_stale_after_seconds,
-                settings.slow_index_stale_after_seconds,
-                settings.slow_index_labels,
-            )
-        ).encode()
+    # Include Greeks, source clocks, spot routing, and raw rejection flags too.
+    # Arrival time and BBO alone do not identify the analytical inputs.
+    inputs = (
+        state.as_of, state.failover_mode, state.quotes, state.best_quotes,
+        state.provider_states, settings,
     )
-    for quote in state.quotes:
-        instrument = quote.instrument
-        digest.update(
-            repr(
-                (
-                    instrument.canonical_id,
-                    quote.provider,
-                    quote.received_at,
-                    quote.bid,
-                    quote.ask,
-                    quote.open_interest,
-                    quote.volume,
-                    quote.quality,
-                )
-            ).encode()
-        )
-    for provider_state in state.provider_states:
-        digest.update(
-            repr(
-                (
-                    provider_state.provider,
-                    provider_state.status,
-                    provider_state.checked_at,
-                    provider_state.reason,
-                )
-            ).encode()
-        )
-    return digest.hexdigest()
+    return hashlib.blake2b(repr(inputs).encode(), digest_size=16).hexdigest()

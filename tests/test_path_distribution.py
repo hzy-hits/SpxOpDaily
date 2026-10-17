@@ -812,27 +812,25 @@ def test_condor_bucket_refresh_keeps_only_recent_same_structure_probability(monk
     assert updated["probability_as_of"] == refresh_at.isoformat()
 
 
-def test_attach_path_distribution_reuses_a_completed_snapshot(monkeypatch) -> None:
-    from datetime import datetime, timezone
-
+def test_winner_risk_distribution_uses_current_economics(monkeypatch) -> None:
     from spx_spark.application.order_map import path_distribution as module
 
-    calls = {"count": 0}
-
-    def estimate(*_args, **_kwargs):
-        calls["count"] += 1
-        return {"status": "ready", "n_paths": 1}
+    def estimate(candidate, facts, **kwargs):
+        return {"status": "ready", "entry": candidate["entry"],
+                "spot": facts["spot"], "as_of": kwargs["now"]}
 
     monkeypatch.setattr(module, "estimate_path_distribution", estimate)
-    candidate = {"candidate_id": "c1", "strategy_type": "CALL_DEBIT_VERTICAL", "legs": []}
-    facts = {"session_date": "2026-10-16"}
+    candidate = {"candidate_id": "same-legs", "entry": 1.0}
+    facts = {"spot": 7700.0}
     now = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
-
     first = module.attach_path_distribution(
-        candidate, facts, data_root=None, probability_settings=None, now=now, nonblocking=True
-    )
+        candidate, facts, data_root=None, probability_settings=None, now=now
+    )["edge"]["path_distribution"]
+    candidate["entry"] = 2.0
+    facts["spot"] = 7710.0
+    later = now + timedelta(seconds=5)
     second = module.attach_path_distribution(
-        candidate, facts, data_root=None, probability_settings=None, now=now, nonblocking=True
-    )
-    assert calls["count"] == 1
-    assert first["edge"]["path_distribution"] == second["edge"]["path_distribution"]
+        candidate, facts, data_root=None, probability_settings=None, now=later
+    )["edge"]["path_distribution"]
+    assert first["entry"] == 1.0
+    assert second == {"status": "ready", "entry": 2.0, "spot": 7710.0, "as_of": later}

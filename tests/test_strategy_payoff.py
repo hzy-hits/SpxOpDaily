@@ -5724,3 +5724,24 @@ def test_batch_policy_replay_matches_scalar_for_debit_and_credit() -> None:
         ]
         assert labels == scalar
 
+
+
+@pytest.mark.parametrize("initial_gap", [0, 60, 300])
+def test_batch_matches_scalar_across_frozen_policies_and_quote_gaps(initial_gap):
+    import numpy as np
+    from spx_spark.analytics.options import strategy_payoff as module
+
+    now = datetime(2026, 10, 16, 13, 30, tzinfo=timezone.utc)
+    rng = np.random.default_rng(16)
+    times = [now + timedelta(seconds=initial_gap + 60 * i) for i in range(76)]
+    for policy in (module.DEFAULT_MANAGEMENT_POLICY, module.IRON_CONDOR_MANAGEMENT_POLICY,
+                   module.RTH_IRON_CONDOR_MANAGEMENT_POLICY, module.PIN_BUTTERFLY_MANAGEMENT_POLICY,
+                   module.CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY):
+        values = rng.uniform(.1, 10, (50, len(times))) * (-1 if policy.entry_side == "credit" else 1)
+        kwargs = dict(entry_price=2, contract_count=4, entry_at=now,
+                      policy=policy, max_quote_gap_seconds=60)
+        batch = simulate_management_policy_batch(values, times, **kwargs)
+        scalar = [simulate_management_policy(
+            [PolicyMark(at, float(value)) for at, value in zip(times, row)], **kwargs
+        ) for row in values]
+        assert batch == scalar

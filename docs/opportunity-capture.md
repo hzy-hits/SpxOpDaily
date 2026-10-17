@@ -11,8 +11,13 @@
 `decision_id + state` 去重，把最终决策写入
 `opportunities/date=YYYY-MM-DD.jsonl`（state = authorized / detected / rejected，
 带 stage、reason codes、correlation_id）。报告用 `notification_events.correlation_id`
-与 `status='delivered'` 计算 authorized_delivered / authorized_not_delivered；
-acted 没有执行回执，固定为 0，绝不推断。`scripts/opportunity-capture-report.py`
+与 `status='delivered'` 计算 authorized_delivered / authorized_not_delivered。
+这些计数仅表示 Python 记录中的投递／交接证据；`rust_ingress` 成功代表 Rust 接收，
+不代表终端已送达，缺少证据也不等于确认投递失败。DB 不可读或缺字段时计数为 null。
+行情目录取 `StorageSettings.data_root`，运营数据库取独立的 `SPX_DATA_ROOT/spx.sqlite`；
+研究机报告可用 `--data-root` 和 `--database` 分别指定两处路径。
+acted 没有执行回执，返回 null（未知），绝不推断为零成交。
+当前是每分钟采样 latest decision，不是完整机会台账，不能据此计算机会捕获率或漏报率。`scripts/opportunity-capture-report.py`
 输出当日或 `--week-ending` 的周报（`capture_week_summary`）。
 
 系统已经有足够的**原料**，但没有一个统一的机会台账：
@@ -71,7 +76,7 @@ outcome_marks[]
 | Detection rate | 大 move（>0.5 / 1.0 EM）中，至少被 DETECTED 的比例 |
 | Authorization rate | DETECTED 中进入 AUTHORIZED 的比例 |
 | Delivery rate | AUTHORIZED 中收到成功回执的比例 |
-| Action rate | DELIVERED 中人工 ACTED 的比例（从后续记录推断，不假装知道） |
+| Action rate | DELIVERED 中人工 ACTED 的比例（仅由明确人工确认记录，缺失为未知） |
 | Time-to-ready | detected → authorized 的 P50/P95 |
 | Time-to-deliver | authorized → receipt 的 P50/P95 |
 | Top miss reasons | 每个 reason code 在未授权中的占比 |
