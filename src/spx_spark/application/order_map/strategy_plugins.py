@@ -84,7 +84,11 @@ def run_shadow_strategies(
     persist: bool = True,
 ) -> tuple[dict[str, Any], ...]:
     selected = registry or REGISTRY
-    selected.load_plugins()
+    try:
+        selected.load_plugins()
+    except Exception:
+        # A broken shadow plug-in must never block the authorization cycle.
+        return ()
     strategies = selected.active(shadow=True)
     if not strategies:
         return ()
