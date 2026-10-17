@@ -1,5 +1,7 @@
 # SPX Spark
 
+<!-- documentation-status: 2026-10-18 -->
+
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 **SPX/SPXW market intelligence, strategy research, and Desk Maps for human decisions.**
@@ -71,6 +73,7 @@ it does not connect to brokers or choose Python strategy legs. Full
 `strategy_decision` objects do not cross the Rust wire.
 
 See the [runtime diagram](docs/architecture/README.md#runtime-and-data-ownership),
+[decision protocol](docs/architecture/decision-protocol.md),
 [monorepo contract](docs/monorepo-layout.md), and
 [notification contract](docs/notification-architecture.md) for exact ownership.
 The existing Python/Rust split is retained; no language migration is assumed.

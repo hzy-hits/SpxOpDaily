@@ -1,5 +1,7 @@
 # Historical source atlas
 
+<!-- documentation-status: 2026-10-18 -->
+
 [Current architecture](../README.md) · [Current interactive guide](../service-flow.html)
 
 The [original standalone HTML atlas](spx-module-data-atlas.html) is the Chinese
