@@ -35,6 +35,8 @@
 
 现状（2026-10-18）：`NotificationEnvelope` 已带 `message_class`、`template_id`、
 `template_version`，lane→class 有默认映射；人工交易卡已标注 `ready` / `watch`。
+`message_intent_for_decision` 可从 decision 构造 MessageIntent 事实（subject / economics /
+risk / data_quality / provenance），渲染仍走现有代码。
 模板注册表仍是目标；数字锁定已有 `llm_writer.narrative_numbers_locked`（所有自由文本
 数字必须来自 decision，idea memo 已在用）。入队时另写
 `audit/notification_correlations.jsonl`，回执侧可按 event_id 关联 correlation_id。

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from spx_spark.domain.protocol import Envelope, envelope_for
-from spx_spark.notifier.model import NotificationEnvelope
+from spx_spark.notifier.model import NotificationEnvelope, message_intent_for_decision
 
 
 def test_decision_envelope_carries_one_utc_correlation_id() -> None:
@@ -67,3 +67,25 @@ def test_notification_envelope_maps_lane_to_message_class() -> None:
     )
     with pytest.raises(ValueError):
         invalid.validate()
+
+    intent = message_intent_for_decision(
+        {
+            "decision_id": "strategy:1",
+            "decision_type": "CALL_DEBIT_VERTICAL",
+            "decision_at": now.isoformat(),
+            "correlation_id": "corr:test",
+            "policy_version": "v69",
+            "candidate": {
+                "strategy_type": "CALL_DEBIT_VERTICAL",
+                "direction": "up",
+                "economics": {"max_loss_points": 10.0},
+            },
+        },
+        message_class="ready",
+        lane="trade_ready",
+        template_id="trade_ready",
+    )
+    assert intent.message_class == "ready"
+    assert intent.provenance["correlation_id"] == "corr:test"
+    assert intent.economics == {"max_loss_points": 10.0}
+    assert intent.template_version == 1

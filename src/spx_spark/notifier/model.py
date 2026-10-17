@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 CommandRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
@@ -106,6 +106,87 @@ class NotificationEnvelope:
             or not 0 <= self.operator_generation <= 4_294_967_295
         ):
             raise ValueError("operator_generation must be a u32 integer")
+
+
+@dataclass(frozen=True)
+class MessageIntent:
+    """Phase-1 typed facts for one outbound message (rendering stays separate)."""
+
+    message_id: str | None
+    message_class: str
+    lane: str
+    as_of: datetime
+    expires_at: datetime | None
+    subject: Mapping[str, object]
+    decision: Mapping[str, object]
+    economics: Mapping[str, object] | None
+    risk: Mapping[str, object] | None
+    data_quality: Mapping[str, object]
+    provenance: Mapping[str, object]
+    narrative: str | None = None
+    template_id: str | None = None
+    template_version: int = 1
+
+
+def message_intent_for_decision(
+    decision: Mapping[str, object],
+    *,
+    message_class: str,
+    lane: str,
+    message_id: str | None = None,
+    template_id: str | None = None,
+    template_version: int = 1,
+) -> MessageIntent:
+    """Build the fact side of a message; callers keep using existing renderers."""
+
+    candidate = decision.get("candidate")
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    provenance = {
+        "decision_id": decision.get("decision_id"),
+        "correlation_id": decision.get("correlation_id"),
+        "policy_version": decision.get("policy_version"),
+        "runtime_git_sha": decision.get("runtime_git_sha"),
+    }
+    return MessageIntent(
+        message_id=message_id,
+        message_class=message_class,
+        lane=lane,
+        as_of=_time(decision.get("decision_at")) or datetime.now(tz=timezone.utc),
+        expires_at=_time(candidate.get("quote_valid_until")),
+        subject={
+            "strategy_type": candidate.get("strategy_type") or decision.get("decision_type"),
+            "direction": candidate.get("direction"),
+            "legs": candidate.get("legs"),
+        },
+        decision={
+            "decision_id": decision.get("decision_id"),
+            "decision_type": decision.get("decision_type"),
+            "status": decision.get("status"),
+        },
+        economics=candidate.get("economics") if isinstance(candidate.get("economics"), Mapping) else None,
+        risk=(
+            candidate.get("management_plan")
+            if isinstance(candidate.get("management_plan"), Mapping)
+            else None
+        ),
+        data_quality={
+            "quote": candidate.get("quote"),
+            "probability_evidence": decision.get("probability_evidence"),
+        },
+        provenance=provenance,
+        template_id=template_id,
+        template_version=template_version,
+    )
+
+
+def _time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
