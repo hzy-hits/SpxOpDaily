@@ -68,6 +68,13 @@ def active(user, units):
                                              check=False).returncode == 0]
 
 
+def retire_research_timer():
+    timer = 'spx-spark-backtest-weekly.timer'
+    state = run('systemctl', '--user', 'show', timer, '-p', 'LoadState', '--value')
+    if state not in {'not-found', 'masked'}:
+        run('systemctl', '--user', 'disable', '--now', timer)
+
+
 def schema_files(root):
     return {str(p.relative_to(root)): checksum(p) for p in (root / 'alembic').rglob('*.py')}
 
@@ -202,6 +209,7 @@ def install(sha, digest):
                 or set(active(False, RUST_UNITS)) != set(RUST_UNITS)):
             raise RuntimeError('Installed release is unhealthy; operator recovery required')
         verify_health(time.time() - 60)
+        retire_research_timer()
         print(json.dumps({'status': 'already_deployed', 'revision': sha}))
         return
     needs_migration = reviewed_migration(previous, target)
@@ -261,6 +269,7 @@ def install(sha, digest):
                 or set(active(False, running_rust)) != set(running_rust)):
             raise RuntimeError('Post-deployment service validation failed')
         wait_ready(started, processes)
+        retire_research_timer()
         ROOT.joinpath('previous.json').write_text(json.dumps({
             'python': str(previous), 'rust': str(previous_rust), 'release': sha,
             'database_backup': database_backup,
@@ -289,7 +298,6 @@ def install(sha, digest):
             timers = [t for t in timers if t != 'spx-spark-backtest-weekly.timer']
         if timers:
             run('systemctl', '--user', 'start', *timers)
-    run('systemctl', '--user', 'disable', '--now', 'spx-spark-backtest-weekly.timer')
     print(json.dumps({'status': 'deployed', 'revision': sha, 'archive_sha256': digest,
                       'previous_python': str(previous), 'previous_rust': str(previous_rust),
                       'cutover_seconds': round(time.time() - started, 1)}))

@@ -35,7 +35,10 @@ No Git checkout, uv sync, cargo build or compiler executes on Oracle.
 
 Host-only configuration and secrets stay in the old protected locations; existing
 data/log paths are linked into the release. No service is enabled for the first time,
-no broker Gateway restart occurs, and writer ownership does not change. Deployment
+no broker Gateway restart occurs, and writer ownership does not change. A retired
+weekly research timer that is absent or masked is already stopped; it is not a
+release error. An existing timer is disabled inside the rollback boundary before
+the success receipt is written. Deployment
 serializes with a host lock, stops writers before switching and restores prior unit
 paths/binaries on failed validation. A successful switch records `previous.json`.
 Database revision changes normally stop deployment: binary rollback does not roll back data.
