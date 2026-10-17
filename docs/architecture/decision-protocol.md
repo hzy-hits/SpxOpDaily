@@ -42,7 +42,7 @@ class Envelope:
 2. `type + version` 唯一确定 payload schema；未知 type/version 必须 fail closed。
 3. schema 由 pydantic 生成（`model_json_schema()`），Rust 用 `schemars` 对齐；
    golden fixture 只保留跨语言必需的用例。
-4. 先把 Rust 的 `strategy_decision.v1` 改名为 `manual_advisory.v1`，消除同名。
+4. 解冻这三个类型时，优先把 Rust 的 `strategy_decision.v1` 改名为 `manual_advisory.v1`，消除同名。
 5. `contracts/README.md` 的冻结决定继续有效；解冻只针对上述三个类型。
 
 ## 3. 时间契约
