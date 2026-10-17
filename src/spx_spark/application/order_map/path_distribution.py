@@ -86,30 +86,27 @@ def attach_path_distribution(
 ) -> dict[str, Any]:
     """Copy ``candidate`` and hang the advisory distribution on ``edge``.
 
-    ``nonblocking`` reuses a completed snapshot for up to 30 seconds and falls
-    back to a synchronous estimate on a miss. A pure background refresh would
-    either skip a cycle or authorize on stale data, which is not acceptable for
-    a veto input; the vectorised replay makes the fallback cheap.
+    ``nonblocking`` returns a completed snapshot for up to 30 seconds, refreshes
+    it in the background after 10 seconds, and falls back to the vectorised
+    estimate on a cold miss.
     """
+
+    def build() -> dict[str, Any]:
+        return estimate_path_distribution(
+            candidate, facts, data_root=data_root,
+            probability_settings=probability_settings, now=now, policy=policy,
+            paths=paths, clock_mode=clock_mode,
+        )
 
     key = ""
     if nonblocking:
         key = winner_distribution_key(candidate, facts, data_root=data_root)
-        cached = cached_winner_distribution(key, now)
+        cached = cached_winner_distribution(key, now, refresh=build)
         if cached is not None:
             edge = dict(_map(candidate.get("edge")))
             edge["path_distribution"] = cached
             return {**dict(candidate), "edge": edge}
-    distribution = estimate_path_distribution(
-        candidate,
-        facts,
-        data_root=data_root,
-        probability_settings=probability_settings,
-        now=now,
-        policy=policy,
-        paths=paths,
-        clock_mode=clock_mode,
-    )
+    distribution = build()
     if nonblocking:
         store_winner_distribution(key, now, distribution)
     edge = dict(_map(candidate.get("edge")))

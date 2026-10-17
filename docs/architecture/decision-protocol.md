@@ -124,8 +124,8 @@ class Strategy(Protocol):
 1. `armed` 可以早发，但必须带 `evidence_age` 与 `valid_until`；`ready` 才代表证据齐全。
 2. 链分析按 snapshot 内容指纹在 Core 内共享 OptionsMap/曝光快照（market features /
    shock / alert 只构建一次）；路径回放已批量化（4,000 路径、5 分钟粒度约 20–40 ms，
-   1 分钟粒度约 50 ms）。debit 分布复用 30s 内完成的快照，miss 时同步回退，避免授权
-   使用陈旧分布；纯异步回放不作为授权输入。
+   1 分钟粒度约 50 ms）。debit 分布复用 30s 内完成的快照，10s 后在后台刷新；冷 miss
+   时同步回退（约 20–40 ms），避免授权等待或使用过期分布。
 3. 消息同时带 `decision_at` 与 `quote_as_of`，接收方能看到判断的时效。
 
 ## 7. 观测接入
