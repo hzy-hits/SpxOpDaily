@@ -1,0 +1,47 @@
+---
+config:
+  theme: base
+  layout: dagre
+  htmlLabels: false
+  themeVariables:
+    fontFamily: 'Arial, PingFang SC, Microsoft YaHei, sans-serif'
+    fontSize: '16px'
+    primaryTextColor: '#18344d'
+    lineColor: '#607487'
+    clusterBkg: '#f8fafc'
+    clusterBorder: '#cbd5e1'
+  flowchart:
+    wrappingWidth: 280
+    curve: linear
+    nodeSpacing: 30
+    rankSpacing: 45
+---
+flowchart TB
+    subgraph CLOUD["CLOUD · development and delivery"]
+      DEV["Developers / cloud agents"] -->|Pull request| CI["GitHub Actions<br/>Tests + native AMD64 / ARM64 builds"]
+      CI --> ART["Releases + GHCR<br/>One commit · checksums · digests"]
+    end
+    subgraph ORACLE["ORACLE · production"]
+      RUN["Existing systemd services<br/>Python + Rust · native ARM64 bundle"] --> HOT[("Live state + recent quotes")]
+    end
+    subgraph HOME["HOME · scheduling, research, and retention"]
+      PI["Raspberry Pi<br/>Prefect + metadata + archive worker"] -->|Stream + verify| NAS[("NAS<br/>Verified snapshots + result backups")]
+      NAS -->|Pinned dataset| LAP["Linux laptop<br/>Pinned image + /srv/research"]
+      LAP -->|Results + receipts| NAS
+      PI -.->|Schedule| LAP
+    end
+    MAC["Mac<br/>Review + on-demand research"] -.->|Review| DEV
+    MAC -.->|Operate| PI
+    ART -->|Prebuilt ARM64 package| RUN
+    ART -->|Same-commit AMD64 image| LAP
+    HOT -->|Read-only pull over Tailscale| PI
+    class DEV,CI,ART cloud
+    class RUN,HOT live
+    class PI,MAC control
+    class NAS,LAP store
+
+    classDef cloud fill:#e9f2ff,stroke:#477bb5,color:#173a61
+    classDef live fill:#e4f5f0,stroke:#378c77,color:#153f35
+    classDef control fill:#f0eaff,stroke:#9272c5,color:#3f2f60
+    classDef store fill:#fff4d9,stroke:#b89335,color:#5a4513
+    classDef warn fill:#fff0ec,stroke:#c77b62,color:#713f30
