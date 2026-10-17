@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from spx_spark.clock import Clock, SystemClock
+
 
 def new_correlation_id() -> str:
     return f"corr:{uuid4().hex}"
@@ -62,6 +64,11 @@ class Envelope:
         _require_utc("produced_at", self.produced_at)
         _require_utc("as_of", self.as_of)
 
+    def validated_payload(self) -> Any:
+        from spx_spark.domain.payload_schemas import validate_payload
+
+        return validate_payload(self.type, self.version, self.payload)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "message_id": self.message_id,
@@ -84,12 +91,13 @@ def envelope_for(
     correlation_id: str,
     payload: Mapping[str, Any] | None = None,
     produced_at: datetime | None = None,
+    clock: Clock | None = None,
 ) -> Envelope:
     return Envelope(
         message_id=new_message_id(),
         type=message_type,
         version=version,
-        produced_at=produced_at or datetime.now(tz=timezone.utc),
+        produced_at=produced_at or (clock or SystemClock()).now(),
         as_of=as_of,
         source=source,
         correlation_id=correlation_id,

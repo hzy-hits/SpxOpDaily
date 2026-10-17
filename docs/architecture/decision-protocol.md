@@ -45,8 +45,13 @@ class Envelope:
    `audit/notification_correlations.jsonl`（event_id → correlation_id）关联，不改
    Rust 表结构。
 2. `type + version` 唯一确定 payload schema；未知 type/version 必须 fail closed。
-3. schema 由 pydantic 生成（`model_json_schema()`），Rust 用 `schemars` 对齐；
-   golden fixture 只保留跨语言必需的用例。
+   现状（2026-10-18）：`domain/payload_schemas.py` 注册了 strategy_decision v1/v2、
+   trade_intent v1、notification_intent v1；`persist_strategy_decision` 写库前校验
+   strategy_decision，`Envelope.validated_payload()` 在消费端校验；未知版本抛
+   `UnknownPayloadVersion`。
+3. schema 由 pydantic 生成（`model_json_schema()`，入口
+   `payload_json_schema(type, version)`），Rust 用 `schemars` 对齐；
+   golden fixture 只保留跨语言必需的用例。Rust 侧对齐仍是目标。
 4. 解冻这三个类型时，优先把 Rust 的 `strategy_decision.v1` 改名为 `manual_advisory.v1`，消除同名。
 5. `contracts/README.md` 的冻结决定继续有效；解冻只针对上述三个类型。
 
@@ -70,9 +75,11 @@ class Envelope:
 规则：
 
 1. 跨边界一律 aware UTC；ET 只出现在交易日历和展示层。
-2. 新增 `Clock` Protocol（`now()` / `monotonic()`），Core/Worker 在启动时注入；
-   `domain/` 与 `analytics/` 禁止 `datetime.now()`，用 AST 测试守住（已有
-   `tests/architecture/test_pure_boundaries.py` 可扩展）。
+2. 新增 `Clock` Protocol（`now()` / `monotonic()`，`spx_spark/clock.py` 的
+   `SystemClock` / `FixedClock`），`envelope_for` 已支持注入；`domain/` 与
+   `analytics/` 的 `datetime.now()` 已清零，由
+   `tests/architecture/test_no_wall_clock.py` 守住。Core/Worker 全链路启动注入仍是
+   目标（当前入口仍各自取时间）。
 3. 回放只按 `available_at` 过滤，禁止用 `created_at` 或消息发送时间代替。
 
 ## 4. 存储 owner
@@ -139,8 +146,8 @@ correlation_id 是日志、DB、消息共用的检索键；每个 owner 每 60s 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | P0 | correlation_id + Envelope + Rust 改名 | 一条 decision 能反查到 quote/receipt |
-| P1 | 三个 payload 的 pydantic schema | schema 生成、未知版本 fail closed |
-| P2 | Clock 端口 + 时间字段检查 | domain/analytics 无 `datetime.now()` |
+| P1 | 三个 payload 的 pydantic schema | schema 生成、未知版本 fail closed（Python 侧已做；Rust 对齐待做） |
+| P2 | Clock 端口 + 时间字段检查 | domain/analytics 无 `datetime.now()`（已做；Core/Worker 全链路注入待做） |
 | P3 | Strategy Protocol + shadow + replay | 新策略不改核心文件即可 shadow |
 | P4 | Fast/Slow 分层 | `armed` ≤1s、`ready` ≤3s |
 

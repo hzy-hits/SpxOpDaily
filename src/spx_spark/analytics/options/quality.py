@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime
 
 from spx_spark.analytics.options.constants import (
     BAD_QUALITIES,
@@ -17,6 +17,7 @@ from spx_spark.analytics.options.pricing import (
     option_iv,
     option_mid,
 )
+from spx_spark.clock import SystemClock
 from spx_spark.marketdata import MarketDataQuality, Quote
 
 
@@ -26,7 +27,7 @@ def structure_quality_ok(quote: Quote, *, as_of: datetime | None = None) -> bool
         return True
     if quote.quality in _HARD_BAD_QUALITIES:
         return False
-    age_ms = quote.quote_age_ms(as_of or datetime.now(tz=timezone.utc))
+    age_ms = quote.quote_age_ms(as_of or SystemClock().now())
     if age_ms is None:
         return False
     return age_ms <= STRUCTURE_MAX_AGE_SECONDS * 1000.0
