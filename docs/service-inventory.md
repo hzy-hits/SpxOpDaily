@@ -39,6 +39,11 @@
 
 ## Python 定时任务
 
+2026-10-18 14:30 Asia/Shanghai [现场排查](headless-deployment.md#scheduler-investigation-2026-10-18)：
+盘前地图 timer 已从历史失败状态恢复，下一次触发为 10 月 19 日 20:35；
+每日 RTH 验收 timer 正常，但上一轮任务超时仍未修复，瓶颈为累计历史健康文件读取。
+下表 `current` 表示职责归属，不表示最近一次任务全部验收通过。
+
 | unit / 任务 | 计划 | 状态 | 说明 |
 | --- | --- | --- | --- |
 | `spx-spark-order-map-status.timer` | 合法 GTH/RTH 每 15 分钟；`16:00 ET` 收盘快照 | `current` | `spx job order-map --status`，只写源快照 |

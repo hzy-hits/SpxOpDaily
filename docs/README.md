@@ -26,6 +26,9 @@
 <a id="current-state"></a>
 ## 当前运行状态与数据边界
 
+- 2026-10-18 14:30 Asia/Shanghai [调度故障排查](headless-deployment.md#scheduler-investigation-2026-10-18)：
+  云端发布和 Oracle 部署链路正常，盘前地图定时器已恢复；每日 RTH 验收的历史文件
+  读取超时已定位，仍待优化和实测，不能视为当前版本业务验收已通过。
 - 2026-10-18 00:08 Asia/Shanghai [部署及退役核验](headless-deployment.md#verified-deployment-and-release-retirement-2026-10-18)：
   PR #16/#17 已合并，Oracle 应用版本为 `1618abce`，9 个服务运行正常且决策持续落库。
   已清理 38 个旧发布目录（约 2.42 GiB），数据库迁移备份保留；本机不再保留即时回退包。

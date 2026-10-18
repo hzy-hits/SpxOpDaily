@@ -54,6 +54,66 @@ decision was `NO_TRADE`. Fresh market-open quotes, peak-load behavior and delive
 of an executable candidate are not proven by this closed-market check. P95 aggregate
 alerts and fully fact-built notification sections remain follow-up work.
 
+## Scheduler investigation (2026-10-18)
+
+At **14:30 Asia/Shanghai**, GitHub master remained a documentation-only successor
+to runtime `1618abce`; the native/image publication and Oracle deploy jobs in the
+release run above were successful, and `ORACLE_DEPLOY_ENABLED` remained `true`.
+All nine application PIDs were unchanged, restart counts were zero, bridge/report
+health advanced, and decisions continued to reach the database. This confirms the
+delivery path; it does not establish that every scheduled job is healthy.
+
+**Morning map scheduling restored.** The existing, enabled
+`spx-spark-morning-map.timer` had remained failed since August 21 with
+`Result=resources`, no next trigger, and no retained unit journal explaining the
+original failure. Both calendar expressions were valid. Resetting this timer's
+failed state and starting the existing timer restored `active/waiting` and the
+next trigger, **October 19 at 20:35 Asia/Shanghai** (08:35 New York); its second
+weekday slot remains 21:15 Asia/Shanghai (09:15 New York, subject to DST).
+The persistent catch-up invocation exited successfully with `outside_send_window`;
+no notification was sent. This verifies scheduling recovery and the time-window
+guard, not future broker readiness or delivery at the next actual slot.
+
+**Daily RTH acceptance timeout remains unresolved.** Its last invocation ran on
+October 17 from 07:00 to 07:15 Asia/Shanghai, then hit the existing 15-minute
+timeout. The timer itself is active and next runs on October 20 at 07:00
+Asia/Shanghai. The last completed daily report is dated October 7; the last
+level-decision acceptance projection is dated October 13. Neither is fresh
+acceptance evidence for the current release.
+
+The diagnostic isolated a historical-file read bottleneck:
+
+- `build_rth_daily_acceptance()` rebuilds cumulative level-decision acceptance;
+  `_read_tree()` reads whole JSONL files and retains all decoded records.
+- The 31 historical health files total **1,619,198,866 bytes**. A representative
+  100,779,137-byte file has **13,837 extents** on the data disk.
+- Repeated diagnostic stack samples stopped inside `_read_tree()` / `read_text()`;
+  the process was waiting for disk buffers. During that read workload, `/dev/sdb`
+  was approximately 93% busy and read approximately 0.86 MiB/s. After stopping
+  the diagnostic, disk busy time returned to approximately 1.3%.
+- The existing table-scoped SQLite integrity-check fix is already installed.
+  This incident cannot be attributed to the old database-wide `quick_check` alone.
+
+These observations point to scanning fragmented historical files as the immediate
+bottleneck; they do not establish a physical disk fault or a cloud-volume quota.
+Streaming alone would reduce memory but still read the same historical bytes, so
+no streaming-only patch, longer timeout, lowered acceptance threshold or fabricated
+success marker was applied. The diagnostic process was stopped, and the failed
+daily service state remains visible.
+
+Follow-up should reduce repeated historical reads while preserving identical
+acceptance results: evaluate verified compact inputs or partition-level incremental
+summaries, and keep cumulative research validation on the research node where
+appropriate. Before rollout, compare complete reports on the same frozen inputs,
+measure a cold-read run within the existing 15-minute budget, and run the full
+daily acceptance with notifications disabled. A successfully generated degraded
+report must still be distinguished from a passing business/data verdict.
+
+Operational checks after deployment must include `systemctl --user --failed` and
+the next trigger times of enabled production timers, in addition to the nine
+long-running services. The release receiver preserves existing timer activity;
+it does not automatically repair timers that were already failed before deployment.
+
 ## Cloud delivery cutover (2026-10-17)
 
 User-authorized delivery change: move development, builds and offline research off Oracle.
