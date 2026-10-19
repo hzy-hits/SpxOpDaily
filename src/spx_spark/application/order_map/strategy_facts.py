@@ -59,6 +59,7 @@ def build_market_fact_pack(
     provider_control = _map(
         payload.get("strategy_entry_control") or payload.get("provider_entry_control")
     )
+    gth_ibkr_control = _map(payload.get("gth_ibkr_entry_control"))
     forecast = _map(payload.get("strategy_distribution_forecast"))
     q_event, p_event = _map(forecast.get("q_event")), _map(forecast.get("p_event"))
     trading_date = str(payload.get("trading_date") or "")
@@ -178,6 +179,7 @@ def build_market_fact_pack(
     )
     macro_allowed = macro.get("entry_allowed") is True
     provider_allowed = provider_control.get("allowed") is not False
+    gth_ibkr_allowed = session_mode != "gth" or gth_ibkr_control.get("allowed") is True
     session_legal = session_mode != "closed"
     global_reasons = []
     if not session_legal:
@@ -197,10 +199,9 @@ def build_market_fact_pack(
         )
     if not macro_allowed:
         global_reasons.append("macro_entry_not_authorized")
-    if not provider_allowed:
-        global_reasons.append(
-            str(provider_control.get("reason") or "provider_advice_not_authorized")
-        )
+    if not provider_allowed or not gth_ibkr_allowed:
+        control = provider_control if not provider_allowed else gth_ibkr_control
+        global_reasons.append(str(control.get("reason") or "provider_advice_not_authorized"))
     vertical_reasons = []
     if not coordinate_ready:
         vertical_reasons.append("spx_price_unavailable")
@@ -478,7 +479,7 @@ def build_market_fact_pack(
                 "coordinate_ready": coordinate_ready,
                 "market_frame_ready": market_ready,
                 "macro_entry_allowed": macro_allowed,
-                "provider_advice_allowed": provider_allowed,
+                "provider_advice_allowed": provider_allowed and gth_ibkr_allowed,
                 "reasons": global_reasons,
             },
             "path": {

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from spx_spark.ibkr.continuity import advance_continuity, record_continuity
 
 
@@ -71,3 +73,48 @@ def test_recovery_requires_distinct_fresh_samples_and_cannot_escape_through_susp
     next_state, _ = advance_continuity(suspect.to_dict(), _health(aged_at), now=aged_at)
     assert next_state.state == "recovering"
     assert next_state.healthy_samples == 1
+
+
+def test_silent_gap_requires_three_new_observations_and_records_recovery(tmp_path):
+    now = datetime(2026, 10, 16, 14, tzinfo=timezone.utc)
+    record_continuity(tmp_path, _health(now), now=now)
+    heartbeat = now + timedelta(seconds=2)
+    record_continuity(tmp_path, _health(heartbeat), now=heartbeat)
+    path = tmp_path / "latest" / "ibkr_continuity.json"
+    assert json.loads(path.read_text())["last_good_at"] == heartbeat.isoformat()
+    assert not (tmp_path / "audit" / "ibkr_continuity.jsonl").exists()
+
+    resumed = heartbeat + timedelta(minutes=5)
+    for sample in range(3):
+        at = resumed + timedelta(seconds=2 * sample)
+        state = record_continuity(tmp_path, _health(at), now=at)
+        assert state.state == ("healthy" if sample == 2 else "recovering")
+        assert state.healthy_samples == sample + 1
+        duplicate = record_continuity(tmp_path, _health(at), now=at)
+        assert duplicate.state == state.state
+        assert duplicate.healthy_samples == state.healthy_samples
+    events = [json.loads(row) for row in (tmp_path / "audit" / "ibkr_continuity.jsonl").read_text().splitlines()]
+    assert [row["event"] for row in events] == ["gap_start", "recovering", "gap_end"]
+    assert events[0]["reason"] == "health_observation_gap"
+    assert events[-1]["gap_start"] == heartbeat.isoformat()
+    assert events[-1]["gap_seconds"] == 304
+
+
+@pytest.mark.parametrize("pause_seconds,expected", [(90, "healthy"), (91, "recovering")])
+def test_silent_gap_uses_the_health_expiry_boundary(pause_seconds, expected):
+    now = datetime(2026, 10, 16, 14, tzinfo=timezone.utc)
+    previous, _ = advance_continuity(None, _health(now), now=now)
+    at = now + timedelta(seconds=pause_seconds)
+    state, _ = advance_continuity(previous.to_dict(), _health(at), now=at)
+    assert state.state == expected
+
+
+def test_another_silent_gap_restarts_partial_recovery():
+    now = datetime(2026, 10, 16, 14, tzinfo=timezone.utc)
+    gap, _ = advance_continuity(None, _health(now, healthy=False), now=now)
+    at = now + timedelta(seconds=2)
+    recovering, _ = advance_continuity(gap.to_dict(), _health(at), now=at)
+    at += timedelta(minutes=5)
+    state, _ = advance_continuity(recovering.to_dict(), _health(at), now=at)
+    assert state.state == "recovering"
+    assert state.healthy_samples == 1

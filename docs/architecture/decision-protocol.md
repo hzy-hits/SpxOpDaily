@@ -1,10 +1,13 @@
 # 决策协议、时间契约与实时分层
 
-<!-- documentation-status: 2026-10-18 -->
+<!-- documentation-status: 2026-10-19 -->
 > **文档定位：现行设计合同（待实施部分已标注）。** 本文定义跨进程消息、时间语义、
 > 存储 owner、策略接入口和决策分层；现状与目标分开写，不把设计当成已上线。
 > [返回架构指南](README.md) · [模块架构](../../module-architecture.md) ·
 > [合同注册表](../../contracts/README.md)
+
+本轮实施状态见[执行方案状态表](../architecture-simplification-execution-plan-v1.md#2026-10-19-源码实施状态)。
+标为“本变更”的实现仍需合并/发布，本文不作为线上已部署的证明。
 
 ## 1. 为什么需要一份协议
 
@@ -57,7 +60,7 @@ class Envelope:
 
 ## 3. 时间契约
 
-现状：`datetime.now(` 约 194 处，时间字段名 9 种（`as_of` / `source_at` /
+历史计数（2026-10-18）：`datetime.now(` 约 194 处，时间字段名 9 种（`as_of` / `source_at` /
 `received_at` / `available_at` / `observed_at` / `created_at` / `generated_at` /
 `recorded_at` / `decision_at`），没有统一 Clock 端口。
 
@@ -118,13 +121,20 @@ class Strategy(Protocol):
   strategy_plugins.py` 提供注册表、`SPX_STRATEGY_PLUGINS` 插件加载与 shadow runner；
   插件只在独立研究脚本中运行，写 `latest/strategy_shadow.json`（`authority: none`），
   生产 Core 不加载插件，避免同步研究计算或异常拖住决策提交。
-  `scripts/strategy-shadow-replay.py` 可对保存的 facts 做 replay。新增策略只需新增
-  模块并在 `SPX_STRATEGY_PLUGINS` 注册，不改 Core 文件。
+  `scripts/strategy-shadow-replay.py` 当前只对一份保存的 facts 评估一次，使用墙钟 now；
+  它不是带事件序列、确认/冷却、恢复和 available_at 过滤的因果回放运行器。
+  插件注册的扩展能力已实现，持续实时研究/同规则因果 replay 仍待实施，不授权 READY。
+
+本变更在原 `market_features/service.py` 内承接周期分段：
+`_commit_strategy_decision` 保存成功后才导出/入队，`_build_research_context` 仅做后置
+解释。它们不是新策略接口或执行引擎；前置且被正式决策读取的研究证据不后移。
+`gth_ibkr_entry_control` 随 action-time 输入传给 facts/global gate，GTH 必须专项
+allowed 与通用 provider 门同时通过（含铁鹰）；缺少专项授权拒绝，RTH 不受专项门影响。
 
 ## 6. 决策分层与延迟预算
 
-现状：决策 5s 一轮、+1–2s 计算；realtime 15s；alerts 30s；分钟样本 60s。
-瓶颈不是 5s 轮询，而是每轮同步的路径回放与全量链重建。
+设计/历史运行口径：决策 5s 一轮、+1–2s 计算；realtime 15s；alerts 30s；分钟样本 60s。
+本轮未测生产延迟，不能把这些口径或下表预算作为实测 P95。
 
 | Lane | 触发 | 内容 | 输出 | 预算 |
 | --- | --- | --- | --- | --- |
@@ -144,14 +154,17 @@ class Strategy(Protocol):
 4. 现状（2026-10-18）：Core 已启动独立 1s fast lane（`application/fast_lane.py`），
    只发布 armed/watch 投影、`authority: none`；ready 仍由 5s 慢 cycle 授权。
    fast lane 输出 `latency_ms` / `evidence_age_ms` / `ready_budget_ms=3000`；慢 cycle
-   输出 `decision_latency_ms`（cycle 开始→decision 可发布）。P95 聚合与告警是运行侧
-   follow-up，不在本次代码内。
+   只有局部计算的 `decision_latency_ms`，尚未接入公开 cycle summary；summary 已有
+   stage durations。P95 聚合、端到端 READY 延迟与告警仍待接线/验收。
+   本变更使 fast lane 只用 last/trade_time 或 mid/quote_time 成对选价和计龄；
+   过期 last 可退到新鲜 BBO mid，缺少对应字段时钟不能借另一字段的时钟触发 armed。
 
 ## 7. 观测接入
 
 五个金信号与最小 ops snapshot 投影见 [运行观测与决策延迟指标](../observability.md)。
-correlation_id 是日志、DB、消息共用的检索键；每个 owner 每 60s 写一个
-`latest/ops_<service>.json`，Worker 读取并生成 ops 消息，不引入新常驻服务。
+correlation_id 已在部分决策/通知边界存在，但并非全链路覆盖。目标是每个 owner
+每 60s 写一个 `latest/ops_<service>.json`，Worker 读取并生成 ops 消息；这仍待实施，
+不引入新常驻服务。
 
 ## 8. 实施顺序与验收
 
@@ -160,7 +173,7 @@ correlation_id 是日志、DB、消息共用的检索键；每个 owner 每 60s 
 | P0 | correlation_id + Envelope + Rust 改名 | 一条 decision 能反查到 quote/receipt |
 | P1 | 三个 payload 的 pydantic schema | schema 生成、未知版本 fail closed（Python 侧已做；Rust 对齐待做） |
 | P2 | Clock 端口 + 时间字段检查 | domain/analytics 无 `datetime.now()`（已做；Core/Worker 全链路注入待做） |
-| P3 | Strategy Protocol + shadow + replay | 新策略不改核心文件即可 shadow（已做：插件模块 + env） |
+| P3 | Strategy Protocol + shadow + replay | partial：插件单快照 shadow 已做；持续运行、恢复和因果 replay 待做 |
 | P4 | Fast/Slow 分层 | `armed` ≤1s、`ready` ≤3s（fast lane 已做；ready P95/告警待接） |
 
 ## 9. 非目标

@@ -107,9 +107,22 @@ def advance_continuity(
         prior = ContinuityState(HEALTHY, None, None, 0, now)
     kind, reason, observed = health_status(health, now=now, policy=policy)
     if kind == "healthy":
+        if prior.last_good_at is not None and observed <= prior.last_good_at:
+            return prior, None
+        max_age = _number(health.get("max_age_seconds")) or 90.0
+        if (
+            prior.state != GAP
+            and prior.last_good_at is not None
+            and (observed - prior.last_good_at).total_seconds() > max_age
+        ):
+            state = ContinuityState(
+                RECOVERING, prior.gap_start or prior.last_good_at, observed, 1, now
+            )
+            return state, _event(
+                "gap_start", state, now, "health_observation_gap",
+                gap_start=state.gap_start, recovery_samples=1,
+            )
         if prior.state in {GAP, RECOVERING}:
-            if prior.last_good_at is not None and observed <= prior.last_good_at:
-                return prior, None
             samples = prior.healthy_samples + 1
             gap_start = prior.gap_start or now
             state = ContinuityState(
@@ -148,23 +161,14 @@ def record_continuity(
     now: datetime,
     policy: ContinuityPolicy = ContinuityPolicy(),
 ) -> ContinuityState:
-    """Persist state on change and append one ledger row per transition."""
+    """Persist observation progress and append one ledger row per transition."""
 
     root = Path(data_root)
     state_path = root / "latest" / "ibkr_continuity.json"
     previous = read_json_object(state_path)
     previous_state = ContinuityState.from_dict(previous)
     state, event = advance_continuity(previous, health, now=now, policy=policy)
-    changed = previous_state is None or (
-        state.state,
-        state.gap_start,
-        state.healthy_samples,
-    ) != (
-        previous_state.state,
-        previous_state.gap_start,
-        previous_state.healthy_samples,
-    )
-    if changed:
+    if state != previous_state:
         atomic_write_json_secure(state_path, state.to_dict())
     if event is not None:
         append_jsonl_secure(root / "audit" / "ibkr_continuity.jsonl", event)

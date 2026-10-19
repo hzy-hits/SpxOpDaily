@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -894,3 +894,17 @@ def test_gth_entry_control_blocks_during_continuity_gap(tmp_path) -> None:
     assert result["reason"] == "ibkr_continuity_gap"
     assert result["continuity_state"] == "gap"
 
+
+def test_health_publisher_cannot_reopen_gth_on_the_first_sample_after_silence(tmp_path):
+    storage, healthy_at = _seed_healthy_stream_health(tmp_path)
+    resumed = healthy_at + timedelta(minutes=5)
+    for sample in range(3):
+        observed = resumed + timedelta(seconds=2 * sample)
+        persist_stream_health(
+            storage, data_plane_healthy=True, policy_blocked=False,
+            reason="healthy market-data flush", connected=True,
+            circuit_state="closed", conflict_count=0, observed_at=observed,
+        )
+        control = gth_ibkr_entry_control(tmp_path, now=observed)
+        assert control["allowed"] is (sample == 2)
+        assert control["reason"] == ("allowed" if sample == 2 else "ibkr_continuity_recovering")

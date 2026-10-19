@@ -5047,6 +5047,7 @@ def _decision_payload(now: datetime) -> dict[str, object]:
     }
     return {
         "trading_date": "2026-08-07",
+        "gth_ibkr_entry_control": {"allowed": True, "reason": "allowed"},
         "pricing_allowed": True,
         "underlier": {"price": 7710.0, "source": "index:SPX"},
         "minute_market_frame": {
