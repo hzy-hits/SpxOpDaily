@@ -1,6 +1,6 @@
 # 运行观测与决策延迟指标
 
-<!-- documentation-status: 2026-10-18 -->
+<!-- documentation-status: 2026-10-19 -->
 > **文档定位：现行设计合同（指标投影部分待实施）。** 定义“怎么知道系统还好、
 > 决策有多快、消息有没有送到”，不引入新常驻服务。
 > [全仓文档目录](README.md) · [决策协议](architecture/decision-protocol.md) ·
@@ -60,8 +60,9 @@
 
 ## 4. 决策延迟的度量口径
 
-- `decision_latency_ms`：从 cycle 开始到 `strategy_decision` 可发布；market_features
-  的 cycle summary 已输出该字段；fast lane 的 `latest/fast_lane.json` 输出自己的
+- `decision_latency_ms`：目标为从 cycle 开始到 `strategy_decision` 可发布；market_features
+  目前只在内部局部计算，未输出到 cycle summary，指标接线仍待实施；summary 已有阶段
+  耗时。fast lane 的 `latest/fast_lane.json` 输出自己的
   `latency_ms` / `evidence_age_ms`；
 - `evidence_age_ms`：决策使用的报价/Greeks 年龄；
 - `time_to_ready`：detected→authorized（机会台账）；

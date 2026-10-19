@@ -1380,6 +1380,45 @@ def test_user_authorized_smooth_convergence_does_not_require_expansion():
     assert gth_iron_condor_transition(facts, now=NOW)["smooth_convergence"]["status"] == "unavailable"
 
 
+@pytest.mark.parametrize("session", ["gth", "rth"])
+@pytest.mark.parametrize("control", [
+    None, {"allowed": False, "reason": "ibkr_continuity_gap"},
+    {"allowed": False, "reason": "ibkr_continuity_recovering"},
+    {"allowed": False, "reason": "ibkr_competing_session"},
+    {"allowed": True, "reason": "allowed"},
+])
+def test_unified_iron_condor_consumes_the_real_gth_provider_gate(
+    monkeypatch, tmp_path, session, control,
+):
+    from spx_spark.application.order_map.strategy_facts import build_market_fact_pack
+
+    at, state, evidence = (NOW, _gth_state(), _gth_transition_facts()) if session == "gth" else (
+        RTH_NOW, _rth_state(), _rth_facts()
+    )
+    payload = {
+        **_payload(), "spot": {"price": SPOT},
+        "minute_market_frame": {"quality": "ready", "as_of": at.isoformat()},
+        "strategy_entry_control": {"allowed": True},
+    }
+    if control is not None:
+        payload["gth_ibkr_entry_control"] = control
+    # Keep the existing qualified market evidence; do not stub the admission gate.
+    def facts_with_gate(payload, latest, now):
+        facts = build_market_fact_pack(payload, latest, now)
+        return {**evidence, "capabilities": {
+            **evidence["capabilities"], "global": facts["capabilities"]["global"],
+        }}
+
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select.build_market_fact_pack", facts_with_gate)
+    monkeypatch.setattr("spx_spark.application.order_map.strategy_select._accepted_session_cards", lambda *a: ())
+    decision = build_strategy_decision(payload, state, at, data_root=tmp_path)
+    blocked = session == "gth" and (control is None or control["allowed"] is not True)
+    assert decision["decision_type"] == ("NO_TRADE" if blocked else "IRON_CONDOR")
+    assert decision["market_facts"]["capabilities"]["global"]["provider_advice_allowed"] is not blocked
+    if blocked:
+        assert (control["reason"] if control else "provider_advice_not_authorized") in decision["why_not"]["reasons"]
+
+
 @pytest.mark.parametrize("fault", [None, "iv_rising", "missing_history", "conflict", "credit24", "stale"])
 def test_authorized_smooth_gth_uses_unified_candidate_and_preserves_execution_gates(monkeypatch, tmp_path, fault):
     from spx_spark.application.order_map.delivery import _render_strategy_candidate

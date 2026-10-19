@@ -8,6 +8,7 @@ authorizes and never sends a ready card.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,8 +44,9 @@ def run_fast_lane_cycle(
     candidate = decision.get("candidate") if isinstance(decision.get("candidate"), Mapping) else {}
     direction = str(candidate.get("direction") or "").upper()
     trigger = _number(candidate.get("trigger_level"))
-    spot = _price(quote)
-    evidence_age_ms = _age_ms(quote, now)
+    spot, evidence_age_ms = _price(
+        quote, now=now, max_age_ms=storage_settings.latest_stale_after_seconds * 1000
+    )
     valid_until = _time(candidate.get("opportunity_valid_until"))
     state_name = "none"
     reason = "no_candidate"
@@ -103,24 +105,24 @@ def _spot_quote(state: LatestState) -> Quote | None:
     return state.best_quote("index:SPX")
 
 
-def _price(quote: Quote | None) -> float | None:
+def _price(
+    quote: Quote | None, *, now: datetime, max_age_ms: float,
+) -> tuple[float | None, float | None]:
     if quote is None:
-        return None
-    for value in (quote.last, quote.mid, quote.mark, quote.close):
-        if value is not None and value > 0:
-            return float(value)
-    return None
-
-
-def _age_ms(quote: Quote | None, now: datetime) -> float | None:
-    if quote is None:
-        return None
-    source = quote.quote_time or quote.trade_time
-    if source is None:
-        return None
-    if source.tzinfo is None:
-        source = source.replace(tzinfo=timezone.utc)
-    return round((now - source.astimezone(timezone.utc)).total_seconds() * 1000.0, 3)
+        return None, None
+    fallback: tuple[float | None, float | None] = (None, None)
+    for value, source in ((quote.last, quote.trade_time), (quote.mid, quote.quote_time)):
+        if (
+            value is None or not isfinite(value) or value <= 0
+            or source is None or source.tzinfo is None
+        ):
+            continue
+        age = round((now - source).total_seconds() * 1000.0, 3)
+        if 0 <= age <= max_age_ms:
+            return float(value), age
+        if fallback == (None, None):
+            fallback = (float(value), age)
+    return fallback
 
 
 def _decision_age_ms(decision: Mapping[str, Any], now: datetime) -> float | None:

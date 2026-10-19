@@ -11,6 +11,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+from spx_spark.analytics.options.models import OptionsMap
+
 from spx_spark.application.globex_trend.state import load_trend_state, trend_state_path
 from spx_spark.application.market_features.composition import (
     build_decision_audit,
@@ -43,7 +45,7 @@ from spx_spark.application.market_features.market import (
     normalized_market_sample,
     update_volume_baselines,
 )
-from spx_spark.application.market_features.models import DecisionContext
+from spx_spark.application.market_features.models import DecisionContext, MinuteMarketFrame, OptionStructureFrame
 from spx_spark.application.market_features.market_state_5m import score_market_state_5m
 from spx_spark.application.market_features.market_state_5m_inputs import (
     build_market_state_5m_inputs,
@@ -133,18 +135,20 @@ from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
 from spx_spark.config import StorageSettings
+from spx_spark.features.exposure_schema import ExposureMap
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.infrastructure.operational_db import (
     persist_strategy_decision,
     persist_strategy_shadow_candidates,
 )
 from spx_spark.macro_event_clock import macro_event_state
-from spx_spark.marketdata import as_utc
+from spx_spark.marketdata import Quote, as_utc
 from spx_spark.application.order_map.options_cache import options_snapshot
 from spx_spark.provider_failover_controller import ProviderFailoverSettings
 from spx_spark.settings import AppSettings, load_app_settings
 from spx_spark.settings.market_features import MarketFeatureSettings
-from spx_spark.storage import LatestStateStore
+from spx_spark.settings.spring_gamma_v3 import SpringGammaV3Settings
+from spx_spark.storage import LatestState, LatestStateStore
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -166,7 +170,7 @@ def run(
     cycle_started = perf_counter()
     stage_started = cycle_started
     stage_durations_ms: dict[str, float] = {}
-    decision_latency_ms: float | None = None
+    _decision_latency_ms: float | None = None
     state_component_started = cycle_started
     state_component_durations_ms: dict[str, float] = {}
 
@@ -416,7 +420,7 @@ def run(
         market_frame,
         max_sessions=policy.volume_baseline_sessions,
     )
-    level_decision_refresh_error: str | None = None
+    _level_decision_refresh_error: str | None = None
     try:
         raw_level_decision = run_level_decision_shadow(
             storage,
@@ -429,7 +433,7 @@ def run(
             options_map=options_map,
         )
     except Exception as exc:  # The last durable decision remains usable on refresh failure.
-        level_decision_refresh_error = f"{type(exc).__name__}:{exc}"
+        _level_decision_refresh_error = f"{type(exc).__name__}:{exc}"
         raw_level_decision = load_level_decision_shadow(storage)
     level_decision = coherent_level_decision(
         raw_level_decision,
@@ -533,7 +537,7 @@ def run(
         now=evaluation_now,
     )
     producer_deadline = _dict(producer_ledger.get("deadline"))
-    delivery_action_now = as_utc(
+    _delivery_action_now = as_utc(
         datetime.fromisoformat(str(producer_deadline["action_revalidation_at"]))
     )
     finish_stage("market_and_trigger")
@@ -582,7 +586,7 @@ def run(
         )
     )
     strategy_distribution_forecast: dict[str, object] = {}
-    strategy_distribution_forecast_error: str | None = None
+    _strategy_distribution_forecast_error: str | None = None
     cached_forecast_at = (
         _timestamp(state_cache.get("strategy_distribution_forecast_at"))
         if state_cache is not None
@@ -621,10 +625,10 @@ def run(
             # This lane is an append-only research projection.  A model or IO
             # failure must remain visible without interrupting the price-confirmed
             # manual signal lifecycle that was durably processed above.
-            strategy_distribution_forecast_error = f"{type(exc).__name__}:{exc}"
+            _strategy_distribution_forecast_error = f"{type(exc).__name__}:{exc}"
     finish_research_component("forecast")
     spring_gamma_snapshot = load_json(latest_spring_gamma_v3_shadow_path(storage.data_root))
-    gamma_prearm_plan = process_gamma_prearm_plan(
+    _gamma_prearm_plan = process_gamma_prearm_plan(
         storage,
         repricing,
         raw_level_decision,
@@ -694,6 +698,7 @@ def run(
         "option_structure_frame": option_frame.to_dict(),
         "macro_event": action_macro_event,
         "strategy_entry_control": action_provider_entry_control,
+        "gth_ibkr_entry_control": action_gth_ibkr_entry_control,
         "level_decision": raw_level_decision,
         "session_episode": session_episode,
         "intraday_shock_state": load_json(
@@ -724,149 +729,23 @@ def run(
         probability_settings=app.strategy_distribution,
         background_models=True,
     )
-    decision_latency_ms = round((perf_counter() - cycle_started) * 1000.0, 3)
+    _decision_latency_ms = round((perf_counter() - cycle_started) * 1000.0, 3)
     finish_research_component("strategy_build")
     finish_stage("research_and_strategy")
-    try:
-        persisted_decision_id = persist_strategy_decision(
-            strategy_decision,
-            previous_decision=previous_strategy_decision,
-        )
-    except Exception as exc:  # persistence must block READY, not feature collection
-        strategy_persistence = {
-            "ok": False,
-            "error": f"{type(exc).__name__}:{exc}",
-        }
-        strategy_delivery = {
-            "accepted": False,
-            "outcome": "operational_decision_not_persisted",
-        }
-        if not args.json:
-            print(
-                json.dumps(
-                    {
-                        "task": "market_features",
-                        "event": "strategy_decision_persistence",
-                        **strategy_persistence,
-                    },
-                    sort_keys=True,
-                )
-            )
-    else:
-        if persisted_decision_id is None:
-            strategy_persistence = {
-                "ok": True,
-                "skipped": True,
-                "reason": "repeated_no_trade_same_minute",
-            }
-        else:
-            try:
-                shadow_persisted_ids = persist_strategy_shadow_candidates(strategy_decision)
-            except Exception as exc:
-                strategy_persistence = {
-                    "ok": True,
-                    "decision_id": persisted_decision_id,
-                    "shadow_error": f"{type(exc).__name__}:{exc}",
-                }
-            else:
-                strategy_persistence = {
-                    "ok": True,
-                    "decision_id": persisted_decision_id,
-                    "shadow_persisted_ids": list(shadow_persisted_ids),
-                }
-        save_json(
-            Path(storage.data_root) / "latest" / "strategy_decision.json",
-            strategy_decision,
-        )
-        try:
-            strategy_delivery = enqueue_strategy_decision(
-                strategy_decision,
-                now=as_utc(resolved_action_clock()),
-                storage_settings=storage,
-                action_clock=resolved_action_clock,
-            )
-        except Exception as exc:  # delivery diagnostics must not stop feature collection
-            strategy_delivery = {
-                "accepted": False,
-                "outcome": f"error:{type(exc).__name__}:{exc}",
-            }
-        try:
-            strategy_delivery = {
-                **strategy_delivery,
-                "pin_stable_watch": enqueue_pin_stable_watch(
-                    strategy_decision, now=as_utc(resolved_action_clock())
-                ),
-            }
-        except Exception as exc:  # observation card must not block trade_ready
-            strategy_delivery = {
-                **strategy_delivery,
-                "pin_stable_watch": {
-                    "accepted": False,
-                    "outcome": f"error:{type(exc).__name__}:{exc}",
-                },
-            }
-    # Optional explanation and labels run after the final decision is committed and queued.
+    strategy_persistence, _strategy_delivery = _commit_strategy_decision(
+        strategy_decision, previous_strategy_decision, storage,
+        action_clock=resolved_action_clock, emit_json=args.json,
+    )
+    # Explanation-only research cannot authorize or alter the committed decision.
     contract_id = str(trade_intent.get("contract_id") or "")
     cache = state_cache if state_cache is not None else {}
-    try:
-        greek_cache_token = (
-            evaluation_now.replace(second=0, microsecond=0).isoformat(),
-            contract_id,
-        )
-        cached_focused = cache.get("greeks_reference_0dte")
-        cached_greek_decision = cache.get("greek_decision")
-        if (
-            state_cache is not None
-            and state_cache.get("greek_cache_token") == greek_cache_token
-            and isinstance(cached_focused, dict)
-            and isinstance(cached_greek_decision, dict)
-        ):
-            focused = cached_focused
-            greek_decision = cached_greek_decision
-        else:
-            focused = build_zero_dte_greeks_reference(
-                latest,
-                options_map=options_map,
-                grouped_quotes=grouped_quotes,
-                storage_settings=storage,
-                focus_contract_ids=(contract_id,) if contract_id else (),
-                max_serialized_contracts=1 if contract_id else 0,
-                serialized_scenario_names=(
-                    "clock_plus_5m",
-                    "clock_plus_15m",
-                    "clock_plus_30m",
-                    "iv_down_1vol",
-                    "iv_down_3vol",
-                ),
-            )
-            greek_decision = build_greek_decision(
-                focused,
-                [trade_intent] if contract_id else [],
-                macro_event=macro_event,
-                policy=policy,
-            )
-            if state_cache is not None:
-                state_cache["greek_cache_token"] = greek_cache_token
-                state_cache["greeks_reference_0dte"] = focused
-                state_cache["greek_decision"] = greek_decision
-        finish_research_component("greeks")
-        spring_gamma_v3 = _process_spring_gamma_v3_shadow(
-            storage=storage,
-            latest_state=latest,
-            options_map=options_map,
-            market_frame=market_frame,
-            option_frame=option_frame,
-            greek_reference=focused,
-            exposure_map=exposure_map,
-            level_decision=level_decision,
-            now=evaluation_now,
-            settings=app.spring_gamma_v3,
-        )
-        finish_research_component("spring_gamma")
-    except Exception as exc:
-        focused, greek_decision = {}, {}
-        spring_gamma_v3 = {"status": "unavailable", "error": f"{type(exc).__name__}:{exc}"}
-        finish_research_component("research_context_failed")
+    _, greek_decision, _ = _build_research_context(
+        storage=storage, latest=latest, options_map=options_map, grouped_quotes=grouped_quotes,
+        market_frame=market_frame, option_frame=option_frame, exposure_map=exposure_map,
+        level_decision=level_decision, trade_intent=trade_intent, macro_event=macro_event,
+        now=evaluation_now, policy=policy, spring_gamma_settings=app.spring_gamma_v3,
+        state_cache=state_cache, finish_component=finish_research_component,
+    )
     if contract_id:
         score = greek_decision.get("contract_scores", {}).get(contract_id)
         if isinstance(score, dict):
@@ -984,49 +863,10 @@ def run(
     total_duration_ms = round((perf_counter() - cycle_started) * 1000.0, 3)
     output.update(
         {
-            "market_frame_id": market_frame.frame_id,
             "market_quality": market_frame.quality.value,
-            "option_frame_id": option_frame.frame_id,
             "option_quality": option_frame.quality.value,
             "l1_quality": option_frame.l1.quality.value,
-            "decision_context_id": context.context_id,
-            "audit_appended": audit is not None,
             "trade_intent_status": trade_intent.get("status"),
-            "trade_intent_producer_ledger": producer_ledger,
-            "trade_intent_deadline": producer_deadline,
-            "trade_intent_evaluation_to_action_revalidation_ms": (
-                producer_deadline.get("evaluation_to_action_revalidation_ms")
-            ),
-            "trade_intent_action_revalidation_exceeded_ttl": (
-                producer_deadline.get("action_revalidation_exceeded_ttl")
-            ),
-            "trade_intent_delivery": intent_delivery,
-            "evaluation_at": evaluation_now.isoformat(),
-            "action_revalidated_at": delivery_action_now.isoformat(),
-            "action_quote_state_created_at": action_latest.created_at.isoformat(),
-            "action_macro_event": action_macro_event,
-            "action_provider_entry_control": action_provider_entry_control,
-            "action_gth_ibkr_entry_control": action_gth_ibkr_entry_control,
-            "trade_candidate": trade_candidate,
-            "confirmed_gate": confirmed_gate,
-            "level_decision_refresh_error": level_decision_refresh_error,
-            "virtual_strategy": virtual_strategy,
-            "gamma_prearm_plan": gamma_prearm_plan,
-            "gth_level_manual_candidate": gth_level_manual_candidate,
-            "gth_dip_reclaim_evidence": gth_dip_reclaim_evidence,
-            "spring_gamma_v3_shadow": spring_gamma_v3,
-            "strategy_distribution_forecast": strategy_distribution_forecast,
-            "strategy_distribution_forecast_error": strategy_distribution_forecast_error,
-            "strategy_decision": strategy_decision,
-            "strategy_decision_persistence": strategy_persistence,
-            "strategy_decision_delivery": strategy_delivery,
-            "strategy_outcome_observation": strategy_outcome_observation,
-            "stage_durations_ms": stage_durations_ms,
-            "decision_latency_ms": decision_latency_ms,
-            "state_component_durations_ms": state_component_durations_ms,
-            "research_component_durations_ms": research_component_durations_ms,
-            "duration_ms": total_duration_ms,
-            "state_checkpointed": state_checkpointed,
         }
     )
     if args.json:
@@ -1054,6 +894,166 @@ def run(
             )
         )
     return 0
+
+
+def _commit_strategy_decision(
+    strategy_decision: dict[str, Any], previous_strategy_decision: dict[str, Any],
+    storage: StorageSettings, *, action_clock: Callable[[], datetime], emit_json: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Commit before export/delivery; keep persistence and delivery failures distinct."""
+    try:
+        persisted_decision_id = persist_strategy_decision(
+            strategy_decision,
+            previous_decision=previous_strategy_decision,
+        )
+    except Exception as exc:  # persistence must block READY, not feature collection
+        strategy_persistence = {
+            "ok": False,
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+        strategy_delivery = {
+            "accepted": False,
+            "outcome": "operational_decision_not_persisted",
+        }
+        if not emit_json:
+            print(
+                json.dumps(
+                    {
+                        "task": "market_features",
+                        "event": "strategy_decision_persistence",
+                        **strategy_persistence,
+                    },
+                    sort_keys=True,
+                )
+            )
+    else:
+        if persisted_decision_id is None:
+            strategy_persistence = {
+                "ok": True,
+                "skipped": True,
+                "reason": "repeated_no_trade_same_minute",
+            }
+        else:
+            try:
+                shadow_persisted_ids = persist_strategy_shadow_candidates(strategy_decision)
+            except Exception as exc:
+                strategy_persistence = {
+                    "ok": True,
+                    "decision_id": persisted_decision_id,
+                    "shadow_error": f"{type(exc).__name__}:{exc}",
+                }
+            else:
+                strategy_persistence = {
+                    "ok": True,
+                    "decision_id": persisted_decision_id,
+                    "shadow_persisted_ids": list(shadow_persisted_ids),
+                }
+        save_json(
+            Path(storage.data_root) / "latest" / "strategy_decision.json",
+            strategy_decision,
+        )
+        try:
+            strategy_delivery = enqueue_strategy_decision(
+                strategy_decision,
+                now=as_utc(action_clock()),
+                storage_settings=storage,
+                action_clock=action_clock,
+            )
+        except Exception as exc:  # delivery diagnostics must not stop feature collection
+            strategy_delivery = {
+                "accepted": False,
+                "outcome": f"error:{type(exc).__name__}:{exc}",
+            }
+        try:
+            strategy_delivery = {
+                **strategy_delivery,
+                "pin_stable_watch": enqueue_pin_stable_watch(
+                    strategy_decision, now=as_utc(action_clock())
+                ),
+            }
+        except Exception as exc:  # observation card must not block trade_ready
+            strategy_delivery = {
+                **strategy_delivery,
+                "pin_stable_watch": {
+                    "accepted": False,
+                    "outcome": f"error:{type(exc).__name__}:{exc}",
+                },
+            }
+    return strategy_persistence, strategy_delivery
+
+def _build_research_context(
+    *, storage: StorageSettings, latest: LatestState,
+    options_map: OptionsMap, grouped_quotes: Mapping[str, list[Quote]],
+    market_frame: MinuteMarketFrame, option_frame: OptionStructureFrame,
+    exposure_map: ExposureMap, level_decision: Mapping[str, Any],
+    trade_intent: Mapping[str, Any], macro_event: Mapping[str, Any],
+    now: datetime, policy: MarketFeatureSettings,
+    spring_gamma_settings: SpringGammaV3Settings,
+    state_cache: dict[str, object] | None, finish_component: Callable[[str], None],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build optional explanations using the evaluation snapshot, not execution evidence."""
+    contract_id = str(trade_intent.get("contract_id") or "")
+    cache = state_cache if state_cache is not None else {}
+    try:
+        greek_cache_token = (
+            now.replace(second=0, microsecond=0).isoformat(),
+            contract_id,
+        )
+        cached_focused = cache.get("greeks_reference_0dte")
+        cached_greek_decision = cache.get("greek_decision")
+        if (
+            state_cache is not None
+            and state_cache.get("greek_cache_token") == greek_cache_token
+            and isinstance(cached_focused, dict)
+            and isinstance(cached_greek_decision, dict)
+        ):
+            focused = cached_focused
+            greek_decision = cached_greek_decision
+        else:
+            focused = build_zero_dte_greeks_reference(
+                latest,
+                options_map=options_map,
+                grouped_quotes=grouped_quotes,
+                storage_settings=storage,
+                focus_contract_ids=(contract_id,) if contract_id else (),
+                max_serialized_contracts=1 if contract_id else 0,
+                serialized_scenario_names=(
+                    "clock_plus_5m",
+                    "clock_plus_15m",
+                    "clock_plus_30m",
+                    "iv_down_1vol",
+                    "iv_down_3vol",
+                ),
+            )
+            greek_decision = build_greek_decision(
+                focused,
+                [trade_intent] if contract_id else [],
+                macro_event=macro_event,
+                policy=policy,
+            )
+            if state_cache is not None:
+                state_cache["greek_cache_token"] = greek_cache_token
+                state_cache["greeks_reference_0dte"] = focused
+                state_cache["greek_decision"] = greek_decision
+        finish_component("greeks")
+        spring_gamma_v3 = _process_spring_gamma_v3_shadow(
+            storage=storage,
+            latest_state=latest,
+            options_map=options_map,
+            market_frame=market_frame,
+            option_frame=option_frame,
+            greek_reference=focused,
+            exposure_map=exposure_map,
+            level_decision=level_decision,
+            now=now,
+            settings=spring_gamma_settings,
+        )
+        finish_component("spring_gamma")
+    except Exception as exc:
+        focused, greek_decision = {}, {}
+        spring_gamma_v3 = {"status": "unavailable", "error": f"{type(exc).__name__}:{exc}"}
+        finish_component("research_context_failed")
+    return focused, greek_decision, spring_gamma_v3
 
 
 def _record_and_process_trade_intent(
