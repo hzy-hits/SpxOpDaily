@@ -1,13 +1,19 @@
 # SPX Spark 文档目录与当前状态
 
-本目录覆盖仓库全部 Markdown：根目录、`docs/`、`rust/`、`contracts/`、`site/`、
-`tests/fixtures/`。2026-10-05 对 146 份原文档完成定位与导航整理，加本目录共 147 份。
+<!-- documentation-status: 2026-10-18 -->
+
+入口：[English project README](../README.md) · [中文项目说明](../README.zh-CN.md) ·
+[Architecture & diagrams](architecture/README.md) · [中文架构与设计图](architecture/README.zh-CN.md)。
+
+本目录覆盖仓库 Markdown：根目录、`docs/`、`rust/`、`contracts/`、`site/`、
+`tests/fixtures/`。2026-10-05 完成原始文档盘点；后续新增资料继续补入下方目录。
 当前运行文档按代码和已安装服务修订；历史报告保留原时点、样本、结果与限制。
 这次文档整理没有重新执行所有历史实验，也没有把旧收益升级成生产 edge。
 
 ## 阅读顺序与优先级
 
-1. [根 README](../README.md)：当前产品、架构图、入口与限制。
+1. [英文 README](../README.md) / [中文 README](../README.zh-CN.md)：当前产品、入口与限制；
+   [英文架构图集](architecture/README.md) / [中文架构图集](architecture/README.zh-CN.md)：系统、运行时、交付和归档研究。
 2. [AGENTS.md](../AGENTS.md)：协作、安全边界及用户授权的策略变更。
 3. [架构执行基线](architecture-simplification-execution-plan-v1.md)与
    [模块架构](../module-architecture.md)：现有 owner、冻结边界与延期阶段。
@@ -20,6 +26,21 @@
 <a id="current-state"></a>
 ## 当前运行状态与数据边界
 
+- 2026-10-18 14:30 Asia/Shanghai [调度故障排查](headless-deployment.md#scheduler-investigation-2026-10-18)：
+  云端发布和 Oracle 部署链路正常，盘前地图定时器已恢复；每日 RTH 验收的历史文件
+  读取超时已定位，仍待优化和实测，不能视为当前版本业务验收已通过。
+- 2026-10-18 00:08 Asia/Shanghai [部署及退役核验](headless-deployment.md#verified-deployment-and-release-retirement-2026-10-18)：
+  PR #16/#17 已合并，Oracle 应用版本为 `1618abce`，9 个服务运行正常且决策持续落库。
+  已清理 38 个旧发布目录（约 2.42 GiB），数据库迁移备份保留；本机不再保留即时回退包。
+  休市时 IBKR 行情未就绪，开市验收仍未完成；后续纯文档提交不要求重部署应用。
+- 2026-10-17 [云端交付](headless-deployment.md#cloud-delivery-cutover-2026-10-17)已接通：
+  GitHub 构建双架构产物，Oracle 使用固定 ARM64 原生包，研究笔记本使用同提交 AMD64 镜像。
+  树莓派日归档与周研究计划已启用，短窗口回放及 NAS 核验已通过；完整周研究效果、调度库异机
+  备份等限制见[双语架构说明](architecture/README.zh-CN.md)。以下旧事件保留原验收时点。
+- 2026-10-18 补充现行设计合同：[决策协议](architecture/decision-protocol.md)、
+  [GTH 连续性](gth-continuity-recovery.md)、[机会捕捉](opportunity-capture.md)、
+  [通知消息契约](notification-message-contract.md)、[服务清单](service-inventory.md)、
+  [运行观测](observability.md)。
 - 生产主机的 Python `spx-core` / `spx-worker` 和两套券商采集继续运行；
   Rust core/bridge/report/delivery 仍承担冻结职责。Phase 6 Rust 退出和 Phase 7
   数据平台重写延期；旧 24h/hot-worker 独立服务不是当前启动入口。
@@ -91,23 +112,33 @@ OI/Gamma、L1 资金流仍是代理，不是真实参与者持仓/完整买卖�
 每份原文档都链接回本目录并标明定位。定位为“现行”的文件也可能保留明确标注的
 历史段落；研究和验收数字均保留其原始分母、管理合同与执行时点。
 
-### 现行运行与参考（30 份）
+### 现行运行与参考
 
 | 文档 | 路径 |
 | --- | --- |
 | [SPX Spark 项目协作说明](../AGENTS.md) | `AGENTS.md` |
 | [SPX Spark](../README.md) | `README.md` |
+| [SPX Spark 中文说明](../README.zh-CN.md) | `README.zh-CN.md` |
+| [Architecture guide and diagrams](architecture/README.md) | `docs/architecture/README.md` |
+| [决策协议、时间契约与实时分层](architecture/decision-protocol.md) | `docs/architecture/decision-protocol.md` |
+| [架构说明与设计图](architecture/README.zh-CN.md) | `docs/architecture/README.zh-CN.md` |
+| [Historical HTML source atlas](architecture/reference/README.md) | `docs/architecture/reference/README.md` |
 | [Shared wire-contract registry](../contracts/README.md) | `contracts/README.md` |
 | [SPX Spark 架构简化与第三方能力替代总方案 v1](architecture-simplification-blueprint-v1.md) | `docs/architecture-simplification-blueprint-v1.md` |
 | [SPX Spark 架构简化执行方案 v1（面向执行 Agent 的施工图与硬约束）](architecture-simplification-execution-plan-v1.md) | `docs/architecture-simplification-execution-plan-v1.md` |
 | [SPX Spark 希腊字母与曝露代理指标定义（exposure_map 规范）](greeks-definitions.md) | `docs/greeks-definitions.md` |
 | [Headless Deployment Notes](headless-deployment.md) | `docs/headless-deployment.md` |
 | [Market-data capability matrix](market-data-capability-matrix.md) | `docs/market-data-capability-matrix.md` |
+| [GTH IBKR 数据中断的连续性与恢复](gth-continuity-recovery.md) | `docs/gth-continuity-recovery.md` |
+| [机会捕捉台账与归因](opportunity-capture.md) | `docs/opportunity-capture.md` |
 | [Market Data Normalization Model](market-data-model.md) | `docs/market-data-model.md` |
 | [Unified Market Feature Frames](market-feature-frames.md) | `docs/market-feature-frames.md` |
 | [SPX Spark monorepo contract](monorepo-layout.md) | `docs/monorepo-layout.md` |
 | [Notification architecture](notification-architecture.md) | `docs/notification-architecture.md` |
+| [通知消息契约与模板协议](notification-message-contract.md) | `docs/notification-message-contract.md` |
 | [Operations Schedule](operations-schedule.md) | `docs/operations-schedule.md` |
+| [服务与定时任务清单](service-inventory.md) | `docs/service-inventory.md` |
+| [运行观测与决策延迟指标](observability.md) | `docs/observability.md` |
 | [RTH report clock contract](rth-report-clock.md) | `docs/rth-report-clock.md` |
 | [RTH runtime clock and end-to-end acceptance](rth-runtime-clock-and-acceptance.md) | `docs/rth-runtime-clock-and-acceptance.md` |
 | [Runtime configuration](runtime-configuration.md) | `docs/runtime-configuration.md` |

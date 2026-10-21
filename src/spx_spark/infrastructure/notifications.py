@@ -37,6 +37,7 @@ events = sa.Table(
     sa.Column("source", sa.Text(), nullable=False),
     sa.Column("kind", sa.Text(), nullable=False),
     sa.Column("lane", sa.Text(), nullable=False),
+    sa.Column("correlation_id", sa.Text(), nullable=True),
     sa.Column("channel", sa.Text(), nullable=False),
     sa.Column("payload_json", sa.Text(), nullable=False),
     sa.Column("payload_sha256", sa.Text(), nullable=False),
@@ -73,6 +74,7 @@ class NotificationDraft:
     payload: Mapping[str, object]
     channels: tuple[str, ...]
     expires_at: datetime | None = None
+    correlation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,13 +132,16 @@ def _now(value: datetime | None = None) -> datetime:
 
 def _payload(value: Mapping[str, object]) -> tuple[str, str]:
     text = json.dumps(
-        dict(value),
+        dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    fingerprint_text = json.dumps(
+        {key: item for key, item in value.items() if key != "feishu_sections"},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     )
-    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return text, hashlib.sha256(fingerprint_text.encode("utf-8")).hexdigest()
 
 
 def _key(logical_event_id: str, channel: str) -> str:
@@ -250,6 +255,7 @@ def enqueue(
                     source=draft.source,
                     kind=draft.kind,
                     lane=draft.lane,
+                    correlation_id=draft.correlation_id,
                     channel=channel,
                     payload_json=payload_json,
                     payload_sha256=fingerprint,

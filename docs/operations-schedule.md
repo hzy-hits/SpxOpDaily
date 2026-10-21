@@ -1,12 +1,13 @@
 # Operations Schedule
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-18 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
-> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+> [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-18）。
 
-核对日期：2026-10-05。实际执行入口以已安装 unit、`systemctl list-timers` 和
+核对日期：2026-10-18。实际执行入口以已安装 unit、`systemctl list-timers` 和
 `src/spx_spark/infrastructure/jobs.py` 为准。下面区分 user units、system units
-与 Huey，不能把旧 24h loop 的任务表当成当前调度。
+与 Huey，不能把旧 24h loop 的任务表当成当前调度。unit 级清单见
+[服务与定时任务清单](service-inventory.md)。
 
 ## 常驻 owner
 
@@ -23,7 +24,9 @@
 
 `shadow` 是保留的部署名称，不能据此断言当前 report/delivery 未投入使用。
 旧 `spx-spark-24h`、独立 hot-worker 和旧 notification-delivery owner 已收敛；
-不要重新 enable 旧 unit。图片容器及可选 VNC 有独立用途，见专题部署说明。
+不要重新 enable 旧 unit。`spx-spark-post-close-review.timer` 与
+`spx-spark-backtest-weekly.timer` 默认禁用，分别由 session finalizer 与家庭研究节点
+取代。图片容器及可选 VNC 有独立用途，见专题部署说明。
 
 ## 定时工作
 
@@ -31,16 +34,21 @@
 | --- | --- | --- |
 | Desk Map 源快照 | `spx-spark-order-map-status.timer`，合法 GTH/RTH 每 15 分钟 | `16:00 ET` 为收盘快照；源快照保存不等于推送 |
 | 常规 Desk Map | Rust report，合法时段 `:00/:30` ET | Python 只准备投影，受 owner fence 约束 |
+| 盘前地图 | `spx-spark-morning-map.timer`，周一至五 `08:35`、`09:15 ET` | 盘前摘要；不建立新仓 |
+| Order Map 定时推送 | `spx-spark-order-map.timer`，周一至五 `14:00`、`16:30 Asia/Shanghai` | Rust owner 开启时只准备投影，不再外发 |
 | 数据恢复更新 | Core 新鲜决策识别缺失能力恢复 | 不等下一半小时；重新核对当前时间，按投影去重；无恢复不伪造更新 |
 | 宏观日历 | Huey 每 5 分钟检查 TTL | Worker 联网刷新，Core 只读；保留来源覆盖与 last-good |
 | 桌图链路监测 | Huey 每分钟，priority 20 | 直接飞书故障/恢复告警，不能掩盖 Worker/主机整体失效 |
+| 机会台账 | Huey 每分钟 | 读 `latest/strategy_decision.json`；按 decision_id/state 去重追加 `opportunities/date=*.jsonl` |
 | 存储压力检查 | Huey 每小时 UTC `:20` | 替代退役的 storage-pressure timer，复用 session finalizer |
 | 维护审计 | Huey 每日 `23:30 UTC`；user weekly timer 周日 `13:00 Asia/Shanghai` | 默认审计，不因定时到达获得任意删除权限 |
 | 原始数据压缩 | user timer 每小时 `:08`，随机延迟最多 120 秒 | copy-only，保存 manifest；不能自动删除未验证原始数据 |
 | 周末补压缩 | 周六/日 `08:30 Asia/Shanghai`，随机延迟最多 300 秒 | 同样复用原压缩合同 |
 | Session finalizer | 每日 `18:00 America/New_York` | 自动选择完成的交易日；修复重跑幂等 |
 | RTH daily acceptance | 工作日 `19:00 America/New_York` | 行情/决策/投递分开验收 |
-| 每周 backtest job | 主机本地周一 `09:17`，随机延迟最多 300 秒 | 名称/启用状态不证明研究已跑完或策略有 edge |
+| 每周 backtest job | 周一 `09:17`，随机延迟最多 300 秒 | **安装脚本默认禁用**，已移到家庭研究节点；本机不跑 |
+| IBKR verifier | `spx-ibkr-verifier.timer`，每 15 分钟 | 只读核验，不改变采集 owner |
+| IBC watchdog | `ibc-watchdog.timer`，每 2 分钟 | 外部 Gateway 守护，不归应用调度 |
 | Rust frame retention | system timer 每日 `00:15 UTC` | 只处理已完成 UTC 日，保护当前日与写入 reserve |
 
 Huey 使用 UTC。交易时钟由 `America/New_York` 与交易日历解释，不能全年固定

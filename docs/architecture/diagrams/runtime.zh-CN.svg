@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1040" viewBox="0 0 1200 1040" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 服务与数据流转</title>
+<desc id="description">各 owner 并发运行；箭头表示具体交接，不表示一个同步大循环。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="1040" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 服务与数据流转</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">各 owner 并发运行；箭头表示具体交接，不表示一个同步大循环。</text>
+<text x="40" y="132" font-size="17" font-weight="700" class="">01  采集与并发 Core</text>
+<text x="40" y="427" font-size="17" font-weight="700" class="">02  决策提交与人工候选通知</text>
+<text x="40" y="727" font-size="17" font-weight="700" class="">03  研究与独立报告路径</text>
+<path class="edge" d="M340,230 L450,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,230 L860,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,310 L1010,460" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,540 L750,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,540 L340,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M600,620 L600,760" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,840 L860,840" marker-end="url(#arrow)"/>
+<path class="edge" d="M500,310 L500,360 L20,360 L20,840 L40,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<path class="edge" d="M600,150 L600,110 L1180,110 L1180,840 L1160,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<text x="820" y="132" font-size="16" font-weight="400" class="muted">标准行情镜像 → Unix IPC</text>
+<g data-card="券商采集器">
+<rect x="40" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="180" font-size="20" font-weight="700" class="">券商采集器</text>
+<text x="59" y="209" font-size="17" font-weight="400" class="">Schwab RTH / IBKR GTH</text>
+<text x="59" y="232" font-size="17" font-weight="400" class="">独立会话与字段时钟</text>
+</g>
+<g data-card="标准化数据">
+<rect x="450" y="150" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="180" font-size="20" font-weight="700" class="">标准化数据</text>
+<text x="469" y="209" font-size="17" font-weight="400" class="">先追加 raw，再更新 latest</text>
+<text x="469" y="232" font-size="17" font-weight="400" class="">两次独立写入，不是同一事务</text>
+</g>
+<g data-card="Python Core">
+<rect x="860" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="180" font-size="20" font-weight="700" class="">Python Core</text>
+<text x="879" y="209" font-size="17" font-weight="400" class="">采样、市场特征与 shock runner</text>
+<text x="879" y="232" font-size="17" font-weight="400" class="">并发运行</text>
+</g>
+<g data-card="最终策略决策">
+<rect x="860" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="490" font-size="20" font-weight="700" class="">最终策略决策</text>
+<text x="879" y="519" font-size="17" font-weight="400" class="">build_strategy_decision</text>
+<text x="879" y="542" font-size="17" font-weight="400" class="">事实 → 候选 → 门控</text>
+<text x="879" y="565" font-size="17" font-weight="400" class="">仅人工候选授权</text>
+</g>
+<g data-card="提交 → 导出 → 入队">
+<rect x="450" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="490" font-size="20" font-weight="700" class="">提交 → 导出 → 入队</text>
+<text x="469" y="519" font-size="17" font-weight="400" class="">Python SQLite → 决策 JSON</text>
+<text x="469" y="542" font-size="17" font-weight="400" class="">随后入队通知事件</text>
+<text x="469" y="565" font-size="17" font-weight="400" class="">持久化失败阻止 READY</text>
+</g>
+<g data-card="Python Worker / Huey">
+<rect x="40" y="460" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="59" y="490" font-size="20" font-weight="700" class="">Python Worker / Huey</text>
+<text x="59" y="519" font-size="17" font-weight="400" class="">event_id → 通知任务</text>
+<text x="59" y="542" font-size="17" font-weight="400" class="">队列库 ≠ 运行库</text>
+<text x="59" y="565" font-size="17" font-weight="400" class="">独立健康告警</text>
+</g>
+<g data-card="研究入口">
+<rect x="40" y="760" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="790" font-size="20" font-weight="700" class="">研究入口</text>
+<text x="59" y="819" font-size="17" font-weight="400" class="">原始报价 + 可用时间</text>
+<text x="59" y="842" font-size="17" font-weight="400" class="">按条件实时研究或离线回放</text>
+<text x="59" y="865" font-size="17" font-weight="400" class="">不具有交易授权</text>
+</g>
+<g data-card="Desk Map 导出">
+<rect x="450" y="760" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="790" font-size="20" font-weight="700" class="">Desk Map 导出</text>
+<text x="469" y="819" font-size="17" font-weight="400" class="">复用已提交决策</text>
+<text x="469" y="842" font-size="17" font-weight="400" class="">重验当前时点有效性</text>
+<text x="469" y="865" font-size="17" font-weight="400" class="">desk_map_projection.v1</text>
+</g>
+<g data-card="Rust 报告与投递">
+<rect x="860" y="760" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="790" font-size="20" font-weight="700" class="">Rust 报告与投递</text>
+<text x="879" y="819" font-size="17" font-weight="400" class="">Bridge → core → report</text>
+<text x="879" y="842" font-size="17" font-weight="400" class="">账本 → 投递 → 回执</text>
+<text x="879" y="865" font-size="17" font-weight="400" class="">不连接券商、不选策略腿</text>
+</g>
+<text x="40" y="973" font-size="17" font-weight="400" class="muted">参考：早期 HTML 图册 + 现行源码合同。虚线表示报价文件与 IPC 交接。</text>
+<text x="40" y="1006" font-size="17" font-weight="400" class="muted">报告与可选研究不产生第二个策略授权出口；没有自动下单。</text>
+</svg>

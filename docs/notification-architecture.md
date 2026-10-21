@@ -1,6 +1,6 @@
 # Notification architecture
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-18 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 
@@ -21,6 +21,9 @@ Phase 6 Rust 退役已延期；不能根据历史迁移设计另建 owner 或恢
 `SPX_RUST_REPORT_OWNER` 与 Rust 配置/CLI/owner marker 共同维持既有单 owner
 边界。正常部署保留当前 owner；样例配置中的 `network_enabled=false` 不是
 生产投递停用的证据。Bark transport、配置与投递规则保持不变。
+
+消息内容的结构化协议（MessageIntent、模板版本、决策/运维消息分离）见
+[通知消息契约](notification-message-contract.md)。
 
 ## 语义边界
 

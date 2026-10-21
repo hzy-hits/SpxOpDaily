@@ -60,6 +60,15 @@ def envelope(event_id: str, lane: str = "trade_ready") -> NotificationEnvelope:
     )
 
 
+def test_enqueue_persists_the_decision_correlation(store, settings: NotificationSettings) -> None:
+    correlated = replace(envelope("corr-event"), correlation_id="corr:test")
+    dispatcher.enqueue_notification(
+        settings, correlated, title="READY", text="A", enqueued_at=NOW
+    )
+    rows = event_rows(store, "corr-event")
+    assert rows and all(row["correlation_id"] == "corr:test" for row in rows)
+
+
 def test_duplicate_is_idempotent_and_payload_collision_is_rejected(
     store,
     settings: NotificationSettings,
@@ -125,3 +134,18 @@ def test_dispatch_records_real_per_target_attempts(
     assert result.delivered is True
     assert result.outcome == "delivered"
     assert {row["status"] for row in event_rows(store, "dispatch")} == {"delivered"}
+
+
+def test_template_sections_survive_durable_queue_round_trip(store, settings):
+    import json
+    from spx_spark.notifier.unified_delivery import notification_payload_fingerprint
+
+    sections = [{"title": "Risk", "content": "Manual review required"}]
+    dispatcher.enqueue_notification(settings, envelope("sections"), title="READY",
+                                    text="fallback", sections=sections, enqueued_at=NOW)
+    rows = event_rows(store, "sections")
+    assert rows
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        assert payload["feishu_sections"] == sections
+        assert row["payload_sha256"] == notification_payload_fingerprint(payload)

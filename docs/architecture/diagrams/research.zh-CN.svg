@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="995" viewBox="0 0 1200 995" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 归档与研究生命周期</title>
+<desc id="description">每日增量归档，固定快照周回放，结果核验后保存。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="995" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 归档与研究生命周期</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">每日增量归档，固定快照周回放，结果核验后保存。</text>
+<text x="40" y="135" font-size="17" font-weight="700" class="">01  日归档 · 工作日美东 17:30</text>
+<text x="40" y="425" font-size="17" font-weight="700" class="">02  周研究 · 周六北京时间 10:00</text>
+<text x="40" y="715" font-size="17" font-weight="700" class="">03  结果保存 · 完成或失败后</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,445" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,525 L750,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,525 L340,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M190,605 L190,650 L20,650 L20,815 L40,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,815 L450,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,815 L860,815" marker-end="url(#arrow)"/>
+<g data-card="Oracle 报价分区">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">Oracle 报价分区</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">已关闭 + 已核验 Parquet</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">只读传输接口</text>
+</g>
+<g data-card="树莓派归档 Worker">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">树莓派归档 Worker</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">流式写入已核验 NAS 挂载</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">不暂存到存储卡</text>
+</g>
+<g data-card="NAS 本机核验">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">NAS 本机核验</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">重读对象并核验哈希</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">发布不可变快照</text>
+</g>
+<g data-card="选择固定快照">
+<rect x="860" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="475" font-size="20" font-weight="700" class="">选择固定快照</text>
+<text x="879" y="504" font-size="17" font-weight="400" class="">不可变输入清单</text>
+<text x="879" y="527" font-size="17" font-weight="400" class="">安全归档策略配置</text>
+</g>
+<g data-card="固定笔记本输入">
+<rect x="450" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="475" font-size="20" font-weight="700" class="">固定笔记本输入</text>
+<text x="469" y="504" font-size="17" font-weight="400" class="">研究盘 + 已核验数据</text>
+<text x="469" y="527" font-size="17" font-weight="400" class="">匹配策略配置与代码镜像</text>
+</g>
+<g data-card="当前策略回放">
+<rect x="40" y="445" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="475" font-size="20" font-weight="700" class="">当前策略回放</text>
+<text x="59" y="504" font-size="17" font-weight="400" class="">因果报价；断网执行</text>
+<text x="59" y="527" font-size="17" font-weight="400" class="">RTH / GTH 分开</text>
+</g>
+<g data-card="本地运行证据">
+<rect x="40" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="765" font-size="20" font-weight="700" class="">本地运行证据</text>
+<text x="59" y="794" font-size="17" font-weight="400" class="">报告 + 日志 + 清单</text>
+<text x="59" y="817" font-size="17" font-weight="400" class="">保留缺口与失败结果</text>
+</g>
+<g data-card="NAS 结果备份">
+<rect x="450" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="765" font-size="20" font-weight="700" class="">NAS 结果备份</text>
+<text x="469" y="794" font-size="17" font-weight="400" class="">独立文件核验</text>
+<text x="469" y="817" font-size="17" font-weight="400" class="">待备份结果自动补传</text>
+</g>
+<g data-card="回执 + 本地副本">
+<rect x="860" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="765" font-size="20" font-weight="700" class="">回执 + 本地副本</text>
+<text x="879" y="794" font-size="17" font-weight="400" class="">记录核验完成</text>
+<text x="879" y="817" font-size="17" font-weight="400" class="">不新增 Oracle 删除规则</text>
+</g>
+<text x="40" y="951" font-size="17" font-weight="400" class="muted">树莓派负责调度，笔记本负责计算；后续备份成功不改写计算任务的历史失败状态。</text>
+</svg>

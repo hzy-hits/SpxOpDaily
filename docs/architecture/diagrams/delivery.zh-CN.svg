@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="950" viewBox="0 0 1200 950" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 构建、发布与部署</title>
+<desc id="description">同一提交标识：生产原生包与隔离研究镜像。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="950" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 构建、发布与部署</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">同一提交标识：生产原生包与隔离研究镜像。</text>
+<text x="40" y="133" font-size="17" font-weight="700" class="">01  云端交付</text>
+<text x="40" y="402" font-size="17" font-weight="700" class="">02  ORACLE · 既有 SYSTEMD 服务</text>
+<text x="40" y="703" font-size="17" font-weight="700" class="">03  家庭 · 研究镜像</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,350 L20,350 L20,505 L40,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M20,505 L20,805 L40,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M300,505 L330,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M590,505 L620,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M880,505 L910,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,805 L450,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,805 L860,805" marker-end="url(#arrow)"/>
+<g data-card="PR 与必需检查">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">PR 与必需检查</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">Python + Rust 测试</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">原生 AMD64 / ARM64 检查</text>
+</g>
+<g data-card="合并至 master">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">合并至 master</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">符合路径条件的主线构建</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">验证运行包与镜像</text>
+</g>
+<g data-card="发布产物">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">发布产物</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">GitHub Releases + GHCR</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">提交 SHA + 校验值 / digest</text>
+</g>
+<g data-card="校验运行包">
+<rect x="40" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="455" font-size="20" font-weight="700" class="">校验运行包</text>
+<text x="59" y="484" font-size="17" font-weight="400" class="">提交 + 哈希</text>
+<text x="59" y="507" font-size="17" font-weight="400" class="">迁移 + 服务</text>
+</g>
+<g data-card="切换程序路径">
+<rect x="330" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="349" y="455" font-size="20" font-weight="700" class="">切换程序路径</text>
+<text x="349" y="484" font-size="17" font-weight="400" class="">停止既有写入方</text>
+<text x="349" y="507" font-size="17" font-weight="400" class="">启用原生运行包</text>
+</g>
+<g data-card="运行验收">
+<rect x="620" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="639" y="455" font-size="20" font-weight="700" class="">运行验收</text>
+<text x="639" y="484" font-size="17" font-weight="400" class="">进程稳定</text>
+<text x="639" y="507" font-size="17" font-weight="400" class="">Bridge 健康记录推进</text>
+</g>
+<g data-card="保留或回滚">
+<rect x="910" y="425" width="260" height="160" rx="12" fill="#fff0eb" stroke="#a45139" stroke-width="1.4"/>
+<text x="929" y="455" font-size="20" font-weight="700" class="">保留或回滚</text>
+<text x="929" y="484" font-size="17" font-weight="400" class="">通过：保留新版本</text>
+<text x="929" y="507" font-size="17" font-weight="400" class="">失败：恢复旧程序</text>
+</g>
+<text x="40" y="633" font-size="17" font-weight="400" class="muted">主机配置、凭据与数据库保持原归属；程序回滚不会撤销数据库写入。</text>
+<g data-card="加载同版本镜像">
+<rect x="40" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="755" font-size="20" font-weight="700" class="">加载同版本镜像</text>
+<text x="59" y="784" font-size="17" font-weight="400" class="">固定 AMD64 镜像身份</text>
+<text x="59" y="807" font-size="17" font-weight="400" class="">不含生产凭据</text>
+</g>
+<g data-card="准备研究盘">
+<rect x="450" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="755" font-size="20" font-weight="700" class="">准备研究盘</text>
+<text x="469" y="784" font-size="17" font-weight="400" class="">已核验快照 + 策略配置</text>
+<text x="469" y="807" font-size="17" font-weight="400" class="">只读输入</text>
+</g>
+<g data-card="隔离回放">
+<rect x="860" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="755" font-size="20" font-weight="700" class="">隔离回放</text>
+<text x="879" y="784" font-size="17" font-weight="400" class="">断网</text>
+<text x="879" y="807" font-size="17" font-weight="400" class="">CPU 与内存限额</text>
+</g>
+<text x="40" y="925" font-size="17" font-weight="400" class="muted">主线纯文档变更不会触发 Oracle 部署。</text>
+</svg>

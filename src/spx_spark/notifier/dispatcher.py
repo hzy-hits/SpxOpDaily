@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
@@ -213,6 +214,7 @@ def enqueue_notification(
     friend: bool = False,
     feishu_text: str | None = None,
     enqueued_at: datetime | None = None,
+    sections: Sequence[Mapping[str, str]] | None = None,
 ) -> EnqueueResult:
     at = enqueued_at or datetime.now(tz=timezone.utc)
     if quiet_window_suppresses(envelope, now=at):
@@ -235,11 +237,36 @@ def enqueue_notification(
         text=text,
         friend=friend,
         feishu_text=feishu_text,
+        sections=sections,
         enqueued_at=at,
         engine=_store(settings),
         schedule=lambda event_id: _schedule_event(settings, event_id),
     )
+    if envelope.correlation_id:
+        _record_correlation(envelope)
     return _enqueue_result(result)
+
+
+def _record_correlation(envelope: NotificationEnvelope) -> None:
+    """Keep a small receipt-side lookup from logical event id to correlation id."""
+
+    from spx_spark.app_settings import get_settings
+    from spx_spark.state_io import append_jsonl_secure
+
+    try:
+        append_jsonl_secure(
+            get_settings().data_root / "audit" / "notification_correlations.jsonl",
+            {
+                "event_id": envelope.event_id,
+                "correlation_id": envelope.correlation_id,
+                "lane": envelope.lane,
+                "kind": envelope.kind,
+                "recorded_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+        )
+    except OSError:
+        # Correlation telemetry must never block the notification queue.
+        pass
 
 
 def enqueue_linked_notification(

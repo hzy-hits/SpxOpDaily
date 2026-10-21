@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="840" viewBox="0 0 1200 840" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · 环境分工与交接</title>
+<desc id="description">上方说明各环境职责，下方单独列出四条跨环境交接路径。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="840" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · 环境分工与交接</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">上方说明各环境职责，下方单独列出四条跨环境交接路径。</text>
+<text x="40" y="130" font-size="18" font-weight="700" class="">01  云端</text>
+<rect x="40" y="150" width="320" height="380" rx="16" fill="#eef4ff"/>
+<text x="440" y="130" font-size="18" font-weight="700" class="">02  ORACLE</text>
+<rect x="440" y="150" width="320" height="380" rx="16" fill="#eaf7f2"/>
+<text x="840" y="130" font-size="18" font-weight="700" class="">03  家庭</text>
+<rect x="840" y="150" width="320" height="380" rx="16" fill="#f2edfc"/>
+<g data-card="开发者 / Agent">
+<rect x="50" y="170" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="200" font-size="20" font-weight="700" class="">开发者 / Agent</text>
+<text x="69" y="229" font-size="17" font-weight="400" class="">修改代码与审阅 PR</text>
+</g>
+<g data-card="GitHub Actions">
+<rect x="50" y="290" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="320" font-size="20" font-weight="700" class="">GitHub Actions</text>
+<text x="69" y="349" font-size="17" font-weight="400" class="">测试并构建 AMD64 + ARM64</text>
+</g>
+<g data-card="Releases + GHCR">
+<rect x="50" y="410" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="440" font-size="20" font-weight="700" class="">Releases + GHCR</text>
+<text x="69" y="469" font-size="17" font-weight="400" class="">同一提交、原生包与容器镜像</text>
+</g>
+<g data-card="生产服务">
+<rect x="450" y="170" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="200" font-size="20" font-weight="700" class="">生产服务</text>
+<text x="469" y="229" font-size="17" font-weight="400" class="">systemd 管理既有 Python +</text>
+<text x="469" y="252" font-size="17" font-weight="400" class="">Rust</text>
+</g>
+<g data-card="在线状态">
+<rect x="450" y="290" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="320" font-size="20" font-weight="700" class="">在线状态</text>
+<text x="469" y="349" font-size="17" font-weight="400" class="">行情、运行数据库与报告账本</text>
+</g>
+<g data-card="运行职责">
+<rect x="450" y="410" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="440" font-size="20" font-weight="700" class="">运行职责</text>
+<text x="469" y="469" font-size="17" font-weight="400" class="">采集、决策、报告与通知</text>
+</g>
+<g data-card="树莓派">
+<rect x="850" y="170" width="300" height="105" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="869" y="200" font-size="20" font-weight="700" class="">树莓派</text>
+<text x="869" y="229" font-size="17" font-weight="400" class="">Prefect 调度 + 归档传输</text>
+</g>
+<g data-card="Linux 笔记本">
+<rect x="850" y="290" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="320" font-size="20" font-weight="700" class="">Linux 笔记本</text>
+<text x="869" y="349" font-size="17" font-weight="400" class="">固定镜像 + 专用研究盘</text>
+</g>
+<g data-card="NAS">
+<rect x="850" y="410" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="440" font-size="20" font-weight="700" class="">NAS</text>
+<text x="869" y="469" font-size="17" font-weight="400" class="">核验快照 + 结果备份</text>
+</g>
+<text x="40" y="579" font-size="17" font-weight="700" class="">交接路径 · 数据与产物</text>
+<text x="48" y="616" font-size="19" font-weight="600" class="">1  发布原生包  →  Oracle</text>
+<text x="655" y="616" font-size="17" font-weight="400" class="muted">ARM64 / systemd</text>
+<text x="48" y="659" font-size="19" font-weight="600" class="">2  同提交镜像  →  Linux 笔记本</text>
+<text x="655" y="659" font-size="17" font-weight="400" class="muted">AMD64 / 隔离回放</text>
+<text x="48" y="702" font-size="19" font-weight="600" class="">3  Oracle 行情  →  树莓派  →  NAS</text>
+<text x="655" y="702" font-size="17" font-weight="400" class="muted">只读归档 + NAS 本机核验</text>
+<text x="48" y="745" font-size="19" font-weight="600" class="">4  NAS 快照  →  笔记本  →  NAS</text>
+<text x="655" y="745" font-size="17" font-weight="400" class="muted">研究输入 + 结果回执</text>
+<text x="40" y="807" font-size="17" font-weight="400" class="muted">Mac：审阅、运维和按需研究；不承担定时计算 Worker 职责。</text>
+</svg>

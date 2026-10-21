@@ -14,6 +14,7 @@ from sqlalchemy import Engine
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from spx_spark.app_settings import get_settings
+from spx_spark.domain.payload_schemas import validate_strategy_decision
 from spx_spark.infrastructure.notifications import create_database_engine
 
 
@@ -148,6 +149,7 @@ def persist_strategy_decision(
 ) -> str | None:
     """Persist immutable decisions/legs; unchanged NO_TRADE is sampled per minute."""
 
+    validate_strategy_decision(decision)
     if previous_decision is not None and _repeated_no_trade_same_minute(
         decision,
         previous_decision,

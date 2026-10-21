@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
+
+import numpy as np
 
 from spx_spark.analytics.options.chain import median_strike_step
 from spx_spark.analytics.options.exposure_types import StrikeGex, WallLevel
 from spx_spark.analytics.options.pricing import (
-    bs_gamma,
     finite_float,
     option_iv,
     time_to_expiry_years,
@@ -204,6 +206,40 @@ def zero_gamma_bracket(gex_rows: list[StrikeGex], underlier: float) -> tuple[flo
 
 
 
+def _net_gex_series(
+    grid: list[float],
+    contracts: list[tuple[float, float, float, float]],
+    t_years: float,
+) -> list[float]:
+    """Vectorised net-GEX scan over the spot grid.
+
+    Equivalent to calling ``bs_gamma`` for every (spot, contract) pair, but
+    evaluates the whole grid in one numpy pass: the scan is O(grid x contracts)
+    and dominated the per-expiry options-map build when done in scalar Python.
+    """
+
+    spots = np.asarray(grid, dtype=float)[:, None]
+    strikes = np.asarray([row[0] for row in contracts], dtype=float)
+    signs = np.asarray([row[1] for row in contracts], dtype=float)
+    ivs = np.asarray([row[2] for row in contracts], dtype=float)
+    weights = np.asarray([row[3] for row in contracts], dtype=float)
+    root_t = math.sqrt(t_years)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        d1 = (np.log(spots / strikes) + 0.5 * ivs * ivs * t_years) / (ivs * root_t)
+        gamma = np.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi) / (spots * ivs * root_t)
+    valid = np.isfinite(gamma) & (spots > 0.0) & (strikes > 0.0) & (ivs > 0.0)
+    gex = (
+        signs
+        * weights
+        * np.where(valid, gamma, 0.0)
+        * 100.0
+        * spots
+        * spots
+        * 0.01
+    )
+    return gex.sum(axis=1).tolist()
+
+
 def zero_gamma_spot_scan(
     pairs: dict[float, dict[OptionRight, Quote]],
     *,
@@ -236,22 +272,13 @@ def zero_gamma_spot_scan(
     if t_years <= 0:
         return (None, None, "expiry_elapsed")
 
-    def net_gex_at(spot: float) -> float:
-        total = 0.0
-        for strike, sign, iv, weight in contracts:
-            gamma = bs_gamma(spot, strike, iv, t_years)
-            if gamma is None:
-                continue
-            total += sign * weight * gamma * 100.0 * spot * spot * 0.01
-        return total
-
     grid: list[float] = []
     spot = strikes[0]
     while spot <= strikes[-1] + 1e-9:
         grid.append(spot)
         spot += step
 
-    values = [net_gex_at(s) for s in grid]
+    values = _net_gex_series(grid, contracts, t_years)
     roots: list[tuple[float, tuple[float, float]]] = []
     for index in range(len(grid) - 1):
         left_s, right_s = grid[index], grid[index + 1]

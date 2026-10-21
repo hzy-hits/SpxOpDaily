@@ -9,6 +9,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
+
 NEW_YORK = ZoneInfo("America/New_York")
 
 RISK_OBJECTIVE_VERSION = "risk_adjusted_cvar.v1"
@@ -659,6 +661,223 @@ def simulate_management_policy(
         quote_gap_seconds_max=round(gap_max, 3),
         policy_version=policy.policy_version,
         fees_points=round(fees_points, 6),
+    )
+
+
+def simulate_management_policy_batch(
+    liquidation_values: Sequence[Sequence[float]] | np.ndarray,
+    mark_times: Sequence[datetime],
+    *,
+    entry_price: float,
+    contract_count: int,
+    entry_at: datetime,
+    policy: ManagementPolicy = DEFAULT_MANAGEMENT_POLICY,
+    session_date: date | None = None,
+    max_quote_gap_seconds: float | None = None,
+) -> list[PolicyLabel]:
+    """Replay one shared mark timetable across many paths at once.
+
+    Rules are identical to :func:`simulate_management_policy`; the batch form
+    exists because the joint path distribution replays thousands of paths with
+    the same clock, where the scalar per-path loop dominated the decision cycle.
+    """
+
+    if not math.isfinite(entry_price) or entry_price <= 0:
+        raise ValueError("entry_price must be finite and positive")
+    if (
+        not math.isfinite(contract_count)
+        or contract_count <= 0
+        or int(contract_count) != contract_count
+    ):
+        raise ValueError("contract_count must be a positive integer contract count")
+    start = _utc(entry_at)
+    values = np.asarray(liquidation_values, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("liquidation_values must be two-dimensional")
+    times = list(mark_times)
+    if len(times) != values.shape[1]:
+        raise ValueError("mark_times must match liquidation_values columns")
+    for value in times:
+        if value.tzinfo is None:
+            raise ValueError("policy mark time must be timezone-aware")
+    order = sorted(range(len(times)), key=lambda index: times[index])
+    times = [times[index] for index in order]
+    values = values[:, order]
+    keep = [index for index, value in enumerate(times) if value >= start]
+    times = [times[index] for index in keep]
+    values = values[:, keep]
+    path_count = values.shape[0]
+    mark_count = values.shape[1]
+
+    entry_cashflow = entry_price if policy.entry_side == "credit" else -entry_price
+    fees_dollars = policy.fees_per_leg_per_side * float(contract_count) * 2.0
+    fees_points = fees_dollars / 100.0
+    hard_exit = _hard_exit_at(start, policy.hard_exit_et, session_date=session_date)
+
+    if mark_count == 0 or hard_exit <= start:
+        reason = "session_error" if hard_exit <= start else "marks_exhausted"
+        return [_empty_policy_label(policy, reason, fees_points) for _ in range(path_count)]
+    if not np.isfinite(values).all():
+        raise ValueError("policy marks must be finite")
+
+    offsets = np.asarray([(value - start).total_seconds() for value in times], dtype=float)
+    gaps = np.diff(np.concatenate(([0.0], offsets)))
+    gap_cumulative = np.maximum.accumulate(gaps)
+    hard_index = int(np.searchsorted(offsets, (hard_exit - start).total_seconds(), side="left"))
+    mark_index = np.arange(mark_count)
+
+    def _first(mask: np.ndarray) -> np.ndarray:
+        hit = mask.any(axis=1)
+        return np.where(hit, mask.argmax(axis=1), mark_count)
+
+    if max_quote_gap_seconds is None:
+        gap_index = mark_count
+    else:
+        over = gap_cumulative > max_quote_gap_seconds
+        gap_index = int(over.argmax()) if over.any() else mark_count
+
+    gap_first = gap_index <= hard_index
+    exit_index = np.full(path_count, min(gap_index, hard_index), dtype=int)
+    exit_reason = np.where(
+        exit_index == mark_count,
+        "marks_exhausted",
+        np.where(gap_first, "quote_gap", "hard_close"),
+    ).astype(object)
+
+    def _take(candidate: np.ndarray, reason: str) -> None:
+        nonlocal exit_index, exit_reason
+        take = candidate < exit_index
+        exit_index = np.where(take, candidate, exit_index)
+        exit_reason = np.where(take, reason, exit_reason).astype(object)
+
+    stop_level = (
+        entry_price * policy.premium_stop_fraction
+        if policy.premium_stop_fraction is not None and policy.premium_stop_fraction > 0
+        else None
+    )
+    time_stop_level = (
+        start + timedelta(minutes=policy.time_stop_minutes)
+        if policy.time_stop_minutes is not None and policy.time_stop_minutes > 0
+        else None
+    )
+    arm_level = (
+        entry_price * (1.0 + policy.profit_arm_return_on_debit)
+        if policy.profit_arm_return_on_debit is not None
+        else None
+    )
+
+    if policy.entry_side == "credit":
+        buyback = -values
+        take_profit = policy.credit_take_profit_fraction
+        stop_loss = policy.credit_stop_loss_multiple
+        if take_profit is not None and take_profit > 0:
+            _take(
+                _first(buyback <= entry_price * (1 - take_profit) + POLICY_PRICE_EPSILON),
+                "profit_take",
+            )
+        if stop_loss is not None and stop_loss > 0:
+            _take(
+                _first(buyback >= entry_price * (1 + stop_loss) - POLICY_PRICE_EPSILON),
+                "stop_loss",
+            )
+    else:
+        if time_stop_level is not None:
+            _take(
+                np.full(path_count, int(np.searchsorted(offsets, (time_stop_level - start).total_seconds(), side="left"))),
+                "time_stop",
+            )
+        if stop_level is not None:
+            _take(_first(values <= stop_level + POLICY_PRICE_EPSILON), "premium_stop")
+        if arm_level is not None:
+            arm_index = _first(values >= arm_level - POLICY_PRICE_EPSILON)
+            if policy.trail_after_arm_fraction is not None and policy.trail_after_arm_fraction > 0:
+                masked = np.where(
+                    mark_index[None, :] >= arm_index[:, None], values, -np.inf
+                )
+                peak = np.maximum.accumulate(masked, axis=1)
+                trail = peak * policy.trail_after_arm_fraction
+                if policy.trail_floor_is_entry_debit:
+                    trail = np.maximum(trail, entry_price)
+                _take(
+                    _first(
+                        (mark_index[None, :] > arm_index[:, None])
+                        & (values < trail - POLICY_PRICE_EPSILON)
+                    ),
+                    "trail",
+                )
+        else:
+            arm_index = np.full(path_count, mark_count)
+
+    has_exit = exit_index < mark_count
+    gap_exit = exit_reason == "quote_gap"
+    has_value = has_exit & ~gap_exit
+    safe_index = np.where(has_exit, exit_index, mark_count - 1)
+    value_index = np.where(gap_exit, np.maximum(exit_index - 1, 0), safe_index)
+    rows = np.arange(path_count)
+    exit_values = values[rows, safe_index]
+    pnl_marks = entry_cashflow + values
+    mfe = np.maximum(0.0, np.maximum.accumulate(pnl_marks, axis=1)[rows, value_index])
+    mae = np.minimum(0.0, np.minimum.accumulate(pnl_marks, axis=1)[rows, value_index])
+    # A gap before the first accepted mark contributes no observed excursion.
+    mfe = np.where(gap_exit & (exit_index == 0), 0.0, mfe)
+    mae = np.where(gap_exit & (exit_index == 0), 0.0, mae)
+    gap_total = np.where(gap_exit, gap_cumulative[np.minimum(exit_index, mark_count - 1)], gap_cumulative[value_index])
+    pnl = entry_cashflow + exit_values - fees_points
+
+    if policy.entry_side == "credit":
+        armed = np.asarray([reason == "profit_take" for reason in exit_reason])
+        time_to_arm = np.where(
+            armed, offsets[safe_index], np.nan
+        )
+    else:
+        armed = arm_index < exit_index
+        time_to_arm = np.where(armed, offsets[np.minimum(arm_index, mark_count - 1)], np.nan)
+
+    labels: list[PolicyLabel] = []
+    for index in range(path_count):
+        exited = bool(has_value[index])
+        reason = str(exit_reason[index])
+        labels.append(
+            PolicyLabel(
+                tp_armed=bool(armed[index]),
+                tp_before_stop=bool(
+                    armed[index] and reason in {"profit_take", "trail", "hard_close", "time_stop"}
+                ),
+                time_to_arm_seconds=(
+                    round(float(time_to_arm[index]), 6) if armed[index] else None
+                ),
+                mfe_points=float(round(float(mfe[index]), 6)),
+                mae_points=float(round(float(mae[index]), 6)),
+                policy_pnl_points=float(round(float(pnl[index]), 6)) if exited else None,
+                exit_reason=reason,
+                exit_at=times[safe_index[index]] if exited else None,
+                exit_liquidation_value=(
+                    float(round(float(exit_values[index]), 6)) if exited else None
+                ),
+                quote_gap_seconds_max=float(round(float(gap_total[index]), 3)),
+                policy_version=policy.policy_version,
+                fees_points=float(round(fees_points, 6)),
+            )
+        )
+    return labels
+
+
+def _empty_policy_label(
+    policy: ManagementPolicy, reason: str, fees_points: float
+) -> PolicyLabel:
+    return PolicyLabel(
+        tp_armed=False,
+        tp_before_stop=False,
+        time_to_arm_seconds=None,
+        mfe_points=0.0,
+        mae_points=0.0,
+        policy_pnl_points=None,
+        exit_reason=reason,
+        exit_at=None,
+        exit_liquidation_value=None,
+        quote_gap_seconds_max=0.0,
+        policy_version=policy.policy_version,
+        fees_points=float(round(fees_points, 6)),
     )
 
 

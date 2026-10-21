@@ -1,8 +1,33 @@
 # SPX Spark 架构简化执行方案 v1（面向执行 Agent 的施工图与硬约束）
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-19 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
+
+## 2026-10-19 源码实施状态
+
+核对基线为 master `e8bb1e2`；“本变更”指包含此段的修复分支，合并、发布之前
+不能算作 master 或生产已完成。本轮仅做离线源码/测试验收，未核验生产、未部署。
+
+| 能力 | 状态 | 已有边界与剩余工作 |
+| --- | --- | --- |
+| asyncio + broker SDK、SQLite/SQLAlchemy/Alembic、Huey/SQLite、Parquet/DuckDB、FastAPI、Pydantic | implemented（源码基线） | 继续使用现有 owner；不迁 PostgreSQL、Redis、LEAN/Nautilus，不增加真实下单 |
+| GTH 正式候选的双 provider 控制 | implemented（本变更，S1/S3） | action-time 专项 IBKR 控制进入统一 facts/global gate，覆盖铁鹰及其他候选；缺少专项授权 fail closed，RTH 不套用 GTH 门 |
+| IBKR 中断及恢复 | partial（本变更修复静默断档） | 持久化健康观察时钟；超过 health TTL 的观察间隔在恢复首帧进入 rearm；默认 3 个不同时间戳的健康观测。不是 3 次独立 fresh NBBO/flush 的完整证明 |
+| fast lane | implemented（本变更修复字段时钟） | last/trade_time、mid/quote_time 成对使用；无对应时钟的 mark/close 不作实时触发证据；始终 authority:none |
+| SPX 周期边界（Phase 3/P3-2、Phase 5/P5-2） | implemented（本变更） | 原 service 内命名分段，提交先于投递与后置解释；替换内联实现和无消费者的汇总字段，不新增共享框架或资源隔离 |
+| 协议、payload schema、correlation_id、模板 | partial（源码基线） | Python 相关边界已有实现；collector 到全部 receipt 的一致链路、Rust schema 对齐未完成 |
+| 实时研究运行器/因果 replay | pending | 插件和单 facts 快照评估已有；持续事件消费、确认/冷却、恢复、注入回放时钟及 available_at 过滤仍未闭环 |
+| 机会捕捉台账 | partial（源码基线） | latest 分钟采样不是原始机会母集，不能据此宣称捕获率或 outage 归因完成 |
+| Clock 全链路、P95/告警、ops snapshot | pending（端口/局部字段已存在） | 阶段耗时与 fast lane 字段不是端到端 SLO 证据；慢 cycle 的 decision_latency_ms 尚未接入公开 summary |
+| 长 gap 状态失效、post_gap_rearm、degraded_continuity | pending | 尚未清空 level/path/virtual/session 连续性状态；不能因 rearm 修复就视为完成 |
+| 配置/状态进一步收口、股票/LEAPS 用例整理 | pending（分别实施） | 仅在对应 owner 内按需推进，不发起全仓迁目录或配置清零 |
+| 旧 P5-2 清零、P6 Rust 退出、P7 全面重写施工表 | historical/deferred | 保留下文原日期；不是重新开启的施工队列 |
+
+[PR #11](https://github.com/hzy-hits/SpxOpDaily/pull/11) 在本轮核对时仍未合并且有冲突。
+本变更在最新主干上手动承接其有效的私有周期分段和公共 run 回归，不机械合并旧分支，
+不把旧 PR 的 CI 通过当作主干合入或生产验收。详见
+[决策协议](architecture/decision-protocol.md)与 [GTH 连续性](gth-continuity-recovery.md)。
 
 ## 2026-10-05 文档与维护状态
 

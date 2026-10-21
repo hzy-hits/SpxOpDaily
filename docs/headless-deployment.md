@@ -1,5 +1,119 @@
 # Headless Deployment Notes
 
+## Verified deployment and release retirement (2026-10-18)
+
+This is a dated operational snapshot, verified at **2026-10-18 00:08:57 Asia/Shanghai**
+(2026-10-17 16:08:57 UTC). Future documentation-only commits do not change the
+installed application revision or require a production restart.
+
+| Item | Verified state |
+| --- | --- |
+| Installed application | `1618abce638b42e9f98013914b3f18fa919aa436`, including merged PRs [#16](https://github.com/hzy-hits/SpxOpDaily/pull/16) and [#17](https://github.com/hzy-hits/SpxOpDaily/pull/17) |
+| Cloud delivery | [CI, publication and Oracle deployment succeeded](https://github.com/hzy-hits/SpxOpDaily/actions/runs/39046638758); deployment completed on October 17 at 23:54:22 Asia/Shanghai |
+| Release artifact | [Immutable runtime release](https://github.com/hzy-hits/SpxOpDaily/releases/tag/runtime-1618abce638b42e9f98013914b3f18fa919aa436); ARM64 archive SHA-256 `f9aca5629c2e0f8ec3fa39427f8b0d54abfa7808331798d2a97f759b61525668` |
+| Python / Rust selectors | Both `current` links resolve to the installed revision; all five Python and four Rust processes use it |
+| Runtime acceptance | Nine services active, restart counts zero; process IDs unchanged throughout retirement; bridge connected and bridge/report health timestamps advancing |
+| Persistence | `0005_notification_correlation`, nullable column and index present; sampled decision and opportunity-ledger IDs persisted with correlation IDs; `automatic_ordering=false` |
+| Retired research timer | `spx-spark-backtest-weekly.timer` is absent and inactive on Oracle |
+
+At 00:08:34 Asia/Shanghai, the operator-authorized retirement removed **3 inactive
+Python release directories and 35 inactive Rust release directories**, plus four
+obsolete `previous-before-*` selectors. Their allocated size was **2,603,233,280
+bytes (2.42 GiB)**. Root filesystem availability increased from approximately
+16.30 to 18.70 GiB during the operation. The deployment lock was held; process
+executable/memory-map paths and installed unit references were checked before
+deletion. No service restart, unit/configuration change or database write was needed.
+
+The host audit is `/home/ubuntu/spx-runtime/retirements/20261017T160834Z/manifest.json`.
+The old `previous.json` receipt was moved beside it as
+`previous-before-retirement.json`, so it is historical evidence rather than a live
+rollback pointer. **There is now no previous runtime available locally.** A subsequent
+deployment still uses the running revision as its automatic rollback target and
+creates a new receipt after success; the receiver does not read the archived receipt.
+
+The current runtime, `/home/ubuntu/spx-spark` host configuration/data links, IB
+Gateway, and cloud release artifacts were retained. In particular, the pre-migration
+database backup remains at
+`/home/ubuntu/spx-runtime/backups/3880b917e1694c6a49f37fbf47234cdd2f094e37-1792251432531000265.sqlite`,
+with its original integrity/checksum receipt (SHA-256
+`6a3f9bc7ab8d5ef6552e9acef3c572c51e3ecd9d054b3623285cbbec16b1ecea`).
+Retirement rechecked the backup's existence and unchanged size; the original
+migration acceptance performed the SQLite integrity and checksum checks.
+
+Recovery now requires preparing a cloud release again. Prefer a reviewed corrective
+commit on master, retaining the compatible `0005` schema, followed by the normal CI
+delivery path. The [previous cloud release](https://github.com/hzy-hits/SpxOpDaily/releases/tag/runtime-3880b917e1694c6a49f37fbf47234cdd2f094e37)
+remains available for controlled recovery, but the restricted receiver rejects stale
+SHAs: rerunning an old deployment or repointing a deleted directory is not a rollback
+procedure. Database restoration requires stopping writers, preserving current data
+and reconciling later rows; it is not part of application retirement.
+
+Acceptance limits remain explicit: IBKR was connected but reported `IBKR market
+data farms not ready`, continuity was `gap`, the bridge was degraded and the current
+decision was `NO_TRADE`. Fresh market-open quotes, peak-load behavior and delivery
+of an executable candidate are not proven by this closed-market check. P95 aggregate
+alerts and fully fact-built notification sections remain follow-up work.
+
+## Scheduler investigation (2026-10-18)
+
+At **14:30 Asia/Shanghai**, GitHub master remained a documentation-only successor
+to runtime `1618abce`; the native/image publication and Oracle deploy jobs in the
+release run above were successful, and `ORACLE_DEPLOY_ENABLED` remained `true`.
+All nine application PIDs were unchanged, restart counts were zero, bridge/report
+health advanced, and decisions continued to reach the database. This confirms the
+delivery path; it does not establish that every scheduled job is healthy.
+
+**Morning map scheduling restored.** The existing, enabled
+`spx-spark-morning-map.timer` had remained failed since August 21 with
+`Result=resources`, no next trigger, and no retained unit journal explaining the
+original failure. Both calendar expressions were valid. Resetting this timer's
+failed state and starting the existing timer restored `active/waiting` and the
+next trigger, **October 19 at 20:35 Asia/Shanghai** (08:35 New York); its second
+weekday slot remains 21:15 Asia/Shanghai (09:15 New York, subject to DST).
+The persistent catch-up invocation exited successfully with `outside_send_window`;
+no notification was sent. This verifies scheduling recovery and the time-window
+guard, not future broker readiness or delivery at the next actual slot.
+
+**Daily RTH acceptance timeout remains unresolved.** Its last invocation ran on
+October 17 from 07:00 to 07:15 Asia/Shanghai, then hit the existing 15-minute
+timeout. The timer itself is active and next runs on October 20 at 07:00
+Asia/Shanghai. The last completed daily report is dated October 7; the last
+level-decision acceptance projection is dated October 13. Neither is fresh
+acceptance evidence for the current release.
+
+The diagnostic isolated a historical-file read bottleneck:
+
+- `build_rth_daily_acceptance()` rebuilds cumulative level-decision acceptance;
+  `_read_tree()` reads whole JSONL files and retains all decoded records.
+- The 31 historical health files total **1,619,198,866 bytes**. A representative
+  100,779,137-byte file has **13,837 extents** on the data disk.
+- Repeated diagnostic stack samples stopped inside `_read_tree()` / `read_text()`;
+  the process was waiting for disk buffers. During that read workload, `/dev/sdb`
+  was approximately 93% busy and read approximately 0.86 MiB/s. After stopping
+  the diagnostic, disk busy time returned to approximately 1.3%.
+- The existing table-scoped SQLite integrity-check fix is already installed.
+  This incident cannot be attributed to the old database-wide `quick_check` alone.
+
+These observations point to scanning fragmented historical files as the immediate
+bottleneck; they do not establish a physical disk fault or a cloud-volume quota.
+Streaming alone would reduce memory but still read the same historical bytes, so
+no streaming-only patch, longer timeout, lowered acceptance threshold or fabricated
+success marker was applied. The diagnostic process was stopped, and the failed
+daily service state remains visible.
+
+Follow-up should reduce repeated historical reads while preserving identical
+acceptance results: evaluate verified compact inputs or partition-level incremental
+summaries, and keep cumulative research validation on the research node where
+appropriate. Before rollout, compare complete reports on the same frozen inputs,
+measure a cold-read run within the existing 15-minute budget, and run the full
+daily acceptance with notifications disabled. A successfully generated degraded
+report must still be distinguished from a passing business/data verdict.
+
+Operational checks after deployment must include `systemctl --user --failed` and
+the next trigger times of enabled production timers, in addition to the nine
+long-running services. The release receiver preserves existing timer activity;
+it does not automatically repair timers that were already failed before deployment.
+
 ## Cloud delivery cutover (2026-10-17)
 
 User-authorized delivery change: move development, builds and offline research off Oracle.
@@ -13,7 +127,8 @@ Cargo, GitHub Releases/GHCR, SSH and existing systemd units supply the complete 
 New files are `Dockerfile`, `.dockerignore`, `scripts/deploy-release.py` and boundary
 tests; no new application dependency, service, timer, database or configuration key
 is required. Existing source-based install instructions below are legacy bootstrap,
-not the production update path. Old release directories are retained for rollback.
+not the production update path. A previous release is retained after a cutover unless
+separately retired; see the dated retirement record above for current availability.
 
 PRs run Python tests, native AMD64/ARM64 Rust checks and dependency audit, then build
 and test both OCI images and relocatable Ubuntu 24.04 / Python 3.12 bundles. Main
@@ -25,7 +140,7 @@ or rebuilding. Oracle uses the prebuilt ARM64 bundle.
 The image never receives host secrets or production data and defaults to non-root.
 
 Oracle's restricted SSH key accepts only `deploy <40-char SHA> <64-char SHA256>`.
-It rejects unmerged/stale commits, checksum mismatch, changed database migrations,
+It rejects unmerged/stale commits, checksum mismatch, unreviewed database migrations,
 missing baseline services and concurrent scheduled work before stopping services.
 The receiver stages an immutable release under `/home/ubuntu/spx-runtime/releases`,
 then redirects existing Python service executables via `90-cloud-release.conf`.
@@ -35,10 +150,30 @@ No Git checkout, uv sync, cargo build or compiler executes on Oracle.
 
 Host-only configuration and secrets stay in the old protected locations; existing
 data/log paths are linked into the release. No service is enabled for the first time,
-no broker Gateway restart occurs, and writer ownership does not change. Deployment
+no broker Gateway restart occurs, and writer ownership does not change. A retired
+weekly research timer that is absent or masked is already stopped; it is not a
+release error. An existing timer is disabled inside the rollback boundary before
+the success receipt is written. Deployment
 serializes with a host lock, stops writers before switching and restores prior unit
 paths/binaries on failed validation. A successful switch records `previous.json`.
-Database revision changes stop deployment: binary rollback does not roll back data.
+Database revision changes normally stop deployment: binary rollback does not roll back data.
+The reviewed exception in PR #16 is `0004_session_card_cover` ->
+`0005_notification_correlation`: one nullable column and its index, without a data rewrite.
+The receiver permits only the exact SHA-256 of that migration and unchanged existing
+migration files. It stops writers, makes a SQLite backup with integrity check and
+SHA-256 receipt under `/home/ubuntu/spx-runtime/backups`, then invokes Alembic from
+the prebuilt release. A migration failure restores that backup before old writers restart.
+An application health failure restores old binaries while retaining the compatible
+additive schema; it does not discard post-migration writes. Any future schema change
+still requires separate review. Backup capacity requires database size plus 3 GiB
+reserve. Install the reviewed receiver before the master deployment job runs.
+
+Acceptance for this exception includes migration interruption recovery, old-writer
+compatibility, and a real post-cutover check of revision/column/index and decision
+persistence. Retain the database backup. Normally keep the previous runtime until
+market-open acceptance; the explicit October 18 retirement above is an operator-authorized
+exception for runtime files only. Never restore an old database over later production data without first
+stopping writers, backing up the current database and reconciling new rows.
 
 GitHub environment `oracle-production` is restricted to master. Its secrets contain
 only a dedicated forced-command key and pinned host key; the ordinary Mac SSH key
@@ -50,11 +185,15 @@ on master to retry a release; published release assets are never overwritten.
 Acceptance: clean CI on both architectures, isolated relocated-package startup,
 verified archive downloaded by Oracle, successful switch of existing services,
 advancing bridge/report health timestamps and independent provider/source checks.
+After a 15-second stability interval the receiver allows up to 105 more seconds
+for cold bridge resynchronization, continuing to reject PID changes and stale
+health records. The first 2026-10-17 rollout exercised automatic rollback; the
+previous version also needed about 52 seconds to reconnect after restart.
 Closed-market stale quotes are reported as such, never treated as fresh market data.
 Deployment status is evidence of installation and runtime health, not trading readiness.
 
 
-<!-- documentation-status: 2026-10-05 -->
+<!-- documentation-status: 2026-10-18 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 

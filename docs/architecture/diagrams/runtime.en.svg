@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1040" viewBox="0 0 1200 1040" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · service and data flow</title>
+<desc id="description">Concurrent owners; arrows show specific handoffs, not one synchronous loop.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="1040" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · service and data flow</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">Concurrent owners; arrows show specific handoffs, not one synchronous loop.</text>
+<text x="40" y="132" font-size="17" font-weight="700" class="">01  INGESTION AND CONCURRENT CORE</text>
+<text x="40" y="427" font-size="17" font-weight="700" class="">02  DECISION COMMIT AND MANUAL NOTIFICATION</text>
+<text x="40" y="727" font-size="17" font-weight="700" class="">03  RESEARCH AND THE SEPARATE REPORT LANE</text>
+<path class="edge" d="M340,230 L450,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,230 L860,230" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,310 L1010,460" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,540 L750,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,540 L340,540" marker-end="url(#arrow)"/>
+<path class="edge" d="M600,620 L600,760" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,840 L860,840" marker-end="url(#arrow)"/>
+<path class="edge" d="M500,310 L500,360 L20,360 L20,840 L40,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<path class="edge" d="M600,150 L600,110 L1180,110 L1180,840 L1160,840" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<text x="820" y="132" font-size="16" font-weight="400" class="muted">Normalized mirror → Unix IPC</text>
+<g data-card="Broker collectors">
+<rect x="40" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="180" font-size="20" font-weight="700" class="">Broker collectors</text>
+<text x="59" y="209" font-size="17" font-weight="400" class="">Schwab RTH / IBKR GTH</text>
+<text x="59" y="232" font-size="17" font-weight="400" class="">Independent sessions and</text>
+<text x="59" y="255" font-size="17" font-weight="400" class="">clocks</text>
+</g>
+<g data-card="Normalized data">
+<rect x="450" y="150" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="180" font-size="20" font-weight="700" class="">Normalized data</text>
+<text x="469" y="209" font-size="17" font-weight="400" class="">Append raw quotes, then</text>
+<text x="469" y="232" font-size="17" font-weight="400" class="">update latest state</text>
+<text x="469" y="255" font-size="17" font-weight="400" class="">Separate writes, not one</text>
+<text x="469" y="278" font-size="17" font-weight="400" class="">transaction</text>
+</g>
+<g data-card="Python Core">
+<rect x="860" y="150" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="180" font-size="20" font-weight="700" class="">Python Core</text>
+<text x="879" y="209" font-size="17" font-weight="400" class="">Concurrent samplers,</text>
+<text x="879" y="232" font-size="17" font-weight="400" class="">market-feature and shock</text>
+<text x="879" y="255" font-size="17" font-weight="400" class="">runners</text>
+</g>
+<g data-card="Final strategy decision">
+<rect x="860" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="879" y="490" font-size="20" font-weight="700" class="">Final strategy decision</text>
+<text x="879" y="519" font-size="17" font-weight="400" class="">build_strategy_decision</text>
+<text x="879" y="542" font-size="17" font-weight="400" class="">Facts → candidates →</text>
+<text x="879" y="565" font-size="17" font-weight="400" class="">gates</text>
+<text x="879" y="588" font-size="17" font-weight="400" class="">Manual-only authority</text>
+</g>
+<g data-card="Commit and publish">
+<rect x="450" y="460" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="490" font-size="20" font-weight="700" class="">Commit and publish</text>
+<text x="469" y="519" font-size="17" font-weight="400" class="">SQLite → decision JSON</text>
+<text x="469" y="542" font-size="17" font-weight="400" class="">Then enqueue event_id</text>
+<text x="469" y="565" font-size="17" font-weight="400" class="">Failure blocks READY</text>
+</g>
+<g data-card="Python Worker / Huey">
+<rect x="40" y="460" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="59" y="490" font-size="20" font-weight="700" class="">Python Worker / Huey</text>
+<text x="59" y="519" font-size="17" font-weight="400" class="">event_id → notification</text>
+<text x="59" y="542" font-size="17" font-weight="400" class="">tasks</text>
+<text x="59" y="565" font-size="17" font-weight="400" class="">Queue DB ≠ operational DB</text>
+<text x="59" y="588" font-size="17" font-weight="400" class="">Independent health alerts</text>
+</g>
+<g data-card="Research entry points">
+<rect x="40" y="760" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="790" font-size="20" font-weight="700" class="">Research entry points</text>
+<text x="59" y="819" font-size="17" font-weight="400" class="">Raw quotes + source clocks</text>
+<text x="59" y="842" font-size="17" font-weight="400" class="">Conditional live research</text>
+<text x="59" y="865" font-size="17" font-weight="400" class="">or isolated causal replay</text>
+<text x="59" y="888" font-size="17" font-weight="400" class="">No trade authority</text>
+</g>
+<g data-card="Desk Map export">
+<rect x="450" y="760" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="790" font-size="20" font-weight="700" class="">Desk Map export</text>
+<text x="469" y="819" font-size="17" font-weight="400" class="">Reuse committed decision</text>
+<text x="469" y="842" font-size="17" font-weight="400" class="">Recheck current-time</text>
+<text x="469" y="865" font-size="17" font-weight="400" class="">validity</text>
+<text x="469" y="888" font-size="17" font-weight="400" class="">desk_map_projection.v1</text>
+</g>
+<g data-card="Rust report + delivery">
+<rect x="860" y="760" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="790" font-size="20" font-weight="700" class="">Rust report + delivery</text>
+<text x="879" y="819" font-size="17" font-weight="400" class="">Bridge → core → report</text>
+<text x="879" y="842" font-size="17" font-weight="400" class="">Ledger / outbox / receipts</text>
+<text x="879" y="865" font-size="17" font-weight="400" class="">No broker sessions</text>
+<text x="879" y="888" font-size="17" font-weight="400" class="">No strategy leg selection</text>
+</g>
+<text x="40" y="973" font-size="17" font-weight="400" class="muted">Source map: the earlier HTML atlas + current source contracts. Dashed routes: quote files and IPC.</text>
+<text x="40" y="1006" font-size="17" font-weight="400" class="muted">Reports and optional research do not create another strategy authority. No automated orders.</text>
+</svg>

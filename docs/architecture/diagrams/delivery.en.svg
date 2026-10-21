@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="950" viewBox="0 0 1200 950" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · build, release and deployment</title>
+<desc id="description">One commit; native production packages and isolated research images.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="950" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · build, release and deployment</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">One commit; native production packages and isolated research images.</text>
+<text x="40" y="133" font-size="17" font-weight="700" class="">01  CLOUD DELIVERY</text>
+<text x="40" y="402" font-size="17" font-weight="700" class="">02  ORACLE · EXISTING SYSTEMD SERVICES</text>
+<text x="40" y="703" font-size="17" font-weight="700" class="">03  HOME · RESEARCH IMAGE</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,350 L20,350 L20,505 L40,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M20,505 L20,805 L40,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M300,505 L330,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M590,505 L620,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M880,505 L910,505" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,805 L450,805" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,805 L860,805" marker-end="url(#arrow)"/>
+<g data-card="Pull request + checks">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">Pull request + checks</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">Python + Rust tests</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">Native AMD64 / ARM64 checks</text>
+</g>
+<g data-card="Merge to master">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">Merge to master</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">Eligible mainline build</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">Validate packages and</text>
+<text x="469" y="260" font-size="17" font-weight="400" class="">images</text>
+</g>
+<g data-card="Publish artifacts">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">Publish artifacts</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">GitHub Releases + GHCR</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">Commit SHA +</text>
+<text x="879" y="260" font-size="17" font-weight="400" class="">checksums/digests</text>
+</g>
+<g data-card="Verify package">
+<rect x="40" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="455" font-size="20" font-weight="700" class="">Verify package</text>
+<text x="59" y="484" font-size="17" font-weight="400" class="">Commit + hash</text>
+<text x="59" y="507" font-size="17" font-weight="400" class="">Migrations + services</text>
+</g>
+<g data-card="Switch paths">
+<rect x="330" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="349" y="455" font-size="20" font-weight="700" class="">Switch paths</text>
+<text x="349" y="484" font-size="17" font-weight="400" class="">Stop existing writers</text>
+<text x="349" y="507" font-size="17" font-weight="400" class="">Activate native bundle</text>
+</g>
+<g data-card="Runtime checks">
+<rect x="620" y="425" width="260" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="639" y="455" font-size="20" font-weight="700" class="">Runtime checks</text>
+<text x="639" y="484" font-size="17" font-weight="400" class="">Stable processes</text>
+<text x="639" y="507" font-size="17" font-weight="400" class="">Advancing bridge health</text>
+</g>
+<g data-card="Keep or roll back">
+<rect x="910" y="425" width="260" height="160" rx="12" fill="#fff0eb" stroke="#a45139" stroke-width="1.4"/>
+<text x="929" y="455" font-size="20" font-weight="700" class="">Keep or roll back</text>
+<text x="929" y="484" font-size="17" font-weight="400" class="">Pass: retain release</text>
+<text x="929" y="507" font-size="17" font-weight="400" class="">Fail: previous binaries</text>
+</g>
+<text x="40" y="633" font-size="17" font-weight="400" class="muted">Host configuration, secrets and databases keep their owners. Binary rollback does not undo database writes.</text>
+<g data-card="Load matching image">
+<rect x="40" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="755" font-size="20" font-weight="700" class="">Load matching image</text>
+<text x="59" y="784" font-size="17" font-weight="400" class="">Pinned AMD64 identity</text>
+<text x="59" y="807" font-size="17" font-weight="400" class="">No production credentials</text>
+</g>
+<g data-card="Prepare research disk">
+<rect x="450" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="755" font-size="20" font-weight="700" class="">Prepare research disk</text>
+<text x="469" y="784" font-size="17" font-weight="400" class="">Verified snapshot + policy</text>
+<text x="469" y="807" font-size="17" font-weight="400" class="">Read-only inputs</text>
+</g>
+<g data-card="Isolated replay">
+<rect x="860" y="725" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="755" font-size="20" font-weight="700" class="">Isolated replay</text>
+<text x="879" y="784" font-size="17" font-weight="400" class="">No network</text>
+<text x="879" y="807" font-size="17" font-weight="400" class="">Bounded CPU and memory</text>
+</g>
+<text x="40" y="925" font-size="17" font-weight="400" class="muted">Documentation-only master changes do not trigger Oracle deployment.</text>
+</svg>

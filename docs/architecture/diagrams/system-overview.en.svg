@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="840" viewBox="0 0 1200 840" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · environments and handoffs</title>
+<desc id="description">Roles above; the four cross-environment routes below.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="840" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · environments and handoffs</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">Roles above; the four cross-environment routes below.</text>
+<text x="40" y="130" font-size="18" font-weight="700" class="">01  CLOUD</text>
+<rect x="40" y="150" width="320" height="380" rx="16" fill="#eef4ff"/>
+<text x="440" y="130" font-size="18" font-weight="700" class="">02  ORACLE</text>
+<rect x="440" y="150" width="320" height="380" rx="16" fill="#eaf7f2"/>
+<text x="840" y="130" font-size="18" font-weight="700" class="">03  HOME</text>
+<rect x="840" y="150" width="320" height="380" rx="16" fill="#f2edfc"/>
+<g data-card="Developers / agents">
+<rect x="50" y="170" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="200" font-size="20" font-weight="700" class="">Developers / agents</text>
+<text x="69" y="229" font-size="17" font-weight="400" class="">Code changes and reviewed</text>
+<text x="69" y="252" font-size="17" font-weight="400" class="">PRs</text>
+</g>
+<g data-card="GitHub Actions">
+<rect x="50" y="290" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="320" font-size="20" font-weight="700" class="">GitHub Actions</text>
+<text x="69" y="349" font-size="17" font-weight="400" class="">Test and build AMD64 +</text>
+<text x="69" y="372" font-size="17" font-weight="400" class="">ARM64</text>
+</g>
+<g data-card="Releases + GHCR">
+<rect x="50" y="410" width="300" height="105" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="69" y="440" font-size="20" font-weight="700" class="">Releases + GHCR</text>
+<text x="69" y="469" font-size="17" font-weight="400" class="">One commit, native bundles</text>
+<text x="69" y="492" font-size="17" font-weight="400" class="">and images</text>
+</g>
+<g data-card="Production services">
+<rect x="450" y="170" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="200" font-size="20" font-weight="700" class="">Production services</text>
+<text x="469" y="229" font-size="17" font-weight="400" class="">Existing Python + Rust</text>
+<text x="469" y="252" font-size="17" font-weight="400" class="">under systemd</text>
+</g>
+<g data-card="Live state">
+<rect x="450" y="290" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="320" font-size="20" font-weight="700" class="">Live state</text>
+<text x="469" y="349" font-size="17" font-weight="400" class="">Quotes, operational DBs and</text>
+<text x="469" y="372" font-size="17" font-weight="400" class="">report ledgers</text>
+</g>
+<g data-card="Runtime ownership">
+<rect x="450" y="410" width="300" height="105" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="469" y="440" font-size="20" font-weight="700" class="">Runtime ownership</text>
+<text x="469" y="469" font-size="17" font-weight="400" class="">Collect, decide, report and</text>
+<text x="469" y="492" font-size="17" font-weight="400" class="">notify</text>
+</g>
+<g data-card="Raspberry Pi">
+<rect x="850" y="170" width="300" height="105" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="869" y="200" font-size="20" font-weight="700" class="">Raspberry Pi</text>
+<text x="869" y="229" font-size="17" font-weight="400" class="">Prefect scheduling +</text>
+<text x="869" y="252" font-size="17" font-weight="400" class="">archive transfer</text>
+</g>
+<g data-card="Linux laptop">
+<rect x="850" y="290" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="320" font-size="20" font-weight="700" class="">Linux laptop</text>
+<text x="869" y="349" font-size="17" font-weight="400" class="">Pinned image + dedicated</text>
+<text x="869" y="372" font-size="17" font-weight="400" class="">research disk</text>
+</g>
+<g data-card="NAS">
+<rect x="850" y="410" width="300" height="105" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="869" y="440" font-size="20" font-weight="700" class="">NAS</text>
+<text x="869" y="469" font-size="17" font-weight="400" class="">Verified snapshots + result</text>
+<text x="869" y="492" font-size="17" font-weight="400" class="">backups</text>
+</g>
+<text x="40" y="579" font-size="17" font-weight="700" class="">HANDOFFS · data and artifacts</text>
+<text x="48" y="616" font-size="19" font-weight="600" class="">1  Release bundle  →  Oracle</text>
+<text x="655" y="616" font-size="17" font-weight="400" class="muted">ARM64 / systemd</text>
+<text x="48" y="659" font-size="19" font-weight="600" class="">2  Matching image  →  Linux laptop</text>
+<text x="655" y="659" font-size="17" font-weight="400" class="muted">AMD64 / isolated replay</text>
+<text x="48" y="702" font-size="19" font-weight="600" class="">3  Oracle quotes  →  Pi  →  NAS</text>
+<text x="655" y="702" font-size="17" font-weight="400" class="muted">Read-only archive + NAS verification</text>
+<text x="48" y="745" font-size="19" font-weight="600" class="">4  NAS snapshot  →  laptop  →  NAS</text>
+<text x="655" y="745" font-size="17" font-weight="400" class="muted">Research inputs + result receipts</text>
+<text x="40" y="807" font-size="17" font-weight="400" class="muted">Mac: review, operations and on-demand research. No scheduled compute role.</text>
+</svg>

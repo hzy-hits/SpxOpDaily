@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Mapping
 
 from spx_spark.config import StorageSettings
+from spx_spark.ibkr.continuity import record_continuity
 from spx_spark.state_io import atomic_write_json_secure
 
 
@@ -49,29 +50,32 @@ def persist_stream_health(
         if retry_seconds is not None
         else None
     )
-    atomic_write_json_secure(
-        stream_health_path(storage_settings),
-        {
-            "schema_version": HEALTH_SCHEMA_VERSION,
-            "service": "ibkr_stream",
-            "observed_at": now.isoformat(),
-            "expires_at": (
-                now + timedelta(seconds=health_max_age_seconds)
-            ).isoformat(),
-            "max_age_seconds": health_max_age_seconds,
-            # A live process is not proof that the market-data plane works.
-            "process_active": True,
-            "data_plane_healthy": bool(data_plane_healthy),
-            "policy_blocked": bool(policy_blocked),
-            "connected": bool(connected),
-            "circuit_state": circuit_state,
-            "conflict_count": max(int(conflict_count), 0),
-            "retry_at": retry_at,
-            "retry_in_seconds": retry_seconds,
-            "connection_generation": connection_generation,
-            "reason": reason,
-        },
-    )
+    payload = {
+        "schema_version": HEALTH_SCHEMA_VERSION,
+        "service": "ibkr_stream",
+        "observed_at": now.isoformat(),
+        "expires_at": (
+            now + timedelta(seconds=health_max_age_seconds)
+        ).isoformat(),
+        "max_age_seconds": health_max_age_seconds,
+        # A live process is not proof that the market-data plane works.
+        "process_active": True,
+        "data_plane_healthy": bool(data_plane_healthy),
+        "policy_blocked": bool(policy_blocked),
+        "connected": bool(connected),
+        "circuit_state": circuit_state,
+        "conflict_count": max(int(conflict_count), 0),
+        "retry_at": retry_at,
+        "retry_in_seconds": retry_seconds,
+        "connection_generation": connection_generation,
+        "reason": reason,
+    }
+    atomic_write_json_secure(stream_health_path(storage_settings), payload)
+    try:
+        record_continuity(storage_settings.data_root, payload, now=now)
+    except (OSError, ValueError):
+        # Continuity telemetry must not break the health heartbeat.
+        pass
 
 
 def stream_health_is_fresh(

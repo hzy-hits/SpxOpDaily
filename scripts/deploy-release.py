@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Restricted Oracle release receiver; no checkout, dependency install or compilation."""
+from contextlib import closing
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -27,6 +29,12 @@ RUST_UNITS = ['spx-rust-core-shadow', 'spx-rust-normalized-bridge',
 HEALTH_FILES = [Path('/var/lib/spx-spark-bridge-shadow/health.json'),
                 Path('/var/lib/spx-spark-report-shadow/health.json')]
 BASE_URL = 'https://github.com/hzy-hits/SpxOpDaily/releases/download'
+DATABASE = Path('/srv/data/spx-spark/spx.sqlite')
+# Reviewed additive migration only. Any other schema change still stops cutover.
+CORRELATION_MIGRATION = 'alembic/versions/0005_notification_correlation.py'
+CORRELATION_SHA256 = '3968710f27ca2350c65c3235eacc821bdbe0614a7141c48483d4ba667434d9fe'
+OLD_REVISION = '0004_session_card_cover'
+NEW_REVISION = '0005_notification_correlation'
 
 
 def run(*args, **kwargs):
@@ -60,8 +68,78 @@ def active(user, units):
                                              check=False).returncode == 0]
 
 
+def retire_research_timer():
+    timer = 'spx-spark-backtest-weekly.timer'
+    state = run('systemctl', '--user', 'show', timer, '-p', 'LoadState', '--value')
+    if state not in {'not-found', 'masked'}:
+        run('systemctl', '--user', 'disable', '--now', timer)
+
+
 def schema_files(root):
     return {str(p.relative_to(root)): checksum(p) for p in (root / 'alembic').rglob('*.py')}
+
+
+def reviewed_migration(previous, target):
+    before, after = schema_files(previous), schema_files(target)
+    if before == after:
+        return False
+    if (CORRELATION_MIGRATION not in before
+            and after == {**before, CORRELATION_MIGRATION: CORRELATION_SHA256}):
+        return True
+    raise ValueError('Database migration changed; separate migration review required')
+
+
+def database_revision(connection):
+    rows = connection.execute('SELECT version_num FROM alembic_version').fetchall()
+    if len(rows) != 1:
+        raise ValueError('Expected exactly one database revision')
+    return rows[0][0]
+
+
+def migrate_correlation(target):
+    """Run the reviewed Alembic revision with all writers stopped and a verified backup.
+
+    An application rollback keeps the additive nullable column/index. If Alembic
+    itself fails, restore the pre-migration database before restarting old writers.
+    """
+    with closing(sqlite3.connect(f'file:{DATABASE}?mode=rw', uri=True)) as source:
+        revision = database_revision(source)
+        if revision == NEW_REVISION:
+            columns = {row[1] for row in source.execute('PRAGMA table_info(notification_events)')}
+            indexes = {row[1] for row in source.execute('PRAGMA index_list(notification_events)')}
+            if 'correlation_id' not in columns or 'ix_notification_events_correlation' not in indexes:
+                raise ValueError('Database revision does not match correlation schema')
+            return None
+        if revision != OLD_REVISION:
+            raise ValueError('Unexpected database baseline; migration refused')
+        backups = ROOT / 'backups'
+        backups.mkdir(exist_ok=True, mode=0o700)
+        if shutil.disk_usage(backups).free < DATABASE.stat().st_size + 3 * 1024**3:
+            raise ValueError('Insufficient space for database backup plus 3 GiB reserve')
+        backup = backups / f'{target.name}-{time.time_ns()}.sqlite'
+        backup.touch(mode=0o600, exist_ok=False)
+        with closing(sqlite3.connect(backup)) as saved:
+            source.backup(saved)
+            if saved.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+                raise RuntimeError('Pre-migration database backup failed integrity check')
+        receipt = {'source': str(DATABASE), 'backup': str(backup),
+                   'sha256': checksum(backup), 'from_revision': revision,
+                   'to_revision': NEW_REVISION, 'release': target.name}
+        backup.with_suffix('.json').write_text(json.dumps(receipt, indent=2) + '\n')
+        env = dict(os.environ, PYTHONPATH=str(target / 'src'), SPX_DATA_ROOT=str(DATABASE.parent),
+                   PYTHONDONTWRITEBYTECODE='1', SPX_SPARK_DISABLE_RUNTIME_OVERRIDES='1')
+        try:
+            run(str(target / '.venv/bin/python'), '-m', 'alembic', 'upgrade', NEW_REVISION,
+                cwd=target, env=env)
+            if database_revision(source) != NEW_REVISION:
+                raise RuntimeError('Database migration did not reach reviewed revision')
+            if source.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+                raise RuntimeError('Post-migration database integrity check failed')
+        except BaseException:
+            with closing(sqlite3.connect(backup)) as saved:
+                saved.backup(source)
+            raise
+        return str(backup)
 
 
 def verify_health(started):
@@ -72,6 +150,21 @@ def verify_health(started):
             raise RuntimeError('Runtime health did not advance after deployment')
         if 'socket_connected' in payload and not payload['socket_connected']:
             raise RuntimeError('Normalized bridge has not reconnected')
+
+
+def wait_ready(started, processes, timeout=105):
+    """Allow cold replay/resync while rejecting crashes and a stale health file."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if any(pid == '0' or run(*args) != pid for args, pid in processes.items()):
+            raise RuntimeError('A production process restarted during validation')
+        try:
+            verify_health(started)
+            return
+        except (RuntimeError, OSError, ValueError, KeyError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(2)
 
 
 def install(sha, digest):
@@ -116,10 +209,10 @@ def install(sha, digest):
                 or set(active(False, RUST_UNITS)) != set(RUST_UNITS)):
             raise RuntimeError('Installed release is unhealthy; operator recovery required')
         verify_health(time.time() - 60)
+        retire_research_timer()
         print(json.dumps({'status': 'already_deployed', 'revision': sha}))
         return
-    if schema_files(previous) != schema_files(target):
-        raise ValueError('Database migration changed; separate migration review required')
+    needs_migration = reviewed_migration(previous, target)
     old_rust = RUST / 'current'
     previous_rust = old_rust.resolve()
     # Preserve machine configuration, existing environment files, data and local unit hardening.
@@ -137,6 +230,7 @@ def install(sha, digest):
         raise ValueError('A scheduled production job is running; retry after it finishes')
     changes = {}
     succeeded = False
+    database_backup = None
     rust_target = RUST / 'releases' / sha
     run('sudo', '-n', 'mkdir', '-p', str(rust_target))
     run('sudo', '-n', 'cp', '-a', str(target / 'bin'), str(rust_target))
@@ -146,6 +240,8 @@ def install(sha, digest):
             run('systemctl', '--user', 'stop', *timers)
         run('systemctl', '--user', 'stop', *running_python)
         run('sudo', '-n', 'systemctl', 'stop', *running_rust)
+        if needs_migration:
+            database_backup = migrate_correlation(target)
         for unit in units:
             entries = [line.replace(str(LEGACY), str(current)) for line in unit.read_text().splitlines()
                        if line.startswith(('ExecStart=', 'ExecStartPre='))]
@@ -169,14 +265,14 @@ def install(sha, digest):
                 args = (*prefix, 'show', name, '-p', 'MainPID', '--value')
                 processes[args] = run(*args)
         time.sleep(15)
-        if any(pid == '0' or run(*args) != pid for args, pid in processes.items()):
-            raise RuntimeError('A production process restarted during validation')
         if (set(active(True, running_python)) != set(running_python)
                 or set(active(False, running_rust)) != set(running_rust)):
             raise RuntimeError('Post-deployment service validation failed')
-        verify_health(started)
+        wait_ready(started, processes)
+        retire_research_timer()
         ROOT.joinpath('previous.json').write_text(json.dumps({
             'python': str(previous), 'rust': str(previous_rust), 'release': sha,
+            'database_backup': database_backup,
             'dropins': {str(p): v.decode() if v is not None else None for p, v in changes.items()}
         }, indent=2) + '\n')
         succeeded = True
@@ -202,9 +298,9 @@ def install(sha, digest):
             timers = [t for t in timers if t != 'spx-spark-backtest-weekly.timer']
         if timers:
             run('systemctl', '--user', 'start', *timers)
-    run('systemctl', '--user', 'disable', '--now', 'spx-spark-backtest-weekly.timer')
     print(json.dumps({'status': 'deployed', 'revision': sha, 'archive_sha256': digest,
-                      'previous_python': str(previous), 'previous_rust': str(previous_rust)}))
+                      'previous_python': str(previous), 'previous_rust': str(previous_rust),
+                      'cutover_seconds': round(time.time() - started, 1)}))
 
 
 if __name__ == '__main__':

@@ -222,12 +222,18 @@ def enumerate_iron_condor_candidates(
     *,
     now: datetime,
     policy: StrategyPolicy,
+    structure: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    structure = build_iron_condor_map(
-        payload, facts, latest, now=now, policy=policy, include_placement_scan=False
+    primary = (
+        dict(structure)
+        if structure is not None
+        else build_iron_condor_map(
+            payload, facts, latest, now=now, policy=policy, include_placement_scan=False
+        )
     )
-    if structure.get("status") != "ready":
+    if primary.get("status") != "ready":
         return []
+    structure = primary
     now = _utc(now)
     session_policy, providers, _ = _session_quote_policy(now, policy)
     if session_policy is None:

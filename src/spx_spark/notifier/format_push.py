@@ -11,6 +11,7 @@ Lane doctrine:
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from spx_spark.notifier.policy import (
@@ -710,6 +711,7 @@ def build_feishu_card(
     title: str,
     kind: str = "status",
     lane: str = "trade",
+    sections: Sequence[Mapping[str, object]] | None = None,
 ) -> dict[str, Any]:
     """Feishu interactive card (schema 2.0) with a single markdown body."""
     # Feishu markdown is close to commonmark; keep writer output mostly intact.
@@ -724,7 +726,19 @@ def build_feishu_card(
             template = state_template
     status_parts = _status_card_parts(content) if kind == "status" else None
     header_title = title.strip() or "SPX Spark"
-    body_elements: list[dict[str, Any]] = [
+    if sections:
+        body_elements: list[dict[str, Any]] = []
+        for section in sections:
+            section_title = str(section.get("title") or "").strip()
+            section_body = str(section.get("content") or "").strip()
+            if section_title:
+                body_elements.append({"tag": "markdown", "content": f"**{section_title}**"})
+            if section_body:
+                body_elements.append({"tag": "markdown", "content": section_body})
+        if not body_elements:
+            body_elements = [{"tag": "markdown", "content": content, "text_align": "left"}]
+        return _feishu_card(header_title, template, body_elements)
+    body_elements = [
         {
             "tag": "markdown",
             "content": content,
@@ -752,6 +766,14 @@ def build_feishu_card(
         header_title, body_elements, template = sectioned
     if len(header_title) > 50:
         header_title = header_title[:49] + "…"
+    return _feishu_card(header_title, template, body_elements)
+
+
+def _feishu_card(
+    header_title: str,
+    template: str,
+    body_elements: list[dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "schema": "2.0",
         "config": {"update_multi": True},

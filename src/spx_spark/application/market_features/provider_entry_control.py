@@ -62,6 +62,8 @@ def gth_ibkr_entry_control(
     """
 
     payload = read_json_object(Path(data_root) / "latest" / "ibkr_stream_health.json")
+    continuity = read_json_object(Path(data_root) / "latest" / "ibkr_continuity.json")
+    continuity_state = str(continuity.get("state") or "") or None
     reason = str(payload.get("reason") or "")
     circuit_state = str(payload.get("circuit_state") or "unknown")
     conflict_count = payload.get("conflict_count")
@@ -83,6 +85,9 @@ def gth_ibkr_entry_control(
         block_reason = "ibkr_stream_disconnected"
     elif payload.get("data_plane_healthy") is not True:
         block_reason = "ibkr_data_plane_unhealthy"
+    elif continuity_state in {"gap", "recovering"}:
+        # A fresh health sample after an outage is not yet a rearmed lane.
+        block_reason = f"ibkr_continuity_{continuity_state}"
     else:
         block_reason = "allowed"
     return {
@@ -96,6 +101,8 @@ def gth_ibkr_entry_control(
         "circuit_state": payload.get("circuit_state"),
         "conflict_count": conflict_count,
         "source_reason": payload.get("reason"),
+        "continuity_state": continuity_state,
+        "continuity_gap_start": continuity.get("gap_start"),
     }
 
 

@@ -23,6 +23,7 @@ from spx_spark.analytics.options.strategy_payoff import (
     management_policy_for_candidate,
     risk_adjusted_cvar_objective,
     simulate_management_policy,
+    simulate_management_policy_batch,
     vertical_economics,
     vertical_payoff,
     vertical_width_path_reasons,
@@ -5046,6 +5047,7 @@ def _decision_payload(now: datetime) -> dict[str, object]:
     }
     return {
         "trading_date": "2026-08-07",
+        "gth_ibkr_entry_control": {"allowed": True, "reason": "allowed"},
         "pricing_allowed": True,
         "underlier": {"price": 7710.0, "source": "index:SPX"},
         "minute_market_frame": {
@@ -5674,3 +5676,73 @@ def test_session_metadata_snapshot_is_reused_only_within_decision(monkeypatch):
     for expected in (1, 2):
         build_strategy_decision(_decision_payload(now), _state(now), now)
         assert len(loads) == expected
+
+def test_batch_policy_replay_matches_scalar_for_debit_and_credit() -> None:
+    now = datetime(2026, 10, 16, 13, 30, tzinfo=timezone.utc)
+    times = [now + timedelta(minutes=5 * index) for index in range(12)]
+    cases = (
+        (
+            DEFAULT_MANAGEMENT_POLICY,
+            3.2,
+            (
+                [3.2, 3.2, 3.3, 3.6, 4.0, 4.6, 5.0, 4.9, 4.2, 3.8, 3.5, 3.2],
+                [3.2, 3.0, 2.4, 2.0, 1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9],
+                [3.2, 3.1, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+            ),
+        ),
+        (
+            RTH_IRON_CONDOR_MANAGEMENT_POLICY,
+            1.8,
+            (
+                [-1.8, -1.6, -1.2, -0.8, -0.5, -0.4, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3],
+                [-1.8, -2.0, -3.0, -4.0, -5.0, -5.6, -6.0, -6.0, -6.0, -6.0, -6.0, -6.0],
+                [-1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8, -1.8],
+            ),
+        ),
+    )
+    for policy, entry_price, rows in cases:
+        labels = simulate_management_policy_batch(
+            rows,
+            times,
+            entry_price=entry_price,
+            contract_count=2,
+            entry_at=now,
+            policy=policy,
+            session_date=now.date(),
+            max_quote_gap_seconds=300,
+        )
+        scalar = [
+            simulate_management_policy(
+                [PolicyMark(at, value) for at, value in zip(times, row)],
+                entry_price=entry_price,
+                contract_count=2,
+                entry_at=now,
+                policy=policy,
+                session_date=now.date(),
+                max_quote_gap_seconds=300,
+            )
+            for row in rows
+        ]
+        assert labels == scalar
+
+
+
+@pytest.mark.parametrize("initial_gap", [0, 60, 300])
+def test_batch_matches_scalar_across_frozen_policies_and_quote_gaps(initial_gap):
+    import numpy as np
+    from spx_spark.analytics.options import strategy_payoff as module
+
+    now = datetime(2026, 10, 16, 13, 30, tzinfo=timezone.utc)
+    rng = np.random.default_rng(16)
+    times = [now + timedelta(seconds=initial_gap + 60 * i) for i in range(76)]
+    for policy in (module.DEFAULT_MANAGEMENT_POLICY, module.IRON_CONDOR_MANAGEMENT_POLICY,
+                   module.RTH_IRON_CONDOR_MANAGEMENT_POLICY, module.PIN_BUTTERFLY_MANAGEMENT_POLICY,
+                   module.CLOSE_CONVERGENCE_BUTTERFLY_MANAGEMENT_POLICY):
+        values = rng.uniform(.1, 10, (50, len(times))) * (-1 if policy.entry_side == "credit" else 1)
+        kwargs = dict(entry_price=2, contract_count=4, entry_at=now,
+                      policy=policy, max_quote_gap_seconds=60)
+        batch = simulate_management_policy_batch(values, times, **kwargs)
+        scalar = [simulate_management_policy(
+            [PolicyMark(at, float(value)) for at, value in zip(times, row)], **kwargs
+        ) for row in values]
+        assert batch == scalar

@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="995" viewBox="0 0 1200 995" role="img" aria-labelledby="title description">
+<title id="title">SPX Spark · archive and research lifecycle</title>
+<desc id="description">Daily archive, pinned weekly replay, then verified result retention.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#697c90"/></marker></defs>
+<style>text{font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;fill:#20384e} .muted{fill:#597084} .edge{fill:none;stroke:#697c90;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}</style>
+<rect width="1200" height="995" fill="#fff"/>
+<text x="40" y="48" font-size="29" font-weight="700" class="">SPX Spark · archive and research lifecycle</text>
+<text x="40" y="80" font-size="17" font-weight="400" class="muted">Daily archive, pinned weekly replay, then verified result retention.</text>
+<text x="40" y="135" font-size="17" font-weight="700" class="">01  DAILY · WEEKDAYS 17:30 NEW YORK</text>
+<text x="40" y="425" font-size="17" font-weight="700" class="">02  WEEKLY · SATURDAY 10:00 SHANGHAI</text>
+<text x="40" y="715" font-size="17" font-weight="700" class="">03  RESULTS · AFTER SUCCESS OR FAILURE</text>
+<path class="edge" d="M340,235 L450,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,235 L860,235" marker-end="url(#arrow)"/>
+<path class="edge" d="M1010,315 L1010,445" marker-end="url(#arrow)"/>
+<path class="edge" d="M860,525 L750,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M450,525 L340,525" marker-end="url(#arrow)"/>
+<path class="edge" d="M190,605 L190,650 L20,650 L20,815 L40,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M340,815 L450,815" marker-end="url(#arrow)"/>
+<path class="edge" d="M750,815 L860,815" marker-end="url(#arrow)"/>
+<g data-card="Oracle partitions">
+<rect x="40" y="155" width="300" height="160" rx="12" fill="#eaf7f2" stroke="#23765d" stroke-width="1.4"/>
+<text x="59" y="185" font-size="20" font-weight="700" class="">Oracle partitions</text>
+<text x="59" y="214" font-size="17" font-weight="400" class="">Closed + verified Parquet</text>
+<text x="59" y="237" font-size="17" font-weight="400" class="">Read-only transfer endpoint</text>
+</g>
+<g data-card="Pi archive worker">
+<rect x="450" y="155" width="300" height="160" rx="12" fill="#f2edfc" stroke="#7556a7" stroke-width="1.4"/>
+<text x="469" y="185" font-size="20" font-weight="700" class="">Pi archive worker</text>
+<text x="469" y="214" font-size="17" font-weight="400" class="">Stream to verified NAS</text>
+<text x="469" y="237" font-size="17" font-weight="400" class="">mount</text>
+<text x="469" y="260" font-size="17" font-weight="400" class="">No SD-card staging</text>
+</g>
+<g data-card="NAS verification">
+<rect x="860" y="155" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="185" font-size="20" font-weight="700" class="">NAS verification</text>
+<text x="879" y="214" font-size="17" font-weight="400" class="">Reread objects; verify</text>
+<text x="879" y="237" font-size="17" font-weight="400" class="">hashes</text>
+<text x="879" y="260" font-size="17" font-weight="400" class="">Publish immutable snapshot</text>
+</g>
+<g data-card="Select fixed snapshot">
+<rect x="860" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="475" font-size="20" font-weight="700" class="">Select fixed snapshot</text>
+<text x="879" y="504" font-size="17" font-weight="400" class="">Immutable input manifest</text>
+<text x="879" y="527" font-size="17" font-weight="400" class="">Safe archived policy</text>
+<text x="879" y="550" font-size="17" font-weight="400" class="">settings</text>
+</g>
+<g data-card="Pin laptop inputs">
+<rect x="450" y="445" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="475" font-size="20" font-weight="700" class="">Pin laptop inputs</text>
+<text x="469" y="504" font-size="17" font-weight="400" class="">Research disk + verified</text>
+<text x="469" y="527" font-size="17" font-weight="400" class="">data</text>
+<text x="469" y="550" font-size="17" font-weight="400" class="">Matching policy and code</text>
+<text x="469" y="573" font-size="17" font-weight="400" class="">image</text>
+</g>
+<g data-card="Current-strategy replay">
+<rect x="40" y="445" width="300" height="160" rx="12" fill="#eef4ff" stroke="#3664a1" stroke-width="1.4"/>
+<text x="59" y="475" font-size="20" font-weight="700" class="">Current-strategy replay</text>
+<text x="59" y="504" font-size="17" font-weight="400" class="">Causal quotes; no network</text>
+<text x="59" y="527" font-size="17" font-weight="400" class="">RTH / GTH kept separate</text>
+</g>
+<g data-card="Local run evidence">
+<rect x="40" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="59" y="765" font-size="20" font-weight="700" class="">Local run evidence</text>
+<text x="59" y="794" font-size="17" font-weight="400" class="">Reports + logs + manifests</text>
+<text x="59" y="817" font-size="17" font-weight="400" class="">Preserve gaps and failed</text>
+<text x="59" y="840" font-size="17" font-weight="400" class="">outcomes</text>
+</g>
+<g data-card="NAS result backup">
+<rect x="450" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="469" y="765" font-size="20" font-weight="700" class="">NAS result backup</text>
+<text x="469" y="794" font-size="17" font-weight="400" class="">Independent file</text>
+<text x="469" y="817" font-size="17" font-weight="400" class="">verification</text>
+<text x="469" y="840" font-size="17" font-weight="400" class="">Retry pending backups</text>
+</g>
+<g data-card="Receipt + local copy">
+<rect x="860" y="735" width="300" height="160" rx="12" fill="#fff5df" stroke="#977024" stroke-width="1.4"/>
+<text x="879" y="765" font-size="20" font-weight="700" class="">Receipt + local copy</text>
+<text x="879" y="794" font-size="17" font-weight="400" class="">Record verified retention</text>
+<text x="879" y="817" font-size="17" font-weight="400" class="">No new Oracle deletion rule</text>
+</g>
+<text x="40" y="951" font-size="17" font-weight="400" class="muted">The Pi schedules; the laptop computes. Later backup success does not rewrite a failed compute run.</text>
+</svg>
