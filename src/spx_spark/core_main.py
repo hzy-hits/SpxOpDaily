@@ -23,7 +23,8 @@ from spx_spark.application.runtime.market_regime_range import MarketRegimeFreshn
 from spx_spark.config import StorageSettings
 from spx_spark.logging_setup import configure_logging
 from spx_spark.settings import current_app_settings
-from spx_spark.strategy import steven
+
+
 async def _run_owner(name: str, runner: Callable[[], int],
                      shutdown: asyncio.Event) -> None:
     code = await asyncio.to_thread(runner)
@@ -139,10 +140,6 @@ async def main() -> None:
                         app_settings=app_settings,
                         storage_settings=storage,
                     ),
-                    runtime.alert_interval_seconds, shutdown, critical=False))
-            if app_settings.alerts.steven_enabled:
-                tasks.create_task(_run_periodic(
-                    "steven", partial(steven.run, ["--summary-json"]),
                     runtime.alert_interval_seconds, shutdown, critical=False))
     finally:
         request_shutdown()

@@ -138,4 +138,11 @@ git diff --check
 
 旧版实时行情 / Replay 网站已退役。[通知图片入口](site/spxw-surface/README.md)和
 [历史策略复盘页](site/strategy-review/README.md)不是实时持仓或完整行情界面。
+
+Steven observe-only guidance、专用 replay 与 episode 复盘已在源码退役
+（2026-10-17）；共享 gamma/exposure 与股票/低 IV + LEAPS 扫描保留。
+`spx replay steven` 不再提供；升级前须清理旧 `steven.*` 部署配置，残留键会导致
+启动失败，见[退役边界](docs/steven-framework-integration.md)与
+[共享 pin-distance 配置迁移](docs/runtime-configuration.md#scope)。此变更不代表已部署 VPS。
+
 带日期的事故报告保留原始观测；证据及文档优先级见[完整目录](docs/README.md)。

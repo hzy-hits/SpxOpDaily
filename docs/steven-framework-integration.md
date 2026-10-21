@@ -4,6 +4,17 @@
 > **文档定位：历史研究与实验。** 研究/观察记录；保留原数据来源、样本期、政策和失败结果，不代表现行策略已证明 edge。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 
+> **Source retirement (2026-10-17; P5-2 / historical P3-3 ownership):**
+> Steven guidance, its optional Core task, replay command, episode review and
+> dedicated bar pipeline are removed. The specification below is historical,
+> not an activation guide. Shared exposure/gamma calculations remain; Core's
+> existing market-feature computation now publishes `latest/exposure_map.json`
+> for the OI-mirror CLI. The 25-point pin-distance setting moves to the existing
+> typed `AppSettings`; see [configuration cutover](runtime-configuration.md#scope).
+> Existing historical artifacts are neither deleted nor migrated. Bark/notifier
+> code, prompts and delivery, Rust, strategy authority and the stock/LEAPS scanner
+> are unchanged. No VPS deployment or live-state verification is implied.
+
 日期：2026-07-11
 状态：规格文档（Phase 2/3 代码已合入；运行默认 `steven.enabled=false`，盘中验收前保持关闭）
 前置阅读：`docs/superpowers/specs/2026-07-11-steven-framework-data-budget-plan.zh.md`、`docs/greeks-definitions.md`

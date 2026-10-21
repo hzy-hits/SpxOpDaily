@@ -42,6 +42,22 @@ def test_unknown_toml_key_is_rejected(settings_cwd: Path) -> None:
         AppSettings()
 
 
+def test_shared_exposure_pin_distance_is_typed_and_configurable(
+    settings_cwd: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert AppSettings().exposure_pin_max_distance_points == 25.0
+    monkeypatch.setenv("SPX_EXPOSURE_PIN_MAX_DISTANCE_POINTS", "40")
+    assert AppSettings().exposure_pin_max_distance_points == 40.0
+    assert AppSettings(exposure_pin_max_distance_points=10).exposure_pin_max_distance_points == 10
+    for invalid in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            AppSettings(exposure_pin_max_distance_points=invalid)
+
+
+def test_steven_replay_command_is_retired(settings_cwd: Path) -> None:
+    assert CliRunner().invoke(app, ["replay", "steven"]).exit_code == 2
+
+
 def test_core_lock_path_is_typed_and_cli_is_registered(
     settings_cwd: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,7 +179,6 @@ def test_data_command_forwards_to_existing_owners(
         ("spx_spark.ibkr.trading_hours_report.run", ["report", "ibkr-hours"]),
         ("spx_spark.strategy.micopedia.run", ["report", "micopedia"]),
         ("spx_spark.options_map.run", ["report", "options-map"]),
-        ("spx_spark.strategy.steven_replay.run", ["replay", "steven"]),
         ("spx_spark.ibkr.collector.run", ["ibkr", "collect"]),
         ("spx_spark.ibkr.stream.cli.run", ["ibkr", "stream"]),
         ("spx_spark.ibkr.farm_health.run_probe_cli", ["ibkr", "farm-probe"]),

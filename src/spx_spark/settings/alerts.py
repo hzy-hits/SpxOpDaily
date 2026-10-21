@@ -13,8 +13,6 @@ class AlertSettings:
     documented environment overrides once before rules receive this object.
     """
 
-    steven_enabled: bool = False
-    steven_alert_context_enabled: bool = False
     require_schwab_streaming_anchors: bool = True
     move_quiet_floor_bps: float = 15.0
     move_high_severity_em_fraction: float = 0.35

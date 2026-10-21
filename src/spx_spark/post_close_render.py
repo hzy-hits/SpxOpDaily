@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from spx_spark.steven_validation import FORWARD_METRICS_DISCLAIMER
-
 
 def fmt(value: Any, digits: int = 2) -> str:
     if value is None:
@@ -169,23 +167,6 @@ def render_markdown(payload: dict[str, Any]) -> str:
         if not greeks.get("metrics"):
             lines.append("| No comparable same-universe pair | - | - | - |")
         lines.append("")
-
-    steven = payload.get("steven_episode")
-    if isinstance(steven, dict):
-        metrics = (
-            steven.get("forward_metrics") if isinstance(steven.get("forward_metrics"), dict) else {}
-        )
-        lines.extend(
-            [
-                "## Steven Episode (observe_only audit)",
-                "",
-                f"- Episode: `{steven.get('episode_id')}`; setups: {steven.get('setup_count')}; final_state: `{steven.get('final_state') or '-'}`.",
-                f"- Forward quality: `{metrics.get('quality')}`; direction hypothesis: `{metrics.get('direction_hypothesis')}`; reference: {fmt(metrics.get('reference_price'))}.",
-                f"- MFE/MAE (bps): {fmt_bps(metrics.get('mfe_bps'))} / {fmt_bps(metrics.get('mae_bps'))}.",
-                f"- {FORWARD_METRICS_DISCLAIMER}",
-                "",
-            ]
-        )
 
     lines.extend(
         [

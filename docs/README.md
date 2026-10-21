@@ -243,7 +243,7 @@ OI/Gamma、L1 资金流仍是代理，不是真实参与者持仓/完整买卖�
 | [SPX 3–5DTE 海鸥与玉蜥蜴：原始入场、报价退出与官方结算](seagull-jade-3-5dte-research-2026-09-08.md) | `docs/seagull-jade-3-5dte-research-2026-09-08.md` |
 | [Spring Gamma v3 RTH 八变量接入审计](spring-gamma-v3-rth-eight-feature-integration-audit-2026-07-24.md) | `docs/spring-gamma-v3-rth-eight-feature-integration-audit-2026-07-24.md` |
 | [SPX 0DTE 全信号回测与 RTH 漏斗复核](spx-0dte-all-signal-backtest-2026-07-23.md) | `docs/spx-0dte-all-signal-backtest-2026-07-23.md` |
-| [Steven SPX Options Framework 集成规格（exposure_map + strategy/steven）](steven-framework-integration.md) | `docs/steven-framework-integration.md` |
+| [Steven 集成规格（历史；2026-10-17 source retirement，保留 shared exposure）](steven-framework-integration.md) | `docs/steven-framework-integration.md` |
 | [到达后停留、分阶段铁鹰与因果结构选择](strategy-adaptations-replay-2026-09-06.md) | `docs/strategy-adaptations-replay-2026-09-06.md` |
 | [原始券商快照去重与策略收益归因](strategy-attribution-and-dedup-2026-09-05.md) | `docs/strategy-attribution-and-dedup-2026-09-05.md` |
 | [SPX 0DTE：GTH、Put/Down 与入场质量修复验证](strategy-backtest-validation-2026-07-18.md) | `docs/strategy-backtest-validation-2026-07-18.md` |

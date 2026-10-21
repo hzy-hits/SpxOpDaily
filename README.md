@@ -174,5 +174,15 @@ records, and notification history cannot select backtest samples or prove edge.
 The former live-surface/replay website is retired. The
 [notification-image entry](site/spxw-surface/README.md) and
 [historical strategy review](site/strategy-review/README.md) are not live portfolio
-or complete market-data interfaces. Dated incident reports retain their original
-observations; see the [document catalog](docs/README.md) for evidence and precedence.
+or complete market-data interfaces.
+
+Steven observe-only guidance, its dedicated replay, and episode review are retired
+in source (2026-10-17); shared gamma/exposure analytics and the stock/low-IV +
+LEAPS scanner are kept. `spx replay steven` is no longer provided. Remove legacy
+`steven.*` deployment overlay keys before upgrading — stale keys fail startup —
+per the [retirement boundary](docs/steven-framework-integration.md) and the
+[shared pin-distance setting](docs/runtime-configuration.md#scope). Merging this
+does not imply VPS deployment.
+
+Dated incident reports retain their original observations; see the
+[document catalog](docs/README.md) for evidence and precedence.

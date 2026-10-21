@@ -19,7 +19,6 @@ class FunctionBudget:
 
 CRITICAL_FUNCTION_BUDGETS = (
     FunctionBudget("schwab/collector.py", "run", 260, 8),
-    FunctionBudget("strategy/steven_machine.py", "advance_state", 50, 6),
     FunctionBudget(
         "post_close_completeness.py",
         "evaluate_review_completeness",

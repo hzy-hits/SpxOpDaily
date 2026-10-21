@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from spx_spark.app_settings import AppSettings
 from spx_spark.application.market_features.exposure_strikes import key_strike_features
 from spx_spark.features import exposure_map as exposure_module
 from spx_spark.features.exposure_map import (
@@ -224,6 +225,48 @@ def test_intraday_oi_plus_volume_weight_preserved() -> None:
         intraday=False,
     )
     assert intraday == pytest.approx((oi_only or 0.0) * 1.5, rel=1e-9)
+
+
+@pytest.mark.parametrize("distance, expected_pin", ((25.0, 7500.0), (60.0, 7550.0)))
+def test_shared_exposure_pin_distance_preserves_selection(
+    monkeypatch: pytest.MonkeyPatch, distance: float, expected_pin: float,
+) -> None:
+    monkeypatch.setattr(
+        exposure_module, "get_settings",
+        lambda: AppSettings(exposure_pin_max_distance_points=distance),
+    )
+    assert build_exposure_map(make_golden_state()).expiries[0].walls.pin_candidate == expected_pin
+
+
+def test_core_cycle_keeps_exposure_export_available_to_oi_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migrate_operational_database,
+) -> None:
+    from dataclasses import replace
+
+    from spx_spark.application.market_features import service
+    from spx_spark.config import StorageSettings
+    from spx_spark.options_map import cli
+
+    migrate_operational_database(tmp_path)
+    storage = replace(
+        StorageSettings.from_env(), data_root=str(tmp_path),
+        latest_state_path=str(tmp_path / "latest" / "state.json"),
+    )
+    state = make_golden_state()
+    monkeypatch.setattr(StorageSettings, "from_env", classmethod(lambda cls: storage))
+    monkeypatch.setattr(service.LatestStateStore, "load", lambda *a, **kw: state)
+
+    assert service.run([], now=AS_OF, storage_settings=storage) == 0
+
+    exported = json.loads((tmp_path / "latest" / "exposure_map.json").read_text())
+    expected = build_exposure_map(state).to_dict()
+    for field in ("as_of", "underlier", "expiries"):
+        assert exported[field] == expected[field]
+    image = tmp_path / "oi-mirror.svg"
+    assert cli.run(["--oi-mirror-svg", str(image)]) == 0
+    assert image.is_file()
+    assert not (tmp_path / "latest" / "steven_state.json").exists()
+    assert not (tmp_path / "lake" / "steven").exists()
 
 
 def test_exposure_map_oi_and_volume_weighted_coexist() -> None:

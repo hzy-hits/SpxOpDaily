@@ -105,19 +105,6 @@ def report(ctx: typer.Context) -> None:
 @app.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
-def replay(ctx: typer.Context) -> None:
-    """Run a strategy replay."""
-    name, args = _tool_args(ctx)
-    if name == "steven":
-        from spx_spark.strategy.steven_replay import run
-    else:
-        raise typer.BadParameter(f"unknown replay tool: {name}")
-    _finish(run(args))
-
-
-@app.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
-)
 def ibkr(ctx: typer.Context) -> None:
     """Run an IBKR snapshot, stream, farm probe or position reader."""
     name, args = _tool_args(ctx)

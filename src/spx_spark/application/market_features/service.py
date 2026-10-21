@@ -21,9 +21,7 @@ from spx_spark.application.market_features.composition import (
 from spx_spark.application.market_features.confirmed_gate_audit import (
     reconcile_confirmed_gate,
 )
-from spx_spark.application.market_features.es_bar_consumer import (
-    load_consumable_es_bars,
-)
+from spx_spark.application.market_features.es_bar_consumer import load_consumable_es_bars
 from spx_spark.application.market_features.es_bar_consumer_fence import (
     fence_rth_market_state as _fence_rth_market_state,
     fence_rth_market_state_inputs as _fence_rth_market_state_inputs,
@@ -135,7 +133,7 @@ from spx_spark.application.order_map.level_trigger_repricing import (
     default_level_trigger_repricing_path,
 )
 from spx_spark.config import StorageSettings
-from spx_spark.features.exposure_schema import ExposureMap
+from spx_spark.features.exposure_schema import ExposureMap, persist_exposure_map
 from spx_spark.greek_reference import build_zero_dte_greeks_reference
 from spx_spark.infrastructure.operational_db import (
     persist_strategy_decision,
@@ -264,6 +262,7 @@ def run(
     grouped_quotes, options_map, exposure_map = options_snapshot(
         latest, storage_settings=storage
     )
+    persist_exposure_map(exposure_map, storage.data_root)
     finish_state_component("option_analytics")
     option_history = _dict_list(persisted.get("option_history"))
     option_frame, contracts = build_option_structure_frame(

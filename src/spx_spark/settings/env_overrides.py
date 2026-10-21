@@ -14,8 +14,6 @@ def env_override(dotted_path: str, environ: Mapping[str, str]) -> Any | None:
             "SPX_STANDARDIZED_MINUTE_MAX_AGE_SECONDS"
         ),
         "ibkr_broker.account_read_enabled": "IBKR_BROKER_ACCOUNT_READ_ENABLED",
-        "steven.enabled": "SPX_STEVEN_ENABLED",
-        "steven.alert_context_enabled": "SPX_STEVEN_ALERT_CONTEXT_ENABLED",
         "alerts.move_quiet_floor_bps": "ALERT_MOVE_QUIET_FLOOR_BPS",
         "alerts.move_high_severity_em_fraction": (
             "ALERT_MOVE_HIGH_SEVERITY_EM_FRACTION"
