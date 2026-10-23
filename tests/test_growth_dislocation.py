@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from spx_spark.analytics.growth_dislocation import (
     apply_crowding,
@@ -25,7 +28,7 @@ from spx_spark.infrastructure.growth_dislocation import (
     scan_once,
     scheduled_mode,
 )
-from spx_spark.market_calendar import ET
+from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.notifier.human_policy import quiet_window_suppresses
 from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.settings import load_app_settings
@@ -122,11 +125,17 @@ class FakeSchwabClient:
         for index in range(50):
             price *= 1.03 if index % 2 == 0 else 0.97
             closes.append(price)
+        day = self.now.date()
+        if not DEFAULT_MARKET_CALENDAR.is_trading_day(day):
+            day = DEFAULT_MARKET_CALENDAR.previous_trading_day(day)
+        days = [day]
+        for _ in range(49):
+            days.append(DEFAULT_MARKET_CALENDAR.previous_trading_day(days[-1]))
         return [
             {
                 "datetime": int(
                     datetime.combine(
-                        self.now.date() - timedelta(days=50 - index),
+                        day,
                         datetime.min.time(),
                         tzinfo=ET,
                     ).timestamp()
@@ -134,7 +143,7 @@ class FakeSchwabClient:
                 ),
                 "close": close,
             }
-            for index, close in enumerate(closes)
+            for day, close in zip(reversed(days), closes)
         ]
 
 
@@ -979,3 +988,155 @@ def test_production_universe_covers_russell_1000_fallen_angels() -> None:
     assert by_symbol["RBLX"].sector_benchmark == "XLC"
     assert "IWB" in by_symbol["RBLX"].memberships
     assert by_symbol["APP"].crowding_group == by_symbol["RBLX"].crowding_group
+
+
+def test_scan_repairs_sparse_and_provisional_cached_daily_bars(tmp_path: Path) -> None:
+    client = FakeSchwabClient(NOW)
+    common = dict(now=NOW, mode="rth", client=client, policy=_policy(),
+                  universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    baseline = scan_once(**common).document
+    path = tmp_path / "runtime" / "growth_dislocation_state.json"
+    state = json.loads(path.read_text())
+    for symbol in ("TEST", "XLK"):
+        rows = state["price_histories"][symbol]
+        del rows[-12:-7]
+        rows[-2]["close"] = 999.0  # Yesterday's cached intraday observation is not a close.
+    path.write_text(json.dumps(state))
+
+    repaired = scan_once(**common).document
+
+    assert repaired["scan_complete"]
+    assert repaired["all_candidates"][0]["rsi14"] == baseline["all_candidates"][0]["rsi14"]
+    assert repaired["all_candidates"][0]["rs_5d_sector"] == baseline["all_candidates"][0]["rs_5d_sector"]
+    repaired_state = json.loads(path.read_text())
+    for symbol in ("TEST", "XLK"):
+        days = [datetime.fromisoformat(r["date"]).date()
+                for r in repaired_state["price_histories"][symbol]]
+        assert all(b == DEFAULT_MARKET_CALENDAR.next_trading_day(a) for a, b in zip(days, days[1:]))
+
+
+@pytest.mark.parametrize("symbol", ["TEST", "XLK"])
+@pytest.mark.parametrize("fault", ["gap", "lag", "nonfinite", "unavailable"])
+def test_unrepaired_history_cannot_score_or_change_core_membership(
+    tmp_path: Path, symbol: str, fault: str,
+) -> None:
+    class BrokenHistory(FakeSchwabClient):
+        def _candles(self, requested: str):
+            rows = super()._candles(requested)
+            if requested == symbol:
+                if fault == "gap":
+                    del rows[-10]
+                elif fault == "lag":
+                    rows = rows[:-3]
+                elif fault == "nonfinite":
+                    rows[-8]["close"] = float("inf")
+                else:
+                    raise TimeoutError("test provider unavailable")
+            return rows
+
+    common = dict(now=NOW.replace(hour=20), mode="daily", policy=_policy(),
+                  universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    first = scan_once(client=FakeSchwabClient(NOW), **common).document
+    broken = scan_once(client=BrokenHistory(NOW), **common).document
+
+    assert first["all_candidates"]
+    assert not broken["all_candidates"]
+    assert not broken["scan_complete"]
+    assert not broken["data_quality"]["request_limited"]
+    assert broken["core_pool_status"] == "FROZEN"
+    assert broken["added_symbols"] == broken["exited_symbols"] == []
+    assert broken["core_pool"][0]["snapshot_status"] == "historical"
+    assert broken["core_pool"][0]["detail_refreshed_this_run"] is False
+    row = broken["watchlist"][0]
+    assert row["final_score"] is None
+    assert row["rsi14" if symbol == "TEST" else "sector_return_5d"] is None
+    assert any(f"history:{symbol}:" in error for error in broken["data_quality"]["errors"])
+
+    recovered = scan_once(client=FakeSchwabClient(NOW), **common).document
+    assert recovered["scan_complete"]
+    assert recovered["all_candidates"]
+    assert recovered["added_symbols"] == []
+
+
+@pytest.mark.parametrize("at", [NOW, datetime(2026, 9, 8, 15, 30, tzinfo=ET)])
+def test_daily_uses_broker_close_and_rth_uses_only_current_quote(tmp_path: Path, at: datetime) -> None:
+    client = FakeSchwabClient(at)
+    common = dict(client=client, policy=_policy(), universe=_universe(), data_root=tmp_path,
+                  iv_percentile_fetcher=_ivp_fetcher)
+    intraday = scan_once(now=at, mode="rth", **common).document["all_candidates"][0]
+    daily = scan_once(now=at.replace(hour=20), mode="daily", **common).document["all_candidates"][0]
+    candles = client._candles("TEST")
+    assert daily["return_5d"] == pytest.approx(candles[-1]["close"] / candles[-6]["close"] - 1)
+    assert intraday["return_5d"] == pytest.approx(client.test_last / candles[-6]["close"] - 1)
+    assert daily["price_history_as_of"] == at.date().isoformat()
+
+
+def test_report_leads_with_current_scan_and_does_not_fill_missing_iv_from_history(tmp_path: Path) -> None:
+    client = FakeSchwabClient(NOW)
+    common = dict(now=NOW.replace(hour=20), mode="daily", client=client, policy=_policy(),
+                  universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    first = scan_once(**common).document
+    client.test_last = 114.0  # Position fails entry; no IV refresh for this member.
+    paused = scan_once(**common).document
+    member = paused["core_pool"][0]
+    assert member["snapshot_status"] == "historical"
+    assert member["current_observation"]["ivp_52w"] is None
+    _, text = render_notification(paused, discoveries=True)
+    assert text.index("## 当日扫描") < text.index("## 淘汰与数据缺口") < text.index("## Top Opportunities") < text.index("## Core Pool")
+    core_text = text.split("## Core Pool", 1)[1]
+    assert "28.00%" in core_text
+    assert "| 8.00% |" not in core_text
+    assert "未获取" in core_text
+    assert member["snapshot_as_of_et"] in core_text
+    assert "TEST LEAPS" not in text
+
+    # A fresh strict candidate is visible even before it joins Core Pool.
+    candidate = dict(first["all_candidates"][0], symbol="NEW")
+    paused["all_candidates"] = paused["notification_top10"] = [candidate]
+    _, text = render_notification(paused, discoveries=True)
+    assert text.index("| NEW |") < text.index("## Core Pool")
+
+
+def test_feishu_coverage_distinguishes_missing_and_cached_iv(tmp_path: Path) -> None:
+    common = dict(now=NOW, mode="daily", client=FakeSchwabClient(NOW), policy=_policy(),
+                  universe=_universe(), data_root=tmp_path)
+    missing = scan_once(iv_percentile_fetcher=lambda _: {}, **common).document
+    assert missing["data_quality"]["ivp_incomplete"]
+    assert missing["counts"]["ivp_missing"] == 1
+    scan_once(iv_percentile_fetcher=_ivp_fetcher, **common)
+    cached = scan_once(iv_percentile_fetcher=lambda _: {}, **common).document
+    assert cached["counts"]["ivp_refreshed"] == 0
+    assert cached["counts"]["ivp_cached"] == 1
+    assert cached["counts"]["ivp_missing"] == 0
+    _, text = render_notification(cached, discoveries=True)
+    assert "沿用有效缓存 1" in text
+    assert "本轮刷新 0" in text
+
+
+def test_history_refresh_cannot_exceed_budget_or_reuse_old_contract(tmp_path: Path) -> None:
+    common = dict(now=NOW, mode="rth", client=FakeSchwabClient(NOW),
+                  universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    scan_once(policy=_policy(), **common)
+    limited = scan_once(policy=replace(_policy(), rth_request_budget=3), **common).document
+    assert limited["requests_used"] == 3
+    assert limited["data_quality"]["request_limited"]
+    assert not limited["scan_complete"]
+    assert not limited["all_candidates"]
+    assert "target_leaps_not_refreshed_this_run" in limited["watchlist"][0]["data_quality_reasons"]
+
+
+def test_stale_benchmark_quote_cannot_generate_relative_strength(tmp_path: Path) -> None:
+    class StaleBenchmark(FakeSchwabClient):
+        def _quote(self, symbol: str):
+            row = super()._quote(symbol)
+            if symbol == "XLK":
+                row["quote"]["quoteTime"] = int((self.now - timedelta(days=1)).timestamp() * 1000)
+            return row
+
+    document = scan_once(
+        now=NOW, mode="rth", client=StaleBenchmark(NOW), policy=_policy(),
+        universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher,
+    ).document
+    assert not document["scan_complete"]
+    assert not document["all_candidates"]
+    assert document["watchlist"][0]["sector_return_5d"] is None

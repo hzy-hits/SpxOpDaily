@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
@@ -256,6 +257,7 @@ def _build_document(
     requests_used = 0
     errors: list[str] = []
     quotes: dict[str, EquityQuote] = {}
+    requested_quote_symbols = 0
     provider_symbols = list(
         dict.fromkeys(
             [member.provider_symbol for member in universe.members]
@@ -267,6 +269,7 @@ def _build_document(
             break
         batch = provider_symbols[offset : offset + 500]
         requests_used += 1
+        requested_quote_symbols += len(batch)
         try:
             quotes.update(fetch_equity_quote_batch(client, batch))
         except ProviderError as exc:
@@ -331,6 +334,12 @@ def _build_document(
                 "ivp_13w": snapshot.ivp_13w if snapshot else None,
                 "ivp_26w": snapshot.ivp_26w if snapshot else None,
                 "ivp_52w": snapshot.ivp_52w if snapshot else None,
+                "iv_history_as_of": (
+                    (snapshot.as_of_date or snapshot.observed_at.astimezone(ET).date()).isoformat()
+                    if snapshot else None
+                ),
+                "iv_observed_at": snapshot.observed_at.isoformat() if snapshot else None,
+                "iv_refreshed_this_run": _ibkr_provider_symbol(member.symbol) in refreshed_iv_symbols,
             }
         )
         if (
@@ -357,7 +366,10 @@ def _build_document(
         observation["screen_reason"] = None
         hard_survivors.append(item)
 
-    histories = _mapping_state(state, "price_histories")
+    history_cache = _mapping_state(state, "price_histories")
+    # Only this run's validated broker history may feed scores. A cached bar
+    # can be an earlier intraday observation, even when its date looks complete.
+    histories: dict[str, Any] = {}
     detail_cache = _mapping_state(state, "details")
     required_benchmarks = list(
         dict.fromkeys(
@@ -365,18 +377,18 @@ def _build_document(
         )
     )
     for symbol in required_benchmarks:
-        history = _close_history(histories.get(symbol))
-        if len(history) < 35 and requests_used < budget:
-            requests_used += 1
-            try:
-                history = list(fetch_daily_closes(client, symbol))
-            except ProviderError as exc:
-                errors.append(f"history:{symbol}:{type(exc).__name__}")
-        benchmark_quote = quotes.get(symbol)
-        if benchmark_quote is not None and benchmark_quote.last is not None:
-            history = _upsert_close(history, ny.date(), benchmark_quote.last)
-        if history:
+        if requests_used >= budget:
+            break
+        requests_used += 1
+        history, reason = _refresh_close_history(
+            client, symbol, now=now, mode=mode, quote=quotes.get(symbol),
+            max_quote_age=policy.quote_max_age_seconds,
+        )
+        if reason:
+            errors.append(f"history:{symbol}:{reason}")
+        else:
             histories[symbol] = _close_history_payload(history)
+            history_cache[symbol] = histories[symbol]
 
     prioritized = _detail_order(hard_survivors, state)
     detailed_now: set[str] = set()
@@ -385,17 +397,16 @@ def _build_document(
     for member, quote, _location in prioritized:
         if requests_used >= budget:
             break
-        history = _close_history(histories.get(member.symbol))
-        if len(history) < 35:
-            requests_used += 1
-            try:
-                history = list(fetch_daily_closes(client, member.provider_symbol))
-            except ProviderError as exc:
-                errors.append(f"history:{member.symbol}:{type(exc).__name__}")
-                continue
-        if quote.last is not None:
-            history = _upsert_close(history, ny.date(), quote.last)
-            histories[member.symbol] = _close_history_payload(history)
+        requests_used += 1
+        history, reason = _refresh_close_history(
+            client, member.provider_symbol, now=now, mode=mode, quote=quote,
+            max_quote_age=policy.quote_max_age_seconds,
+        )
+        if reason:
+            errors.append(f"history:{member.symbol}:{reason}")
+            continue
+        histories[member.symbol] = _close_history_payload(history)
+        history_cache[member.symbol] = histories[member.symbol]
         if requests_used >= budget:
             break
         requests_used += 1
@@ -442,9 +453,6 @@ def _build_document(
         if member.symbol in target_leaps_rejected:
             continue
         history = _close_history(histories.get(member.symbol))
-        if quote.last is not None:
-            history = _upsert_close(history, ny.date(), quote.last)
-            histories[member.symbol] = _close_history_payload(history)
         row, reasons = _candidate_row(
             member=member,
             quote=quote,
@@ -501,7 +509,9 @@ def _build_document(
             str(row["symbol"]),
         )
     )
-    request_limited = bool(hard_survivors) and len(detail_evaluated_now) < len(hard_survivors)
+    request_limited = requested_quote_symbols < len(provider_symbols) or (
+        requests_used >= budget and len(detail_evaluated_now) < len(hard_survivors)
+    )
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "policy_version": POLICY_VERSION,
@@ -518,6 +528,11 @@ def _build_document(
             "price_hard_survivors": len(price_hard_survivors),
             "ivp_snapshots": sum(symbol in iv_snapshots for symbol in price_survivor_symbols),
             "ivp_refreshed": len(refreshed_iv_symbols),
+            "ivp_missing": rejection_counts["ibkr_iv_percentile_missing"],
+            "ivp_cached": sum(
+                symbol in iv_snapshots and symbol not in refreshed_iv_symbols
+                for symbol in price_survivor_symbols
+            ),
             "hard_survivors": len(hard_survivors),
             "detailed_this_run": len(detail_evaluated_now),
             "strict_candidates": len(strict_candidates),
@@ -540,7 +555,7 @@ def _build_document(
         "data_quality": {
             "status": "partial" if request_limited or errors else "complete",
             "request_limited": request_limited,
-            "ivp_incomplete": False,
+            "ivp_incomplete": bool(rejection_counts["ibkr_iv_percentile_missing"]),
             "errors": sorted(set(errors)),
             "volatility_contract": "13-week, 26-week, and 52-week percentiles calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; selected LEAPS current IV passes its hard limit while IV/RV20 is score-only",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
@@ -608,6 +623,7 @@ def _membership_observation(
     return {
         "symbol": member.symbol,
         "quote_observed": quote is not None,
+        "quote_at": quote.quote_at.isoformat() if quote and quote.quote_at else None,
         "price_location_52w": price_location,
         "market_cap": quote.market_cap if quote else None,
         "dividend_yield": quote.dividend_yield if quote else None,
@@ -615,6 +631,9 @@ def _membership_observation(
         "ivp_13w": None,
         "ivp_26w": None,
         "ivp_52w": None,
+        "iv_history_as_of": None,
+        "iv_observed_at": None,
+        "iv_refreshed_this_run": False,
         "strict_eligible": False,
         "today_state": "STALE",
         "screen_reason": screen_reason,
@@ -996,6 +1015,7 @@ def _candidate_row(
         "data_quality": "warming" if reasons else "ready",
         "data_quality_reasons": sorted(set(reasons)),
         "as_of_et": ny.isoformat(),
+        "price_history_as_of": history[-1].day.isoformat() if features and history else None,
     }
     return row, sorted(set(reasons))
 
@@ -1030,19 +1050,76 @@ def render_notification(
         for row in (core_pool if isinstance(core_pool, list) else []) if isinstance(row, Mapping)
     ]
     lines.extend(core_rows or ["| — | — | — | Core Pool 尚无成员 | — | — | — |"])
+    if discoveries:
+        # Feishu's current-scan report is independent of historical membership.
+        # The default renderer and notification routing are left unchanged.
+        quality = _mapping(document.get("data_quality"))
+        lines = [
+            f"# {title}\n\n## 当日扫描\n",
+            f"扫描时间：{document.get('generated_at', '—')}",
+            f"Universe {counts.get('universe', 0)}；基础筛选通过 {counts.get('price_hard_survivors', 0)}；"
+            f"严格候选 {counts.get('strict_candidates', 0)}；待补齐详细数据 {counts.get('warming_rows', 0)}",
+            "本轮新增：" + (", ".join(document.get("strict_added_symbols", [])) or "无"),
+            f"扫描执行：{quality.get('status', 'unknown')}（不代表所有源数据刚刷新）；"
+            f"Schwab 请求 {document.get('requests_used')} / {document.get('request_budget')}",
+            f"IVP 本轮刷新 {counts.get('ivp_refreshed', 0)}；沿用有效缓存 {counts.get('ivp_cached', 0)}；"
+            f"缺失 {counts.get('ivp_missing', 0)}。缓存不冒充本轮刷新。",
+            "仅做候选发现与排序；TRIGGER 不等于买入。Core Pool 待确认不影响本轮候选展示。",
+            "\n## 淘汰与数据缺口\n",
+        ]
+        reason_labels = {
+            "above_52w_location": "52W位置超限",
+            "below_market_cap": "市值不足",
+            "dividend_yield": "股息率超限",
+            "ivp_13w_above_limit": "13W IVP超限",
+            "ivp_26w_above_limit": "26W IVP超限",
+            "ivp_52w_above_limit": "52W IVP超限",
+            "ibkr_iv_percentile_missing": "IVP数据缺失（非策略淘汰）",
+            "target_leaps_hard_filter": "目标LEAPS不合格",
+            "target_leaps_missing": "目标LEAPS缺失",
+            "quote_missing": "股票报价缺失",
+            "quote_fields_missing": "股票报价字段缺失",
+            "quote_frozen": "股票报价过期",
+            "quote_delayed": "股票报价延迟",
+            "not_optionable": "无期权",
+            "price_history_warming": "股票日线未完成校验",
+            "sector_history_warming": "行业基准日线未完成校验",
+            "dte_out_of_range": "期限不符",
+            "delta_missing_or_out_of_range": "Delta缺失或不符",
+            "bid_ask_invalid_or_spread_above_limit": "买卖报价无效或价差过宽",
+            "iv_missing_or_above_limit": "IV缺失或超过上限",
+            "open_interest_below_limit": "持仓量不足",
+            "extrinsic_invalid_or_above_limit": "时间价值无效或过高",
+        }
+        for reason, count in sorted(_mapping(document.get("rejection_counts")).items()):
+            if count:
+                lines.append(f"- {reason_labels.get(reason, reason)}：{count}")
+        for error in quality.get("errors", []):
+            lines.append(f"- 数据错误：{error}")
+        for row in document.get("membership_observations", []):
+            reasons = row.get("contract_rejection_counts")
+            if reasons:
+                lines.append(f"- {row['symbol']} 合约首个失败条件：" + ", ".join(
+                    f"{reason_labels.get(reason, reason)}={count:.2f}"
+                    for reason, count in sorted(reasons.items())
+                ))
+    else:
+        lines += [
+            "\n## Scanner 状态\n",
+            f"- 严格候选 **{counts.get('strict_candidates', 0)}**；"
+            f"未完成数据行（正文隐藏） **{counts.get('warming_rows', 0)}**；"
+            f"本轮详细刷新 **{counts.get('detailed_this_run', 0)} / {counts.get('hard_survivors', 0)}**",
+            f"- Schwab 请求 **{document.get('requests_used')} / {document.get('request_budget')}**；"
+            f"Data Quality **{_mapping(document.get('data_quality')).get('status', 'unknown')}**",
+            "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
+        ]
     lines += [
-        "\n## Scanner 状态\n",
-        f"- 严格候选 **{counts.get('strict_candidates', 0)}**；"
-        f"未完成数据行（正文隐藏） **{counts.get('warming_rows', 0)}**；"
-        f"本轮详细刷新 **{counts.get('detailed_this_run', 0)} / {counts.get('hard_survivors', 0)}**",
-        f"- Schwab 请求 **{document.get('requests_used')} / {document.get('request_budget')}**；"
-        f"Data Quality **{_mapping(document.get('data_quality')).get('status', 'unknown')}**",
-        "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
         "\n## Top Opportunities（52W低位 + IVP 52W）\n",
         "| Symbol | Today State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | IV | IV/RV20 | OI | 时间价值/股价 | Spread |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
-    if isinstance(top := document.get("core_top_opportunities", []), list) and top:
+    top = document.get("notification_top10" if discoveries else "core_top_opportunities", [])
+    if isinstance(top, list) and top:
         for row in top:
             if not isinstance(row, Mapping):
                 continue
@@ -1066,47 +1143,53 @@ def render_notification(
                     spread=_pct(row.get("leaps_spread_mid")),
                 )
             )
+    elif discoveries:
+        lines.append("| — | 本轮无严格候选，详见上方淘汰与数据缺口 |" + " — |" * 14)
     else:
         lines.append(
             "| — | WATCH | — | — | — | — | — | 当前无 Active 严格候选；Core Pool 成员见上表 | — | — | — | — | — | — | — | — |"
         )
     if discoveries:
         core_symbols = {row["symbol"] for row in document.get("core_pool", [])}
-        fresh = sorted(
-            (row for row in document.get("all_candidates", []) if row["symbol"] not in core_symbols),
-            key=priority_sort_key,
+        pending = sorted(
+            row["symbol"] for row in document.get("all_candidates", [])
+            if row["symbol"] not in core_symbols
         )
         lines.extend([
-            "\n## 本轮严格候选 · 待 Core Pool 确认\n",
-            f"扫描时间：{document.get('generated_at', '—')}",
-            "本轮新增：" + (", ".join(document.get("strict_added_symbols", [])) or "无"),
-            "待确认不代表数据未完成；Core Pool 仍需连续两个完整交易日日报通过。",
-            "| Symbol | State | 52W位置 | IVP 52W | Market Cap |",
-            "|---|---|---:|---:|---:|",
+            "\n待 Core Pool 确认：" + (", ".join(pending) or "无") + "；仍需连续两个完整日报通过。",
         ])
-        for row in fresh:
+        if top:
+            lines.append("\n数据日期（ET；RTH日线末点是盘中观察，非最终收盘）：")
+        for row in top:
             lines.append(
-                f"| {row['symbol']} | {row['state']} | {_pct(row.get('price_location_52w'))} "
-                f"| {_pct(row.get('ivp_52w'))} | {_market_cap(row.get('market_cap'))} |"
+                f"- {row['symbol']}：日线 {row.get('price_history_as_of') or '未知'}；"
+                f"IV历史 {row.get('iv_history_as_of') or '未知'}；"
+                f"IV获取时间 {row.get('iv_observed_at') or '未知'}"
             )
-        if not fresh:
-            lines.append("| — | 本轮无待确认严格候选 | — | — | — |")
-        lines.append("\n合约筛选未通过（每份合约记录第一个失败条件）：")
-        reason_labels = {
-            "dte_out_of_range": "期限不符",
-            "delta_missing_or_out_of_range": "Delta缺失或不符",
-            "bid_ask_invalid_or_spread_above_limit": "买卖报价无效或价差过宽",
-            "iv_missing_or_above_limit": "IV缺失或超过上限",
-            "open_interest_below_limit": "持仓量不足",
-            "extrinsic_invalid_or_above_limit": "时间价值无效或过高",
-        }
-        for row in document.get("membership_observations", []):
-            reasons = row.get("contract_rejection_counts")
-            if row.get("screen_reason") == "target_leaps_hard_filter" and reasons:
-                lines.append(f"- {row['symbol']}：" + ", ".join(
-                    f"{reason_labels.get(reason, reason)}={count:.2f}"
-                    for reason, count in sorted(reasons.items())
-                ))
+        lines.extend([
+            "\n## Core Pool · 跟踪记录（非当日推荐）\n",
+            f"Active {counts.get('core_active', 0)}；Paused {counts.get('core_paused', 0)}；"
+            f"Changes：新增 {added}；退出 {exited}",
+            str(changes.get("message", "")),
+            "暂停成员不展示历史评分与历史合约；本轮未获取的字段留空，不拿旧值补齐。",
+            "",
+            "| Symbol | Today State | 本轮原因 | 52W位置 | IVP 52W | Market Cap | 报价源时间 | IV历史日期 | 最后合格快照（历史） |",
+            "|---|---|---|---:|---:|---:|---|---|---|",
+        ])
+        for row in sorted(core_pool, key=lambda r: (
+            r.get("snapshot_status") != "current", str(r.get("symbol")),
+        )):
+            current = _mapping(row.get("current_observation"))
+            lines.append(
+                f"| {row['symbol']} | {row.get('today_state', 'STALE')} | "
+                f"{reason_labels.get(current.get('screen_reason'), current.get('screen_reason')) or '—'} | "
+                f"{_pct(current.get('price_location_52w'))} | "
+                f"{_pct(current.get('ivp_52w'))} | {_market_cap(current.get('market_cap'))} | "
+                f"{current.get('quote_at') or '未获取'} | {current.get('iv_history_as_of') or '未获取'} | "
+                f"{row.get('snapshot_as_of_et') or row.get('as_of_et') or '未知'} |"
+            )
+        if not core_pool:
+            lines.append("| — | 暂无成员 |" + " — |" * 7)
     return title, "\n".join(lines)
 
 
@@ -1222,9 +1305,61 @@ def _close_history(value: Any) -> list[DailyClose]:
             close = float(row["close"])
         except (KeyError, TypeError, ValueError):
             continue
-        if close > 0.0:
+        if math.isfinite(close) and close > 0.0:
             by_day[day] = DailyClose(day, close)
     return [by_day[day] for day in sorted(by_day)][-MAX_CLOSE_HISTORY:]
+
+
+def _refresh_close_history(
+    client: SchwabClient,
+    symbol: str,
+    *,
+    now: datetime,
+    mode: str,
+    quote: EquityQuote | None,
+    max_quote_age: float,
+) -> tuple[list[DailyClose], str | None]:
+    """Repair from broker bars, then validate actual exchange sessions, not row count.
+
+    Completed sessions always come from daily bars. Only RTH may append a fresh
+    same-session quote; after-hours prices never overwrite the official close.
+    This deliberately replaces the old sparse/provisional cache on each scan.
+    """
+    ny = now.astimezone(ET)
+    session = DEFAULT_MARKET_CALENDAR.session(ny.date())
+    completed_day = (
+        ny.date() if session and ny >= session.close_at
+        else DEFAULT_MARKET_CALENDAR.previous_trading_day(ny.date())
+    )
+    try:
+        history = [
+            row for row in fetch_daily_closes(client, symbol)
+            if row.day <= completed_day and DEFAULT_MARKET_CALENDAR.is_trading_day(row.day)
+        ][-MAX_CLOSE_HISTORY:]
+    except ProviderError as exc:
+        return [], type(exc).__name__
+    if not history:
+        return [], "insufficient_sessions"
+    if history[-1].day != completed_day or any(
+        current.day != DEFAULT_MARKET_CALENDAR.next_trading_day(prior.day)
+        for prior, current in zip(history, history[1:])
+    ):
+        return [], "missing_sessions"
+    if any(not math.isfinite(row.close) or row.close <= 0.0 for row in history):
+        return [], "invalid_close"
+    if mode == "rth":
+        if (
+            not session or not session.open_at <= ny < session.close_at
+            or quote is None or not quote.realtime or quote.last is None
+            or quote.quote_at is None or quote.quote_at.astimezone(ET).date() != ny.date()
+            or not 0.0 <= (now - quote.quote_at).total_seconds() <= max_quote_age
+        ):
+            return [], "current_quote_unavailable"
+        history = _upsert_close(history, ny.date(), quote.last)
+    if len(history) < 35:
+        return [], "insufficient_sessions"
+    return history, None
+
 
 def _close_history_payload(history: list[DailyClose]) -> list[dict[str, Any]]:
     return [
