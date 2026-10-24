@@ -83,3 +83,19 @@ lines，实际分配还扣除 base、temporary 与 reserve。这不是全链覆�
 Python warning/critical 为低于 10 GiB，Rust 不接受写后低于 10 GiB 的 append；
 28 GiB action threshold 只用于提前维护。具体清理权与证据见
 [存储说明](storage-plan.md)和[运行配置](runtime-configuration.md)。
+
+## Research context archive (2026-10-24)
+
+The existing macro-calendar refresh task emits a `macro_calendar_snapshot` structured
+log after a persisted refresh and when reusing a fresh overlay. The snapshot retains
+the complete allowlisted events, per-source coverage, refresh clocks, and partial
+failures. It does not change calendar TTLs, entry permissions, strategy parameters,
+or notification delivery. Existing provider-control snapshots already go to the
+Core journal; no new service, timer, database, or capture process is required.
+
+The home archive exports only these operational inputs from the Core/Worker journal.
+The journal receipt time is the earliest time a replay may consume an exported record;
+source timestamps and production freshness checks remain authoritative. Historical
+missing records must remain explicit gaps. A current calendar snapshot must never be
+backdated to authorize a historical trade. Runtime release acceptance is separate
+from complete historical-context coverage and from strategy profitability.
