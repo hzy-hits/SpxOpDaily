@@ -225,3 +225,32 @@ def test_clock_never_performs_http_and_known_week_can_have_no_allowlisted_events
     state = macro_event_state(now, data_root=tmp_path)
     assert state["mode"] == "normal"
     assert state["entry_allowed"] is True
+
+
+def test_archive_log_preserves_calendar_content_and_source_knowledge_times(tmp_path, monkeypatch):
+    import structlog
+    from structlog.testing import capture_logs
+    from spx_spark import macro_event_calendar as calendar
+    from spx_spark.logging_setup import configure_logging
+
+    now = datetime(2026, 8, 12, 16, tzinfo=timezone.utc)
+    monkeypatch.setattr(calendar, "_http_get", lambda url: json.dumps(FF_FIXTURE).encode()
+                        if "ff_calendar" in url else FOMC_FIXTURE.encode())
+    previous_logging = structlog.get_config()
+    try:
+        configure_logging("calendar-archive-test", "INFO")
+        with capture_logs() as records:
+            refresh_macro_events_if_due(tmp_path, now=now)
+            refresh_macro_events_if_due(tmp_path, now=now + timedelta(minutes=5))
+            monkeypatch.setattr(calendar, "_http_get", lambda url: (_ for _ in ()).throw(TimeoutError()))
+            refresh_macro_events_if_due(tmp_path, now=now + timedelta(hours=7))
+    finally:
+        structlog.configure(**previous_logging)
+    snapshots = [row["calendar"] for row in records if row["event"] == "macro_calendar_snapshot"]
+    assert len(snapshots) == 3
+    assert snapshots[0] == snapshots[1]
+    saved = json.loads(runtime_macro_events_path(tmp_path).read_text())
+    assert snapshots[2] == saved
+    assert saved["sources"]["ff_thisweek"]["refreshed_at"] == now.isoformat()
+    assert saved["sources"]["ff_thisweek"]["error"] == "TimeoutError"
+    assert calendar.calendar_coverage(saved, now=now + timedelta(hours=7))["status"] == "unknown"

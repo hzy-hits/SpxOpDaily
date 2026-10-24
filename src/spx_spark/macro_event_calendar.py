@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from spx_spark.state_io import atomic_write_json_secure, read_json_object
+from spx_spark.logging_setup import get_logger
 
 NY = ZoneInfo("America/New_York")
 REFRESH_TTL = timedelta(hours=6)
@@ -58,6 +59,7 @@ def refresh_macro_events_if_due(
     path = runtime_macro_events_path(data_root)
     existing = read_json_object(path)
     if not force and _overlay_fresh(existing, now=now):
+        get_logger(__name__).info("macro_calendar_snapshot", calendar=existing)
         return {
             "status": "skipped_fresh",
             "path": str(path),
@@ -95,6 +97,9 @@ def refresh_macro_events_if_due(
         "events": sorted(events.values(), key=lambda row: str(row["release_at"])),
     }
     atomic_write_json_secure(path, payload)
+    # Existing journald retention and the off-market archiver preserve the actual
+    # knowledge time. Never backdate this observation to an event's release time.
+    get_logger(__name__).info("macro_calendar_snapshot", calendar=payload)
     return {
         "status": "refreshed" if complete else "partial_failure",
         "path": str(path),
