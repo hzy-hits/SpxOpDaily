@@ -530,7 +530,7 @@ def test_ready_iron_condor_is_map_only_not_a_human_winner() -> None:
 
 
 def test_gth_expansion_to_contraction_can_reach_manual_iron_condor() -> None:
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     facts = _gth_transition_facts()
     transition = gth_iron_condor_transition(facts, now=NOW)
@@ -812,7 +812,7 @@ def test_gth_human_iron_condor_accepts_10_second_bbo_skew_but_rejects_more() -> 
 
 
 def test_rth_human_iron_condor_uses_schwab_per_side_delta_after_1100() -> None:
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     at_1100 = datetime(2026, 8, 13, 15, 0, tzinfo=timezone.utc)
     rows = enumerate_iron_condor_candidates(
@@ -1421,7 +1421,7 @@ def test_unified_iron_condor_consumes_the_real_gth_provider_gate(
 
 @pytest.mark.parametrize("fault", [None, "iv_rising", "missing_history", "conflict", "credit24", "stale"])
 def test_authorized_smooth_gth_uses_unified_candidate_and_preserves_execution_gates(monkeypatch, tmp_path, fault):
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
     facts = _gth_transition_facts()
     for key in list(facts["volatility"]):
         if key.startswith("atm_straddle_gth_") and key != "atm_straddle_gth_observations":

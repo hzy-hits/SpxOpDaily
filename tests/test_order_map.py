@@ -5337,9 +5337,7 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
     settings = make_settings(str(tmp_path / "strategy.json"))
     decision = _strategy_decision_payload(now)
     decision.pop("market_facts")
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
-
-    base_text = _render_strategy_candidate(
+    base_text = delivery_module._render_strategy_candidate(
         decision, decision["candidate"], quote_status="refresh_required"
     )
     captured: dict[str, object] = {}
@@ -5427,7 +5425,7 @@ def test_final_enqueue_checks_elapsed_time_and_quote_deadline(monkeypatch, tmp_p
 
 
 def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> None:
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     text = _render_strategy_candidate(
@@ -5479,7 +5477,7 @@ def test_render_strategy_candidate_is_operator_chinese_not_contract_dump() -> No
 
 
 def test_render_strategy_candidate_marks_thin_odds_and_omits_uncalibrated_path() -> None:
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
     text = _render_strategy_candidate(
@@ -5552,7 +5550,7 @@ def test_rolling_butterfly_card_preserves_target_clock_and_money_units() -> None
 
 
 def test_rolling_butterfly_card_does_not_turn_missing_model_values_into_zero() -> None:
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     for risk in ({}, {"expected_pnl_points": float("nan"), "cvar10_loss_points": float("inf")}):
         text = _render_strategy_candidate({}, {
@@ -5759,7 +5757,7 @@ def _pin_stable_decision(
 
 
 def test_render_strategy_butterfly_prints_three_legs_and_wing_range() -> None:
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
 
     now = datetime(2026, 8, 13, 17, 0, tzinfo=timezone.utc)
     text = _render_strategy_candidate(
@@ -6684,8 +6682,7 @@ def test_compact_price_line_leaves_cash_index_untagged() -> None:
 
 
 def test_candidate_card_exposes_evidence_and_separate_quote_deadline() -> None:
-    from spx_spark.application.order_map.delivery import _strategy_card_title
-    from spx_spark.application.order_map.delivery_templates import _render_strategy_candidate
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate, _strategy_card_title
 
     now = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
     decision = _strategy_decision_payload(now)
