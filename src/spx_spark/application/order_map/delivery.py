@@ -467,6 +467,9 @@ def _render_strategy_candidate(
             "## 风险",
             f"最大亏损 {loss} · SPX 离开 {invalidation} 时重新评估",
             "",
+            "## 目标",
+            f"SPX {target}{payoff}",
+            "",
             "## 结构经济性",
             f"净借记 {_fmt_premium(ask)}{payoff}",
             f"到期盈亏平衡（不含费用）{_fmt_premium(economics.get('breakeven_low'))}"
@@ -522,8 +525,11 @@ def _render_strategy_candidate(
             "## 风险",
             f"最大亏损 {loss} · 跳空时普通止损不保证成交",
             "",
-            "## 结构经济性",
+            "## 目标",
             f"盈亏平衡 {_fmt_strike(economics.get('breakeven_spx'))} · {gap_text}",
+            "",
+            "## 结构经济性",
+            f"净借记 {_fmt_premium(ask)}",
             "到期盈亏平衡不含费用；结算观点不等于已验证的净收益优势。",
         ]
     else:
@@ -555,6 +561,9 @@ def _render_strategy_candidate(
             f"最大亏损 {loss} · SPX 跌破 {invalidation} 时重新评估"
             if str(candidate.get("direction") or "") == "UP"
             else f"最大亏损 {loss} · SPX 升破 {invalidation} 时重新评估",
+            "",
+            "## 目标",
+            f"SPX {target}{payoff}",
             "",
             "## 结构经济性",
             f"净借记 {_fmt_premium(ask)}{payoff}",
