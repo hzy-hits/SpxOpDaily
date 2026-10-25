@@ -447,8 +447,16 @@ def core_display_row(
             "entered_at": member.get("entered_at"),
             "exit_streak": int(member.get("exit_streak") or 0),
             "exit_reason": member.get("exit_reason"),
+            "snapshot_status": "current" if current is not None else "historical",
+            "snapshot_as_of_et": row.get("as_of_et"),
+            # Keep the last eligible snapshot for audit, but do not let its
+            # fields or clocks stand in for a missing current observation.
+            "current_observation": dict(observation or {}),
         }
     )
+    if current is None:
+        row["detail_refreshed_this_run"] = False
+        row["data_quality"] = "historical"
     if current is None and observation is not None:
         for key in (
             "price_location_52w",
