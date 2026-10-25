@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 from time import monotonic
+from zoneinfo import ZoneInfo
 from spx_spark.application.order_map.decision_consistency import committed_strategy_decision
 
 from spx_spark.application.notifications.report_enqueue import (
@@ -318,7 +320,9 @@ def _session_close_utc(session_date: str) -> datetime | None:
     return close.astimezone(timezone.utc) if close.tzinfo else close.replace(tzinfo=timezone.utc)
 
 
-def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, Any]) -> str:
+def _render_strategy_candidate(
+    decision: dict[str, Any], candidate: dict[str, Any], *, quote_status: str | None = None
+) -> str:
     quote, economics = candidate.get("quote") or {}, candidate.get("economics") or {}
     setup = str(candidate.get("setup_kind") or "")
     title = _strategy_card_title(candidate)
@@ -431,11 +435,29 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             payoff = (
                 f" · 翼宽 {_fmt_strike(width)} 点 · 借记占 {_percent(debit_frac)}{debit_warning}"
             )
+        thesis = [f"目标位置 SPX {target}；进入目标区间不等于组合盈利。"]
+        convergence = candidate.get("close_convergence")
+        convergence = convergence if isinstance(convergence, dict) else {}
+        if setup == "CLOSE_CONVERGENCE_60M":
+            target_at = _timestamp(convergence.get("target_at"))
+            target_clock = (
+                f"{target_at.astimezone(ZoneInfo('America/New_York')):%Y-%m-%d %H:%M %Z} / "
+                f"{target_at.astimezone(SHANGHAI_TZ):%Y-%m-%d %H:%M} 北京"
+                if target_at is not None else "暂缺"
+            )
+            thesis.extend((
+                f"60分钟收敛 P10/P50/P90 "
+                f"{_fmt_strike(convergence.get('q10'))}/"
+                f"{_fmt_strike(convergence.get('q50'))}/"
+                f"{_fmt_strike(convergence.get('q90'))}",
+                f"持有至预测目标 {target_clock}，以新鲜组合报价退出",
+            ))
         lines = [
             f"【{title}】",
             "",
-            "## 结论",
+            "## 方向判断",
             f"{_setup_cn(setup)} · {_direction_cn(candidate.get('direction'))} · 只许限价",
+            *thesis,
             "",
             "## 执行",
             f"{_butterfly_leg_text(candidate)}",
@@ -447,22 +469,36 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "",
             "## 目标",
             f"SPX {target}{payoff}",
+            "",
+            "## 结构经济性",
+            f"净借记 {_fmt_premium(ask)}{payoff}",
+            f"到期盈亏平衡（不含费用）{_fmt_premium(economics.get('breakeven_low'))}"
+            f"—{_fmt_premium(economics.get('breakeven_high'))}；不代表提前退出可卖价。",
         ]
         if setup == "CLOSE_CONVERGENCE_60M":
-            convergence = (
-                candidate.get("close_convergence")
-                if isinstance(candidate.get("close_convergence"), dict)
-                else {}
+            risk = candidate.get("convergence_risk")
+            risk = risk if isinstance(risk, dict) else {}
+            expected = _finite_number(risk.get("expected_pnl_points"))
+            tail_loss = _finite_number(risk.get("cvar10_loss_points"))
+            objective = _finite_number(risk.get("objective_points"))
+            expected_text = (
+                f"${expected * 100:+.2f}"
+                if expected is not None and isfinite(expected) else "暂缺"
+            )
+            tail_text = (
+                f"${tail_loss * 100:.2f}"
+                if tail_loss is not None and isfinite(tail_loss) and tail_loss >= 0 else "暂缺"
             )
             lines.extend(
                 (
-                    f"60分钟收敛 P10/P50/P90 "
-                    f"{_fmt_strike(convergence.get('q10'))}/"
-                    f"{_fmt_strike(convergence.get('q50'))}/"
-                    f"{_fmt_strike(convergence.get('q90'))}",
-                    f"持有至预测目标 {convergence.get('target_at')}，以新鲜组合报价退出",
+                    f"模型每套预计净收益 {expected_text} · 最差10%情景平均亏损 {tail_text}",
+                    "以上已计跨价及双边费用，为保持入场IV不变的模型估计，前向未验证；到期收益图不代表目标时刻可卖收益。",
                 )
             )
+            if objective is None or not isfinite(objective):
+                lines.append("风险调整收益暂缺；排名不代表已确认经济优势。")
+            elif objective <= 0:
+                lines.append("风险调整收益不为正；候选排名不代表已确认经济优势。")
     elif setup == "EVENT_SETTLEMENT_THRESHOLD":
         view = candidate.get("view") if isinstance(candidate.get("view"), dict) else {}
         direction = str(candidate.get("direction") or "")
@@ -478,7 +514,7 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         lines = [
             f"【{title}】",
             "",
-            "## 结论",
+            "## 方向判断",
             f"事件结算观点 · SPX 到期结算{relation}前收 {_fmt_strike(view.get('threshold_level'))}",
             str(view.get("macro_event_name") or "宏观事件"),
             "",
@@ -491,6 +527,10 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "",
             "## 目标",
             f"盈亏平衡 {_fmt_strike(economics.get('breakeven_spx'))} · {gap_text}",
+            "",
+            "## 结构经济性",
+            f"净借记 {_fmt_premium(ask)}",
+            "到期盈亏平衡不含费用；结算观点不等于已验证的净收益优势。",
         ]
     else:
         legs = _vertical_leg_text(candidate)
@@ -508,8 +548,9 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
         lines = [
             f"【{title}】",
             "",
-            "## 结论",
+            "## 方向判断",
             f"{_setup_cn(setup)} · {_direction_cn(candidate.get('direction'))} · 只许限价",
+            f"目标 SPX {target}；方向成立不等于组合盈利。",
             "",
             "## 执行",
             f"{legs}",
@@ -523,7 +564,38 @@ def _render_strategy_candidate(decision: dict[str, Any], candidate: dict[str, An
             "",
             "## 目标",
             f"SPX {target}{payoff}",
+            "",
+            "## 结构经济性",
+            f"净借记 {_fmt_premium(ask)}{payoff}",
+            f"到期盈亏平衡（不含费用）{_fmt_premium(economics.get('breakeven_spx'))}；不代表提前退出可卖价。",
         ]
+    if setup != "IRON_CONDOR_DELTA":
+        advisories = (candidate.get("edge") or {}).get("advisories") or ()
+        if setup != "CLOSE_CONVERGENCE_60M":
+            if "candidate_utility_not_positive" in advisories:
+                lines.append("研究风险调整评分不为正；方向信号不构成经济优势证明。")
+            if "candidate_lower_bound_not_positive" in advisories:
+                lines.append("研究估计收益下界不为正；不能据此确认经济优势。")
+        lines.extend(("", "## 盘口风险"))
+        bid = _finite_number(quote.get("bid"))
+        ask = _finite_number(quote.get("ask"))
+        if bid is not None and ask is not None and isfinite(bid) and isfinite(ask) and ask >= bid:
+            lines.append(
+                f"报价快照：组合卖出参考 {bid:.2f} / 买入参考 {ask:.2f} · "
+                f"买卖价差 {ask - bid:.2f} 点（每套 ${(ask - bid) * 100:.2f}，不含费用）；非成交保证。"
+            )
+        else:
+            lines.append("组合双边报价不完整或异常；买卖价差暂缺。")
+        if quote_status == "ready":
+            lines.append("入队时仍在报价有效期内；提交前必须刷新。")
+        elif quote_status == "refresh_required":
+            lines.append("报价已过期或时效未确认；刷新组合报价并重新确认后才可提交限价单。")
+        else:
+            lines.append("报价时效未确认；提交前必须刷新。")
+        lines.append(
+            f"报价有效截至 {_beijing_clock(candidate.get('quote_valid_until'))}（北京）；"
+            "观点有效期不延长报价有效期。"
+        )
     environment = (
         (decision.get("regime") or {}).get("rth_environment") or {}
         if isinstance(decision.get("regime"), dict)
