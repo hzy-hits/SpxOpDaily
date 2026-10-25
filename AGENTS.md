@@ -195,6 +195,10 @@ Do not edit code until this brief is accepted when the user requested design-fir
 
 ### Complexity budget
 
+2026-10-25 用户明确废弃通用生产模块 1,000 行硬上限及历史超限模块的单调行数基线。
+不再维护 `test_module_size_budget.py`，不得仅因文件超过该行数而拆分、搬移代码或阻断提交。
+模块组织按职责、依赖边界与可维护性评审；下列变更规模记录仍用于说明影响，不是文件行数配额。
+
 Every final report must show:
 
 - production files added/deleted

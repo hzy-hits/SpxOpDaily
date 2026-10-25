@@ -5337,7 +5337,9 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
     settings = make_settings(str(tmp_path / "strategy.json"))
     decision = _strategy_decision_payload(now)
     decision.pop("market_facts")
-    base_text = delivery_module._render_strategy_candidate(decision, decision["candidate"])
+    base_text = delivery_module._render_strategy_candidate(
+        decision, decision["candidate"], quote_status="refresh_required"
+    )
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
@@ -5373,12 +5375,18 @@ def test_strategy_decision_omits_research_memo_from_trade_ready_path(
     assert captured["text"] == captured["feishu_text"]
 
 
-@pytest.mark.parametrize("elapsed,accepted", [(20, True), (301, False)])
+@pytest.mark.parametrize("elapsed,accepted", [(1, True), (20, True), (301, False)])
 def test_final_enqueue_checks_elapsed_time_and_quote_deadline(monkeypatch, tmp_path, elapsed, accepted):
+    from copy import deepcopy
     from spx_spark.application.order_map import delivery
+    from spx_spark.notifier.format_push import build_feishu_card
     now = datetime(2026, 8, 7, 15, tzinfo=timezone.utc)
     decision = _strategy_decision_payload(now)
     decision["candidate"]["quote_valid_until"] = (now + timedelta(seconds=15)).isoformat()
+    decision["candidate"]["edge"] = {
+        "advisories": ["candidate_utility_not_positive", "candidate_lower_bound_not_positive"]
+    }
+    original = deepcopy(decision)
     settings = make_settings(str(tmp_path / "strategy.json"))
     captured = []
     monkeypatch.setattr(NotificationSettings, "from_env", classmethod(lambda cls: settings))
@@ -5392,9 +5400,25 @@ def test_final_enqueue_checks_elapsed_time_and_quote_deadline(monkeypatch, tmp_p
     action_at = now + timedelta(seconds=elapsed)
     result = delivery.enqueue_strategy_decision(decision, now=now, action_clock=lambda: action_at)
     assert result["accepted"] is accepted
+    assert decision == original
     if accepted:
-        assert result["quote_status"] == "refresh_required"
+        assert result["quote_status"] == ("ready" if elapsed < 15 else "refresh_required")
         assert captured[0]["enqueued_at"] == action_at
+        assert captured[0]["text"] == captured[0]["feishu_text"]
+        sections = {item["title"]: item["content"] for item in captured[0]["sections"]}
+        assert "看涨" in sections["方向判断"] and "7730" in sections["方向判断"]
+        assert "评分不为正" in sections["结构经济性"]
+        assert "收益下界不为正" in sections["结构经济性"]
+        assert "0.20 点" in sections["盘口风险"] and "$20.00" in sections["盘口风险"]
+        assert ("报价已过期" in sections["盘口风险"]) is (elapsed >= 15)
+        assert "提交前必须刷新" in sections["盘口风险"] or "重新确认" in sections["盘口风险"]
+        card = build_feishu_card(
+            captured[0]["text"], title=captured[0]["title"], kind="trade_intent",
+            lane="trade_ready", sections=captured[0]["sections"],
+        )
+        card_bodies = [item["content"] for item in card["body"]["elements"]]
+        for title in ("方向判断", "结构经济性", "盘口风险"):
+            assert sections[title] in card_bodies
     else:
         assert captured == []
         assert result["outcome"] == "candidate_expired_during_preparation"
@@ -5487,6 +5511,77 @@ def test_render_strategy_candidate_marks_thin_odds_and_omits_uncalibrated_path()
     assert "借记占 42%（偏贵）" in text
     assert "路径 P10/P50/P90" not in text
     assert "未校准" not in text
+
+
+def test_rolling_butterfly_card_preserves_target_clock_and_money_units() -> None:
+    from copy import deepcopy
+    from spx_spark.application.order_map.delivery import _ensure_templates
+    from spx_spark.notifier.templates import render_message
+
+    _ensure_templates()
+    for target, eastern, beijing in (
+        ("2026-10-23T20:00:00+00:00", "2026-10-23 16:00 EDT", "2026-10-24 04:00"),
+        ("2026-11-02T21:00:00+00:00", "2026-11-02 16:00 EST", "2026-11-03 05:00"),
+    ):
+        candidate = {
+            "setup_kind": "CLOSE_CONVERGENCE_60M", "strategy_type": "CALL_BUTTERFLY",
+            "direction": "NEUTRAL", "evidence_status": "forward_unvalidated_user_override",
+            "quote": {"bid": 3.25, "ask": 3.75},
+            "economics": {"width_points": 10, "max_loss_points": 3.75,
+                          "breakeven_low": 7693.75, "breakeven_high": 7706.25},
+            "close_convergence": {"target_at": target, "q10": 7690, "q50": 7700, "q90": 7710},
+            "convergence_risk": {
+                "expected_pnl_points": 0.125, "cvar10_loss_points": 1.25, "objective_points": -0.1,
+            },
+        }
+        original = deepcopy(candidate)
+        rendered = render_message("trade_ready", channel="feishu", context={
+            "decision": {}, "candidate": candidate, "quote_status": "refresh_required",
+        })
+        sections = {item["title"]: item["content"] for item in rendered.sections}
+        assert eastern in sections["方向判断"] and beijing in sections["方向判断"]
+        assert "$+12.50" in sections["结构经济性"] and "$125.00" in sections["结构经济性"]
+        assert "7693.75" in sections["结构经济性"] and "7706.25" in sections["结构经济性"]
+        assert "3.25" in sections["盘口风险"] and "0.50 点" in sections["盘口风险"]
+        assert "风险调整收益不为正" in sections["结构经济性"]
+        assert "报价已过期" in sections["盘口风险"]
+        assert rendered.text == rendered.feishu_text
+        assert candidate == original  # Presentation must not rewrite the frozen decision.
+
+
+def test_rolling_butterfly_card_does_not_turn_missing_model_values_into_zero() -> None:
+    from spx_spark.application.order_map.delivery import _render_strategy_candidate
+
+    for risk in ({}, {"expected_pnl_points": float("nan"), "cvar10_loss_points": float("inf")}):
+        text = _render_strategy_candidate({}, {
+            "setup_kind": "CLOSE_CONVERGENCE_60M", "strategy_type": "PUT_BUTTERFLY",
+            "direction": "NEUTRAL", "close_convergence": {"target_at": "invalid"},
+            "convergence_risk": risk,
+        })
+        assert "$+0.00" not in text and "$0.00" not in text
+        assert "nan" not in text and "inf" not in text
+        assert "风险调整收益暂缺" in text
+
+
+@pytest.mark.parametrize("quote", [{"ask": 4.2}, {"bid": 4.3, "ask": 4.2},
+                                  {"bid": float("nan"), "ask": 4.2}])
+def test_trade_ready_missing_or_invalid_spread_is_not_free_liquidity(quote) -> None:
+    from spx_spark.application.order_map.delivery import _ensure_templates
+    from spx_spark.notifier.templates import render_message
+
+    _ensure_templates()
+    candidate = {
+        "setup_kind": "TREND_PULLBACK", "strategy_type": "CALL_DEBIT_VERTICAL",
+        "direction": "UP", "quote": quote,
+    }
+    rendered = render_message("trade_ready", channel="feishu", context={
+        "decision": {}, "candidate": candidate,
+    })
+    sections = {item["title"]: item["content"] for item in rendered.sections}
+    assert "看涨" in sections["方向判断"]
+    assert "价差暂缺" in sections["盘口风险"]
+    assert "$0.00" not in sections["盘口风险"]
+    assert "时效未确认" in sections["盘口风险"]
 
 
 def test_pin_stable_watch_enqueues_once_per_center_and_clock_phase(

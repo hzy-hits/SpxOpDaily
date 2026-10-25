@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from spx_spark.application.order_map import delivery_templates  # noqa: F401
 from spx_spark.application.order_map.strategy_regime import (
     DEFAULT_STRATEGY_POLICY,
@@ -105,3 +107,37 @@ def test_trade_ready_v1_matches_golden_output() -> None:
     ).read_text(encoding="utf-8")
     assert rendered.text == golden.rstrip("\n")
     assert rendered.sections
+
+
+@pytest.mark.parametrize("quote_status", ["ready", "refresh_required"])
+@pytest.mark.parametrize("setup,kind,direction,target", [
+    ("TREND_PULLBACK", "CALL_DEBIT_VERTICAL", "UP", "SPX 7730"),
+    ("TREND_PULLBACK", "PUT_DEBIT_VERTICAL", "DOWN", "SPX 7700"),
+    ("CLOSE_CONVERGENCE_60M", "CALL_BUTTERFLY", "NEUTRAL", "SPX 7730"),
+    ("EVENT_SETTLEMENT_THRESHOLD", "CALL_DEBIT_VERTICAL", "UP", "盈亏平衡 7713"),
+])
+def test_trade_ready_bark_summary_retains_target(setup, kind, direction, target, quote_status):
+    from copy import deepcopy
+    from spx_spark.notifier.format_push import bark_lockscreen_summary
+
+    right = "P" if kind == "PUT_DEBIT_VERTICAL" else "C"
+    candidate = {
+        "setup_kind": setup, "strategy_type": kind, "direction": direction,
+        "target_spx": 7700.0 if direction == "DOWN" else 7730.0,
+        "center": 7730.0, "width": 10.0, "right": right,
+        "long": {"strike": 7720.0 if right == "P" else 7710.0, "right": right},
+        "short": {"strike": 7710.0 if right == "P" else 7720.0, "right": right},
+        "quote": {"bid": 2.8, "ask": 3.0},
+        "economics": {"max_loss_points": 3.0, "breakeven_spx": 7713.0},
+        "view": {"threshold_level": 7700.0, "breakeven_gap_points": 13.0},
+    }
+    original = deepcopy(candidate)
+    rendered = render_message("trade_ready", channel="bark", context={
+        "decision": {}, "candidate": candidate, "quote_status": quote_status,
+    })
+    summary = bark_lockscreen_summary(rendered.text, title=rendered.title, kind="trade_intent")
+    assert target in summary
+    assert "最大亏损 $300" in summary
+    assert "买 " in summary and "卖 " in summary
+    assert len(summary) <= 280
+    assert candidate == original

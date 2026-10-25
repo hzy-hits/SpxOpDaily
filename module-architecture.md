@@ -153,6 +153,10 @@ L0 foundation      marketdata, market_calendar, alert_model, runtime_config,
 
 ## 3. 兼容门面预算
 
+2026-10-25 起，通用生产模块的 1,000 行上限及历史超限模块的行数基线已按用户要求废弃。
+模块按职责与依赖边界组织，不能仅为满足行数门槛拆分或搬移实现。
+下表是兼容门面的独立约束，不是通用业务模块大小限制。
+
 | 门面 | 预算（非空行） | 实现包 |
 | --- | --- | --- |
 | `options_map/__init__.py` | ≤150 | `analytics.options` + `options_map.*` |

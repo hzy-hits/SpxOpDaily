@@ -37,7 +37,9 @@ def _markdown_sections(text: str) -> tuple[Mapping[str, str], ...]:
 def _render_trade_ready_template(context: Mapping[str, Any]) -> RenderedMessage:
     decision = context["decision"]
     candidate = context["candidate"]
-    text = _render_strategy_candidate(decision, candidate) + str(context.get("extra") or "")
+    text = _render_strategy_candidate(
+        decision, candidate, quote_status=context.get("quote_status")
+    ) + str(context.get("extra") or "")
     text = (
         f"{text}\n\n## 决策参考\n"
         f"盘型：{price_action_playbook_text(decision)}\n"
@@ -45,7 +47,7 @@ def _render_trade_ready_template(context: Mapping[str, Any]) -> RenderedMessage:
         f"{_ict_liquidity_line(decision, candidate)}"
     )
     if context.get("quote_status") == "refresh_required":
-        text = "本次报价已过期；刷新组合报价并重新确认后才可提交限价单。\n\n" + text
+        text = "本次报价已过期或时效未确认；刷新组合报价并重新确认后才可提交限价单。\n\n" + text
     return RenderedMessage(
         title=_strategy_card_title(candidate),
         text=text,
