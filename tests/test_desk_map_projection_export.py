@@ -95,6 +95,9 @@ def test_recovery_refreshes_current_map_between_slots_and_suppresses_flapping(tm
     # One width temporarily disappears while another arrives; a return to the
     # already announced width cannot generate an endless recovery loop.
     current = _recovery_payload(now, session, (20,))
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    now += timedelta(seconds=121)
+    current = _recovery_payload(now, session, (20,))
     assert refresh_desk_on_data_recovery(storage, current, now=now)["published"]
     current = _recovery_payload(now, session, (10,))
     assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
@@ -121,6 +124,9 @@ def test_audit_or_delayed_timer_does_not_consume_newly_available_data(tmp_path, 
                                        trading_date="2026-08-05", storage=storage)
     assert "iron_condor_10_quotes" not in audit["recovery_seen"]
     monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    now += timedelta(seconds=121)
+    current = _recovery_payload(now, "gth", (10,))
     assert refresh_desk_on_data_recovery(storage, current, now=now)["published"]
 
 
@@ -170,16 +176,18 @@ def test_quote_then_probability_recovery_publishes_one_completed_update(tmp_path
     assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=35))["published"]
     assert json.loads((tmp_path / "latest/desk_map_projection.json").read_text())["projection_id"] == baseline["projection_id"]
     current = _recovery_payload(start + timedelta(seconds=40), session, (10, 20))
-    result = refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=40))
+    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=40))["published"]
+    current = _recovery_payload(start + timedelta(seconds=121), session, (10, 20))
+    result = refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=121))
     assert result["published"]
     assert set(result["recovered"]) == {
         f"iron_condor_{width}_{kind}" for width in (10, 20) for kind in ("quotes", "probability")
     }
     # Durable baseline survives another consumer call and temporary field loss.
-    current = _recovery_payload(start + timedelta(seconds=45), session)
-    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=45))["published"]
-    current = _recovery_payload(start + timedelta(seconds=50), session, (10, 20))
-    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=50))["published"]
+    current = _recovery_payload(start + timedelta(seconds=126), session)
+    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=126))["published"]
+    current = _recovery_payload(start + timedelta(seconds=131), session, (10, 20))
+    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=131))["published"]
 
 
 def test_recovery_rechecks_pending_history_without_hiding_terminal_quote_recovery(tmp_path, monkeypatch):
@@ -237,7 +245,7 @@ def test_cold_start_generic_readiness_and_ic_history_publish_one_complete_recove
     rows[0]["path_distribution"] = completed["strategy_decision"]["iron_condor_map"]["width_comparisons"][0]["path_distribution"]
     assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
     current = completed
-    now += timedelta(seconds=15)
+    now = start + timedelta(seconds=121)
     current["strategy_decision"]["decision_at"] = now.isoformat()
     current["as_of"] = now.isoformat()
     result = refresh_desk_on_data_recovery(storage, current, now=now)
@@ -247,6 +255,52 @@ def test_cold_start_generic_readiness_and_ic_history_publish_one_complete_recove
         *(f"iron_condor_{width}_{kind}" for width in (10, 20) for kind in ("quotes", "probability")),
     }
     assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+
+
+@pytest.mark.parametrize("hour,session", [(11, "gth"), (14, "rth")])
+def test_partial_feed_and_optional_oi_do_not_each_republish_a_map(tmp_path, monkeypatch, hour, session):
+    from spx_spark.application.order_map import service
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    storage = _storage(tmp_path)
+    start = datetime(2026, 8, 5, hour, tzinfo=timezone.utc)
+    baseline = _recovery_payload(start, session)
+    baseline["strategy_decision"]["data_quality"] = {}
+    baseline["option_structure_frame"]["structure"] = {}
+    persist_desk_map_projection(baseline, [], now=start, trading_date="2026-08-05", storage=storage)
+    now = start + timedelta(minutes=7)
+    current = _recovery_payload(now, session, (10, 20))
+    current["strategy_decision"]["data_quality"]["options"] = "unavailable"
+    monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    current["strategy_decision"]["data_quality"]["options"] = "ready"
+    assert refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    now += timedelta(minutes=3)
+    current = _recovery_payload(now, session, (10, 20))
+    current["option_structure_frame"]["exposure"] = {"oi_quality": "ibkr_ok"}
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+
+
+@pytest.mark.parametrize("hour,session", [(11, "gth"), (14, "rth")])
+def test_coalesced_recovery_uses_fresh_quotes_after_the_interval(tmp_path, monkeypatch, hour, session):
+    from spx_spark.application.order_map import service
+
+    monkeypatch.setenv("SPX_RUST_REPORT_OWNER", "true")
+    storage = _storage(tmp_path)
+    start = datetime(2026, 8, 5, hour, tzinfo=timezone.utc)
+    persist_desk_map_projection(_recovery_payload(start, session), [], now=start,
+                               trading_date="2026-08-05", storage=storage)
+    current = _recovery_payload(start + timedelta(seconds=5), session, (10,))
+    monkeypatch.setattr(service, "build_order_payload_with_retry", lambda *a, **kw: copy.deepcopy(current))
+    assert not refresh_desk_on_data_recovery(storage, current, now=start + timedelta(seconds=5))["published"]
+    now = start + timedelta(seconds=121)
+    assert not refresh_desk_on_data_recovery(storage, current, now=now)["published"]
+    current = _recovery_payload(now, session, (10, 20))
+    result = refresh_desk_on_data_recovery(storage, current, now=now)
+    assert result["published"]
+    assert set(result["recovered"]) == {
+        f"iron_condor_{width}_{kind}" for width in (10, 20) for kind in ("quotes", "probability")
+    }
 
 
 def _payload() -> dict[str, object]:

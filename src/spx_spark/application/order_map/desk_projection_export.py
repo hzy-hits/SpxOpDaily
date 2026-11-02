@@ -38,6 +38,7 @@ from spx_spark.analytics.options.strategy_payoff import (
 SCHEMA_VERSION = "desk_map_projection.v1"
 DEFAULT_RTH_TTL = timedelta(minutes=20)
 DEFAULT_GTH_TTL = timedelta(minutes=65)
+RECOVERY_MIN_INTERVAL = timedelta(minutes=2)
 MAX_RESEARCH_CONTEXT_AGE = timedelta(minutes=5)
 STRATEGY_DISTRIBUTION_SCHEMA_VERSION = "strategy_distribution_forecast.v1"
 
@@ -108,6 +109,12 @@ def available_desk_data(payload: Mapping[str, Any], *, now: datetime) -> set[str
 
 def _completed_recovery(payload: Mapping[str, Any], ready: set[str], seen: set[str]) -> set[str]:
     recovered = ready - seen
+    # A partly restored feed is not a recovered desk. Optional OI/Gamma changes
+    # appear in the next regular map instead of creating another whole-card push.
+    if not {"market", "options", "l1"}.issubset(ready) or not (
+        recovered - {"oi_verified", "gamma_structure"}
+    ):
+        return set()
     scan = (payload.get("strategy_decision") or {}).get("iron_condor_map") or {}
     for row in scan.get("width_comparisons") or [scan]:
         width = row.get("wing_width")
@@ -135,6 +142,14 @@ def refresh_desk_on_data_recovery(
     if (not previous.get("projection_id") or previous.get("trading_date_et") != trading_date
             or previous.get("session") != session):
         return {"published": False}
+    try:
+        previous_at = datetime.fromisoformat(str(previous.get("available_at")).replace("Z", "+00:00"))
+        if now - previous_at < RECOVERY_MIN_INTERVAL:
+            return {"published": False}
+    except (ValueError, TypeError):
+        return {"published": False}
+    # Do not consume recovered flags while coalescing. A later Core cycle uses
+    # its current decision/quotes, never the prices from a deferred update.
     seen = set(previous.get("recovery_seen") or ())
     if not _completed_recovery(payload, available_desk_data(payload, now=now), seen):
         return {"published": False}
