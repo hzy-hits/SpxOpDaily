@@ -463,3 +463,15 @@ Core 仍加载已部署的 `1db03acb`；12:49:26 检查决策年龄约 0.95 秒�
 本地桌图导出测试 38 项通过；发布状态以对应 CI 和实际运行版本为准。
 生产文件新增/删除 0/0，生产代码净增 15 行；依赖、配置键、服务/timer、
 数据库/表均新增/删除 0/0；替换逐项到齐即重发的行为，无新增持久化状态。
+
+
+本次 PR 的首次云端全量 Python 3,602 项与双架构 Rust 测试通过，但 AMD64
+依赖审计因现有压缩库漏洞失败。按 Rust 冻结合同的安全修复例外，仅更新
+`zstd 0.13.3 -> 0.14.3`、`zstd-safe 7.2.4 -> 8.2.0`、
+`zstd-sys 2.0.16 -> 2.1.2` 的版本与锁文件；其他依赖版本保持不变。
+上游依据：[RUSTSEC-2026-0391](https://rustsec.org/advisories/RUSTSEC-2026-0391/)、
+[RUSTSEC-2026-0403](https://rustsec.org/advisories/RUSTSEC-2026-0403/)、
+[RUSTSEC-2026-0398](https://rustsec.org/advisories/RUSTSEC-2026-0398/)、
+[RUSTSEC-2026-0410](https://rustsec.org/advisories/RUSTSEC-2026-0410/)。
+没有忽略审计项，没有新增依赖或修改 Rust 业务代码；现有原始帧归档/恢复测试
+与双架构构建在云端重新执行，生产不就地编译或替换运行包。
