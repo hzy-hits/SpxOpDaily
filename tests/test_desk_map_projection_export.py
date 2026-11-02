@@ -734,6 +734,33 @@ def test_invalid_nested_research_is_omitted_and_disclosed_without_poisoning_desk
     assert "research_context_contract_invalid" not in wire["message"]["data_quality"]
 
 
+@pytest.mark.parametrize(
+    "now_text,session,slot,beijing_clock",
+    [
+        ("2026-10-30T00:30:08+00:00", "gth", "2026-10-30:gth:20:30", "08:30"),
+        ("2026-11-02T01:30:08+00:00", "gth", "2026-11-02:gth:20:30", "09:30"),
+        ("2026-10-30T13:30:08+00:00", "rth", "2026-10-30:09:30", "21:30"),
+        ("2026-11-02T14:30:08+00:00", "rth", "2026-11-02:09:30", "22:30"),
+    ],
+)
+def test_projection_slot_and_display_follow_standard_time(
+    tmp_path: Path, now_text: str, session: str, slot: str, beijing_clock: str,
+) -> None:
+    now = datetime.fromisoformat(now_text)
+    payload = _payload()
+    payload["expiry"] = now.strftime("%Y%m%d")
+    wire = build_desk_map_wire(
+        payload, [], now=now, trading_date=now.date().isoformat(), storage=_storage(tmp_path),
+    )
+    assert wire["session"] == session
+    assert wire["source_slot"] == slot
+    assert wire["trading_date_et"] == now.date().isoformat()
+    assert f" · {beijing_clock} · " in wire["message"]["title"]
+    assert datetime.fromisoformat(wire["available_at"]) == now
+    ttl = timedelta(minutes=20 if session == "rth" else 65)
+    assert datetime.fromisoformat(wire["valid_until"]) == now + ttl
+
+
 def test_gth_projection_floors_source_slot_to_et_quarter_hour(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
 

@@ -4623,6 +4623,65 @@ def test_within_refresh_window_beijing() -> None:
     assert within_refresh_window(beijing_0230) is True
 
 
+@pytest.mark.parametrize(
+    "now_text,expected_minutes",
+    [
+        ("2026-03-06T21:00:00+00:00", 3870),  # Spring weekend loses an hour.
+        ("2026-10-30T20:00:00+00:00", 3990),  # Fall weekend gains an hour.
+        ("2026-11-01T05:30:00+00:00", 1980),  # First 01:30 ET, still EDT.
+        ("2026-11-01T06:30:00+00:00", 1920),  # Repeated 01:30 ET, now EST.
+    ],
+)
+@pytest.mark.parametrize("input_zone", ["UTC", "America/New_York", "Asia/Shanghai"])
+def test_open_countdown_measures_elapsed_time_across_dst(
+    now_text: str, expected_minutes: int, input_zone: str,
+) -> None:
+    now = datetime.fromisoformat(now_text).astimezone(ZoneInfo(input_zone))
+    assert minutes_to_open(now) == expected_minutes
+    assert session_phase(now)["minutes_to_us_open"] == expected_minutes
+
+
+@pytest.mark.parametrize(
+    "trading_day,utc_open_hour,beijing_open",
+    [
+        ("2026-03-06", 14, "22:30"),
+        ("2026-03-09", 13, "21:30"),
+        ("2026-10-30", 13, "21:30"),
+        ("2026-11-02", 14, "22:30"),
+    ],
+)
+def test_desk_windows_follow_new_york_across_dst(
+    trading_day: str, utc_open_hour: int, beijing_open: str,
+) -> None:
+    from spx_spark.application.order_map.report_clock import rth_report_slot
+    from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR
+
+    opening = datetime.fromisoformat(trading_day).replace(
+        hour=utc_open_hour, minute=30, tzinfo=timezone.utc,
+    )
+    gth_open = opening - timedelta(hours=13, minutes=15)
+    assert not within_status_window(gth_open - timedelta(seconds=1))
+    assert within_status_window(gth_open)
+    assert within_status_window(opening - timedelta(minutes=5, seconds=1))
+    assert not within_status_window(opening - timedelta(minutes=5))
+    assert not within_status_window(opening - timedelta(seconds=1))
+    assert within_status_window(opening)
+    assert not DEFAULT_MARKET_CALENDAR.is_rth_open(opening - timedelta(seconds=1))
+    assert DEFAULT_MARKET_CALENDAR.is_rth_open(opening)
+    assert rth_report_slot(opening).key == f"{trading_day}:09:30"
+    phase = session_phase(opening)
+    assert phase["name"] == "us_open_hour"
+    assert phase["beijing_now"] == beijing_open
+    assert phase["minutes_since_us_open"] == 0
+    assert phase["minutes_to_us_close"] == 390
+
+    closing = opening + timedelta(hours=6, minutes=30)
+    assert within_status_window(closing - timedelta(minutes=15))
+    assert within_status_window(closing)  # Bounded close snapshot only.
+    assert not DEFAULT_MARKET_CALENDAR.is_rth_open(closing)
+    assert not within_status_window(closing + timedelta(minutes=2, seconds=1))
+
+
 def test_session_phase_tracks_partner_clock() -> None:
     # Beijing 09:00 Thursday = ET 21:00 Wednesday: Asia/Globex overnight.
     asia = session_phase(datetime(2026, 7, 9, 1, 0, tzinfo=timezone.utc))

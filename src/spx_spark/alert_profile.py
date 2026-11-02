@@ -118,8 +118,8 @@ WINDOWS: tuple[AlertWindow, ...] = (
         optional_instruments=("index:VVIX", "index:SKEW", "equity:SPY", "equity:QQQ", "equity:IWM", "equity:DIA"),
         focus=("opening drive or fade", "SPXW greek availability", "vol regime shift"),
     ),
-    # ET 10:30-13:30 = Beijing 22:30-01:30: the reader is still awake and often
-    # holding 0DTE positions opened at the US open. "normal" priority stamped
+    # ET 10:30-13:30 = Beijing 22:30-01:30 (EDT) / 23:30-02:30 (EST).
+    # This watch covers positions opened at the US open. "normal" priority stamped
     # medium severity and got filtered by the notify gate; keep it "high".
     AlertWindow(
         name="rth_midday_watch",
