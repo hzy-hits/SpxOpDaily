@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -167,7 +167,10 @@ def minutes_to_open(now_utc: datetime) -> int | None:
         open_dt = next_session.open_at
     if ny >= open_dt:
         return None
-    return int((open_dt - ny).total_seconds() // 60)
+    # Same-zone datetime subtraction measures wall time, skipping DST changes.
+    return int(
+        (open_dt.astimezone(timezone.utc) - now_utc.astimezone(timezone.utc)).total_seconds() // 60
+    )
 
 
 # --- session phase: the partner's clock, not the exchange's -----------------
@@ -308,7 +311,11 @@ def session_phase(now_utc: datetime) -> dict[str, Any]:
                 "盘后过渡",
                 "现金已收、期货重定价; 复盘与次日准备",
             )
-    minutes_to_us_open = int((open_dt - ny).total_seconds() // 60) if ny < open_dt else None
+    minutes_to_us_open = (
+        int((open_dt.astimezone(timezone.utc) - now_utc.astimezone(timezone.utc)).total_seconds() // 60)
+        if ny < open_dt
+        else None
+    )
     minutes_since_us_open = (
         int((ny - current_session.open_at).total_seconds() // 60)
         if current_session is not None and current_session.open_at <= ny < current_session.close_at
