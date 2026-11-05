@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hypothesis import given, strategies as st
 
 from spx_spark.analytics.growth_dislocation import (
     apply_crowding,
@@ -65,6 +66,8 @@ class FakeSchwabClient:
         self.now = now
         self.chain_iv_percent = chain_iv_percent
         self.test_last = 110.0
+        self.test_optionable = True
+        self.chain_open_interest = 1200
         self.requests: list[tuple[str, dict[str, object]]] = []
 
     def get_json(self, path: str, params: dict[str, object]):
@@ -84,7 +87,7 @@ class FakeSchwabClient:
                 "bid": 20.0,
                 "ask": 21.0,
                 "volatility": self.chain_iv_percent,
-                "openInterest": 1200,
+                "openInterest": self.chain_open_interest,
                 "totalVolume": 25,
                 "quoteTimeInLong": int(self.now.timestamp() * 1000),
             }
@@ -111,7 +114,7 @@ class FakeSchwabClient:
                 "52WeekHigh": high,
                 "quoteTime": int(self.now.timestamp() * 1000),
             },
-            "reference": {"optionable": symbol not in {"SPY", "XLK"}},
+            "reference": {"optionable": self.test_optionable if symbol == "TEST" else symbol not in {"SPY", "XLK", "HIGH"}},
             "fundamental": {
                 "sharesOutstanding": 100_000_000,
                 "divYield": 0.0,
@@ -186,6 +189,8 @@ def _eligible_score_row() -> dict[str, float | int]:
         "ivp_26w": 0.10,
         "ivp_52w": 0.08,
         "price_location_52w": 0.05,
+        "market_cap": 10_000_000_000.0,
+        "dividend_yield": 0.0,
     }
 
 
@@ -217,7 +222,7 @@ def _universe() -> Universe:
     )
 
 
-def test_v11_defaults_make_iv_rv_a_smooth_score() -> None:
+def test_v13_defaults_keep_tradeability_and_restore_one_year_leaps_floor() -> None:
     policy = _policy()
 
     assert policy.min_market_cap == 10_000_000_000.0
@@ -226,7 +231,7 @@ def test_v11_defaults_make_iv_rv_a_smooth_score() -> None:
         0.20,
         0.20,
     )
-    assert (policy.min_leaps_dte, policy.max_leaps_dte) == (450, 730)
+    assert (policy.min_leaps_dte, policy.max_leaps_dte) == (365, 730)
     assert (policy.target_delta_min, policy.target_delta_max) == (0.68, 0.80)
     assert policy.max_leaps_spread_mid == 0.08
     assert policy.max_current_leaps_iv == 0.60
@@ -277,20 +282,14 @@ def test_rsi_recovery_score_is_continuous_at_state_thresholds() -> None:
     assert rsi_recovery_score(45.0, 30.0, policy) == 30.0
 
 
-def test_v11_score_includes_iv_rv_without_changing_52w_priority() -> None:
+def test_v13_score_is_bounded_and_shared_by_notification_priority() -> None:
     row = _eligible_score_row()
 
     scored = score_candidate(row, _policy())
 
     assert scored is not None
-    assert round(scored["iv_score"], 2) == 30.00
-    assert round(scored["ivrv_score"], 2) == 100.00
-    assert scored["rsi_score"] == 100.0
-    assert round(scored["rs_score"], 2) == 60.40
-    assert round(scored["final_score"], 2) == 64.08
-    assert round(scored["price_dislocation_score"], 2) == 75.00
-    assert round(scored["ivp_52w_score"], 2) == 60.00
-    assert round(scored["priority_score"], 2) == 67.50
+    assert all(0.0 <= value <= 100.0 for key, value in scored.items() if key.endswith("score"))
+    assert scored["final_score"] == scored["priority_score"]
     assert round(scored["extrinsic_value_ratio"], 4) == 0.0941
     assert scored["state"] == "TRIGGER"
 
@@ -355,6 +354,16 @@ def test_target_leaps_prefers_target_delta_before_tighter_spread() -> None:
     assert select_target_leaps([tight_edge, target_delta], _policy()) is target_delta
 
 
+def test_one_year_leaps_are_eligible_but_longer_contracts_remain_preferred() -> None:
+    shorter = SimpleNamespace(
+        symbol="ONE_YEAR", dte=407, delta=0.74, bid=20.0, ask=21.0,
+        strike=90.0, volatility=0.20, open_interest=1000,
+    )
+    longer = SimpleNamespace(**{**vars(shorter), "symbol": "LONGER", "dte": 589})
+    assert select_target_leaps([shorter], _policy()) is shorter
+    assert select_target_leaps([shorter, longer], _policy()) is longer
+
+
 def test_extrinsic_value_rejects_mid_below_call_intrinsic_value() -> None:
     assert (
         extrinsic_value_ratio(
@@ -367,11 +376,9 @@ def test_extrinsic_value_rejects_mid_below_call_intrinsic_value() -> None:
     )
 
 
-def test_contract_rejects_high_ivp_absolute_iv_oi_and_time_value() -> None:
+def test_contract_rejects_invalid_liquidity_and_time_value() -> None:
     row = _eligible_score_row()
     for field, value in (
-        ("ivp_52w", 0.21),
-        ("current_iv", 0.61),
         ("target_leaps_oi", 99),
         ("leaps_ask", 50.0),
     ):
@@ -390,10 +397,10 @@ def test_iv_rv_ratio_of_one_and_a_half_reduces_score_without_rejecting() -> None
     assert scored is not None
     assert round(iv_rv_score(0.45, 0.30, _policy()), 2) == 41.67
     assert round(scored["ivrv_score"], 2) == 41.67
-    assert round(scored["final_score"], 2) == 58.25
+    assert scored["final_score"] < score_candidate(_eligible_score_row(), _policy())["final_score"]
 
 
-def test_eligible_candidates_rank_by_market_cap_then_score() -> None:
+def test_eligible_candidates_rank_by_score_then_market_cap() -> None:
     candidates = [
         {
             "symbol": "SMALL_HIGH_SCORE",
@@ -418,9 +425,9 @@ def test_eligible_candidates_rank_by_market_cap_then_score() -> None:
     top, reserve = apply_crowding(candidates, _policy())
 
     assert [row["symbol"] for row in top] == [
+        "SMALL_HIGH_SCORE",
         "LARGE_HIGH_SCORE",
         "LARGE_LOW_SCORE",
-        "SMALL_HIGH_SCORE",
     ]
     assert reserve == []
 
@@ -552,7 +559,7 @@ def test_first_scan_uses_ibkr_iv_percentiles_without_multiweek_warmup(
     assert candidate["iv_data_notes"] == []
 
 
-def test_direct_ibkr_ivp_hard_gate_rejects_expensive_regime(tmp_path: Path) -> None:
+def test_direct_ibkr_ivp_above_old_gate_is_still_scored(tmp_path: Path) -> None:
     outcome = scan_once(
         now=NOW,
         mode="rth",
@@ -563,11 +570,11 @@ def test_direct_ibkr_ivp_hard_gate_rejects_expensive_regime(tmp_path: Path) -> N
         iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, ivp_13w=0.21),
     )
 
-    assert outcome.document["counts"]["strict_candidates"] == 0
-    assert outcome.document["rejection_counts"]["ivp_13w_above_limit"] == 1
+    assert outcome.document["counts"]["strict_candidates"] == 1
+    assert outcome.document["all_candidates"][0]["ivp_13w"] == 0.21
 
 
-def test_direct_ibkr_52w_ivp_is_also_a_hard_gate(tmp_path: Path) -> None:
+def test_direct_ibkr_52w_ivp_above_old_gate_is_still_scored(tmp_path: Path) -> None:
     outcome = scan_once(
         now=NOW,
         mode="rth",
@@ -578,8 +585,8 @@ def test_direct_ibkr_52w_ivp_is_also_a_hard_gate(tmp_path: Path) -> None:
         iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, ivp_52w=0.21),
     )
 
-    assert outcome.document["counts"]["strict_candidates"] == 0
-    assert outcome.document["rejection_counts"]["ivp_52w_above_limit"] == 1
+    assert outcome.document["counts"]["strict_candidates"] == 1
+    assert outcome.document["all_candidates"][0]["ivp_52w"] == 0.21
 
 
 def test_missing_target_leaps_is_hard_rejection_not_warming(tmp_path: Path) -> None:
@@ -600,7 +607,7 @@ def test_missing_target_leaps_is_hard_rejection_not_warming(tmp_path: Path) -> N
     assert outcome.document["rejection_counts"]["target_leaps_missing"] == 1
 
 
-def test_target_leaps_contract_gate_rejects_high_absolute_iv(tmp_path: Path) -> None:
+def test_target_leaps_high_absolute_iv_is_a_score_input(tmp_path: Path) -> None:
     outcome = scan_once(
         now=NOW,
         mode="rth",
@@ -611,8 +618,8 @@ def test_target_leaps_contract_gate_rejects_high_absolute_iv(tmp_path: Path) -> 
         iv_percentile_fetcher=_ivp_fetcher,
     )
 
-    assert outcome.document["counts"]["strict_candidates"] == 0
-    assert outcome.document["rejection_counts"]["target_leaps_hard_filter"] == 1
+    assert outcome.document["counts"]["strict_candidates"] == 1
+    assert outcome.document["all_candidates"][0]["current_iv"] == 0.61
 
 
 def test_missing_ibkr_ivp_fails_closed_to_symbol_rejection(tmp_path: Path) -> None:
@@ -794,7 +801,7 @@ def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Pa
     assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 
 
-def test_daily_summary_exits_member_with_confirmed_expensive_leaps(tmp_path: Path) -> None:
+def test_daily_summary_keeps_and_penalizes_expensive_leaps(tmp_path: Path) -> None:
     client = FakeSchwabClient(NOW)
     daily = NOW.replace(hour=20, minute=0)
     common = {
@@ -806,21 +813,18 @@ def test_daily_summary_exits_member_with_confirmed_expensive_leaps(tmp_path: Pat
         "data_root": tmp_path,
         "iv_percentile_fetcher": _ivp_fetcher,
     }
-    scan_once(**common)  # type: ignore[arg-type]
+    first = scan_once(**common)  # type: ignore[arg-type]
     client.chain_iv_percent = 61.0
 
     exited = scan_once(**common)  # type: ignore[arg-type]
 
-    assert exited.document["counts"]["strict_candidates"] == 0
-    assert exited.document["counts"]["core_pool"] == 0
-    assert exited.document["core_top_opportunities"] == []
-    assert exited.document["core_changes"]["exited"] == [
-        {"symbol": "TEST", "reason": "target_leaps_hard_filter"},
-    ]
+    assert exited.document["counts"]["strict_candidates"] == 1
+    assert exited.document["counts"]["core_pool"] == 1
+    assert exited.document["core_changes"]["exited"] == []
+    assert exited.document["core_top_opportunities"][0]["final_score"] < first.document["core_top_opportunities"][0]["final_score"]
     _title, text = render_notification(exited.document, discoveries=True)
-    assert "TEST (target_leaps_hard_filter)" in text
-    assert "IV超过上限" in text
-    assert "| TEST |" not in text
+    assert "61.00%" in text
+    assert "| TEST |" in text
 
 
 def test_request_budget_fails_closed_to_partial_warming_table(tmp_path: Path) -> None:
@@ -895,12 +899,12 @@ def test_core_pool_first_pass_enters_after_bootstrap(tmp_path: Path, mode: str) 
         "data_root": tmp_path,
     }
 
-    client.chain_iv_percent = 61.0
+    client.chain_open_interest = 99
     bootstrap = scan_once(
         iv_percentile_fetcher=_ivp_fetcher,
         **common,  # type: ignore[arg-type]
     )
-    client.chain_iv_percent = 20.0
+    client.chain_open_interest = 1200
     first_pass = scan_once(
         iv_percentile_fetcher=_ivp_fetcher,
         **common,  # type: ignore[arg-type]
@@ -935,43 +939,42 @@ def test_core_pool_exits_first_failed_scan_and_reenters_on_recovery(
     }
 
     bootstrap = scan_once(**common)  # type: ignore[arg-type]
-    client.test_last = 114.0  # 28%: fails entry but would never exit the old pool.
+    client.test_optionable = False
     first = scan_once(**common)  # type: ignore[arg-type]
     second = scan_once(**common)  # type: ignore[arg-type]
-    client.test_last = 110.0
+    client.test_optionable = True
     recovered = scan_once(**common)  # type: ignore[arg-type]
 
     assert bootstrap.document["added_symbols"] == ["TEST"]
     assert first.document["exited_symbols"] == ["TEST"]
     assert first.document["counts"]["core_pool"] == 0
-    assert first.document["core_changes"]["exited"][0]["reason"] == "above_52w_location"
+    assert first.document["core_changes"]["exited"][0]["reason"] == "not_optionable"
     assert second.document["exited_symbols"] == []
     assert recovered.document["added_symbols"] == ["TEST"]
     assert recovered.document["counts"]["core_pool"] == 1
     state = json.loads((tmp_path / "runtime/growth_dislocation_state.json").read_text())
-    assert state["core_pool"]["archive"][0]["reason"] == "above_52w_location"
-    assert state["core_pool"]["archive"][0]["observation"]["price_location_52w"] == 0.28
+    assert state["core_pool"]["archive"][0]["reason"] == "not_optionable"
+    assert state["core_pool"]["archive"][0]["observation"]["optionable"] is False
 
 
 @pytest.mark.parametrize("period", ["13w", "26w", "52w"])
-def test_core_pool_exits_on_each_ivp_gate_without_grandfathering(tmp_path: Path, period: str) -> None:
+def test_core_pool_each_ivp_preference_reduces_score_not_membership(tmp_path: Path, period: str) -> None:
     common = dict(now=NOW.replace(hour=20), mode="daily", client=FakeSchwabClient(NOW),
                   policy=_policy(), universe=_universe(), data_root=tmp_path)
-    scan_once(iv_percentile_fetcher=_ivp_fetcher, **common)
+    first = scan_once(iv_percentile_fetcher=_ivp_fetcher, **common).document
     failed = scan_once(
         iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, **{f"ivp_{period}": 0.21}),
         **common,
     ).document
-    assert failed["exited_symbols"] == ["TEST"]
-    assert failed["core_changes"]["exited"][0]["reason"] == f"ivp_{period}_above_limit"
-    assert failed["core_pool"] == failed["core_top_opportunities"] == []
-    assert scan_once(iv_percentile_fetcher=_ivp_fetcher, **common).document["added_symbols"] == ["TEST"]
+    assert failed["exited_symbols"] == []
+    assert failed["core_top_opportunities"][0]["final_score"] < first["core_top_opportunities"][0]["final_score"]
+    assert scan_once(iv_percentile_fetcher=_ivp_fetcher, **common).document["added_symbols"] == []
 
 
 @pytest.mark.parametrize("mode", ["daily", "rth"])
 @pytest.mark.parametrize("fields", [
-    {"delta": 0.67}, {"daysToExpiration": 449}, {"ask": 21.8},
-    {"volatility": 61.0}, {"openInterest": 99}, {"bid": 50.0, "ask": 51.0},
+    {"delta": 0.67}, {"daysToExpiration": 364}, {"ask": 21.8},
+    {"openInterest": 99}, {"bid": 50.0, "ask": 51.0},
 ])
 def test_confirmed_contract_failures_exit_in_both_scan_modes(tmp_path: Path, mode: str, fields: dict) -> None:
     class FailedContract(FakeSchwabClient):
@@ -1036,7 +1039,7 @@ def test_unknown_data_preserves_stale_member_not_an_active_opportunity(
                         else:
                             payload["isDelayed"] = True
                     elif fault in {"mixed_unknown_and_failed", "malformed_contract"}:
-                        contract["volatility"] = 61.0
+                        contract["openInterest"] = 99
                         contracts.append(dict(contract))
                         contracts[1].pop("delta" if fault == "mixed_unknown_and_failed" else "daysToExpiration")
             return status, payload
@@ -1092,12 +1095,12 @@ def test_rth_exit_only_notifies_once_and_does_not_expand_bark_routing(tmp_path: 
                   data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher,
                   notification_settings=settings, enqueue=enqueue)
     scan_once(**common)
-    client.test_last = 114.0
+    client.test_optionable = False
     exited = scan_once(**common)
     assert exited.document["exited_symbols"] == ["TEST"]
     assert exited.document["strict_added_symbols"] == []
     assert len(deliveries) == 2
-    assert "TEST (above_52w_location)" in deliveries[-1][1]["feishu_text"]
+    assert "TEST (not_optionable)" in deliveries[-1][1]["feishu_text"]
     assert all(not delivery.bark_enabled and not delivery.bark_friend_enabled for delivery, _ in deliveries)
     assert scan_once(**common).notification is None
     common.update(mode="daily", now=NOW.replace(hour=20))
@@ -1122,8 +1125,25 @@ def test_v11_members_are_reevaluated_and_research_rejections_still_apply(tmp_pat
     assert scan_once(**common).document["added_symbols"] == []
     saved = json.loads(state_path.read_text())
     assert saved["schema_version"] == state["schema_version"]
-    assert saved["policy_version"] == "growth_dislocation_leaps.v12"
+    assert saved["policy_version"] == "growth_dislocation_leaps.v13"
     assert "entry_streaks" not in saved["core_pool"]
+
+
+def test_research_rejected_stock_does_not_occupy_score_top_slot(tmp_path: Path) -> None:
+    base = _universe().members[0]
+    common = dict(now=NOW, mode="rth", client=FakeSchwabClient(NOW),
+                  policy=replace(_policy(), top_count=1), universe=_universe(),
+                  data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    scan_once(**common)
+    state_path = tmp_path / "runtime/growth_dislocation_state.json"
+    state = json.loads(state_path.read_text())
+    state["core_pool"]["research_rejected_symbols"] = ["TEST"]
+    state_path.write_text(json.dumps(state))
+    common["universe"] = Universe((base, replace(base, symbol="ZZZ", provider_symbol="ZZZ")), ())
+    result = scan_once(**common).document
+    assert result["exited_symbols"] == ["TEST"]
+    assert result["added_symbols"] == ["ZZZ"]
+    assert [row["symbol"] for row in result["core_top_opportunities"]] == ["ZZZ"]
 
 
 def test_schedule_is_exchange_local_and_daily_lane_bypasses_quiet_window() -> None:
@@ -1311,11 +1331,12 @@ def test_history_refresh_cannot_exceed_budget_or_reuse_old_contract(tmp_path: Pa
                   universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
     scan_once(policy=_policy(), **common)
     limited = scan_once(policy=replace(_policy(), rth_request_budget=3), **common).document
-    assert limited["requests_used"] == 3
+    assert limited["requests_used"] <= 3
     assert limited["data_quality"]["request_limited"]
     assert not limited["scan_complete"]
     assert not limited["all_candidates"]
-    assert "target_leaps_not_refreshed_this_run" in limited["watchlist"][0]["data_quality_reasons"]
+    assert limited["counts"]["not_evaluated"] == 1
+    assert limited["core_pool"][0]["today_state"] == "STALE"
 
 
 def test_stale_benchmark_quote_cannot_generate_relative_strength(tmp_path: Path) -> None:
@@ -1333,3 +1354,137 @@ def test_stale_benchmark_quote_cannot_generate_relative_strength(tmp_path: Path)
     assert not document["scan_complete"]
     assert not document["all_candidates"]
     assert document["watchlist"][0]["sector_return_5d"] is None
+
+
+@given(
+    percentile=st.floats(min_value=0, max_value=1),
+    location=st.floats(min_value=0, max_value=1),
+    market_cap=st.floats(min_value=1e7, max_value=1e13),
+    dividend=st.floats(min_value=0, max_value=0.2),
+    iv=st.floats(min_value=0.01, max_value=3.0),
+)
+def test_preference_scores_are_bounded_monotone_and_do_not_exclude(
+    percentile, location, market_cap, dividend, iv,
+) -> None:
+    row = dict(_eligible_score_row(), ivp_13w=percentile, ivp_26w=percentile,
+               ivp_52w=percentile, price_location_52w=location, market_cap=market_cap,
+               dividend_yield=dividend, current_iv=iv)
+    score = score_candidate(row, _policy())
+    assert score is not None and 0 <= score["final_score"] <= 100
+    for field in ("ivp_13w", "ivp_26w", "ivp_52w", "price_location_52w", "dividend_yield", "current_iv"):
+        worse = dict(row, **{field: min(1.0, row[field] + 0.001) if field.startswith("ivp_") else row[field] + 0.001})
+        assert score_candidate(worse, _policy())["final_score"] <= score["final_score"] + 1e-10
+    larger = dict(row, market_cap=market_cap * 1.01)
+    assert score_candidate(larger, _policy())["final_score"] >= score["final_score"] - 1e-10
+
+
+@pytest.mark.parametrize("field,anchor", [
+    ("price_location_52w", 0.20), ("ivp_13w", 0.20), ("ivp_26w", 0.20),
+    ("ivp_52w", 0.20), ("market_cap", 10e9), ("dividend_yield", 0.015), ("current_iv", 0.60),
+])
+def test_former_gate_boundaries_have_no_scoring_cliff(field, anchor) -> None:
+    low = score_candidate(dict(_eligible_score_row(), **{field: anchor * (1 - 1e-6)}), _policy())
+    high = score_candidate(dict(_eligible_score_row(), **{field: anchor * (1 + 1e-6)}), _policy())
+    assert low is not None and high is not None
+    assert abs(low["final_score"] - high["final_score"]) < 0.001
+
+
+def test_quote_and_iv_preferences_above_old_cutoffs_are_scored_end_to_end(tmp_path: Path) -> None:
+    class LessPreferred(FakeSchwabClient):
+        def _quote(self, symbol):
+            quote = super()._quote(symbol)
+            if symbol == "TEST":
+                quote["quote"]["52WeekLow"] = 50.0
+                quote["fundamental"].update(sharesOutstanding=50_000_000, divYield=2.0)
+            return quote
+
+    result = scan_once(
+        now=NOW, mode="rth", client=LessPreferred(NOW, chain_iv_percent=80), policy=_policy(),
+        universe=_universe(), data_root=tmp_path,
+        iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, ivp_13w=0.8, ivp_26w=0.7, ivp_52w=0.6),
+    ).document
+    row = result["all_candidates"][0]
+    assert row["symbol"] == "TEST"
+    assert row["market_cap"] < _policy().min_market_cap
+    assert row["price_location_52w"] > _policy().max_price_location_52w
+    assert row["dividend_yield"] > _policy().max_dividend_yield
+    assert row["current_iv"] > _policy().max_current_leaps_iv
+    assert 0 < row["final_score"] < 100
+    assert result["added_symbols"] == ["TEST"]
+
+
+def test_new_high_score_replaces_incumbent_and_old_name_can_reenter(tmp_path: Path) -> None:
+    class RankedQuotes(FakeSchwabClient):
+        locations = {"TEST": 0.10, "NEW": 0.0}
+
+        def _quote(self, symbol):
+            quote = super()._quote(symbol)
+            if symbol in self.locations:
+                low = 110.0 - 50.0 * self.locations[symbol]
+                quote["quote"].update({"52WeekLow": low, "52WeekHigh": low + 50.0})
+            return quote
+
+    client = RankedQuotes(NOW)
+    base = _universe().members[0]
+    common = dict(now=NOW, mode="rth", client=client, policy=replace(_policy(), top_count=1),
+                  data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    first = scan_once(universe=Universe((base,), ()), **common).document
+    assert first["added_symbols"] == ["TEST"]
+    universe = Universe((base, replace(base, symbol="NEW", provider_symbol="NEW")), ())
+    replacement = scan_once(universe=universe, **common).document
+    assert replacement["added_symbols"] == ["NEW"]
+    assert replacement["core_changes"]["exited"] == [{"symbol": "TEST", "reason": "RANKED_OUT"}]
+    assert [row["symbol"] for row in replacement["notification_top10"]] == ["NEW"]
+    client.locations = {"TEST": 0.0, "NEW": 0.8}
+    recovery = scan_once(universe=universe, **common).document
+    assert recovery["added_symbols"] == ["TEST"]
+    assert recovery["exited_symbols"] == ["NEW"]
+
+
+def test_budgeted_shortlist_explores_new_names_without_faking_global_coverage(tmp_path: Path) -> None:
+    base = _universe().members[0]
+    universe = Universe(tuple(replace(base, symbol=f"S{i:03}", provider_symbol=f"S{i:03}") for i in range(100)), ())
+    calls = []
+
+    def fetch(symbols):
+        calls.append(symbols)
+        return _ivp_fetcher(symbols)
+
+    common = dict(now=NOW, mode="rth", policy=replace(_policy(), rth_request_budget=12),
+                  universe=universe, data_root=tmp_path, iv_percentile_fetcher=fetch)
+    first = scan_once(client=FakeSchwabClient(NOW), **common).document
+    second = scan_once(client=FakeSchwabClient(NOW), **common).document
+    for result in (first, second):
+        assert result["scan_complete"]
+        assert result["requests_used"] <= 12
+        assert 0 < result["counts"]["shortlisted"] < 100
+        assert result["counts"]["not_evaluated"] == 100 - result["counts"]["shortlisted"]
+        _, text = render_notification(result, discoveries=True)
+        assert "不宣称全市场已完成评分" in text
+    old_set = {row["symbol"] for row in first["all_candidates"]}
+    new_set = {row["symbol"] for row in second["all_candidates"]}
+    assert new_set - old_set
+    assert any(symbol >= "S020" for symbol in old_set)
+    assert all(len(batch) <= 5 for batch in calls)
+
+
+def test_source_times_during_fetch_are_valid_at_scan_completion(tmp_path: Path, monkeypatch) -> None:
+    import spx_spark.infrastructure.growth_dislocation as scanner
+
+    elapsed = [0.0]
+    monkeypatch.setattr(scanner, "monotonic", lambda: elapsed[0])
+
+    class AdvancingQuotes(FakeSchwabClient):
+        def get_json(self, path, params):
+            elapsed[0] += 2.0
+            self.now = NOW + timedelta(seconds=elapsed[0])
+            return super().get_json(path, params)
+
+    result = scan_once(
+        now=NOW, mode="rth", client=AdvancingQuotes(NOW), policy=_policy(),
+        universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher,
+    ).document
+    assert result["all_candidates"]
+    row = result["all_candidates"][0]
+    assert NOW < datetime.fromisoformat(row["quote_at"]) <= datetime.fromisoformat(result["generated_at"])
+    assert NOW < datetime.fromisoformat(row["option_quote_at"]) <= datetime.fromisoformat(result["generated_at"])

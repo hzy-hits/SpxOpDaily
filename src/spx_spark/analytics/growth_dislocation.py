@@ -10,8 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v12"
-IV_SCORE_CHEAP_CUTOFF = 0.10
+POLICY_VERSION = "growth_dislocation_leaps.v13"
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -22,6 +21,22 @@ def price_location_52w(last: float, low_52w: float, high_52w: float) -> float | 
     if high_52w <= low_52w:
         return None
     return (last - low_52w) / (high_52w - low_52w)
+
+
+def quote_preference_scores(
+    location: float, market_cap: float, dividend_yield: float,
+    policy: GrowthDislocationSettings,
+) -> dict[str, float]:
+    """Former cutoffs are half-score anchors, not discontinuous exclusions."""
+    price_score = 100.0 / (1.0 + max(0.0, location) / policy.max_price_location_52w)
+    cap_score = 100.0 * market_cap / (market_cap + policy.min_market_cap)
+    dividend_score = 100.0 / (1.0 + max(0.0, dividend_yield) / policy.max_dividend_yield)
+    return {
+        "price_dislocation_score": price_score,
+        "market_cap_score": cap_score,
+        "dividend_score": dividend_score,
+        "prefilter_score": (0.35 * price_score + 0.10 * cap_score + 0.05 * dividend_score) / 0.50,
+    }
 
 
 def price_features(closes: Sequence[float]) -> dict[str, float] | None:
@@ -87,9 +102,6 @@ def select_target_leaps(
             or float(contract.volatility) <= 0.0
         ):
             reject("iv_missing")
-            continue
-        if float(contract.volatility) > policy.max_current_leaps_iv:
-            reject("iv_above_limit")
             continue
         if contract.open_interest is None:
             reject("open_interest_missing")
@@ -182,14 +194,15 @@ def score_candidate(
         "ivp_13w",
         "ivp_26w",
         "ivp_52w",
+        "price_location_52w",
+        "market_cap",
+        "dividend_yield",
     )
-    if any(data.get(key) is None for key in required):
+    if any(data.get(key) is None or not math.isfinite(float(data[key])) for key in required):
         return None
-    if (
-        float(data["ivp_13w"]) > policy.max_ivp_13w
-        or float(data["ivp_26w"]) > policy.max_ivp_26w
-        or float(data["ivp_52w"]) > policy.max_ivp_52w
-    ):
+    if float(data["market_cap"]) <= 0.0 or float(data["dividend_yield"]) < 0.0:
+        return None
+    if any(not 0.0 <= float(data[key]) <= 1.0 for key in ("ivp_13w", "ivp_26w", "ivp_52w")):
         return None
     spread = float(data["spread_mid"])
     if spread > policy.max_leaps_spread_mid:
@@ -202,7 +215,6 @@ def score_candidate(
     realized_vol_20d = float(data["realized_vol_20d"])
     if (
         current_iv <= 0.0
-        or current_iv > policy.max_current_leaps_iv
         or realized_vol_20d <= 0.0
     ):
         return None
@@ -220,6 +232,7 @@ def score_candidate(
     iv_score = iv_cheapness_score(
         float(data["ivp_13w"]),
         float(data["ivp_26w"]),
+        policy,
     )
     ivrv_score = iv_rv_score(current_iv, realized_vol_20d, policy)
     rsi_score = rsi_recovery_score(
@@ -233,22 +246,19 @@ def score_candidate(
         float(data["sector_return_5d"]),
         float(data["sector_return_10d"]),
     )
-    final_score = 0.40 * iv_score + 0.10 * ivrv_score + 0.30 * rsi_score + 0.20 * rs_score
-    price_dislocation_score: float | None = None
-    ivp_52w_score: float | None = None
-    priority_score: float | None = None
-    if data.get("price_location_52w") is not None and data.get("ivp_52w") is not None:
-        price_dislocation_score = 100.0 * clamp(
-            1.0 - float(data["price_location_52w"]) / policy.max_price_location_52w,
-            0.0,
-            1.0,
-        )
-        ivp_52w_score = 100.0 * clamp(
-            1.0 - float(data["ivp_52w"]) / policy.max_ivp_52w,
-            0.0,
-            1.0,
-        )
-        priority_score = 0.50 * price_dislocation_score + 0.50 * ivp_52w_score
+    quote_scores = quote_preference_scores(
+        float(data["price_location_52w"]), float(data["market_cap"]),
+        float(data["dividend_yield"]), policy,
+    )
+    ivp_52w_score = 100.0 / (1.0 + float(data["ivp_52w"]) / policy.max_ivp_52w)
+    timing_score = 0.4 * rsi_score + 0.6 * rs_score
+    absolute_iv_score = 100.0 / (1.0 + current_iv / policy.max_current_leaps_iv)
+    vol_cost_score = 0.5 * absolute_iv_score + 0.5 * ivrv_score
+    final_score = (
+        0.35 * quote_scores["price_dislocation_score"] + 0.30 * ivp_52w_score
+        + 0.10 * iv_score + 0.10 * quote_scores["market_cap_score"]
+        + 0.05 * quote_scores["dividend_score"] + 0.05 * timing_score + 0.05 * vol_cost_score
+    )
     rs5_sector = float(data["return_5d"]) - float(data["sector_return_5d"])
     state = candidate_state(
         close=float(data["last"]),
@@ -261,9 +271,12 @@ def score_candidate(
         "rs_score": rs_score,
         "rsi_score": rsi_score,
         "final_score": final_score,
-        "price_dislocation_score": price_dislocation_score,
+        **quote_scores,
         "ivp_52w_score": ivp_52w_score,
-        "priority_score": priority_score,
+        "timing_score": timing_score,
+        "vol_cost_score": vol_cost_score,
+        "absolute_iv_score": absolute_iv_score,
+        "priority_score": final_score,
         "extrinsic_value_ratio": time_value_ratio,
         "state": state,
         "rs_5d_sector": rs5_sector,
@@ -295,11 +308,11 @@ def apply_crowding(
 
 
 def candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, str]:
-    """Prefer larger eligible issuers, then use the V1 signal score as a tiebreaker."""
+    """Use the same score ordering for the scanner, Core Pool and notifications."""
 
     return (
-        -float(candidate.get("market_cap") or 0.0),
         -float(candidate.get("final_score") or 0.0),
+        -float(candidate.get("market_cap") or 0.0),
         str(candidate.get("symbol") or ""),
     )
 
@@ -320,9 +333,12 @@ def priority_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, float
 def iv_cheapness_score(
     ivp_13w: float,
     ivp_26w: float,
+    policy: GrowthDislocationSettings,
 ) -> float:
-    weighted_ivp = 0.60 * ivp_13w + 0.40 * ivp_26w
-    return 100.0 * max(0.0, 1.0 - weighted_ivp / IV_SCORE_CHEAP_CUTOFF)
+    return (
+        60.0 / (1.0 + ivp_13w / policy.max_ivp_13w)
+        + 40.0 / (1.0 + ivp_26w / policy.max_ivp_26w)
+    )
 
 
 def iv_rv_score(
