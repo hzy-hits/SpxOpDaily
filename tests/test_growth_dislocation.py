@@ -327,7 +327,7 @@ def test_target_leaps_rejects_wide_contract_before_selection() -> None:
     assert select_target_leaps([wide, tight], _policy()) is tight
     reasons: dict[str, int] = {}
     assert select_target_leaps([wide], _policy(), rejection_counts=reasons) is None
-    assert reasons == {"bid_ask_invalid_or_spread_above_limit": 1}
+    assert reasons == {"spread_above_limit": 1}
 
 
 def test_target_leaps_prefers_target_delta_before_tighter_spread() -> None:
@@ -460,7 +460,7 @@ def test_notification_candidates_rank_by_52w_priority_then_timing_score() -> Non
     assert reserve == []
 
 
-def test_rth_scanner_updates_today_state_without_changing_core_membership(
+def test_rth_scanner_adds_immediately_and_does_not_notify_score_only_changes(
     tmp_path: Path,
 ) -> None:
     client = FakeSchwabClient(NOW)
@@ -512,13 +512,13 @@ def test_rth_scanner_updates_today_state_without_changing_core_membership(
     assert first.document["top10"][0]["leaps_symbol"] == "TEST LEAPS"
     assert first.document["top10"][0]["option_quote_status"] == "live"
     assert first.document["automatic_ordering"] is False
-    assert first.document["added_symbols"] == []
-    assert first.document["core_pool_status"] == "BOOTSTRAP_PENDING"
-    assert first.document["core_top_opportunities"] == []
+    assert first.document["added_symbols"] == ["TEST"]
+    assert first.document["core_pool_status"] == "ACTIVE"
+    assert first.document["core_top_opportunities"][0]["symbol"] == "TEST"
     assert first.document["strict_added_symbols"] == ["TEST"]
     _, legacy = render_notification(first.document)
     _, feishu = render_notification(first.document, discoveries=True)
-    assert "| TEST |" not in legacy
+    assert "| TEST |" in legacy
     assert "| TEST |" in feishu
     assert first.document["material_fingerprint"] != second.document["material_fingerprint"]
     assert second.document["added_symbols"] == []
@@ -794,7 +794,7 @@ def test_daily_summary_pushes_even_when_material_table_is_unchanged(tmp_path: Pa
     assert f"{candidate['leaps_spread_mid'] * 100.0:.2f}%" in text
 
 
-def test_daily_summary_keeps_paused_core_members_visible(tmp_path: Path) -> None:
+def test_daily_summary_exits_member_with_confirmed_expensive_leaps(tmp_path: Path) -> None:
     client = FakeSchwabClient(NOW)
     daily = NOW.replace(hour=20, minute=0)
     common = {
@@ -809,15 +809,18 @@ def test_daily_summary_keeps_paused_core_members_visible(tmp_path: Path) -> None
     scan_once(**common)  # type: ignore[arg-type]
     client.chain_iv_percent = 61.0
 
-    paused = scan_once(**common)  # type: ignore[arg-type]
+    exited = scan_once(**common)  # type: ignore[arg-type]
 
-    assert paused.document["counts"]["strict_candidates"] == 0
-    assert paused.document["counts"]["core_pool"] == 1
-    assert paused.document["counts"]["core_paused"] == 1
-    assert paused.document["core_top_opportunities"] == []
-    _title, text = render_notification(paused.document)
-    assert "| TEST | PAUSED | PAUSED | target_leaps_hard_filter |" in text
-    assert "当前无 Active 严格候选；Core Pool 成员见上表" in text
+    assert exited.document["counts"]["strict_candidates"] == 0
+    assert exited.document["counts"]["core_pool"] == 0
+    assert exited.document["core_top_opportunities"] == []
+    assert exited.document["core_changes"]["exited"] == [
+        {"symbol": "TEST", "reason": "target_leaps_hard_filter"},
+    ]
+    _title, text = render_notification(exited.document, discoveries=True)
+    assert "TEST (target_leaps_hard_filter)" in text
+    assert "IV超过上限" in text
+    assert "| TEST |" not in text
 
 
 def test_request_budget_fails_closed_to_partial_warming_table(tmp_path: Path) -> None:
@@ -879,22 +882,25 @@ def test_partial_scan_preserves_membership_and_does_not_create_false_reentry(
     assert len(deliveries) == 3
 
 
-def test_core_pool_requires_two_complete_daily_passes_after_bootstrap(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["daily", "rth"])
+def test_core_pool_first_pass_enters_after_bootstrap(tmp_path: Path, mode: str) -> None:
     client = FakeSchwabClient(NOW)
-    daily = NOW.replace(hour=20, minute=0)
+    at = NOW.replace(hour=20, minute=0) if mode == "daily" else NOW
     common = {
-        "now": daily,
-        "mode": "daily",
+        "now": at,
+        "mode": mode,
         "client": client,
         "policy": _policy(),
         "universe": _universe(),
         "data_root": tmp_path,
     }
 
+    client.chain_iv_percent = 61.0
     bootstrap = scan_once(
-        iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, ivp_13w=0.21),
+        iv_percentile_fetcher=_ivp_fetcher,
         **common,  # type: ignore[arg-type]
     )
+    client.chain_iv_percent = 20.0
     first_pass = scan_once(
         iv_percentile_fetcher=_ivp_fetcher,
         **common,  # type: ignore[arg-type]
@@ -905,22 +911,22 @@ def test_core_pool_requires_two_complete_daily_passes_after_bootstrap(tmp_path: 
     )
 
     assert bootstrap.document["counts"]["core_pool"] == 0
-    assert first_pass.document["counts"]["core_pool"] == 0
-    assert first_pass.document["core_entry_pending"] == [
-        {"symbol": "TEST", "complete_daily_passes": 1}
-    ]
-    assert second_pass.document["added_symbols"] == ["TEST"]
+    assert first_pass.document["counts"]["core_pool"] == 1
+    assert first_pass.document["core_entry_pending"] == []
+    assert first_pass.document["added_symbols"] == ["TEST"]
+    assert second_pass.document["added_symbols"] == []
     assert second_pass.document["counts"]["core_pool"] == 1
 
 
-def test_core_pool_exits_only_after_three_complete_price_recovery_scans(
-    tmp_path: Path,
+@pytest.mark.parametrize("mode", ["daily", "rth"])
+def test_core_pool_exits_first_failed_scan_and_reenters_on_recovery(
+    tmp_path: Path, mode: str,
 ) -> None:
     client = FakeSchwabClient(NOW)
-    daily = NOW.replace(hour=20, minute=0)
+    at = NOW.replace(hour=20, minute=0) if mode == "daily" else NOW
     common = {
-        "now": daily,
-        "mode": "daily",
+        "now": at,
+        "mode": mode,
         "client": client,
         "policy": _policy(),
         "universe": _universe(),
@@ -929,17 +935,195 @@ def test_core_pool_exits_only_after_three_complete_price_recovery_scans(
     }
 
     bootstrap = scan_once(**common)  # type: ignore[arg-type]
-    client.test_last = 120.0
+    client.test_last = 114.0  # 28%: fails entry but would never exit the old pool.
     first = scan_once(**common)  # type: ignore[arg-type]
     second = scan_once(**common)  # type: ignore[arg-type]
-    third = scan_once(**common)  # type: ignore[arg-type]
+    client.test_last = 110.0
+    recovered = scan_once(**common)  # type: ignore[arg-type]
 
     assert bootstrap.document["added_symbols"] == ["TEST"]
-    assert first.document["core_pool"][0]["exit_streak"] == 1
-    assert first.document["core_pool"][0]["exit_reason"] == "PRICE_RECOVERED"
-    assert second.document["counts"]["core_pool"] == 1
-    assert third.document["exited_symbols"] == ["TEST"]
-    assert third.document["counts"]["core_pool"] == 0
+    assert first.document["exited_symbols"] == ["TEST"]
+    assert first.document["counts"]["core_pool"] == 0
+    assert first.document["core_changes"]["exited"][0]["reason"] == "above_52w_location"
+    assert second.document["exited_symbols"] == []
+    assert recovered.document["added_symbols"] == ["TEST"]
+    assert recovered.document["counts"]["core_pool"] == 1
+    state = json.loads((tmp_path / "runtime/growth_dislocation_state.json").read_text())
+    assert state["core_pool"]["archive"][0]["reason"] == "above_52w_location"
+    assert state["core_pool"]["archive"][0]["observation"]["price_location_52w"] == 0.28
+
+
+@pytest.mark.parametrize("period", ["13w", "26w", "52w"])
+def test_core_pool_exits_on_each_ivp_gate_without_grandfathering(tmp_path: Path, period: str) -> None:
+    common = dict(now=NOW.replace(hour=20), mode="daily", client=FakeSchwabClient(NOW),
+                  policy=_policy(), universe=_universe(), data_root=tmp_path)
+    scan_once(iv_percentile_fetcher=_ivp_fetcher, **common)
+    failed = scan_once(
+        iv_percentile_fetcher=lambda symbols: _ivp_fetcher(symbols, **{f"ivp_{period}": 0.21}),
+        **common,
+    ).document
+    assert failed["exited_symbols"] == ["TEST"]
+    assert failed["core_changes"]["exited"][0]["reason"] == f"ivp_{period}_above_limit"
+    assert failed["core_pool"] == failed["core_top_opportunities"] == []
+    assert scan_once(iv_percentile_fetcher=_ivp_fetcher, **common).document["added_symbols"] == ["TEST"]
+
+
+@pytest.mark.parametrize("mode", ["daily", "rth"])
+@pytest.mark.parametrize("fields", [
+    {"delta": 0.67}, {"daysToExpiration": 449}, {"ask": 21.8},
+    {"volatility": 61.0}, {"openInterest": 99}, {"bid": 50.0, "ask": 51.0},
+])
+def test_confirmed_contract_failures_exit_in_both_scan_modes(tmp_path: Path, mode: str, fields: dict) -> None:
+    class FailedContract(FakeSchwabClient):
+        def get_json(self, path, params):
+            status, payload = super().get_json(path, params)
+            if path.endswith("/chains"):
+                for strikes in payload["callExpDateMap"].values():
+                    for contracts in strikes.values():
+                        contracts[0].update(fields)
+            return status, payload
+
+    common = dict(now=NOW.replace(hour=20) if mode == "daily" else NOW, mode=mode,
+                  policy=_policy(), universe=_universe(), data_root=tmp_path,
+                  iv_percentile_fetcher=_ivp_fetcher)
+    scan_once(client=FakeSchwabClient(NOW), **common)
+    failed = scan_once(client=FailedContract(NOW), **common).document
+    assert failed["exited_symbols"] == ["TEST"]
+    assert failed["core_pool"] == []
+
+
+@pytest.mark.parametrize("mode", ["daily", "rth"])
+@pytest.mark.parametrize("fault", [
+    "missing_quote", "optionable_missing", "old_stock_quote", "future_stock_quote", "empty_chain", "chain_failure",
+    "delta_missing", "iv_missing", "oi_missing", "bbo_invalid", "old_option_quote",
+    "future_option_quote", "delayed_option_quote", "mixed_unknown_and_failed", "malformed_contract",
+])
+def test_unknown_data_preserves_stale_member_not_an_active_opportunity(
+    tmp_path: Path, mode: str, fault: str,
+) -> None:
+    class UnknownData(FakeSchwabClient):
+        def get_json(self, path, params):
+            status, payload = super().get_json(path, params)
+            if path.endswith("/quotes"):
+                if fault == "missing_quote":
+                    payload.pop("TEST", None)
+                if fault == "optionable_missing":
+                    payload["TEST"]["reference"].pop("optionable")
+                if fault == "old_stock_quote":
+                    payload["TEST"]["quote"]["quoteTime"] -= 86_400_000
+                    payload["TEST"]["quote"]["mark"] = 140.0  # Stale apparent failure.
+                if fault == "future_stock_quote":
+                    payload["TEST"]["quote"]["quoteTime"] += 86_400_000
+                    payload["TEST"]["quote"]["mark"] = 140.0
+            if path.endswith("/chains"):
+                if fault == "empty_chain":
+                    payload["callExpDateMap"] = {}
+                elif fault == "chain_failure":
+                    payload["status"] = "FAILED"
+                else:
+                    contracts = next(iter(next(iter(payload["callExpDateMap"].values())).values()))
+                    contract = contracts[0]
+                    field = {"delta_missing": "delta", "iv_missing": "volatility",
+                             "oi_missing": "openInterest", "bbo_invalid": "ask"}.get(fault)
+                    if field:
+                        contract.pop(field)
+                    elif fault in {"old_option_quote", "future_option_quote", "delayed_option_quote"}:
+                        contract["volatility"] = 61.0
+                        if fault == "old_option_quote":
+                            contract["quoteTimeInLong"] -= 86_400_000
+                        elif fault == "future_option_quote":
+                            contract["quoteTimeInLong"] += 86_400_000
+                        else:
+                            payload["isDelayed"] = True
+                    elif fault in {"mixed_unknown_and_failed", "malformed_contract"}:
+                        contract["volatility"] = 61.0
+                        contracts.append(dict(contract))
+                        contracts[1].pop("delta" if fault == "mixed_unknown_and_failed" else "daysToExpiration")
+            return status, payload
+
+    common = dict(now=NOW.replace(hour=20) if mode == "daily" else NOW, mode=mode,
+                  policy=_policy(), universe=_universe(), data_root=tmp_path,
+                  iv_percentile_fetcher=_ivp_fetcher)
+    first = scan_once(client=FakeSchwabClient(NOW), **common).document
+    unknown = scan_once(client=UnknownData(NOW), **common).document
+    assert unknown["exited_symbols"] == unknown["added_symbols"] == []
+    assert unknown["core_pool"][0]["symbol"] == "TEST"
+    assert unknown["core_pool"][0]["today_state"] == "STALE"
+    assert unknown["core_pool"][0]["snapshot_status"] == "historical"
+    assert unknown["core_pool"][0]["snapshot_as_of_et"] == first["core_pool"][0]["snapshot_as_of_et"]
+    assert unknown["counts"]["core_active"] == 0
+    assert unknown["core_top_opportunities"] == []
+    _, text = render_notification(unknown, discoveries=True)
+    assert "TEST LEAPS" not in text
+    assert scan_once(client=FakeSchwabClient(NOW), **common).document["added_symbols"] == []
+
+
+def test_missing_iv_preserves_old_member_but_does_not_delay_new_member(tmp_path: Path) -> None:
+    base = _universe().members[0]
+    common = dict(mode="daily", policy=_policy(), data_root=tmp_path)
+    scan_once(now=NOW.replace(hour=20), client=FakeSchwabClient(NOW), universe=_universe(),
+              iv_percentile_fetcher=_ivp_fetcher, **common)
+    next_day = NOW + timedelta(days=4)  # Two sessions old: beyond the existing one-session cache TTL.
+    universe = Universe((base, replace(base, symbol="NEW", provider_symbol="NEW")), ())
+    result = scan_once(
+        now=next_day.replace(hour=20), client=FakeSchwabClient(next_day), universe=universe,
+        iv_percentile_fetcher=lambda _: {
+            symbol: replace(snapshot, observed_at=next_day)
+            for symbol, snapshot in _ivp_fetcher(["NEW"]).items()
+        }, **common,
+    ).document
+    assert result["scan_complete"]
+    assert result["added_symbols"] == ["NEW"]
+    assert result["exited_symbols"] == []
+    assert {row["symbol"]: row["today_state"] for row in result["core_pool"]}["TEST"] == "STALE"
+    assert [row["symbol"] for row in result["core_top_opportunities"]] == ["NEW"]
+
+
+def test_rth_exit_only_notifies_once_and_does_not_expand_bark_routing(tmp_path: Path) -> None:
+    client = FakeSchwabClient(NOW)
+    deliveries = []
+    settings = replace(NotificationSettings.from_env(), bark_enabled=True, bark_friend_enabled=True)
+
+    def enqueue(delivery_settings, _envelope, **kwargs):
+        deliveries.append((delivery_settings, kwargs))
+        return SimpleNamespace(accepted=True, outcome="pending")
+
+    common = dict(now=NOW, mode="rth", client=client, policy=_policy(), universe=_universe(),
+                  data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher,
+                  notification_settings=settings, enqueue=enqueue)
+    scan_once(**common)
+    client.test_last = 114.0
+    exited = scan_once(**common)
+    assert exited.document["exited_symbols"] == ["TEST"]
+    assert exited.document["strict_added_symbols"] == []
+    assert len(deliveries) == 2
+    assert "TEST (above_52w_location)" in deliveries[-1][1]["feishu_text"]
+    assert all(not delivery.bark_enabled and not delivery.bark_friend_enabled for delivery, _ in deliveries)
+    assert scan_once(**common).notification is None
+    common.update(mode="daily", now=NOW.replace(hour=20))
+    scan_once(**common)
+    assert deliveries[-1][0] == settings  # Daily delivery retains the original settings.
+
+
+def test_v11_members_are_reevaluated_and_research_rejections_still_apply(tmp_path: Path) -> None:
+    common = dict(now=NOW, mode="rth", client=FakeSchwabClient(NOW), policy=_policy(),
+                  universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    scan_once(**common)
+    state_path = tmp_path / "runtime/growth_dislocation_state.json"
+    state = json.loads(state_path.read_text())
+    state["policy_version"] = "growth_dislocation_leaps.v11"
+    state["core_pool"]["entry_streaks"] = {"NEW": 1}
+    state["core_pool"]["members"]["TEST"].update(exit_streak=2, exit_reason="PRICE_RECOVERED")
+    state["core_pool"]["research_rejected_symbols"] = ["TEST"]
+    state_path.write_text(json.dumps(state))
+    result = scan_once(**common).document
+    assert result["core_changes"]["exited"] == [{"symbol": "TEST", "reason": "RESEARCH_REJECTED"}]
+    assert result["core_pool"] == []
+    assert scan_once(**common).document["added_symbols"] == []
+    saved = json.loads(state_path.read_text())
+    assert saved["schema_version"] == state["schema_version"]
+    assert saved["policy_version"] == "growth_dislocation_leaps.v12"
+    assert "entry_streaks" not in saved["core_pool"]
 
 
 def test_schedule_is_exchange_local_and_daily_lane_bypasses_quiet_window() -> None:
@@ -1072,11 +1256,19 @@ def test_daily_uses_broker_close_and_rth_uses_only_current_quote(tmp_path: Path,
 
 
 def test_report_leads_with_current_scan_and_does_not_fill_missing_iv_from_history(tmp_path: Path) -> None:
+    class MissingFieldsClient(FakeSchwabClient):
+        def _quote(self, symbol: str):
+            quote = super()._quote(symbol)
+            if symbol == "TEST":
+                quote["fundamental"].pop("divYield")
+            return quote
+
     client = FakeSchwabClient(NOW)
     common = dict(now=NOW.replace(hour=20), mode="daily", client=client, policy=_policy(),
                   universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
     first = scan_once(**common).document
-    client.test_last = 114.0  # Position fails entry; no IV refresh for this member.
+    client = MissingFieldsClient(NOW)  # Unknown eligibility; no IV refresh for this member.
+    common["client"] = client
     paused = scan_once(**common).document
     member = paused["core_pool"][0]
     assert member["snapshot_status"] == "historical"
@@ -1084,7 +1276,8 @@ def test_report_leads_with_current_scan_and_does_not_fill_missing_iv_from_histor
     _, text = render_notification(paused, discoveries=True)
     assert text.index("## 当日扫描") < text.index("## 淘汰与数据缺口") < text.index("## Top Opportunities") < text.index("## Core Pool")
     core_text = text.split("## Core Pool", 1)[1]
-    assert "28.00%" in core_text
+    assert member["today_state"] == "STALE"
+    assert "股票报价字段缺失" in core_text
     assert "| 8.00% |" not in core_text
     assert "未获取" in core_text
     assert member["snapshot_as_of_et"] in core_text

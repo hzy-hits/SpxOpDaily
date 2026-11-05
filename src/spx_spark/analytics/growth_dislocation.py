@@ -10,7 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v11"
+POLICY_VERSION = "growth_dislocation_leaps.v12"
 IV_SCORE_CHEAP_CUTOFF = 0.10
 
 
@@ -66,19 +66,33 @@ def select_target_leaps(
         if not policy.min_leaps_dte <= int(contract.dte) <= policy.max_leaps_dte:
             reject("dte_out_of_range")
             continue
-        if contract.delta is None or not (
+        if contract.delta is None:
+            reject("delta_missing")
+            continue
+        if not (
             policy.target_delta_min <= float(contract.delta) <= policy.target_delta_max
         ):
-            reject("delta_missing_or_out_of_range")
+            reject("delta_out_of_range")
             continue
         spread = spread_mid_ratio(contract.bid, contract.ask)
-        if spread is None or spread > policy.max_leaps_spread_mid:
-            reject("bid_ask_invalid_or_spread_above_limit")
+        if spread is None:
+            reject("bid_ask_invalid")
             continue
-        if contract.volatility is None or not (
-            0.0 < float(contract.volatility) <= policy.max_current_leaps_iv
+        if spread > policy.max_leaps_spread_mid:
+            reject("spread_above_limit")
+            continue
+        if (
+            contract.volatility is None
+            or not math.isfinite(float(contract.volatility))
+            or float(contract.volatility) <= 0.0
         ):
-            reject("iv_missing_or_above_limit")
+            reject("iv_missing")
+            continue
+        if float(contract.volatility) > policy.max_current_leaps_iv:
+            reject("iv_above_limit")
+            continue
+        if contract.open_interest is None:
+            reject("open_interest_missing")
             continue
         if int(contract.open_interest) < policy.min_target_leaps_open_interest:
             reject("open_interest_below_limit")
@@ -90,8 +104,11 @@ def select_target_leaps(
                 bid=float(contract.bid),
                 ask=float(contract.ask),
             )
-            if value_ratio is None or value_ratio > policy.max_extrinsic_value_ratio:
-                reject("extrinsic_invalid_or_above_limit")
+            if value_ratio is None:
+                reject("extrinsic_invalid")
+                continue
+            if value_ratio > policy.max_extrinsic_value_ratio:
+                reject("extrinsic_above_limit")
                 continue
         eligible.append(contract)
     if not eligible:
@@ -416,8 +433,6 @@ def new_core_member(row: Mapping[str, Any], *, at: str, reason: str) -> dict[str
         "entry_reason": reason,
         "last_eligible_at": at,
         "last_complete_observed_at": at,
-        "exit_streak": 0,
-        "exit_reason": None,
         "snapshot": dict(row),
     }
 
@@ -429,15 +444,14 @@ def core_display_row(
     current: Mapping[str, Any] | None,
     warming: Mapping[str, Any] | None,
     observation: Mapping[str, Any] | None,
-    quality_complete: bool,
 ) -> dict[str, Any]:
     row = dict(current or stored)
     if current is not None:
         today_state = str(current.get("state") or "WATCH")
-    elif warming is not None or not quality_complete:
-        today_state = "STALE"
     else:
-        today_state = "PAUSED"
+        # A retained non-candidate has unknown eligibility, never a current buy
+        # opportunity. Confirmed failures have already left the dynamic pool.
+        today_state = "STALE"
     row.update(
         {
             "core_status": member.get("lifecycle_status", "CORE_PAUSED"),
@@ -445,8 +459,6 @@ def core_display_row(
             "pause_reason": member.get("pause_reason"),
             "entry_reason": member.get("entry_reason"),
             "entered_at": member.get("entered_at"),
-            "exit_streak": int(member.get("exit_streak") or 0),
-            "exit_reason": member.get("exit_reason"),
             "snapshot_status": "current" if current is not None else "historical",
             "snapshot_as_of_et": row.get("as_of_et"),
             # Keep the last eligible snapshot for audit, but do not let its
