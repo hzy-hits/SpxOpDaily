@@ -24,7 +24,7 @@ class EquityQuote:
     high_52w: float | None
     market_cap: float | None
     dividend_yield: float | None
-    optionable: bool
+    optionable: bool | None
     quote_at: datetime | None
     realtime: bool
 
@@ -44,7 +44,7 @@ class OptionContract:
     bid: float | None
     ask: float | None
     volatility: float | None
-    open_interest: int
+    open_interest: int | None
     total_volume: int
     dte: int
     quote_at: datetime | None
@@ -56,6 +56,7 @@ class LeapsChain:
     max_dte: int
     observed_volume: int
     delayed: bool
+    complete: bool
 
 
 def fetch_equity_quote_batch(
@@ -137,27 +138,35 @@ def fetch_leaps_chain(
         },
     )
     if not isinstance(payload, Mapping) or str(payload.get("status") or "") != "SUCCESS":
-        return LeapsChain((), 0, 0, bool(_mapping(payload).get("isDelayed")))
+        return LeapsChain((), 0, 0, bool(_mapping(payload).get("isDelayed")), False)
     contracts: list[OptionContract] = []
     expiration_map = payload.get("callExpDateMap")
+    complete = isinstance(expiration_map, Mapping)
     if isinstance(expiration_map, Mapping):
         for expiry_key, strike_map in expiration_map.items():
             expiry = _expiry_from_key(expiry_key)
             if expiry is None or not isinstance(strike_map, Mapping):
+                complete = False
                 continue
             for raw_contracts in strike_map.values():
                 if not isinstance(raw_contracts, list):
+                    complete = False
                     continue
                 for raw in raw_contracts:
                     if isinstance(raw, Mapping):
                         contract = _option_contract(raw, expiry=expiry)
                         if contract is not None:
                             contracts.append(contract)
+                        else:
+                            complete = False
+                    else:
+                        complete = False
     return LeapsChain(
         contracts=tuple(contracts),
         max_dte=max((contract.dte for contract in contracts), default=0),
         observed_volume=sum(contract.total_volume for contract in contracts),
         delayed=bool(payload.get("isDelayed")),
+        complete=complete,
     )
 
 
@@ -165,6 +174,7 @@ def _equity_quote(provider_symbol: str, raw: Mapping[str, Any]) -> EquityQuote:
     quote = _mapping(raw.get("quote"))
     fundamental = _mapping(raw.get("fundamental"))
     reference = _mapping(raw.get("reference"))
+    optionable = reference.get("optionable")
     last = _first_positive(quote, "mark", "lastPrice", "closePrice")
     shares = _positive_float(fundamental.get("sharesOutstanding"))
     raw_yield = _nonnegative_float(fundamental.get("divYield"))
@@ -175,7 +185,7 @@ def _equity_quote(provider_symbol: str, raw: Mapping[str, Any]) -> EquityQuote:
         high_52w=_positive_float(quote.get("52WeekHigh")),
         market_cap=(last * shares if last is not None and shares is not None else None),
         dividend_yield=(raw_yield / 100.0 if raw_yield is not None else None),
-        optionable=bool(reference.get("optionable")),
+        optionable=optionable if isinstance(optionable, bool) else None,
         quote_at=_datetime_from_millis(quote.get("quoteTime") or quote.get("tradeTime")),
         realtime=bool(raw.get("realtime")),
     )
@@ -196,7 +206,7 @@ def _option_contract(raw: Mapping[str, Any], *, expiry: date) -> OptionContract 
         bid=_nonnegative_float(raw.get("bid")),
         ask=_nonnegative_float(raw.get("ask")),
         volatility=(volatility / 100.0 if volatility is not None else None),
-        open_interest=_nonnegative_int(raw.get("openInterest")) or 0,
+        open_interest=_nonnegative_int(raw.get("openInterest")),
         total_volume=_nonnegative_int(raw.get("totalVolume")) or 0,
         dte=dte,
         quote_at=_datetime_from_millis(raw.get("quoteTimeInLong") or raw.get("tradeTimeInLong")),

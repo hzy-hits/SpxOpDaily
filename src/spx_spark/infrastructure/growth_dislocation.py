@@ -5,12 +5,15 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from functools import partial
+from itertools import zip_longest
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.error import HTTPError, URLError
 
@@ -23,6 +26,7 @@ from spx_spark.analytics.growth_dislocation import (
     price_features,
     price_location_52w,
     priority_sort_key,
+    quote_preference_scores,
     score_candidate,
     select_target_leaps,
     spread_mid_ratio,
@@ -64,11 +68,6 @@ SCHEDULE_MINUTE = 30
 SCHEDULE_GRACE_MINUTES = 5
 DAILY_SUMMARY_HOUR_ET = 20
 MAX_CLOSE_HISTORY = 270
-CORE_ENTRY_CONFIRMATIONS = 2
-CORE_EXIT_CONFIRMATIONS = 3
-CORE_EXIT_PRICE_LOCATION_52W = 0.30
-CORE_EXIT_MARKET_CAP = 2_500_000_000.0
-CORE_EXIT_DIVIDEND_YIELD = 0.02
 ProviderError = (
     HTTPError,
     URLError,
@@ -181,6 +180,8 @@ def scan_once(
             state=state,
             iv_percentile_fetcher=iv_percentile_fetcher,
         )
+        at = datetime.fromisoformat(document["generated_at"])
+        ny = at.astimezone(ET)
         current_symbols = {str(row["symbol"]) for row in document["all_candidates"]}
         previous_symbols = {str(symbol) for symbol in state.get("active_candidate_symbols", [])}
         complete = bool(document.get("scan_complete"))
@@ -199,14 +200,14 @@ def scan_once(
         document["material_fingerprint"] = fingerprint
         atomic_write_json_secure(latest_path, document)
         notification: EnqueueResult | None = None
-        should_notify = mode == "daily" or bool(added_symbols) or bool(strict_added)
+        should_notify = mode == "daily" or bool(added_symbols or exited_symbols or strict_added)
         if should_notify and notification_settings is not None:
             title, text = render_notification(document)
             _, feishu_text = render_notification(document, discoveries=True)
             # New intraday discovery events belong only to Feishu. Existing daily
             # routing and its legacy text remain unchanged.
             delivery_settings = notification_settings
-            if mode != "daily" and not added_symbols:
+            if mode != "daily":
                 delivery_settings = replace(
                     notification_settings, bark_enabled=False, bark_friend_enabled=False,
                 )
@@ -252,10 +253,12 @@ def _build_document(
     state: dict[str, Any],
     iv_percentile_fetcher: IvPercentileFetcher | None,
 ) -> tuple[dict[str, Any], str]:
+    scan_started_at, started_clock = now, monotonic()
     budget = policy.rth_request_budget if mode == "rth" else policy.daily_request_budget
     requests_used = 0
     errors: list[str] = []
     quotes: dict[str, EquityQuote] = {}
+    requested_quote_symbols = 0
     provider_symbols = list(
         dict.fromkeys(
             [member.provider_symbol for member in universe.members]
@@ -267,11 +270,14 @@ def _build_document(
             break
         batch = provider_symbols[offset : offset + 500]
         requests_used += 1
+        requested_quote_symbols += len(batch)
         try:
             quotes.update(fetch_equity_quote_batch(client, batch))
         except ProviderError as exc:
             errors.append(f"quotes:{type(exc).__name__}")
 
+    now = scan_started_at + timedelta(seconds=monotonic() - started_clock)
+    ny = now.astimezone(ET)
     rejection_counts: Counter[str] = Counter()
     membership_observations: dict[str, dict[str, Any]] = {}
     price_hard_survivors: list[tuple[UniverseMember, EquityQuote, float]] = []
@@ -289,6 +295,16 @@ def _build_document(
             continue
         assert quote is not None and location is not None
         price_hard_survivors.append((member, quote, location))
+
+    quotes_ready = len(price_hard_survivors)
+    price_hard_survivors = _detail_order(
+        price_hard_survivors, state, policy=policy, request_budget=budget - requests_used,
+    )
+    selected_symbols = {member.symbol for member, _quote, _location in price_hard_survivors}
+    for symbol, observation in membership_observations.items():
+        observation["selected_this_run"] = symbol in selected_symbols
+        if observation["screen_reason"] is None and symbol not in selected_symbols:
+            observation["screen_reason"] = "not_evaluated_this_run"
 
     iv_cache = _mapping_state(state, "iv_percentiles")
     iv_snapshots = _fresh_iv_snapshots(iv_cache, trading_day=ny.date())
@@ -331,6 +347,12 @@ def _build_document(
                 "ivp_13w": snapshot.ivp_13w if snapshot else None,
                 "ivp_26w": snapshot.ivp_26w if snapshot else None,
                 "ivp_52w": snapshot.ivp_52w if snapshot else None,
+                "iv_history_as_of": (
+                    (snapshot.as_of_date or snapshot.observed_at.astimezone(ET).date()).isoformat()
+                    if snapshot else None
+                ),
+                "iv_observed_at": snapshot.observed_at.isoformat() if snapshot else None,
+                "iv_refreshed_this_run": _ibkr_provider_symbol(member.symbol) in refreshed_iv_symbols,
             }
         )
         if (
@@ -342,22 +364,17 @@ def _build_document(
             observation["screen_reason"] = "ibkr_iv_percentile_missing"
             rejection_counts["ibkr_iv_percentile_missing"] += 1
             continue
-        if snapshot.ivp_13w > policy.max_ivp_13w:
-            observation["screen_reason"] = "ivp_13w_above_limit"
-            rejection_counts["ivp_13w_above_limit"] += 1
-            continue
-        if snapshot.ivp_26w > policy.max_ivp_26w:
-            observation["screen_reason"] = "ivp_26w_above_limit"
-            rejection_counts["ivp_26w_above_limit"] += 1
-            continue
-        if snapshot.ivp_52w > policy.max_ivp_52w:
-            observation["screen_reason"] = "ivp_52w_above_limit"
-            rejection_counts["ivp_52w_above_limit"] += 1
+        if any(not 0.0 <= value <= 1.0 for value in (snapshot.ivp_13w, snapshot.ivp_26w, snapshot.ivp_52w)):
+            observation["screen_reason"] = "ibkr_iv_percentile_invalid"
+            rejection_counts["ibkr_iv_percentile_invalid"] += 1
             continue
         observation["screen_reason"] = None
         hard_survivors.append(item)
 
-    histories = _mapping_state(state, "price_histories")
+    history_cache = _mapping_state(state, "price_histories")
+    # Only this run's validated broker history may feed scores. A cached bar
+    # can be an earlier intraday observation, even when its date looks complete.
+    histories: dict[str, Any] = {}
     detail_cache = _mapping_state(state, "details")
     required_benchmarks = list(
         dict.fromkeys(
@@ -365,37 +382,36 @@ def _build_document(
         )
     )
     for symbol in required_benchmarks:
-        history = _close_history(histories.get(symbol))
-        if len(history) < 35 and requests_used < budget:
-            requests_used += 1
-            try:
-                history = list(fetch_daily_closes(client, symbol))
-            except ProviderError as exc:
-                errors.append(f"history:{symbol}:{type(exc).__name__}")
-        benchmark_quote = quotes.get(symbol)
-        if benchmark_quote is not None and benchmark_quote.last is not None:
-            history = _upsert_close(history, ny.date(), benchmark_quote.last)
-        if history:
+        if requests_used >= budget:
+            break
+        requests_used += 1
+        history, reason = _refresh_close_history(
+            client, symbol, now=now, mode=mode, quote=quotes.get(symbol),
+            max_quote_age=policy.quote_max_age_seconds,
+        )
+        if reason:
+            errors.append(f"history:{symbol}:{reason}")
+        else:
             histories[symbol] = _close_history_payload(history)
+            history_cache[symbol] = histories[symbol]
 
-    prioritized = _detail_order(hard_survivors, state)
+    prioritized = hard_survivors
     detailed_now: set[str] = set()
     detail_evaluated_now: set[str] = set()
     target_leaps_rejected: set[str] = set()
     for member, quote, _location in prioritized:
         if requests_used >= budget:
             break
-        history = _close_history(histories.get(member.symbol))
-        if len(history) < 35:
-            requests_used += 1
-            try:
-                history = list(fetch_daily_closes(client, member.provider_symbol))
-            except ProviderError as exc:
-                errors.append(f"history:{member.symbol}:{type(exc).__name__}")
-                continue
-        if quote.last is not None:
-            history = _upsert_close(history, ny.date(), quote.last)
-            histories[member.symbol] = _close_history_payload(history)
+        requests_used += 1
+        history, reason = _refresh_close_history(
+            client, member.provider_symbol, now=now, mode=mode, quote=quote,
+            max_quote_age=policy.quote_max_age_seconds,
+        )
+        if reason:
+            errors.append(f"history:{member.symbol}:{reason}")
+            continue
+        histories[member.symbol] = _close_history_payload(history)
+        history_cache[member.symbol] = histories[member.symbol]
         if requests_used >= budget:
             break
         requests_used += 1
@@ -411,6 +427,8 @@ def _build_document(
         except ProviderError as exc:
             errors.append(f"chain:{member.symbol}:{type(exc).__name__}")
             continue
+        now = scan_started_at + timedelta(seconds=monotonic() - started_clock)
+        ny = now.astimezone(ET)
         detail_evaluated_now.add(member.symbol)
         membership_observations[member.symbol].update(
             {
@@ -429,6 +447,26 @@ def _build_document(
         if target is None:
             reason = "target_leaps_hard_filter" if chain.contracts else "target_leaps_missing"
             membership_observations[member.symbol]["screen_reason"] = reason
+            # Missing/invalid fields, an empty response, or stale quotes cannot
+            # prove that a previously eligible member is now untradeable.
+            membership_observations[member.symbol]["strict_rejection_confirmed"] = (
+                chain.complete and bool(contract_rejections)
+                and set(contract_rejections) <= {
+                    "dte_out_of_range", "delta_out_of_range", "spread_above_limit",
+                    "open_interest_below_limit", "extrinsic_above_limit",
+                }
+                and not chain.delayed
+                and all(
+                    contract.quote_at is not None
+                    and 0 <= (now - contract.quote_at).total_seconds()
+                    and (
+                        (now - contract.quote_at).total_seconds() <= policy.option_quote_max_age_seconds
+                        if mode == "rth"
+                        else contract.quote_at.astimezone(ET).date() == ny.date()
+                    )
+                    for contract in chain.contracts
+                )
+            )
             rejection_counts[reason] += 1
             detail_cache.pop(member.symbol, None)
             target_leaps_rejected.add(member.symbol)
@@ -436,15 +474,16 @@ def _build_document(
         detail_cache[member.symbol] = _detail_payload(target, chain, fetched_at=now)
         detailed_now.add(member.symbol)
 
+    # Quotes received during network I/O are not future data relative to the
+    # completed scan. Preserve the injected reference time for historical tests.
+    now = scan_started_at + timedelta(seconds=monotonic() - started_clock)
+    ny = now.astimezone(ET)
     strict_candidates: list[dict[str, Any]] = []
     warming: list[dict[str, Any]] = []
     for member, quote, location in hard_survivors:
         if member.symbol in target_leaps_rejected:
             continue
         history = _close_history(histories.get(member.symbol))
-        if quote.last is not None:
-            history = _upsert_close(history, ny.date(), quote.last)
-            histories[member.symbol] = _close_history_payload(history)
         row, reasons = _candidate_row(
             member=member,
             quote=quote,
@@ -501,12 +540,15 @@ def _build_document(
             str(row["symbol"]),
         )
     )
-    request_limited = bool(hard_survivors) and len(detail_evaluated_now) < len(hard_survivors)
+    request_limited = requested_quote_symbols < len(provider_symbols) or (
+        requests_used >= budget and len(detail_evaluated_now) < len(hard_survivors)
+    ) or (quotes_ready > 0 and not selected_symbols)
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "policy_version": POLICY_VERSION,
         "generated_at": now.isoformat(),
         "mode": mode,
+        "scan_scope": "budgeted_ranked_shortlist",
         "timezone": "America/New_York",
         "universe_metadata": list(universe.metadata),
         "scan_complete": not request_limited and not errors,
@@ -516,8 +558,16 @@ def _build_document(
             "universe": len(universe.members),
             "quotes_present": sum(member.provider_symbol in quotes for member in universe.members),
             "price_hard_survivors": len(price_hard_survivors),
+            "quotes_ready": quotes_ready,
+            "shortlisted": len(selected_symbols),
+            "not_evaluated": quotes_ready - len(selected_symbols),
             "ivp_snapshots": sum(symbol in iv_snapshots for symbol in price_survivor_symbols),
             "ivp_refreshed": len(refreshed_iv_symbols),
+            "ivp_missing": rejection_counts["ibkr_iv_percentile_missing"],
+            "ivp_cached": sum(
+                symbol in iv_snapshots and symbol not in refreshed_iv_symbols
+                for symbol in price_survivor_symbols
+            ),
             "hard_survivors": len(hard_survivors),
             "detailed_this_run": len(detail_evaluated_now),
             "strict_candidates": len(strict_candidates),
@@ -540,9 +590,9 @@ def _build_document(
         "data_quality": {
             "status": "partial" if request_limited or errors else "complete",
             "request_limited": request_limited,
-            "ivp_incomplete": False,
+            "ivp_incomplete": bool(rejection_counts["ibkr_iv_percentile_missing"]),
             "errors": sorted(set(errors)),
-            "volatility_contract": "13-week, 26-week, and 52-week percentiles calculated from IBKR TWS daily OPTION_IMPLIED_VOLATILITY history <= configured limits; selected LEAPS current IV passes its hard limit while IV/RV20 is score-only",
+            "volatility_contract": "13/26/52-week IBKR IV percentiles and absolute LEAPS IV are continuous score inputs, not exclusion thresholds; missing/invalid fields do not receive an invented score",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
             "classification": "official sector fallback; subindustry unavailable",
         },
@@ -569,30 +619,26 @@ def _hard_filter(
         quote.market_cap,
         quote.dividend_yield,
         quote.quote_at,
+        quote.optionable,
     ):
         return "quote_fields_missing", None
     if mode == "rth":
         if not quote.realtime:
             return "quote_delayed", None
         assert quote.quote_at is not None
-        if (
+        if not 0 <= (
             now - quote.quote_at.astimezone(timezone.utc)
-        ).total_seconds() > policy.quote_max_age_seconds:
+        ).total_seconds() <= policy.quote_max_age_seconds:
             return "quote_frozen", None
     elif (
-        quote.quote_at is None or quote.quote_at.astimezone(ET).date() != now.astimezone(ET).date()
+        quote.quote_at is None or quote.quote_at > now
+        or quote.quote_at.astimezone(ET).date() != now.astimezone(ET).date()
     ):
         return "quote_frozen", None
     assert quote.last is not None and quote.low_52w is not None and quote.high_52w is not None
     location = price_location_52w(quote.last, quote.low_52w, quote.high_52w)
     if location is None:
         return "price_range_invalid", None
-    if location > policy.max_price_location_52w:
-        return "above_52w_location", location
-    if quote.market_cap is None or quote.market_cap < policy.min_market_cap:
-        return "below_market_cap", location
-    if quote.dividend_yield is None or quote.dividend_yield >= policy.max_dividend_yield:
-        return "dividend_yield", location
     if not quote.optionable:
         return "not_optionable", location
     return None, location
@@ -608,6 +654,7 @@ def _membership_observation(
     return {
         "symbol": member.symbol,
         "quote_observed": quote is not None,
+        "quote_at": quote.quote_at.isoformat() if quote and quote.quote_at else None,
         "price_location_52w": price_location,
         "market_cap": quote.market_cap if quote else None,
         "dividend_yield": quote.dividend_yield if quote else None,
@@ -615,6 +662,9 @@ def _membership_observation(
         "ivp_13w": None,
         "ivp_26w": None,
         "ivp_52w": None,
+        "iv_history_as_of": None,
+        "iv_observed_at": None,
+        "iv_refreshed_this_run": False,
         "strict_eligible": False,
         "today_state": "STALE",
         "screen_reason": screen_reason,
@@ -632,15 +682,18 @@ def _apply_core_pool(
     at: datetime,
     policy: GrowthDislocationSettings,
 ) -> tuple[list[str], list[str]]:
-    """Apply the approved daily-only Core Pool membership contract."""
+    """Use the same current-score Top N for entry and exit on completed batches.
+
+    Incomplete scans freeze membership; an individual missing observation keeps
+    its member STALE. Neither condition turns yesterday's snapshot into a pass.
+    """
 
     core = _mapping_state(state, "core_pool")
     members = _mapping_records(core.get("members"))
-    entry_streaks = {
-        str(symbol): max(0, int(count))
-        for symbol, count in _mapping(core.get("entry_streaks")).items()
-        if str(symbol)
-    }
+    core.pop("entry_streaks", None)
+    for member in members.values():
+        member.pop("exit_streak", None)
+        member.pop("exit_reason", None)
     archive = [dict(row) for row in core.get("archive", []) if isinstance(row, Mapping)]
     rejected = {
         str(symbol).upper() for symbol in core.get("research_rejected_symbols", []) if str(symbol)
@@ -650,6 +703,11 @@ def _apply_core_pool(
         for row in document.get("all_candidates", [])
         if isinstance(row, Mapping) and row.get("symbol")
     }
+    ranked, _reserve = apply_crowding(
+        [row for symbol, row in candidates.items() if symbol not in rejected],
+        policy, sort_key=priority_sort_key,
+    )
+    ranked_symbols = {row["symbol"] for row in ranked}
     warming = {
         str(row["symbol"]): dict(row)
         for row in document.get("watchlist", [])
@@ -661,41 +719,27 @@ def _apply_core_pool(
         if isinstance(row, Mapping) and row.get("symbol")
     }
     quality_complete = _mapping(document.get("data_quality")).get("status") == "complete"
-    complete_daily = mode == "daily" and quality_complete
+    quality_complete = quality_complete and bool(document.get("scan_complete"))
     initialized = bool(core.get("initialized"))
     added: list[dict[str, str]] = []
     exited: list[dict[str, str]] = []
     at_label = at.isoformat()
 
-    if not initialized and complete_daily:
-        for symbol, row in sorted(candidates.items()):
-            members[symbol] = new_core_member(row, at=at_label, reason="BOOTSTRAP")
-            added.append({"symbol": symbol, "reason": "BOOTSTRAP"})
+    if quality_complete:
+        if not initialized:
+            core["bootstrapped_at"] = at_label
         initialized = True
-        entry_streaks.clear()
-        core["bootstrapped_at"] = at_label
-    elif initialized and complete_daily:
         for symbol in list(members):
             member = members[symbol]
             observation = observations.get(symbol, {})
-            exit_reason, immediate = _core_exit_signal(
+            reason = _core_exit_signal(
                 symbol=symbol,
                 observation=observation,
                 rejected=rejected,
-                policy=policy,
             )
-            if exit_reason is None:
-                member["exit_reason"] = None
-                member["exit_streak"] = 0
-            else:
-                prior_reason = member.get("exit_reason")
-                member["exit_reason"] = exit_reason
-                member["exit_streak"] = (
-                    int(member.get("exit_streak") or 0) + 1 if prior_reason == exit_reason else 1
-                )
-            should_exit = immediate or int(member.get("exit_streak") or 0) >= CORE_EXIT_CONFIRMATIONS
-            if should_exit:
-                reason = str(member.get("exit_reason") or "UNTRADEABLE")
+            if symbol in candidates and symbol not in ranked_symbols:
+                reason = reason or "RANKED_OUT"
+            if reason is not None:
                 exited.append({"symbol": symbol, "reason": reason})
                 archive.append(
                     {
@@ -703,10 +747,10 @@ def _apply_core_pool(
                         "entered_at": member.get("entered_at"),
                         "exited_at": at_label,
                         "reason": reason,
+                        "observation": observation,
                     }
                 )
                 members.pop(symbol)
-                entry_streaks.pop(symbol, None)
                 continue
             if symbol in candidates:
                 member["lifecycle_status"] = "CORE_ACTIVE"
@@ -716,35 +760,28 @@ def _apply_core_pool(
             else:
                 member["lifecycle_status"] = "CORE_PAUSED"
                 member["pause_reason"] = str(
-                    observation.get("screen_reason") or "not_strict_candidate"
+                    observation.get("screen_reason") or "observation_missing"
                 )
-            member["last_complete_observed_at"] = at_label
+            if observation.get("selected_this_run"):
+                member["last_complete_observed_at"] = at_label
 
-        eligible_nonmembers = set(candidates) - set(members) - rejected
-        for symbol in list(entry_streaks):
-            if symbol not in eligible_nonmembers:
-                entry_streaks.pop(symbol, None)
+        eligible_nonmembers = ranked_symbols - set(members) - rejected
         for symbol in sorted(eligible_nonmembers):
-            count = entry_streaks.get(symbol, 0) + 1
-            if count < CORE_ENTRY_CONFIRMATIONS:
-                entry_streaks[symbol] = count
-                continue
             members[symbol] = new_core_member(
                 candidates[symbol],
                 at=at_label,
-                reason="TWO_COMPLETE_DAILY_PASSES",
+                reason="SCORE_TOP_POOL",
             )
-            added.append({"symbol": symbol, "reason": "TWO_COMPLETE_DAILY_PASSES"})
-            entry_streaks.pop(symbol, None)
+            added.append({"symbol": symbol, "reason": "SCORE_TOP_POOL"})
 
-    if complete_daily:
         ranked, _reserve = apply_crowding(
             [row for symbol, row in candidates.items() if symbol in members],
             policy,
             sort_key=priority_sort_key,
         )
         core["top_opportunities"] = ranked
-        core["last_complete_daily_at"] = at_label
+        if mode == "daily":
+            core["last_complete_daily_at"] = at_label
 
     stored_top = [
         dict(row) for row in core.get("top_opportunities", []) if isinstance(row, Mapping)
@@ -756,7 +793,6 @@ def _apply_core_pool(
             current=candidates.get(str(row.get("symbol"))),
             warming=warming.get(str(row.get("symbol"))),
             observation=observations.get(str(row.get("symbol"))),
-            quality_complete=quality_complete,
         )
         for row in stored_top
     ]
@@ -767,7 +803,6 @@ def _apply_core_pool(
             current=candidates.get(symbol),
             warming=warming.get(symbol),
             observation=observations.get(symbol),
-            quality_complete=quality_complete,
         )
         for symbol, member in members.items()
     ]
@@ -777,7 +812,6 @@ def _apply_core_pool(
         {
             "initialized": initialized,
             "members": members,
-            "entry_streaks": entry_streaks,
             "archive": archive,
             "last_scan_at": at_label,
         }
@@ -790,21 +824,16 @@ def _apply_core_pool(
         else "ACTIVE"
     )
     if not initialized:
-        change_message = "Waiting for the first complete daily scan"
+        change_message = "Waiting for the first complete scan"
     elif not quality_complete:
         change_message = "Membership frozen due to partial scan"
-    elif mode == "rth":
-        change_message = "RTH scan updates Today State only"
     else:
-        change_message = "Membership evaluated from complete daily scan"
+        change_message = "Score-ranked Top N enters; refreshed members ranked out or untradeable exit; unassessed/missing data stays STALE"
     document["core_pool_status"] = core_status
-    document["core_membership_updated"] = complete_daily
+    document["core_membership_updated"] = quality_complete
     document["core_pool"] = core_rows
     document["core_top_opportunities"] = displayed_top
-    document["core_entry_pending"] = [
-        {"symbol": symbol, "complete_daily_passes": count}
-        for symbol, count in sorted(entry_streaks.items())
-    ]
+    document["core_entry_pending"] = []
     document["core_changes"] = {
         "added": added,
         "exited": exited,
@@ -816,12 +845,12 @@ def _apply_core_pool(
         {
             "core_pool": len(members),
             "core_active": sum(
-                member.get("lifecycle_status") == "CORE_ACTIVE" for member in members.values()
+                row["snapshot_status"] == "current" for row in core_rows
             ),
             "core_paused": sum(
-                member.get("lifecycle_status") == "CORE_PAUSED" for member in members.values()
+                row["snapshot_status"] != "current" for row in core_rows
             ),
-            "core_entry_pending": len(entry_streaks),
+            "core_entry_pending": 0,
         }
     )
     document["counts"] = counts
@@ -843,27 +872,18 @@ def _core_exit_signal(
     symbol: str,
     observation: Mapping[str, Any],
     rejected: set[str],
-    policy: GrowthDislocationSettings,
-) -> tuple[str | None, bool]:
+) -> str | None:
     if symbol in rejected:
-        return "RESEARCH_REJECTED", True
-    if observation.get("quote_observed") and observation.get("optionable") is False:
-        return "UNTRADEABLE", True
-    price_location = _optional_float(observation.get("price_location_52w"))
-    if price_location is not None and price_location > CORE_EXIT_PRICE_LOCATION_52W:
-        return "PRICE_RECOVERED", False
-    market_cap = _optional_float(observation.get("market_cap"))
-    if market_cap is not None and market_cap < CORE_EXIT_MARKET_CAP:
-        return "MARKET_CAP_LOST", False
-    dividend_yield = _optional_float(observation.get("dividend_yield"))
-    if dividend_yield is not None and dividend_yield >= CORE_EXIT_DIVIDEND_YIELD:
-        return "DIVIDEND_PROFILE_CHANGED", False
-    max_dte = _optional_float(observation.get("max_option_dte"))
-    if observation.get("leaps_depth_refreshed") and (
-        max_dte is None or max_dte < policy.min_leaps_dte
-    ):
-        return "LEAPS_DEPTH_LOST", False
-    return None, False
+        return "RESEARCH_REJECTED"
+    reason = str(observation.get("screen_reason") or "")
+    # Consume the existing scanner's fresh-data verdict, not a second, looser
+    # set of thresholds or old cached field values.
+    if reason in {
+        "not_optionable",
+        "iv_or_liquidity_hard_filter",
+    } or (reason == "target_leaps_hard_filter" and observation.get("strict_rejection_confirmed")):
+        return reason
+    return None
 
 
 def _candidate_row(
@@ -905,12 +925,15 @@ def _candidate_row(
     elif not detail_current:
         reasons.append("target_leaps_not_refreshed_this_run")
     option_quote_at = _parse_datetime(detail.get("quote_at"))
-    if detail and mode == "rth":
+    if detail:
         if bool(detail.get("delayed")):
             reasons.append("target_leaps_delayed")
         elif option_quote_at is None:
             reasons.append("target_leaps_timestamp_missing")
-        elif (now - option_quote_at).total_seconds() > policy.option_quote_max_age_seconds:
+        elif option_quote_at > now or (
+            (now - option_quote_at).total_seconds() > policy.option_quote_max_age_seconds
+            if mode == "rth" else option_quote_at.astimezone(ET).date() != ny.date()
+        ):
             reasons.append("target_leaps_frozen")
     bid = _optional_float(detail.get("bid"))
     ask = _optional_float(detail.get("ask"))
@@ -996,6 +1019,7 @@ def _candidate_row(
         "data_quality": "warming" if reasons else "ready",
         "data_quality_reasons": sorted(set(reasons)),
         "as_of_et": ny.isoformat(),
+        "price_history_as_of": history[-1].day.isoformat() if features and history else None,
     }
     return row, sorted(set(reasons))
 
@@ -1030,19 +1054,90 @@ def render_notification(
         for row in (core_pool if isinstance(core_pool, list) else []) if isinstance(row, Mapping)
     ]
     lines.extend(core_rows or ["| — | — | — | Core Pool 尚无成员 | — | — | — |"])
+    if discoveries:
+        # Feishu's current-scan report is independent of historical membership.
+        # The default renderer and notification routing are left unchanged.
+        quality = _mapping(document.get("data_quality"))
+        lines = [
+            f"# {title}\n\n## 当日扫描\n",
+            f"扫描时间：{document.get('generated_at', '—')}",
+            f"Universe {counts.get('universe', 0)}；基础数据就绪 {counts.get('quotes_ready', 0)}；"
+            f"本轮细查 {counts.get('shortlisted', 0)}；完成评分 {counts.get('strict_candidates', 0)}；"
+            f"待补齐详细数据 {counts.get('warming_rows', 0)}",
+            f"预算内分批扫描：另有 {counts.get('not_evaluated', 0)} 只本轮未细查，不是策略淘汰；"
+            "Top 是本轮已评估标的排名，不宣称全市场已完成评分。",
+            "本轮新增：" + (", ".join(document.get("strict_added_symbols", [])) or "无"),
+            f"扫描执行：{quality.get('status', 'unknown')}（不代表所有源数据刚刷新）；"
+            f"Schwab 请求 {document.get('requests_used')} / {document.get('request_budget')}",
+            f"IVP 本轮刷新 {counts.get('ivp_refreshed', 0)}；沿用有效缓存 {counts.get('ivp_cached', 0)}；"
+            f"缺失 {counts.get('ivp_missing', 0)}。缓存不冒充本轮刷新。",
+            f"Core Pool 本轮变化：新增 {added}；退出 {exited}",
+            "仅做候选发现与排序；TRIGGER 不等于买入。按综合评分竞争 Core Top 名额；旧成员无留存加分。",
+            "评分：52W位置 35.00% + 52W IVP 30.00% + 13W/26W IVP 10.00% + 市值 10.00% "
+            "+ 股息 5.00% + 修复/行业RS 5.00% + IV成本 5.00%。偏好超限扣分，不单项淘汰。",
+            "\n## 淘汰与数据缺口\n",
+        ]
+        reason_labels = {
+            "above_52w_location": "52W位置超限",
+            "below_market_cap": "市值不足",
+            "dividend_yield": "股息率超限",
+            "ivp_13w_above_limit": "13W IVP超限",
+            "ivp_26w_above_limit": "26W IVP超限",
+            "ivp_52w_above_limit": "52W IVP超限",
+            "iv_or_liquidity_hard_filter": "波动率或合约条件不符",
+            "ibkr_iv_percentile_missing": "IVP数据缺失（非策略淘汰）",
+            "ibkr_iv_percentile_invalid": "IVP数据无效（非策略淘汰）",
+            "not_evaluated_this_run": "预算轮转，本轮未细查",
+            "target_leaps_hard_filter": "目标LEAPS不合格",
+            "target_leaps_missing": "目标LEAPS缺失",
+            "quote_missing": "股票报价缺失",
+            "quote_fields_missing": "股票报价字段缺失",
+            "quote_frozen": "股票报价过期",
+            "quote_delayed": "股票报价延迟",
+            "not_optionable": "无期权",
+            "price_history_warming": "股票日线未完成校验",
+            "sector_history_warming": "行业基准日线未完成校验",
+            "dte_out_of_range": "期限不符",
+            "delta_missing": "Delta缺失",
+            "delta_out_of_range": "Delta不符",
+            "bid_ask_invalid": "买卖报价无效",
+            "spread_above_limit": "价差过宽",
+            "iv_missing": "IV缺失",
+            "iv_above_limit": "IV超过上限",
+            "open_interest_missing": "持仓量缺失",
+            "open_interest_below_limit": "持仓量不足",
+            "extrinsic_invalid": "时间价值无效",
+            "extrinsic_above_limit": "时间价值过高",
+        }
+        for reason, count in sorted(_mapping(document.get("rejection_counts")).items()):
+            if count:
+                lines.append(f"- {reason_labels.get(reason, reason)}：{count}")
+        for error in quality.get("errors", []):
+            lines.append(f"- 数据错误：{error}")
+        for row in document.get("membership_observations", []):
+            reasons = row.get("contract_rejection_counts")
+            if reasons:
+                lines.append(f"- {row['symbol']} 合约首个失败条件：" + ", ".join(
+                    f"{reason_labels.get(reason, reason)}={count:.2f}"
+                    for reason, count in sorted(reasons.items())
+                ))
+    else:
+        lines += [
+            "\n## Scanner 状态\n",
+            f"- 严格候选 **{counts.get('strict_candidates', 0)}**；"
+            f"未完成数据行（正文隐藏） **{counts.get('warming_rows', 0)}**；"
+            f"本轮详细刷新 **{counts.get('detailed_this_run', 0)} / {counts.get('hard_survivors', 0)}**",
+            f"- Schwab 请求 **{document.get('requests_used')} / {document.get('request_budget')}**；"
+            f"Data Quality **{_mapping(document.get('data_quality')).get('status', 'unknown')}**",
+            "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
+        ]
     lines += [
-        "\n## Scanner 状态\n",
-        f"- 严格候选 **{counts.get('strict_candidates', 0)}**；"
-        f"未完成数据行（正文隐藏） **{counts.get('warming_rows', 0)}**；"
-        f"本轮详细刷新 **{counts.get('detailed_this_run', 0)} / {counts.get('hard_survivors', 0)}**",
-        f"- Schwab 请求 **{document.get('requests_used')} / {document.get('request_budget')}**；"
-        f"Data Quality **{_mapping(document.get('data_quality')).get('status', 'unknown')}**",
-        "- 仅做候选发现与排序；TRIGGER 不等于买入，仍需基本面复核。",
-        "\n## Top Opportunities（52W低位 + IVP 52W）\n",
-        "| Symbol | Today State | 52W优先分 | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | IV | IV/RV20 | OI | 时间价值/股价 | Spread |",
+        "\n## Top Opportunities（综合评分，52W优先）\n",
+        "| Symbol | Today State | Score | Market Cap | Timing | 52W位置 | IVP 52W | IVP 13W/26W | RSI | 行业RS 5D | LEAPS | IV | IV/RV20 | OI | 时间价值/股价 | Spread |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
-    if isinstance(top := document.get("core_top_opportunities", []), list) and top:
+    top = document.get("notification_top10" if discoveries else "core_top_opportunities", [])
+    if isinstance(top, list) and top:
         for row in top:
             if not isinstance(row, Mapping):
                 continue
@@ -1052,7 +1147,7 @@ def render_notification(
                     state=row.get("today_state", row.get("state", "-")),
                     priority=_fmt(row.get("priority_score")),
                     market_cap=_market_cap(row.get("market_cap")),
-                    score=_fmt(row.get("final_score")),
+                    score=_fmt(row.get("timing_score")),
                     location=_pct(row.get("price_location_52w")),
                     ivp_52w=_pct(row.get("ivp_52w")),
                     ivp=_iv_gate_label(row),
@@ -1066,47 +1161,45 @@ def render_notification(
                     spread=_pct(row.get("leaps_spread_mid")),
                 )
             )
+    elif discoveries:
+        lines.append("| — | 本轮无完成评分且可交易的候选，详见上方淘汰与数据缺口 |" + " — |" * 14)
     else:
         lines.append(
             "| — | WATCH | — | — | — | — | — | 当前无 Active 严格候选；Core Pool 成员见上表 | — | — | — | — | — | — | — | — |"
         )
     if discoveries:
-        core_symbols = {row["symbol"] for row in document.get("core_pool", [])}
-        fresh = sorted(
-            (row for row in document.get("all_candidates", []) if row["symbol"] not in core_symbols),
-            key=priority_sort_key,
-        )
-        lines.extend([
-            "\n## 本轮严格候选 · 待 Core Pool 确认\n",
-            f"扫描时间：{document.get('generated_at', '—')}",
-            "本轮新增：" + (", ".join(document.get("strict_added_symbols", [])) or "无"),
-            "待确认不代表数据未完成；Core Pool 仍需连续两个完整交易日日报通过。",
-            "| Symbol | State | 52W位置 | IVP 52W | Market Cap |",
-            "|---|---|---:|---:|---:|",
-        ])
-        for row in fresh:
+        if top:
+            lines.append("\n数据日期（ET；RTH日线末点是盘中观察，非最终收盘）：")
+        for row in top:
             lines.append(
-                f"| {row['symbol']} | {row['state']} | {_pct(row.get('price_location_52w'))} "
-                f"| {_pct(row.get('ivp_52w'))} | {_market_cap(row.get('market_cap'))} |"
+                f"- {row['symbol']}：日线 {row.get('price_history_as_of') or '未知'}；"
+                f"IV历史 {row.get('iv_history_as_of') or '未知'}；"
+                f"IV获取时间 {row.get('iv_observed_at') or '未知'}"
             )
-        if not fresh:
-            lines.append("| — | 本轮无待确认严格候选 | — | — | — |")
-        lines.append("\n合约筛选未通过（每份合约记录第一个失败条件）：")
-        reason_labels = {
-            "dte_out_of_range": "期限不符",
-            "delta_missing_or_out_of_range": "Delta缺失或不符",
-            "bid_ask_invalid_or_spread_above_limit": "买卖报价无效或价差过宽",
-            "iv_missing_or_above_limit": "IV缺失或超过上限",
-            "open_interest_below_limit": "持仓量不足",
-            "extrinsic_invalid_or_above_limit": "时间价值无效或过高",
-        }
-        for row in document.get("membership_observations", []):
-            reasons = row.get("contract_rejection_counts")
-            if row.get("screen_reason") == "target_leaps_hard_filter" and reasons:
-                lines.append(f"- {row['symbol']}：" + ", ".join(
-                    f"{reason_labels.get(reason, reason)}={count:.2f}"
-                    for reason, count in sorted(reasons.items())
-                ))
+        lines.extend([
+            "\n## Core Pool · 跟踪记录（非当日推荐）\n",
+            f"Active {counts.get('core_active', 0)}；STALE {counts.get('core_paused', 0)}；"
+            f"Changes：新增 {added}；退出 {exited}",
+            str(changes.get("message", "")),
+            "数据缺失不等于策略淘汰；STALE 成员不展示历史评分与历史合约，本轮未获取的字段留空。",
+            "",
+            "| Symbol | Today State | 本轮原因 | 52W位置 | IVP 52W | Market Cap | 报价源时间 | IV历史日期 | 最后合格快照（历史） |",
+            "|---|---|---|---:|---:|---:|---|---|---|",
+        ])
+        for row in sorted(core_pool, key=lambda r: (
+            r.get("snapshot_status") != "current", str(r.get("symbol")),
+        )):
+            current = _mapping(row.get("current_observation"))
+            lines.append(
+                f"| {row['symbol']} | {row.get('today_state', 'STALE')} | "
+                f"{reason_labels.get(current.get('screen_reason'), current.get('screen_reason')) or '—'} | "
+                f"{_pct(current.get('price_location_52w'))} | "
+                f"{_pct(current.get('ivp_52w'))} | {_market_cap(current.get('market_cap'))} | "
+                f"{current.get('quote_at') or '未获取'} | {current.get('iv_history_as_of') or '未获取'} | "
+                f"{row.get('snapshot_as_of_et') or row.get('as_of_et') or '未知'} |"
+            )
+        if not core_pool:
+            lines.append("| — | 暂无成员 |" + " — |" * 7)
     return title, "\n".join(lines)
 
 
@@ -1122,21 +1215,50 @@ def _change_label(value: Any) -> str:
 def _detail_order(
     survivors: list[tuple[UniverseMember, EquityQuote, float]],
     state: dict[str, Any],
+    *,
+    policy: GrowthDislocationSettings,
+    request_budget: int,
 ) -> list[tuple[UniverseMember, EquityQuote, float]]:
-    by_symbol = {item[0].symbol: item for item in survivors}
-    priority = [
-        str(symbol) for symbol in state.get("priority_symbols", []) if str(symbol) in by_symbol
-    ]
-    remaining = sorted(
-        (item for item in survivors if item[0].symbol not in set(priority)),
-        key=lambda item: (item[2], item[0].symbol),
+    # Rank cheap quote data before spending IBKR history / Schwab detail calls.
+    # Interleave incumbent refresh, new leaders and exploration. Incumbents get
+    # data coverage, never a score bonus or a guaranteed membership slot.
+    ordered = sorted(
+        survivors,
+        key=lambda item: (
+            -quote_preference_scores(item[2], item[1].market_cap, item[1].dividend_yield, policy)["prefilter_score"],
+            item[0].symbol,
+        ),
     )
-    cursor = int(state.get("detail_cursor") or 0)
+    members = _mapping(_mapping(state.get("core_pool")).get("members"))
+    incumbents = sorted(
+        (item for item in ordered if item[0].symbol in members),
+        key=lambda item: (str(_mapping(members[item[0].symbol]).get("last_complete_observed_at") or ""), item[0].symbol),
+    )
+    newcomers = [item for item in ordered if item[0].symbol not in members]
+    leaders = newcomers[: max(policy.top_count * 2, request_budget // 2)]
+    remaining = newcomers[len(leaders):]
+    cursor = int(state.get("detail_cursor") or 0) % max(1, len(remaining))
+    rotation = remaining[cursor:] + remaining[:cursor]
+    selected: list[tuple[UniverseMember, EquityQuote, float]] = []
+    benchmarks: set[str] = set()
+    rotated = 0
+    for group in zip_longest(incumbents, leaders[::2], leaders[1::2], rotation):
+        for lane, item in enumerate(group):
+            if item is None:
+                continue
+            cost = 2 + int(item[0].sector_benchmark not in benchmarks)
+            if cost > request_budget:
+                continue
+            selected.append(item)
+            request_budget -= cost
+            benchmarks.add(item[0].sector_benchmark)
+            if lane == 3:
+                rotated += 1
+        if request_budget < 2:
+            break
     if remaining:
-        cursor %= len(remaining)
-        remaining = remaining[cursor:] + remaining[:cursor]
-        state["detail_cursor"] = (cursor + 1) % len(remaining)
-    return [by_symbol[symbol] for symbol in priority] + remaining
+        state["detail_cursor"] = (cursor + rotated) % len(remaining)
+    return selected
 
 def _detail_payload(
     target: OptionContract,
@@ -1159,7 +1281,8 @@ def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
         return {}
     # V6 smoothed the score curve, V7 changed notification priority, V8 added
     # the Core Pool, V9 made RSI score-only, V10 tightened all three entry gates,
-    # and V11 made IV/RV score-only while preserving all existing caches.
+    # V11 made IV/RV score-only, V12 makes Core membership dynamic. Preserve
+    # prior members/caches so the next complete scan evaluates them honestly.
     if raw.get("policy_version") not in {
         None,
         "growth_dislocation_leaps.v5",
@@ -1168,6 +1291,8 @@ def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
         "growth_dislocation_leaps.v8",
         "growth_dislocation_leaps.v9",
         "growth_dislocation_leaps.v10",
+        "growth_dislocation_leaps.v11",
+        "growth_dislocation_leaps.v12",
         POLICY_VERSION,
     }:
         return {}
@@ -1222,9 +1347,61 @@ def _close_history(value: Any) -> list[DailyClose]:
             close = float(row["close"])
         except (KeyError, TypeError, ValueError):
             continue
-        if close > 0.0:
+        if math.isfinite(close) and close > 0.0:
             by_day[day] = DailyClose(day, close)
     return [by_day[day] for day in sorted(by_day)][-MAX_CLOSE_HISTORY:]
+
+
+def _refresh_close_history(
+    client: SchwabClient,
+    symbol: str,
+    *,
+    now: datetime,
+    mode: str,
+    quote: EquityQuote | None,
+    max_quote_age: float,
+) -> tuple[list[DailyClose], str | None]:
+    """Repair from broker bars, then validate actual exchange sessions, not row count.
+
+    Completed sessions always come from daily bars. Only RTH may append a fresh
+    same-session quote; after-hours prices never overwrite the official close.
+    This deliberately replaces the old sparse/provisional cache on each scan.
+    """
+    ny = now.astimezone(ET)
+    session = DEFAULT_MARKET_CALENDAR.session(ny.date())
+    completed_day = (
+        ny.date() if session and ny >= session.close_at
+        else DEFAULT_MARKET_CALENDAR.previous_trading_day(ny.date())
+    )
+    try:
+        history = [
+            row for row in fetch_daily_closes(client, symbol)
+            if row.day <= completed_day and DEFAULT_MARKET_CALENDAR.is_trading_day(row.day)
+        ][-MAX_CLOSE_HISTORY:]
+    except ProviderError as exc:
+        return [], type(exc).__name__
+    if not history:
+        return [], "insufficient_sessions"
+    if history[-1].day != completed_day or any(
+        current.day != DEFAULT_MARKET_CALENDAR.next_trading_day(prior.day)
+        for prior, current in zip(history, history[1:])
+    ):
+        return [], "missing_sessions"
+    if any(not math.isfinite(row.close) or row.close <= 0.0 for row in history):
+        return [], "invalid_close"
+    if mode == "rth":
+        if (
+            not session or not session.open_at <= ny < session.close_at
+            or quote is None or not quote.realtime or quote.last is None
+            or quote.quote_at is None or quote.quote_at.astimezone(ET).date() != ny.date()
+            or not 0.0 <= (now - quote.quote_at).total_seconds() <= max_quote_age
+        ):
+            return [], "current_quote_unavailable"
+        history = _upsert_close(history, ny.date(), quote.last)
+    if len(history) < 35:
+        return [], "insufficient_sessions"
+    return history, None
+
 
 def _close_history_payload(history: list[DailyClose]) -> list[dict[str, Any]]:
     return [
