@@ -1,6 +1,6 @@
 # Storage Plan
 
-<!-- documentation-status: 2026-10-15 -->
+<!-- documentation-status: 2026-11-07 -->
 > **文档定位：现行运行与参考。** 现行说明；历史段落保留原适用日期。运行状态以实际服务和源字段时钟为准。
 > [全仓文档、当前运行状态与合同优先级](README.md)（目录核对：2026-10-05）。
 
@@ -59,18 +59,55 @@ failed during transfer; later SSH and Tailscale probes timed out. Peer “Online
 status therefore did not prove usable transfer. No local source was removed by
 this failed retry. Its eligible cold backlog was only about 0.64 GiB.
 
-Capacity remains unresolved by these narrow repairs: about 18.3 GiB of November
-6 broker JSONL, a 13.2 GiB operational database with no meaningful free-page
-reserve, about 21 GiB of Parquet, and daily Rust frames share the data volume.
-The NAS task excludes the live database and lake, and the lightweight policy
-does not automatically bound database growth. Do not describe the nightly
-recovery or these status fixes as sufficient headroom for the next session.
-Required follow-up is a measured write/retention budget for the existing stores;
-do not lower the 10 GiB write reserve or discard unverified broker history.
+The subsequent user-authorized repair adds online operational-history retention
+in the existing `infrastructure/operational_db.py`, called by the existing hourly
+Worker storage job. Phase 5/P5-1 and the Phase 7 maintenance exception apply.
+`AppSettings.operational_retention_days=3` keeps recent UTC session dates locally;
+older terminal outcomes are archived first, then unreferenced decisions and legs,
+then unreferenced events. Unknown/unresolved outcomes and their dependencies,
+feature parents, strategy versions and notification-correlated decisions remain.
+All notification events/attempts, sessions, provider incidents and compaction
+manifests remain in the live DB. Broker history is untouched.
 
-Validation: 56 focused replay-cleanup, compactor, finalizer and monitor tests,
-Ruff and Import Linter passed. Source changes are a reviewable PR, not deployed
-by this investigation. Existing NAS retry is the only production mutation.
+Each gzip archive contains full SQL rows and lives under
+`<SPX_DATA_ROOT>/backups/operational-history/<SHA256>.json.gz`. The filename hashes
+the decompressed JSON. Publication and directories are fsynced, decompression must
+match the original bytes, and a short SQLite write transaction rechecks rows,
+legs and references before deleting anything. A crash before commit leaves the
+source records available; an existing identical archive can be reused. Archive
+failure never skips the independent raw-source cleanup. Neither scheduled path
+stops services or replaces the database.
+
+Maintenance scans at most 500 records / about 16 MiB per batch (one large record
+can exceed that byte target), with a configurable 10-second SQL/time budget per
+hour; lock contention yields to the next run. Archive filesystem I/O completes
+its bounded batch before returning. Freed SQLite pages are reused rather than
+requiring a recurring VACUUM or rebuild. This bounds routine hot history, not
+unresolved observations or the permanent compressed archive. The existing manual
+retention tool is used once for this incident's accumulated DB, retaining a full
+compressed pre-cutover copy and all notification bookkeeping.
+
+Offline restoration: decompress the gzip, verify its SHA-256 against the basename,
+and read `table`, `rows`, and `decision_legs`. Insert complete rows into a separate
+DB with the same schema, restoring events before decisions, then legs/outcomes;
+resolve retained dependencies before enabling/checking foreign keys. Never restore
+old rows over the active runtime. Historical operational reports must explicitly
+include these archives; strategy replay still starts from original broker data.
+
+Observed capacity drivers were 18.3 GiB of November 6 broker JSONL, a 13.2 GiB
+operational DB, about 21 GiB of Parquet, and daily Rust frames. Sampling the largest
+Schwab hour did not find consecutive identical records after excluding arrival
+metadata; price equality alone cannot authorize quote deletion. The 24-hour
+verified raw retention and 10 GiB Rust reserve remain in effect. NAS transport
+is still an external dependency: its current job excludes the live DB and lake;
+local archives are not falsely reported as off-host copies. Long-term cold-history
+capacity still needs a reachable archive destination, even after online DB growth
+is controlled. Release/production acceptance is recorded below after deployment.
+
+Validation so far: focused cleanup, compactor, finalizer, monitor and operational
+archive tests, Ruff and Import Linter pass. Archive tests cover row restoration,
+foreign keys, incomplete outcomes, notification preservation, late references,
+archive failure and repeated maintenance. Full release checks run in CI.
 
 ## Operational database archive and reset (2026-10-15, P5-1)
 

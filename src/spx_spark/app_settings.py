@@ -23,6 +23,8 @@ class AppSettings(BaseSettings):
     data_root: Path = Path("/srv/data/spx-spark")
     log_level: str = "INFO"
     core_lock_root: Path = Path("/tmp")
+    operational_retention_days: int = Field(default=3, ge=1, le=365)
+    operational_maintenance_seconds: float = Field(default=10.0, gt=0, le=60)
     exposure_pin_max_distance_points: float = Field(
         default=25.0, ge=0, allow_inf_nan=False,
         description="Maximum SPX point distance for the shared exposure pin candidate.",

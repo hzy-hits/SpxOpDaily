@@ -247,3 +247,15 @@ def test_macro_worker_refresh_reaches_strategy_reader_with_separate_roots(
     assert pre_event["mode"] == "pre_event"
     assert pre_event["entry_allowed"] is False
     assert not (tmp_path / "operational" / "runtime" / "macro_events.auto.json").exists()
+
+
+def test_history_archive_failure_does_not_skip_raw_cleanup(tmp_path, monkeypatch):
+    jobs = load_jobs(tmp_path, monkeypatch)
+    cleaned = []
+    def fail(**kwargs):
+        raise OSError('archive unavailable')
+    monkeypatch.setattr('spx_spark.infrastructure.operational_db.archive_operational_history', fail)
+    monkeypatch.setattr('spx_spark.session_finalize.run', lambda args: cleaned.append(True) or 0)
+    with pytest.raises(OSError, match='archive unavailable'):
+        jobs.storage_pressure.call_local()
+    assert cleaned == [True]

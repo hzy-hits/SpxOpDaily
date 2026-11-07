@@ -57,10 +57,24 @@ def maintenance_daily() -> None:
 
 @huey.periodic_task(crontab(minute="20", strict=True))
 def storage_pressure() -> None:
+    import json
+    from spx_spark.infrastructure.operational_db import archive_operational_history
     from spx_spark.session_finalize import run
 
-    if run(["--date", "auto", "--json", "--pressure-check"]) != 0:
-        raise RuntimeError("storage pressure check failed")
+    settings = get_settings()
+    try:
+        result = archive_operational_history(
+            database_path=settings.data_root / "spx.sqlite",
+            now=datetime.now(tz=timezone.utc),
+            retention_days=settings.operational_retention_days,
+            time_budget_seconds=settings.operational_maintenance_seconds,
+        )
+        print(json.dumps({"event": "operational_retention", **result}, sort_keys=True))
+    finally:
+        # A failed history archive must not prevent independently verified raw
+        # source cleanup from recovering space in this same maintenance pass.
+        if run(["--date", "auto", "--json", "--pressure-check"]) != 0:
+            raise RuntimeError("storage pressure check failed")
 
 
 @huey.periodic_task(crontab(minute="0", hour="12", day_of_week="0", strict=True))
