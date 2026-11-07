@@ -39,6 +39,33 @@ def test_projection_lag_is_separate_from_report_completion():
     assert desk_pipeline_faults(**data) == ["desk_projection_not_forwarded"]
 
 
+def test_expired_weekend_projection_remains_a_missed_report_not_a_live_backlog():
+    now = datetime(2026, 11, 7, 3, 9, tzinfo=timezone.utc)
+    data = healthy(now)
+    data["source"] = {
+        "available_at": "2026-11-06T20:45:10+00:00",
+        "valid_until": "2026-11-06T21:05:10+00:00",
+    }
+    data["mirrored"] = {"available_at": "2026-11-06T17:15:09+00:00"}
+    assert desk_pipeline_faults(**data) == ["desk_projection_expired_before_forwarding"]
+    # Fresh heartbeats and freed disk space cannot retrospectively deliver an
+    # expired report. A matching source/mirror is separate forwarding evidence.
+    data["mirrored"] = dict(data["source"])
+    assert desk_pipeline_faults(**data) == []
+
+
+def test_projection_lag_changes_to_missed_at_expiry_without_clearing_the_fault():
+    data = healthy()
+    data["source"] = {
+        "available_at": (NOW - timedelta(minutes=4)).isoformat(),
+        "valid_until": (NOW + timedelta(seconds=1)).isoformat(),
+    }
+    data["mirrored"] = {}
+    assert desk_pipeline_faults(**data) == ["desk_projection_not_forwarded"]
+    data["source"]["valid_until"] = NOW.isoformat()
+    assert desk_pipeline_faults(**data) == ["desk_projection_expired_before_forwarding"]
+
+
 def test_recovery_report_does_not_mask_a_missing_scheduled_report():
     data = healthy()
     data["report"]["last_scheduled_persisted_at"] = (NOW - timedelta(hours=1)).isoformat()

@@ -266,6 +266,42 @@ def test_cleanup_ignores_pressure_and_requires_24_hour_manifest_age(tmp_path: Pa
     assert raw.exists() is False
 
 
+def test_missing_manifest_for_young_and_active_hours_is_retained_not_failed(tmp_path: Path) -> None:
+    recent = source_path(tmp_path, hour=11)
+    active = source_path(tmp_path, hour=13)
+    write_source(recent, [quote_payload(received_at="2026-07-10T11:05:00+00:00")])
+    write_source(active, [quote_payload(received_at="2026-07-10T13:05:00+00:00")])
+    result = cleanup_authorized_replay_sources(tmp_path, now=NOW, pressure=low_pressure())
+    assert result.status == "waiting_for_age"
+    assert result.deleted_files == 0
+    assert result.blocked_dates == ()
+    assert recent.exists() and active.exists()
+
+    # At the age boundary, a still-unverified closed hour must fail closed.
+    result = cleanup_authorized_replay_sources(
+        tmp_path, now=NOW.replace(hour=12, minute=0) + timedelta(days=1), pressure=low_pressure(),
+    )
+    assert result.status == "blocked"
+    assert result.deleted_files == 0
+    assert recent.exists() and active.exists()
+
+
+def test_young_uncompacted_hour_does_not_fail_verified_old_hour_cleanup(tmp_path: Path) -> None:
+    old = source_path(tmp_path, hour=10)
+    write_source(old, [quote_payload()])
+    prepare(tmp_path)
+    recent = tmp_path / "raw/provider=ibkr/date=2026-07-11/hour=13/quotes.jsonl"
+    write_source(recent, [quote_payload(received_at="2026-07-11T13:05:00+00:00")])
+    result = cleanup_authorized_replay_sources(
+        tmp_path, now=NOW + timedelta(hours=25), pressure=low_pressure(),
+    )
+    assert result.status == "deleted"
+    assert result.deleted_files == 1
+    assert result.blocked_dates == ()
+    assert not old.exists()
+    assert recent.exists()
+
+
 def test_cleanup_dry_run_then_exact_delete_and_audit_resumes_as_verified(
     tmp_path: Path,
 ) -> None:

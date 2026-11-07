@@ -25,6 +25,53 @@ See [runtime configuration](runtime-configuration.md), [schedule](operations-sch
 The remaining sizing estimates and MVP proposals below are historical design;
 they do not replace the current cleanup or retention implementation.
 
+## Desk pipeline storage incident (2026-11-07)
+
+Production inspected: `94c3de4e`. This is a Phase 7 maintenance-only repair and a
+Phase 6 operational-monitoring repair under the execution plan's section 0;
+no platform rewrite, new service, or automatic database rebuild is introduced.
+
+The first observed Rust ingress reserve rejection on November 6 was at
+16:48:11 UTC (11:48 ET): 10,737,184,768 bytes were available, below the required
+10 GiB reserve plus the frame being appended. The bridge retried its pending
+frame and later Desk Maps missed their useful delivery window. The last report
+was saved at 16:32:36 UTC; the last mirrored projection was generated at 17:15:09
+and acknowledged at 17:21:33 UTC. Fresh process heartbeats did not prove delivery.
+
+The November 7 Rust retention run removed 11,187,518,939 bytes of raw frame
+segments only after archive verification. Rejections continued until 00:30:29
+UTC before that space recovery. At 03:47 UTC the data volume had about 20.2 GiB
+free, so the current free-space reading cannot disprove the earlier exhaustion.
+The 20:45 November 6 source projection expired at 21:05; it must not be renewed
+or pushed as a current card during the closed weekend.
+
+The 23:00 UTC session finalizer published its artifact, but marked cleanup
+blocked because three still-young `hour=23` sources had no compaction manifest.
+The repair retains missing-manifest hours within the existing retention grace
+as `waiting_for_age`. Mature missing/invalid manifests still block deletion;
+hashes, row counts, late-append protection, and the manifest age gate remain.
+The existing monitor now distinguishes an expired, unforwarded historical map
+from a new map waiting to be forwarded. It keeps the missed-map fault visible.
+
+The NAS task failed with SSH/rsync exit 255. A read-only SSH check initially
+confirmed the NAS export and 1.6 TiB free, but the subsequent existing-unit retry
+failed during transfer; later SSH and Tailscale probes timed out. Peer “Online”
+status therefore did not prove usable transfer. No local source was removed by
+this failed retry. Its eligible cold backlog was only about 0.64 GiB.
+
+Capacity remains unresolved by these narrow repairs: about 18.3 GiB of November
+6 broker JSONL, a 13.2 GiB operational database with no meaningful free-page
+reserve, about 21 GiB of Parquet, and daily Rust frames share the data volume.
+The NAS task excludes the live database and lake, and the lightweight policy
+does not automatically bound database growth. Do not describe the nightly
+recovery or these status fixes as sufficient headroom for the next session.
+Required follow-up is a measured write/retention budget for the existing stores;
+do not lower the 10 GiB write reserve or discard unverified broker history.
+
+Validation: 56 focused replay-cleanup, compactor, finalizer and monitor tests,
+Ruff and Import Linter passed. Source changes are a reviewable PR, not deployed
+by this investigation. Existing NAS retry is the only production mutation.
+
 ## Operational database archive and reset (2026-10-15, P5-1)
 
 `/srv/data/spx-spark/spx.sqlite` is the Python operational database, not the

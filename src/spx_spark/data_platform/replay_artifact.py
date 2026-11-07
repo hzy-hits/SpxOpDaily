@@ -15,7 +15,7 @@ import shutil
 from collections import Counter, defaultdict
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 from uuid import uuid4
@@ -482,6 +482,20 @@ def cleanup_authorized_replay_sources(
     for partition in selected:
         manifest = load_manifest(partition.manifest_path)
         source_size = partition.source_path.stat().st_size
+        # Live/recent hours may not have been compacted yet. They cannot be
+        # deleted during the retention grace, so a missing manifest is not a
+        # cleanup failure. Mature sources still require the full verification.
+        if manifest is None and utc_now < partition.end_at + timedelta(hours=grace_hours):
+            results.append(
+                ReplayDeleteResult(
+                    partition.session_date,
+                    partition.source_relative_path,
+                    "waiting_for_age",
+                    source_size,
+                    "raw retention grace has not elapsed; compaction pending",
+                )
+            )
+            continue
         if manifest is None or manifest.status != "verified":
             detail = "verified compaction manifest is unavailable"
             blocked_dates.append((partition.session_date, detail))
@@ -528,6 +542,7 @@ def cleanup_authorized_replay_sources(
             "would_delete_raw",
             "up_to_date",
             "empty_up_to_date",
+            "waiting_for_age",
             "raw_delete_blocked",
         }
     ]
