@@ -849,3 +849,51 @@ Suggested fields:
 - Cboe VIX historical data: https://www.cboe.com/tradable_products/vix/vix_historical_data/
 - Cboe SKEW dashboard: https://www.cboe.com/us/indices/dashboard/skew/
 - Schwab-py quote docs: https://schwab-py.readthedocs.io/en/latest/client.html
+
+## Repeated historical alert and NAS recovery (2026-11-07 follow-up)
+
+Phase 6 operational-monitoring and Phase 7/P7-Lite maintenance exceptions apply.
+The first repair retained the Friday expired-map fault in the hourly alert set.
+Consequently, a healthy weekend heartbeat still produced a fault notification.
+The monitor now records the missed projection's source clock separately, notifies
+that historical loss once, and keeps hourly reminders only for active faults.
+It never re-dates or sends an expired map. A new expected trading slot without a
+report, a halted/stale bridge, and a stopped delivery service still alert. The
+status message explicitly distinguishes runtime checks from phone delivery.
+
+The existing NAS owner is now versioned as `scripts/archive-nas.py`; the existing
+`spx-nas-archive.service` and `.timer` retain their names and daily schedule.
+The unit retries failures after 15 minutes with a 30-minute attempt deadline;
+rsync keeps partial files and can reuse them. Gzip output is deterministic across
+retries. Both NAS mount identity and remote streaming SHA-256/size verification
+must pass before deletion. A same-sized corrupt destination is not accepted.
+The job has a 256 MiB memory ceiling, 25% CPU budget, and idle I/O priority.
+No additional daemon, queue or database is introduced.
+
+The job also uploads finalized content-addressed operational gzip archives and
+retired SQLite `.zst` files with `decompressed_sha256_and_size` receipts. Recent
+compressed rollback/history files remain local for seven days after creation;
+older payloads are removed only after a fresh remote verification. Receipts stay
+local. Live databases and the raw broker lake are never traversed by this job.
+Older backup formats lacking that receipt remain local for separate inspection.
+A missing NAS mount fails closed; the Pi SD card is not a fallback destination.
+
+Operational gzip archives use their original SHA-256 basename beneath
+`/mnt/nas/spx-spark/oracle/backups/operational-history/`. Database copies preserve
+their backup-directory names; release backups use `backups/releases/`.
+Restore a requested payload to staging with rsync, verify its compressed hash
+against the local `.nas-receipt.json`, then verify the decompressed hash against
+the operational filename or SQLite compression receipt. Restore rows/databases
+only into an offline research copy, never over the live runtime.
+
+After the reviewed runtime bundle is deployed, install these two existing unit
+files from the same commit, reload the user manager, and restart the timer/job.
+The former unversioned `archive.py` and its superseded upload helper are retired;
+all future executions use the immutable runtime bundle. This is adoption of the
+existing owner, not a second archival path.
+
+The independent NAS host check found approximately 3.9 GiB resident anonymous
+memory in the `mihomo` container, almost exhausted swap and high memory/I/O
+pressure. That shared household proxy is outside the SPX process boundary;
+changing its resource limits/restarting it requires the user's explicit consent.
+Transport resilience does not by itself establish that host-level cause is fixed.

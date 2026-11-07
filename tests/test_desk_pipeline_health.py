@@ -125,3 +125,44 @@ def test_heartbeat_published_during_reads_is_not_future(monkeypatch, tmp_path):
                                    health_root=tmp_path, delivery_active=True)
     assert result["faults"] == []
     assert not result["sent"]
+
+
+def test_historical_miss_not_repeated_and_new_fault_still_alerts(tmp_path):
+    now = datetime(2026, 11, 7, 8, 0, tzinfo=timezone.utc)
+    settings = SimpleNamespace(data_root=str(tmp_path))
+    root = tmp_path / 'health'
+    source = {'available_at': '2026-11-06T20:45:10+00:00',
+              'valid_until': '2026-11-06T21:05:10+00:00'}
+    calls = []
+    def send(settings, card):
+        calls.append(card)
+        return SimpleNamespace(ok=True)
+    def check(moment, phase='connected'):
+        values = {
+            root / 'spx-spark-bridge-shadow/health.json': {'updated_at': moment.isoformat(), 'phase': phase},
+            root / 'spx-spark-report-shadow/health.json': {'updated_at': moment.isoformat(),
+                                                         'last_persisted_at': '2026-11-06T16:32:36Z'},
+            tmp_path / 'latest/desk_map_projection.json': source,
+        }
+        for path, value in values.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value))
+        return monitor_desk_pipeline(now=moment, settings=settings, health_root=root,
+                                     delivery_active=True, sender=send, notification=object())
+    # Migration from the previous hourly historical-fault state.
+    state = tmp_path / 'ledger/maintenance_disk_alert_state.json'
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({'desk_pipeline': {
+        'faults': ['desk_projection_expired_before_forwarding'], 'notified_at': now.isoformat()}}))
+    assert check(now)['sent']
+    assert not check(now + timedelta(hours=2))['sent']
+    assert not check(now + timedelta(hours=4))['sent']
+    assert json.loads(state.read_text())['desk_pipeline']['missed_projection_at'] == source['available_at']
+    assert check(now + timedelta(hours=5), 'halted')['faults'] == ['bridge_halted']
+    assert len(calls) == 2
+    assert check(now + timedelta(hours=6))['sent']
+    assert not check(now + timedelta(hours=8))['sent']
+    # A new trading slot must still fail when no fresh report arrives.
+    reopened = datetime(2026, 11, 9, 1, 36, tzinfo=timezone.utc)
+    assert check(reopened)['faults'] == ['scheduled_report_missing']
+    assert len(calls) == 4

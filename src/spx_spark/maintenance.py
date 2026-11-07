@@ -798,6 +798,10 @@ def monitor_desk_pipeline(*, now=None, settings=None, notification=None, sender=
     now = now or datetime.now(timezone.utc)
     faults = desk_pipeline_faults(now=now, bridge=bridge, report=report, source=source,
                                  mirrored=mirrored, delivery_active=delivery_active)
+    # An expired projection is an immutable missed delivery, not work the
+    # bridge can recover by retrying. Record/notify it once per source clock.
+    missed = source.get("available_at") if "desk_projection_expired_before_forwarding" in faults else None
+    faults = [item for item in faults if item != "desk_projection_expired_before_forwarding"]
     path = disk_alert_state_path(settings)
     with exclusive_state_lock(path):
         state = read(path)
@@ -809,11 +813,18 @@ def monitor_desk_pipeline(*, now=None, settings=None, notification=None, sender=
             recent = False
         was_faulted = bool(previous.get("faults"))
         changed = faults != previous.get("faults", [])
-        if (not faults and not was_faulted) or (not changed and recent):
+        new_miss = bool(missed) and missed != previous.get("missed_projection_at")
+        if not new_miss and ((not faults and not was_faulted) or (not changed and recent)):
             return {"faults": faults, "sent": False, "reason": "healthy_or_cooldown"}
-        title = "SPX 推送链路故障" if faults else "SPX 推送链路恢复"
+        title = "SPX 推送链路故障" if faults else "SPX 推送链路运行检查更新"
+        detail = ("故障：" + "；".join(DESK_FAULT_LABELS[item] for item in faults)
+                  if faults else "当前心跳、投递进程与应到报告检查通过。")
+        if missed:
+            detail += "\n历史漏报：" + str(missed) + "；已过期，不补发；同一漏报不再重复提醒。"
+        if not faults:
+            detail += "\n这些运行检查不证明手机送达；下一张有效桌图仍须核验报告与投递回执。"
         text = ("检测时间 UTC：" + now.isoformat() + "\n" +
-                ("故障：" + "；".join(DESK_FAULT_LABELS[item] for item in faults) if faults else "桥接与应到报告检查已恢复。") +
+                detail +
                 "\n上游桌图：" + str(source.get("available_at")) +
                 "\n报告端投影：" + str(mirrored.get("available_at")) +
                 "\n最后报告保存：" + str(report.get("last_persisted_at")) +
@@ -828,6 +839,7 @@ def monitor_desk_pipeline(*, now=None, settings=None, notification=None, sender=
         if not result.ok:
             # Do not persist transport errors: they can contain webhook URLs.
             return {"faults": faults, "sent": False, "reason": "independent_alert_unconfirmed"}
-        state["desk_pipeline"] = {"faults": faults, "notified_at": now.isoformat()}
+        state["desk_pipeline"] = {"faults": faults, "notified_at": now.isoformat(),
+                                  "missed_projection_at": missed or previous.get("missed_projection_at")}
         atomic_write_json_secure(path, state)
         return {"faults": faults, "sent": True, "reason": "fault" if faults else "recovered"}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily SPX NAS archive at 08:45 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 08:45:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=300
+Unit=spx-nas-archive.service
+
+[Install]
+WantedBy=timers.target
