@@ -116,14 +116,26 @@ def database_revision(connection):
     return rows[0][0]
 
 
-def migrate_retention_indexes(target):
+def migrate_retention_indexes(target, *, rollback=False):
     """Run the reviewed Alembic revision with all writers stopped and a verified backup.
 
-    An application rollback keeps the additive FK indexes. If Alembic
-    itself fails, restore the pre-migration database before restarting old writers.
+    Application rollback downgrades only the indexes/revision, preserving new rows.
+    If Alembic itself fails, restore the pre-migration backup before writers start.
     """
     with closing(sqlite3.connect(f'file:{DATABASE}?mode=rw', uri=True)) as source:
         revision = database_revision(source)
+        env = dict(os.environ, PYTHONPATH=str(target / 'src'), SPX_DATA_ROOT=str(DATABASE.parent),
+                   PYTHONDONTWRITEBYTECODE='1', SPX_SPARK_DISABLE_RUNTIME_OVERRIDES='1')
+        if rollback:
+            if revision == OLD_REVISION:
+                return None
+            if revision != NEW_REVISION:
+                raise ValueError('Unexpected database revision; rollback refused')
+            run(str(target / '.venv/bin/python'), '-m', 'alembic', 'downgrade', OLD_REVISION,
+                cwd=target, env=env)
+            if database_revision(source) != OLD_REVISION:
+                raise RuntimeError('Database rollback did not reach the previous revision')
+            return None
         if revision == NEW_REVISION:
             indexes = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='index'")}
             if not {'ix_decisions_feature_snapshot', 'ix_outcomes_decision'} <= indexes:
@@ -145,8 +157,6 @@ def migrate_retention_indexes(target):
                    'sha256': checksum(backup), 'from_revision': revision,
                    'to_revision': NEW_REVISION, 'release': target.name}
         backup.with_suffix('.json').write_text(json.dumps(receipt, indent=2) + '\n')
-        env = dict(os.environ, PYTHONPATH=str(target / 'src'), SPX_DATA_ROOT=str(DATABASE.parent),
-                   PYTHONDONTWRITEBYTECODE='1', SPX_SPARK_DISABLE_RUNTIME_OVERRIDES='1')
         try:
             run(str(target / '.venv/bin/python'), '-m', 'alembic', 'upgrade', NEW_REVISION,
                 cwd=target, env=env)
@@ -171,7 +181,7 @@ def verify_health(started):
             raise RuntimeError('Normalized bridge has not reconnected')
 
 
-def wait_ready(started, processes, timeout=105):
+def wait_ready(started, processes, timeout=300):
     """Allow cold replay/resync while rejecting crashes and a stale health file."""
     deadline = time.monotonic() + timeout
     while True:
@@ -298,6 +308,8 @@ def install(sha, digest):
     except BaseException:
         run('systemctl', '--user', 'stop', *running_python)
         run('sudo', '-n', 'systemctl', 'stop', *running_rust)
+        if needs_migration:
+            migrate_retention_indexes(target, rollback=True)
         for path, content in changes.items():
             if content is None:
                 path.unlink(missing_ok=True)
@@ -309,8 +321,10 @@ def install(sha, digest):
             current.unlink(missing_ok=True)
         run('sudo', '-n', 'ln', '-sfn', str(previous_rust), str(old_rust))
         run('systemctl', '--user', 'daemon-reload')
-        run('systemctl', '--user', 'start', *running_python)
-        run('sudo', '-n', 'systemctl', 'start', *running_rust)
+        try:
+            run('systemctl', '--user', 'start', *running_python)
+        finally:
+            run('sudo', '-n', 'systemctl', 'start', *running_rust)
         raise
     finally:
         if succeeded:
