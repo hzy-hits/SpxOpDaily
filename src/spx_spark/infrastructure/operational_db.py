@@ -5,8 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
+import gzip
+import hashlib
 import json
+import os
 from pathlib import Path
+import sqlite3
+import tempfile
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -20,6 +26,136 @@ from spx_spark.infrastructure.notifications import create_database_engine
 
 metadata = sa.MetaData()
 NEW_YORK = ZoneInfo("America/New_York")
+
+
+def archive_operational_history(
+    *, database_path: str | Path, now: datetime, retention_days: int = 3,
+    time_budget_seconds: float = 10.0,
+) -> dict[str, object]:
+    """Move old, completed operational rows to verified gzip in bounded batches.
+
+    Original broker history and notification bookkeeping are not touched. SQLite
+    reuses the freed pages; this job never VACUUMs, rebuilds or stops writers.
+    Archives contain complete SQL rows, including leg rows, for offline restore.
+    """
+    if now.tzinfo is None or retention_days < 1 or time_budget_seconds <= 0:
+        raise ValueError("aware time, positive retention and time budget required")
+    path = Path(database_path)
+    result: dict[str, object] = {"status": "complete", "rows": 0, "source_bytes": 0, "archive_bytes": 0}
+    if not path.exists():
+        return {**result, "status": "database_absent"}
+    cutoff = (now.astimezone(timezone.utc) - timedelta(days=retention_days)).date().isoformat()
+    deadline = monotonic() + time_budget_seconds
+    terminal = "status IN ('observed','unavailable','censored') AND target_at < :cutoff"
+    # NOT IN materializes each reference set once, rather than scanning outcomes
+    # for every candidate decision (there is no decision-only outcomes index).
+    decision_gate = """session_date < :cutoff AND session_date <> ''
+        AND decision_id NOT IN (SELECT decision_id FROM outcomes WHERE decision_id IS NOT NULL)
+        AND decision_id NOT IN (SELECT correlation_id FROM notification_events WHERE correlation_id IS NOT NULL)"""
+    event_gate = """session_date < :cutoff AND session_date <> '' AND event_type <> 'strategy_version'
+        AND event_key NOT IN (SELECT event_key FROM decisions WHERE event_key IS NOT NULL)
+        AND event_key NOT IN (SELECT feature_snapshot_id FROM decisions WHERE feature_snapshot_id IS NOT NULL)
+        AND event_key NOT IN (SELECT event_key FROM outcomes WHERE event_key IS NOT NULL)
+        AND event_key NOT IN (SELECT json_extract(attributes_json, '$.parent_event_key') FROM events
+            WHERE event_type='feature_snapshot' AND json_valid(attributes_json)
+            AND json_extract(attributes_json, '$.parent_event_key') IS NOT NULL)"""
+    policies = (("outcomes", "outcome_id", terminal), ("decisions", "decision_id", decision_gate),
+                ("events", "event_key", event_gate))
+    archive_root = path.parent / "backups" / "operational-history"
+    connection = sqlite3.connect(path, timeout=0.1)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.set_progress_handler(lambda: int(monotonic() >= deadline), 1000)
+    try:
+        while monotonic() < deadline:
+            progress = False
+            for table, key, predicate in policies:
+                if monotonic() >= deadline:
+                    result["status"] = "budget_exhausted"
+                    break
+                with connection:
+                    cursor = connection.execute(
+                        f"SELECT * FROM {table} WHERE {predicate} LIMIT 500", {"cutoff": cutoff}
+                    )
+                    rows: list[dict[str, object]] = []
+                    size = 0
+                    for record in cursor:
+                        row = dict(record)
+                        rows.append(row)
+                        size += len(json.dumps(row))
+                        if size >= 16 * 1024**2:
+                            break
+                    cursor.close()
+                    if not rows:
+                        continue
+                    ids = [row[key] for row in rows]
+                    placeholders = ",".join("?" for _ in ids)
+                    legs = [dict(r) for r in connection.execute(
+                        f"SELECT * FROM decision_legs WHERE decision_id IN ({placeholders}) ORDER BY decision_id,leg_index", ids
+                    )] if table == "decisions" else []
+                payload = json.dumps({"table": table, "rows": rows, "decision_legs": legs},
+                                     sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+                archive_bytes = _verified_operational_archive(archive_root, payload)
+                # Recheck content and eligibility after archive I/O, outside the
+                # write lock. Late observations or changed rows must survive.
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    live = [dict(r) for r in connection.execute(
+                        f"SELECT * FROM {table} WHERE {key} IN ({placeholders}) AND {predicate.replace(':cutoff', '?')}",
+                        (*ids, cutoff),
+                    )]
+                    if {str(r[key]): r for r in live} != {str(r[key]): r for r in rows}:
+                        raise RuntimeError("operational archive source or references changed")
+                    if table == "decisions":
+                        live_legs = [dict(r) for r in connection.execute(
+                            f"SELECT * FROM decision_legs WHERE decision_id IN ({placeholders}) ORDER BY decision_id,leg_index", ids
+                        )]
+                        if live_legs != legs:
+                            raise RuntimeError("operational archive legs changed")
+                        connection.execute(f"DELETE FROM decision_legs WHERE decision_id IN ({placeholders})", ids)
+                    connection.execute(f"DELETE FROM {table} WHERE {key} IN ({placeholders})", ids)
+                progress = True
+                result["rows"] += len(rows) + len(legs)
+                result["source_bytes"] += len(payload)
+                result["archive_bytes"] += archive_bytes
+            if not progress:
+                break
+        if monotonic() >= deadline:
+            result["status"] = "budget_exhausted"
+    except sqlite3.OperationalError as exc:
+        if str(exc) not in {"interrupted", "database is locked"}:
+            raise
+        result["status"] = "budget_exhausted" if str(exc) == "interrupted" else "busy"
+    finally:
+        connection.close()
+    return result
+
+
+def _verified_operational_archive(root: Path, payload: bytes) -> int:
+    digest = hashlib.sha256(payload).hexdigest()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = root / f"{digest}.json.gz"
+    if not target.exists():
+        descriptor, name = tempfile.mkstemp(prefix=".archive-", suffix=".tmp", dir=root)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(gzip.compress(payload, compresslevel=1, mtime=0))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    if gzip.decompress(target.read_bytes()) != payload:
+        raise RuntimeError("operational archive verification failed")
+    for directory in (root, root.parent, root.parent.parent):
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    return target.stat().st_size
+
 sessions = sa.Table(
     "sessions",
     metadata,

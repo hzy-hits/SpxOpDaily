@@ -266,3 +266,13 @@ Every legacy setting consumed with `runtime_value("path.to.setting")` must have 
 passed directly to `env_bool`, `env_int`, `env_float`, `env_str`, `env_csv` or
 `env_csv_preserve`. New code must use the pydantic-settings `AppSettings`, not add
 another `runtime_value` consumer.
+
+## Operational-history maintenance (2026-11-07)
+
+The existing hourly Worker storage task reads `operational_retention_days`
+(default 3) and `operational_maintenance_seconds` (default 10) from AppSettings,
+with the existing defaults < deployment < environment precedence. Environment
+overrides are `SPX_OPERATIONAL_RETENTION_DAYS` and
+`SPX_OPERATIONAL_MAINTENANCE_SECONDS`. These settings archive completed old
+operational rows; they do not change broker-quote retention, strategy parameters,
+notification delivery or the 10 GiB disk reserve. See [storage plan](storage-plan.md).

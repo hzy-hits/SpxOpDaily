@@ -192,8 +192,8 @@ def test_reviewed_addition_does_not_allow_modified_or_extra_migrations(tmp_path)
     (after / "alembic/versions").mkdir(parents=True)
     (before / "alembic/env.py").write_text("old")
     (after / "alembic/env.py").write_text("old")
-    shutil.copyfile(Path(__file__).parents[1] / release.CORRELATION_MIGRATION,
-                    after / release.CORRELATION_MIGRATION)
+    shutil.copyfile(Path(__file__).parents[1] / release.RETENTION_MIGRATION,
+                    after / release.RETENTION_MIGRATION)
     assert release.reviewed_migration(before, after)
     (after / "alembic/env.py").write_text("changed")
     with pytest.raises(ValueError, match="separate migration review"):
@@ -204,7 +204,7 @@ def test_additive_migration_keeps_old_rows_and_verified_backup(migration_host):
     import sqlite3
 
     target, database = migration_host
-    backup = Path(release.migrate_correlation(target))
+    backup = Path(release.migrate_retention_indexes(target))
     receipt = json.loads(backup.with_suffix(".json").read_text())
     assert receipt["sha256"] == release.checksum(backup)
     with sqlite3.connect(backup) as saved:
@@ -218,7 +218,7 @@ def test_additive_migration_keeps_old_rows_and_verified_backup(migration_host):
              payload_json, payload_sha256)
             VALUES ('old','old','core','test','ops','test','{}','hash')""")
         assert connection.execute("SELECT correlation_id FROM notification_events").fetchall() == [(None,)]
-    assert release.migrate_correlation(target) is None
+    assert release.migrate_retention_indexes(target) is None
 
 
 def test_partial_migration_failure_restores_database(migration_host, monkeypatch):
@@ -228,15 +228,15 @@ def test_partial_migration_failure_restores_database(migration_host, monkeypatch
 
     def broken(*args, **kwargs):
         with sqlite3.connect(database) as connection:
-            connection.execute("ALTER TABLE notification_events ADD COLUMN correlation_id TEXT")
+            connection.execute("CREATE INDEX ix_outcomes_decision ON outcomes(decision_id)")
         raise RuntimeError("migration interrupted")
 
     monkeypatch.setattr(release, "run", broken)
     with pytest.raises(RuntimeError, match="migration interrupted"):
-        release.migrate_correlation(target)
+        release.migrate_retention_indexes(target)
     with sqlite3.connect(database) as connection:
         assert release.database_revision(connection) == release.OLD_REVISION
-        assert "correlation_id" not in {row[1] for row in connection.execute("PRAGMA table_info(notification_events)")}
+        assert "ix_outcomes_decision" not in {row[1] for row in connection.execute("PRAGMA index_list(outcomes)")}
         assert connection.execute("SELECT value FROM review_preserved").fetchall() == [("before",)]
         assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
 
@@ -269,3 +269,23 @@ def test_real_timer_cleanup_failure_still_rolls_back_before_success_receipt(host
         release.install(SHA, DIGEST)
     assert not (host[0] / "current").is_symlink()
     assert not (host[0] / "previous.json").exists()
+
+
+def test_release_retention_keeps_current_rollback_and_unknown_paths(tmp_path, monkeypatch):
+    root, rust = tmp_path/'python', tmp_path/'rust'
+    monkeypatch.setattr(release,'ROOT',root)
+    monkeypatch.setattr(release,'RUST',rust)
+    for parent in (root,rust):
+        for sha in ('a'*40,'b'*40,'c'*40,'not-a-release'):
+            (parent/'releases'/sha).mkdir(parents=True)
+        (parent/'current').symlink_to(parent/'releases'/('a'*40))
+        (parent/'releases'/('d'*40)).symlink_to(tmp_path)
+    calls=[]
+    monkeypatch.setattr(release,'run',lambda *args: calls.append(args))
+    removed=release.retire_old_releases(root/'releases'/('b'*40),rust/'releases'/('b'*40))
+    assert set(removed)=={str(parent/'releases'/('c'*40)) for parent in (root,rust)}
+    assert (root/'releases'/('a'*40)).is_dir()
+    assert (root/'releases'/('b'*40)).is_dir()
+    assert (root/'releases'/'not-a-release').is_dir()
+    assert (root/'releases'/('d'*40)).is_symlink()
+    assert calls==[('sudo','-n','rm','-rf','--',str(rust/'releases'/('c'*40)))]

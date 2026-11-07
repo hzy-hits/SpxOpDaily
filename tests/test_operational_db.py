@@ -247,7 +247,7 @@ def test_existing_notification_rows_survive_forward_upgrade(tmp_path: Path) -> N
         ).fetchall() == [("event", "delivered")]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone()[0] == "0005_notification_correlation"
+        ).fetchone()[0] == "0006_retention_indexes"
         assert "ix_decisions_strategy_decision_at" in {
             row[1] for row in connection.execute("PRAGMA index_list(decisions)")
         }
@@ -597,3 +597,102 @@ def test_session_projection_migration_preserves_existing_records(tmp_path):
     assert cards == ({"decision_id": "legacy", "decision_at": NOW,
                       "opportunity_id": "old-opportunity", "direction": "UP",
                       "setup_kind": "GTH_LEVEL", "trigger_level": 7500.5, "session_mode": "gth"},)
+
+
+def _retention_event(connection, key, *, kind='test', attributes=None):
+    connection.execute("""INSERT INTO events(event_key,event_type,session_date,source_at,
+        available_at,data_quality,schema_version,attributes_json,created_at)
+        VALUES (?,?, '2026-08-07', ?,?,'live',1,?,?)""",
+        (key, kind, NOW.isoformat(), NOW.isoformat(), json.dumps(attributes or {}), NOW.isoformat()))
+
+
+def test_operational_retention_preserves_dependencies_and_restores_full_rows(tmp_path):
+    import gzip
+    from spx_spark.infrastructure.operational_db import archive_operational_history
+
+    database = _migrate(tmp_path)
+    for suffix in ('old', 'pending', 'notified'):
+        persist_strategy_decision({**_candidate(), 'decision_id': suffix}, database_path=database)
+    with sqlite3.connect(database) as c:
+        c.row_factory = sqlite3.Row
+        _retention_event(c, 'parent')
+        _retention_event(c, 'feature', kind='feature_snapshot', attributes={'parent_event_key': 'parent'})
+        _retention_event(c, 'version', kind='strategy_version')
+        c.execute("UPDATE decisions SET feature_snapshot_id='feature' WHERE decision_id='pending'")
+        c.execute("""INSERT INTO outcomes(outcome_id,event_key,decision_id,horizon_minutes,
+            status,target_at,attributes_json,created_at) VALUES ('pending','parent','pending',5,
+            'pending',?,'{}',?)""", (NOW.isoformat(), NOW.isoformat()))
+        c.execute("""INSERT INTO notification_events(idempotency_key,logical_event_id,source,kind,lane,
+            channel,payload_json,payload_sha256,status,correlation_id)
+            VALUES ('n','n','test','test','test','feishu','{}','h','delivered','notified')""")
+        before = {t: [dict(r) for r in c.execute(f'SELECT * FROM {t}')] for t in
+                  ('events', 'decisions', 'decision_legs', 'outcomes', 'notification_events')}
+    result = archive_operational_history(database_path=database, now=NOW+timedelta(days=5))
+    assert result['rows'] == 3  # one decision and its two legs
+    with sqlite3.connect(database) as c:
+        assert {r[0] for r in c.execute('SELECT decision_id FROM decisions')} == {'pending','notified'}
+        assert c.execute('PRAGMA foreign_key_check').fetchall() == []
+        c.row_factory = sqlite3.Row
+        assert [dict(r) for r in c.execute('SELECT * FROM notification_events')] == before['notification_events']
+        for path in (tmp_path/'backups'/'operational-history').glob('*.json.gz'):
+            payload = json.loads(gzip.decompress(path.read_bytes()))
+            for table, rows in ((payload['table'], payload['rows']), ('decision_legs', payload['decision_legs'])):
+                for row in rows:
+                    names = ','.join(row)
+                    c.execute(f"INSERT INTO {table}({names}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))
+        for table, rows in before.items():
+            assert sorted(map(str, [dict(r) for r in c.execute(f'SELECT * FROM {table}')])) == sorted(map(str, rows))
+    assert archive_operational_history(database_path=database, now=NOW+timedelta(days=5))['rows'] == 3
+
+
+def test_operational_retention_archive_failure_never_deletes(tmp_path, monkeypatch):
+    from spx_spark.infrastructure import operational_db
+    database = _migrate(tmp_path)
+    persist_strategy_decision(_candidate(), database_path=database)
+    def fail(*args):
+        raise OSError('disk full')
+    monkeypatch.setattr(operational_db, '_verified_operational_archive', fail)
+    with pytest.raises(OSError, match='disk full'):
+        operational_db.archive_operational_history(database_path=database, now=NOW+timedelta(days=5))
+    with sqlite3.connect(database) as c:
+        assert c.execute('SELECT count(*) FROM decisions').fetchone()[0] == 1
+        assert c.execute('SELECT count(*) FROM decision_legs').fetchone()[0] == 2
+
+
+def test_operational_retention_rechecks_late_reference(tmp_path, monkeypatch):
+    from spx_spark.infrastructure import operational_db
+    database = _migrate(tmp_path)
+    persist_strategy_decision(_candidate(), database_path=database)
+    archive = operational_db._verified_operational_archive
+    def add_reference(*args):
+        size = archive(*args)
+        with sqlite3.connect(database) as c:
+            _retention_event(c, 'late')
+            c.execute("""INSERT INTO outcomes(outcome_id,event_key,decision_id,horizon_minutes,status,
+                target_at,attributes_json,created_at) VALUES ('late','late','strategy:call-vertical',5,
+                'pending',?,'{}',?)""", (NOW.isoformat(),NOW.isoformat()))
+        return size
+    monkeypatch.setattr(operational_db, '_verified_operational_archive', add_reference)
+    with pytest.raises(RuntimeError, match='references changed'):
+        operational_db.archive_operational_history(database_path=database, now=NOW+timedelta(days=5))
+    with sqlite3.connect(database) as c:
+        assert c.execute('SELECT count(*) FROM decisions').fetchone()[0] == 1
+        assert c.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_operational_retention_finishes_old_outcomes_but_keeps_recent_and_version(tmp_path):
+    from spx_spark.infrastructure.operational_db import archive_operational_history
+    database = _migrate(tmp_path)
+    persist_strategy_decision(_no_trade(), database_path=database)
+    with sqlite3.connect(database) as c:
+        _retention_event(c, 'observation')
+        _retention_event(c, 'version', kind='strategy_version')
+        c.execute("""INSERT INTO outcomes(outcome_id,event_key,decision_id,horizon_minutes,status,
+            target_at,attributes_json,created_at) VALUES ('done','observation','strategy:no-trade',5,
+            'censored',?,'{}',?)""", (NOW.isoformat(), NOW.isoformat()))
+    assert archive_operational_history(database_path=database, now=NOW+timedelta(days=3))['rows'] == 0
+    assert archive_operational_history(database_path=database, now=NOW+timedelta(days=4))['rows'] == 3
+    assert archive_operational_history(database_path=database, now=NOW+timedelta(days=4))['rows'] == 0
+    with sqlite3.connect(database) as c:
+        assert c.execute('SELECT event_key FROM events').fetchall() == [('version',)]
+        assert c.execute('PRAGMA foreign_key_check').fetchall() == []

@@ -726,6 +726,7 @@ DESK_FAULT_LABELS = {
     "bridge_halted": "桥接已停止处理数据",
     "report_halted": "报告服务已停止处理数据",
     "desk_projection_not_forwarded": "新桌图超过三分钟未转发到报告端",
+    "desk_projection_expired_before_forwarding": "历史桌图未转发且已过有效期；保留漏报记录，等待下一次有效桌图核验",
     "scheduled_report_missing": "应到桌图超过五分钟仍未生成",
     "delivery_service_unavailable": "投递服务未运行或无法确认状态",
 }
@@ -752,7 +753,12 @@ def desk_pipeline_faults(*, now, bridge, report, source, mirrored, delivery_acti
     downstream = stamp(mirrored.get("available_at"))
     if upstream and upstream <= now and (downstream is None or downstream < upstream):
         if (now - upstream).total_seconds() > DESK_HEARTBEAT_SECONDS:
-            faults.append("desk_projection_not_forwarded")
+            expires = stamp(source.get("valid_until"))
+            faults.append(
+                "desk_projection_expired_before_forwarding"
+                if expires is not None and expires <= now
+                else "desk_projection_not_forwarded"
+            )
     # Evaluate the last half-hour slot whose grace has elapsed, including the
     # last slot immediately before a session closes. Weekends create no slots.
     due = now - timedelta(minutes=DESK_REPORT_GRACE_MINUTES)
