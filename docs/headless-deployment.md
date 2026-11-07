@@ -9,8 +9,15 @@ scan large child tables for every old row. No table, column or data is rewritten
 The receiver now allowlists the exact bytes of this migration and unchanged prior
 migrations; the earlier 0004-to-0005 exception below is historical. All writers
 are stopped during the existing backup/migrate/validate boundary. A failed migration
-restores the verified backup; an application rollback can retain these additive
-indexes. The new receiver must be installed before the master deployment job.
+restores the verified backup. An application rollback must downgrade these two
+indexes and the Alembic revision before starting the old Worker: its startup runs
+`alembic upgrade head`, and an unknown newer revision prevents startup even though
+old SQL inserts remain compatible. Downgrade preserves rows written after upgrade;
+an application rollback must not restore the older full backup over those rows.
+Python restart failure must still attempt to restore the independent Rust services.
+Cold readiness waits up to 300 seconds for fresh health and a connected bridge,
+while any process restart still fails validation. The new receiver must be
+installed before the master deployment job.
 After verified cutover and rollback-receipt persistence, the receiver retains only
 the current and immediately previous SHA-named Python/Rust release directories.
 Unknown directories and symlinks are excluded; runtime data and backups are never

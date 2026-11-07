@@ -241,6 +241,87 @@ def test_partial_migration_failure_restores_database(migration_host, monkeypatch
         assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
 
 
+def test_application_rollback_preserves_new_rows_and_old_worker_can_boot(migration_host, tmp_path):
+    import os
+    import shutil
+    import sqlite3
+    import subprocess
+    import sys
+
+    target, database = migration_host
+    release.migrate_retention_indexes(target)
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO review_preserved VALUES ('written after migration')")
+    release.migrate_retention_indexes(target, rollback=True)
+    old = tmp_path / 'old-runtime'
+    shutil.copytree(target / 'alembic', old / 'alembic')
+    (old / release.RETENTION_MIGRATION).unlink()
+    shutil.copyfile(target / 'alembic.ini', old / 'alembic.ini')
+    # Reproduce the old Worker's actual startup migration, not merely old SQL inserts.
+    subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', 'head'], cwd=old,
+                   env=dict(os.environ, SPX_DATA_ROOT=str(database.parent)),
+                   check=True, capture_output=True)
+    with sqlite3.connect(database) as connection:
+        assert release.database_revision(connection) == release.OLD_REVISION
+        assert connection.execute('SELECT value FROM review_preserved').fetchall() == [
+            ('before',), ('written after migration',)]
+        assert not connection.execute("SELECT name FROM sqlite_master WHERE name IN "
+                                      "('ix_decisions_feature_snapshot','ix_outcomes_decision')").fetchall()
+
+
+def test_failed_cutover_downgrades_before_old_worker_starts(host, monkeypatch):
+    original = release.run
+    revision = [release.OLD_REVISION]
+    monkeypatch.setattr(release, 'reviewed_migration', lambda *args: True)
+
+    def migrate(target, *, rollback=False):
+        revision[0] = release.OLD_REVISION if rollback else release.NEW_REVISION
+
+    def run(*args, **kwargs):
+        if args == ('systemctl', '--user', 'start', *release.PYTHON_UNITS):
+            selected = (host[0] / 'current').resolve()
+            expected = release.NEW_REVISION if selected == host[2] else release.OLD_REVISION
+            assert revision[0] == expected
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(release, 'migrate_retention_indexes', migrate)
+    monkeypatch.setattr(release, 'run', run)
+    monkeypatch.setattr(release, 'wait_ready', lambda *args: (_ for _ in ()).throw(RuntimeError('not ready')))
+    with pytest.raises(RuntimeError, match='not ready'):
+        release.install(SHA, DIGEST)
+    assert revision[0] == release.OLD_REVISION
+    assert not (host[0] / 'current').is_symlink()
+
+
+def test_python_restart_failure_does_not_leave_rust_stopped(host, monkeypatch):
+    original = release.run
+
+    def run(*args, **kwargs):
+        if args == ('systemctl', '--user', 'start', *release.PYTHON_UNITS):
+            raise RuntimeError('Python restart failed')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(release, 'run', run)
+    with pytest.raises(RuntimeError, match='Python restart failed'):
+        release.install(SHA, DIGEST)
+    assert ('sudo', '-n', 'systemctl', 'start', *release.RUST_UNITS) in host[-1]
+
+
+def test_bounded_cold_start_can_exceed_two_minutes(monkeypatch):
+    now = [0]
+    monkeypatch.setattr(release.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(release.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(release, 'run', lambda *args: '100')
+
+    def health(started):
+        if now[0] < 150:
+            raise RuntimeError('ledger startup still reading')
+
+    monkeypatch.setattr(release, 'verify_health', health)
+    release.wait_ready(0, {('pid',): '100'})
+    assert now[0] == 150
+
+
 @pytest.mark.parametrize("state", ["not-found", "masked"])
 def test_retired_research_timer_does_not_fail_successful_release(host, monkeypatch, state):
     original = release.run

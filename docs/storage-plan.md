@@ -108,7 +108,32 @@ capacity still needs a reachable archive destination, even after online DB growt
 is controlled. The release receiver now also keeps only current and immediate rollback code
 bundles after successful cutover, so deployments do not accumulate another
 unbounded copy of dependencies. Data, database backups and unknown paths are
-excluded. Release/production acceptance is recorded below after deployment.
+excluded.
+
+The first deployment of PR #26 (`465aef6c`) did not pass acceptance. On November 7,
+the 5.51 GiB migration backup and checks held writers stopped for approximately
+eight minutes; after restart, cold reads of the separate 1.1 GiB Rust operational
+ledger exceeded the 105-second bridge readiness deadline. Automatic rollback
+then exposed a second defect: old Worker startup could not resolve Alembic
+`0006_retention_indexes`, and its failed restart prevented the grouped recovery
+from reaching Rust. The operator downgraded only the added indexes/revision,
+preserving all new rows, and restored all nine services. At 06:53 UTC the old
+`94c3de4e` runtime had fresh decisions and accepted bridge acknowledgments again.
+This failed attempt is not evidence of a successful release.
+
+The receiver repair uses that data-preserving downgrade during application
+rollback, attempts Rust restoration even when Python restart fails, and allows
+up to 300 seconds for cold startup with unchanged process/health/socket checks.
+Regression coverage includes the actual old Alembic startup graph and rows
+written after migration. Scheduled hourly archive maintenance does not run a
+whole-database backup or integrity scan and does not stop services.
+
+The one-time operational rebuild reduced the live DB from 14,151,798,784 to
+5,912,117,248 bytes at 06:33:57 UTC, with 4.3 seconds of Core/Worker suspension
+for that separate cutover. All 11,056 notification events and 11,505 attempts
+remained. Its full retired database was subsequently compressed and verified by
+decompressed SHA-256 and size before the uncompressed copy was removed. The later
+release outage above must not be confused with this 4.3-second data cutover.
 
 Validation so far: focused cleanup, compactor, finalizer, monitor and operational
 archive tests, Ruff and Import Linter pass. Archive tests cover row restoration,
