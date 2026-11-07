@@ -198,3 +198,14 @@ source timestamps and production freshness checks remain authoritative. Historic
 missing records must remain explicit gaps. A current calendar snapshot must never be
 backdated to authorize a historical trade. Runtime release acceptance is separate
 from complete historical-context coverage and from strategy profitability.
+
+### NAS cold archive recovery (2026-11-07)
+
+The existing `spx-nas-archive.timer` remains daily at 08:45 Asia/Shanghai (up to
+five minutes jitter). Failed transfers retry in the same service after 15 minutes;
+each attempt is bounded to 30 minutes and resumes rsync partial files. The
+versioned owner is `scripts/archive-nas.py` in the current runtime bundle. Remote
+mount/hash verification precedes local retirement, including newly retained
+operational history. See [storage contract](storage-plan.md#repeated-historical-alert-and-nas-recovery-2026-11-07-follow-up).
+Historical expired Desk Maps are recorded once by the Worker monitor; they are
+not recurring active failures and are never resent as fresh trading information.

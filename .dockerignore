@@ -13,6 +13,9 @@
 !alembic/**
 !scripts/
 !scripts/**
+!systemd/
+!systemd/spx-nas-archive.service
+!systemd/spx-nas-archive.timer
 !out/
 !out/bin/
 !out/bin/*

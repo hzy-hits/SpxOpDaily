@@ -1,0 +1,17 @@
+[Unit]
+Description=Archive verified SPX cold history to the existing NAS export
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spx-nas-archive
+ExecStart=/usr/bin/python3 /home/ubuntu/spx-runtime/current/scripts/archive-nas.py --execute
+TimeoutStartSec=30min
+Restart=on-failure
+RestartSec=15min
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=256M
+CPUQuota=25%
+UMask=0077
+NoNewPrivileges=yes
