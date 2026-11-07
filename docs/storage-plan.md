@@ -105,7 +105,10 @@ verified raw retention and 10 GiB Rust reserve remain in effect. NAS transport
 is still an external dependency: its current job excludes the live DB and lake;
 local archives are not falsely reported as off-host copies. Long-term cold-history
 capacity still needs a reachable archive destination, even after online DB growth
-is controlled. Release/production acceptance is recorded below after deployment.
+is controlled. The release receiver now also keeps only current and immediate rollback code
+bundles after successful cutover, so deployments do not accumulate another
+unbounded copy of dependencies. Data, database backups and unknown paths are
+excluded. Release/production acceptance is recorded below after deployment.
 
 Validation so far: focused cleanup, compactor, finalizer, monitor and operational
 archive tests, Ruff and Import Linter pass. Archive tests cover row restoration,

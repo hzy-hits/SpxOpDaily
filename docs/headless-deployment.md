@@ -11,6 +11,10 @@ migrations; the earlier 0004-to-0005 exception below is historical. All writers
 are stopped during the existing backup/migrate/validate boundary. A failed migration
 restores the verified backup; an application rollback can retain these additive
 indexes. The new receiver must be installed before the master deployment job.
+After verified cutover and rollback-receipt persistence, the receiver retains only
+the current and immediately previous SHA-named Python/Rust release directories.
+Unknown directories and symlinks are excluded; runtime data and backups are never
+removed. Cleanup failure is reported without rolling back a healthy release.
 
 ## Verified deployment and release retirement (2026-10-18)
 

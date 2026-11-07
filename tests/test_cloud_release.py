@@ -269,3 +269,23 @@ def test_real_timer_cleanup_failure_still_rolls_back_before_success_receipt(host
         release.install(SHA, DIGEST)
     assert not (host[0] / "current").is_symlink()
     assert not (host[0] / "previous.json").exists()
+
+
+def test_release_retention_keeps_current_rollback_and_unknown_paths(tmp_path, monkeypatch):
+    root, rust = tmp_path/'python', tmp_path/'rust'
+    monkeypatch.setattr(release,'ROOT',root)
+    monkeypatch.setattr(release,'RUST',rust)
+    for parent in (root,rust):
+        for sha in ('a'*40,'b'*40,'c'*40,'not-a-release'):
+            (parent/'releases'/sha).mkdir(parents=True)
+        (parent/'current').symlink_to(parent/'releases'/('a'*40))
+        (parent/'releases'/('d'*40)).symlink_to(tmp_path)
+    calls=[]
+    monkeypatch.setattr(release,'run',lambda *args: calls.append(args))
+    removed=release.retire_old_releases(root/'releases'/('b'*40),rust/'releases'/('b'*40))
+    assert set(removed)=={str(parent/'releases'/('c'*40)) for parent in (root,rust)}
+    assert (root/'releases'/('a'*40)).is_dir()
+    assert (root/'releases'/('b'*40)).is_dir()
+    assert (root/'releases'/'not-a-release').is_dir()
+    assert (root/'releases'/('d'*40)).is_symlink()
+    assert calls==[('sudo','-n','rm','-rf','--',str(rust/'releases'/('c'*40)))]

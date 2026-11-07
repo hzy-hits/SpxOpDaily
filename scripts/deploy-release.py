@@ -75,6 +75,26 @@ def retire_research_timer():
         run('systemctl', '--user', 'disable', '--now', timer)
 
 
+def retire_old_releases(previous, previous_rust):
+    """Keep current and immediate rollback bundles; never touch data/backups."""
+    removed = []
+    for root, protected, privileged in (
+        (ROOT / 'releases', {previous.resolve(), (ROOT / 'current').resolve()}, False),
+        (RUST / 'releases', {previous_rust.resolve(), (RUST / 'current').resolve()}, True),
+    ):
+        for path in root.iterdir():
+            if path.is_symlink() or not path.is_dir() or not re.fullmatch(r'[0-9a-f]{40}', path.name):
+                continue
+            if path.resolve() in protected:
+                continue
+            if privileged:
+                run('sudo', '-n', 'rm', '-rf', '--', str(path))
+            else:
+                shutil.rmtree(path)
+            removed.append(str(path))
+    return removed
+
+
 def schema_files(root):
     return {str(p.relative_to(root)): checksum(p) for p in (root / 'alembic').rglob('*.py')}
 
@@ -297,7 +317,14 @@ def install(sha, digest):
             timers = [t for t in timers if t != 'spx-spark-backtest-weekly.timer']
         if timers:
             run('systemctl', '--user', 'start', *timers)
+    try:
+        retired = retire_old_releases(previous, previous_rust)
+    except (OSError, subprocess.SubprocessError) as error:
+        # A cleanup error does not undo an already verified, recorded cutover.
+        retired = []
+        print(json.dumps({'status': 'release_retention_failed', 'error_type': type(error).__name__}))
     print(json.dumps({'status': 'deployed', 'revision': sha, 'archive_sha256': digest,
+                      'retired_releases': retired,
                       'previous_python': str(previous), 'previous_rust': str(previous_rust),
                       'cutover_seconds': round(time.time() - started, 1)}))
 
