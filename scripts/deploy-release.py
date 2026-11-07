@@ -31,10 +31,10 @@ HEALTH_FILES = [Path('/var/lib/spx-spark-bridge-shadow/health.json'),
 BASE_URL = 'https://github.com/hzy-hits/SpxOpDaily/releases/download'
 DATABASE = Path('/srv/data/spx-spark/spx.sqlite')
 # Reviewed additive migration only. Any other schema change still stops cutover.
-CORRELATION_MIGRATION = 'alembic/versions/0005_notification_correlation.py'
-CORRELATION_SHA256 = '3968710f27ca2350c65c3235eacc821bdbe0614a7141c48483d4ba667434d9fe'
-OLD_REVISION = '0004_session_card_cover'
-NEW_REVISION = '0005_notification_correlation'
+RETENTION_MIGRATION = 'alembic/versions/0006_retention_indexes.py'
+RETENTION_SHA256 = '154a8b713815f24a50cff11d2173bf606fec10a6d4689b1661fdd38d37f2d0f2'
+OLD_REVISION = '0005_notification_correlation'
+NEW_REVISION = '0006_retention_indexes'
 
 
 def run(*args, **kwargs):
@@ -83,8 +83,8 @@ def reviewed_migration(previous, target):
     before, after = schema_files(previous), schema_files(target)
     if before == after:
         return False
-    if (CORRELATION_MIGRATION not in before
-            and after == {**before, CORRELATION_MIGRATION: CORRELATION_SHA256}):
+    if (RETENTION_MIGRATION not in before
+            and after == {**before, RETENTION_MIGRATION: RETENTION_SHA256}):
         return True
     raise ValueError('Database migration changed; separate migration review required')
 
@@ -96,19 +96,18 @@ def database_revision(connection):
     return rows[0][0]
 
 
-def migrate_correlation(target):
+def migrate_retention_indexes(target):
     """Run the reviewed Alembic revision with all writers stopped and a verified backup.
 
-    An application rollback keeps the additive nullable column/index. If Alembic
+    An application rollback keeps the additive FK indexes. If Alembic
     itself fails, restore the pre-migration database before restarting old writers.
     """
     with closing(sqlite3.connect(f'file:{DATABASE}?mode=rw', uri=True)) as source:
         revision = database_revision(source)
         if revision == NEW_REVISION:
-            columns = {row[1] for row in source.execute('PRAGMA table_info(notification_events)')}
-            indexes = {row[1] for row in source.execute('PRAGMA index_list(notification_events)')}
-            if 'correlation_id' not in columns or 'ix_notification_events_correlation' not in indexes:
-                raise ValueError('Database revision does not match correlation schema')
+            indexes = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+            if not {'ix_decisions_feature_snapshot', 'ix_outcomes_decision'} <= indexes:
+                raise ValueError('Database revision does not match retention indexes')
             return None
         if revision != OLD_REVISION:
             raise ValueError('Unexpected database baseline; migration refused')
@@ -241,7 +240,7 @@ def install(sha, digest):
         run('systemctl', '--user', 'stop', *running_python)
         run('sudo', '-n', 'systemctl', 'stop', *running_rust)
         if needs_migration:
-            database_backup = migrate_correlation(target)
+            database_backup = migrate_retention_indexes(target)
         for unit in units:
             entries = [line.replace(str(LEGACY), str(current)) for line in unit.read_text().splitlines()
                        if line.startswith(('ExecStart=', 'ExecStartPre='))]

@@ -1,5 +1,17 @@
 # Headless Deployment Notes
 
+## Storage maintenance migration (2026-11-07)
+
+This incident release advances `0005_notification_correlation` to
+`0006_retention_indexes`, adding only `decisions(feature_snapshot_id)` and
+`outcomes(decision_id)` indexes. Without them, foreign-key checks during retention
+scan large child tables for every old row. No table, column or data is rewritten.
+The receiver now allowlists the exact bytes of this migration and unchanged prior
+migrations; the earlier 0004-to-0005 exception below is historical. All writers
+are stopped during the existing backup/migrate/validate boundary. A failed migration
+restores the verified backup; an application rollback can retain these additive
+indexes. The new receiver must be installed before the master deployment job.
+
 ## Verified deployment and release retirement (2026-10-18)
 
 This is a dated operational snapshot, verified at **2026-10-18 00:08:57 Asia/Shanghai**

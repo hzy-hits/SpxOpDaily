@@ -247,7 +247,7 @@ def test_existing_notification_rows_survive_forward_upgrade(tmp_path: Path) -> N
         ).fetchall() == [("event", "delivered")]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone()[0] == "0005_notification_correlation"
+        ).fetchone()[0] == "0006_retention_indexes"
         assert "ix_decisions_strategy_decision_at" in {
             row[1] for row in connection.execute("PRAGMA index_list(decisions)")
         }

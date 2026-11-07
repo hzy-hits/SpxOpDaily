@@ -81,7 +81,10 @@ stops services or replaces the database.
 Maintenance scans at most 500 records / about 16 MiB per batch (one large record
 can exceed that byte target), with a configurable 10-second SQL/time budget per
 hour; lock contention yields to the next run. Archive filesystem I/O completes
-its bounded batch before returning. Freed SQLite pages are reused rather than
+its bounded batch before returning. The additive `0006_retention_indexes` migration indexes the two previously
+unindexed FK references (`decisions.feature_snapshot_id`, `outcomes.decision_id`),
+so archive eligibility and delete checks do not repeatedly scan payload tables.
+Freed SQLite pages are reused rather than
 requiring a recurring VACUUM or rebuild. This bounds routine hot history, not
 unresolved observations or the permanent compressed archive. The existing manual
 retention tool is used once for this incident's accumulated DB, retaining a full
