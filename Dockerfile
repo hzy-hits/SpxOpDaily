@@ -11,6 +11,7 @@ COPY config/ config/
 COPY alembic.ini ./
 COPY alembic/ alembic/
 COPY scripts/ scripts/
+COPY systemd/spx-nas-archive.* systemd/
 RUN uv venv --python /usr/bin/python3.12 --relocatable .venv \
     && uv sync --frozen --no-dev --no-editable --python /usr/bin/python3.12 \
     && uv cache clean \
