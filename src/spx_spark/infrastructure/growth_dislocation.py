@@ -1375,7 +1375,7 @@ def _refresh_close_history(
     )
     try:
         history = [
-            row for row in fetch_daily_closes(client, symbol)
+            row for row in fetch_daily_closes(client, symbol, end_at=now)
             if row.day <= completed_day and DEFAULT_MARKET_CALENDAR.is_trading_day(row.day)
         ][-MAX_CLOSE_HISTORY:]
     except ProviderError as exc:
