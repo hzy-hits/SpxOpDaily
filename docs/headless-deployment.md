@@ -139,6 +139,16 @@ it does not automatically repair timers that were already failed before deployme
 
 ## Cloud delivery cutover (2026-10-17)
 
+2026-11-10 release prerequisite: the user authorized a minimal SQLite security
+upgrade after the Fallen Angel daily-history fix was blocked by
+[RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459.html).
+The existing bundled dependency is now pinned to `rusqlite 0.41.1`, resolving
+`libsqlite3-sys 0.39.1` (SQLite 3.54.1); its required `hashlink` dependency also
+updates to 0.12.2. This is a Phase 6 frozen-workspace security exception, not a
+P6 owner migration: no schema, storage path, service, policy or delivery change.
+Native tests, the dependency audit and the existing immutable-release acceptance
+remain required; no advisory suppression or production compilation is allowed.
+
 User-authorized delivery change: move development, builds and offline research off Oracle.
 This extends the Phase 0 owner inventory / Phase 1 delivery infrastructure; the Rust
 lockfile update is a Phase 6 security exception. It does not move strategy, report,
