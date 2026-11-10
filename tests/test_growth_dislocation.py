@@ -33,6 +33,7 @@ from spx_spark.market_calendar import DEFAULT_MARKET_CALENDAR, ET
 from spx_spark.notifier.human_policy import quiet_window_suppresses
 from spx_spark.notifier.model import NotificationEnvelope
 from spx_spark.settings import load_app_settings
+from spx_spark.schwab.growth_dislocation import fetch_daily_closes
 
 
 NOW = datetime(2026, 8, 20, 15, 30, tzinfo=ET)
@@ -1273,6 +1274,51 @@ def test_daily_uses_broker_close_and_rth_uses_only_current_quote(tmp_path: Path,
     assert daily["return_5d"] == pytest.approx(candles[-1]["close"] / candles[-6]["close"] - 1)
     assert intraday["return_5d"] == pytest.approx(client.test_last / candles[-6]["close"] - 1)
     assert daily["price_history_as_of"] == at.date().isoformat()
+
+
+@pytest.mark.parametrize("at", [
+    datetime(2026, 8, 20, 20, 0, tzinfo=ET),
+    datetime(2026, 9, 8, 20, 0, tzinfo=ET),  # First session after Labor Day.
+    datetime(2026, 11, 2, 20, 0, tzinfo=ET),  # First session after DST ends.
+    datetime(2026, 11, 9, 20, 0, tzinfo=ET),  # Reported Monday failure.
+])
+def test_daily_fetch_includes_latest_close_when_provider_default_lags(
+    tmp_path: Path, at: datetime,
+) -> None:
+    class DefaultLaggingHistory(FakeSchwabClient):
+        def get_json(self, path, params):
+            status, payload = super().get_json(path, params)
+            if path.endswith("/pricehistory"):
+                previous = DEFAULT_MARKET_CALENDAR.previous_trading_day(self.now.date())
+                default_end = datetime.combine(previous, datetime.min.time(), tzinfo=ET)
+                cutoff = params.get("endDate", int(default_end.timestamp() * 1000))
+                payload["candles"] = [c for c in payload["candles"] if c["datetime"] <= cutoff]
+            return status, payload
+
+    client = DefaultLaggingHistory(at)
+    result = scan_once(
+        now=at, mode="daily", client=client, policy=_policy(), universe=_universe(),
+        data_root=tmp_path, iv_percentile_fetcher=lambda symbols: {
+            symbol: replace(snapshot, observed_at=at)
+            for symbol, snapshot in _ivp_fetcher(symbols).items()
+        },
+    ).document
+
+    assert result["scan_complete"]
+    assert result["data_quality"]["errors"] == []
+    assert result["all_candidates"][0]["price_history_as_of"] == at.date().isoformat()
+    assert result["all_candidates"][0]["detail_refreshed_this_run"]
+    finished_at = datetime.fromisoformat(result["generated_at"])
+    for path, params in client.requests:
+        if path.endswith("/pricehistory"):
+            assert int(at.timestamp() * 1000) <= params["endDate"] <= int(finished_at.timestamp() * 1000)
+
+
+def test_daily_history_requires_an_unambiguous_cutoff() -> None:
+    client = FakeSchwabClient(NOW)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        fetch_daily_closes(client, "TEST", end_at=NOW.replace(tzinfo=None))
+    assert client.requests == []
 
 
 def test_report_leads_with_current_scan_and_does_not_fill_missing_iv_from_history(tmp_path: Path) -> None:

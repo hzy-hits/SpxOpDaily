@@ -85,7 +85,13 @@ def fetch_equity_quote_batch(
     return normalized
 
 
-def fetch_daily_closes(client: SchwabClient, provider_symbol: str) -> tuple[DailyClose, ...]:
+def fetch_daily_closes(
+    client: SchwabClient, provider_symbol: str, *, end_at: datetime,
+) -> tuple[DailyClose, ...]:
+    # The provider's implicit end date can exclude today's completed session.
+    # Use the caller's clock, including in replay, rather than wall-clock now.
+    if end_at.utcoffset() is None:
+        raise ValueError("Daily history end_at must be timezone-aware")
     _status, payload = client.get_json(
         PRICE_HISTORY_PATH,
         {
@@ -94,6 +100,7 @@ def fetch_daily_closes(client: SchwabClient, provider_symbol: str) -> tuple[Dail
             "period": 1,
             "frequencyType": "daily",
             "frequency": 1,
+            "endDate": int(end_at.timestamp() * 1000),
             "needExtendedHoursData": "false",
             "needPreviousClose": "true",
         },
