@@ -11,11 +11,7 @@ from typing import Any
 class GrowthDislocationSettings:
     enabled: bool
     universe_path: str
-    max_price_location_52w: float
-    max_dividend_yield: float
     min_market_cap: float
-    max_ivp_13w: float
-    max_ivp_26w: float
     max_ivp_52w: float
     ibkr_history_timeout_seconds: float
     ibkr_history_concurrency: int
@@ -30,10 +26,6 @@ class GrowthDislocationSettings:
     iv_rv_zero_score_ratio: float
     min_target_leaps_open_interest: int
     max_extrinsic_value_ratio: float
-    rsi_oversold_threshold: float
-    rsi_recovery_min: float
-    rsi_recovery_optimal_low: float
-    rsi_recovery_optimal_high: float
     chain_strike_count: int
     rth_request_budget: int
     daily_request_budget: int
@@ -46,10 +38,6 @@ class GrowthDislocationSettings:
         if not self.universe_path.strip():
             raise ValueError("growth-dislocation universe_path cannot be empty")
         for label, value in (
-            ("max_price_location_52w", self.max_price_location_52w),
-            ("max_dividend_yield", self.max_dividend_yield),
-            ("max_ivp_13w", self.max_ivp_13w),
-            ("max_ivp_26w", self.max_ivp_26w),
             ("max_ivp_52w", self.max_ivp_52w),
             ("target_delta_min", self.target_delta_min),
             ("target_delta_max", self.target_delta_max),
@@ -73,15 +61,6 @@ class GrowthDislocationSettings:
             raise ValueError("growth-dislocation target LEAPS open interest must be positive")
         if not 0 < self.min_leaps_dte <= self.preferred_leaps_dte <= self.max_leaps_dte:
             raise ValueError("growth-dislocation LEAPS DTE thresholds are not ordered")
-        if not (
-            0.0
-            < self.rsi_oversold_threshold
-            < self.rsi_recovery_min
-            <= self.rsi_recovery_optimal_low
-            < self.rsi_recovery_optimal_high
-            < 100.0
-        ):
-            raise ValueError("growth-dislocation RSI thresholds are not ordered")
         for label, value in (
             ("chain_strike_count", self.chain_strike_count),
             ("rth_request_budget", self.rth_request_budget),
@@ -110,11 +89,7 @@ def load_growth_dislocation_settings(
     return GrowthDislocationSettings(
         enabled=bool(value("enabled")),
         universe_path=str(value("universe_path")),
-        max_price_location_52w=float(value("max_price_location_52w")),
-        max_dividend_yield=float(value("max_dividend_yield")),
         min_market_cap=float(value("min_market_cap")),
-        max_ivp_13w=float(value("max_ivp_13w")),
-        max_ivp_26w=float(value("max_ivp_26w")),
         max_ivp_52w=float(value("max_ivp_52w")),
         ibkr_history_timeout_seconds=float(value("ibkr_history_timeout_seconds")),
         ibkr_history_concurrency=int(value("ibkr_history_concurrency")),
@@ -129,10 +104,6 @@ def load_growth_dislocation_settings(
         iv_rv_zero_score_ratio=float(value("iv_rv_zero_score_ratio")),
         min_target_leaps_open_interest=int(value("min_target_leaps_open_interest")),
         max_extrinsic_value_ratio=float(value("max_extrinsic_value_ratio")),
-        rsi_oversold_threshold=float(value("rsi_oversold_threshold")),
-        rsi_recovery_min=float(value("rsi_recovery_min")),
-        rsi_recovery_optimal_low=float(value("rsi_recovery_optimal_low")),
-        rsi_recovery_optimal_high=float(value("rsi_recovery_optimal_high")),
         chain_strike_count=int(value("chain_strike_count")),
         rth_request_budget=int(value("rth_request_budget")),
         daily_request_budget=int(value("daily_request_budget")),

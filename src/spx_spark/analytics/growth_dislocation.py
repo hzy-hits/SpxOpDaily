@@ -10,7 +10,7 @@ from typing import Any
 from spx_spark.settings.growth_dislocation import GrowthDislocationSettings
 
 
-POLICY_VERSION = "growth_dislocation_leaps.v13"
+POLICY_VERSION = "growth_dislocation_leaps.v14"
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -23,28 +23,23 @@ def price_location_52w(last: float, low_52w: float, high_52w: float) -> float | 
     return (last - low_52w) / (high_52w - low_52w)
 
 
-def quote_preference_scores(
-    location: float, market_cap: float, dividend_yield: float,
-    policy: GrowthDislocationSettings,
-) -> dict[str, float]:
-    """Former cutoffs are half-score anchors, not discontinuous exclusions."""
-    price_score = 100.0 / (1.0 + max(0.0, location) / policy.max_price_location_52w)
-    cap_score = 100.0 * market_cap / (market_cap + policy.min_market_cap)
-    dividend_score = 100.0 / (1.0 + max(0.0, dividend_yield) / policy.max_dividend_yield)
-    return {
-        "price_dislocation_score": price_score,
-        "market_cap_score": cap_score,
-        "dividend_score": dividend_score,
-        "prefilter_score": (0.35 * price_score + 0.10 * cap_score + 0.05 * dividend_score) / 0.50,
-    }
+def market_cap_score(market_cap: float, policy: GrowthDislocationSettings) -> float:
+    """Size preference for history coverage and opportunity ranking, not a gate."""
+    return 100.0 * market_cap / (market_cap + policy.min_market_cap)
 
 
-def price_features(closes: Sequence[float]) -> dict[str, float] | None:
-    """Build causal daily features from closes ending at the decision value."""
+def price_features(closes: Sequence[float]) -> dict[str, Any] | None:
+    """Completed-close features; breakout evidence never uses the next bar early.
 
-    clean = [float(value) for value in closes if math.isfinite(value) and value > 0.0]
-    if len(clean) < 35:
+    v14: MA20 rises over five sessions, MA50 is non-declining, close > MA50.
+    Break the preceding 20 closes, then hold that FIXED level on the next
+    completed session. Evidence survives only while structure and level hold.
+    All thresholds are initial, forward-unvalidated policy, not fitted alpha.
+    """
+
+    if len(closes) < 61 or any(not math.isfinite(value) or value <= 0 for value in closes):
         return None
+    clean = [float(value) for value in closes]
     rsi_series = _rsi_wilder(clean, period=14)
     recent_rsi = [value for value in rsi_series[-20:] if value is not None]
     if not recent_rsi or rsi_series[-1] is None:
@@ -52,7 +47,36 @@ def price_features(closes: Sequence[float]) -> dict[str, float] | None:
     returns = [math.log(current / prior) for prior, current in zip(clean, clean[1:])]
     rv20 = statistics.stdev(returns[-20:]) * math.sqrt(252.0) if len(returns) >= 20 else None
     low_20d = min(clean[-20:])
+    breakout_index = confirmed_index = None
+    breakout_level = 0.0
+    repair_origin_observed = False
+    for index in range(54, len(clean)):
+        ma20 = statistics.fmean(clean[index - 19:index + 1])
+        ma50 = statistics.fmean(clean[index - 49:index + 1])
+        slope20 = ma20 / statistics.fmean(clean[index - 24:index - 4]) - 1.0
+        slope50 = ma50 / statistics.fmean(clean[index - 54:index - 4]) - 1.0
+        repaired = clean[index] > ma50 and slope20 > 0.0 and slope50 >= 0.0
+        if not repaired or clean[index] < breakout_level:
+            repair_origin_observed = True
+            breakout_index = confirmed_index = None
+            breakout_level = 0.0
+        if repaired and breakout_index is not None and index == breakout_index + 1:
+            confirmed_index = index
+        if repaired and repair_origin_observed and breakout_index is None and clean[index] > max(clean[index - 20:index]):
+            breakout_level = max(clean[index - 20:index])
+            breakout_index = index
     return {
+        "daily_close": clean[-1],
+        "ma20": ma20,
+        "ma50": ma50,
+        "ma20_slope_5d": slope20,
+        "ma50_slope_5d": slope50,
+        "breakout_level": breakout_level or None,
+        "breakout_index": breakout_index,
+        "confirmation_index": confirmed_index,
+        "confirmation_age_sessions": len(clean) - 1 - confirmed_index if confirmed_index is not None else None,
+        "return_20d": clean[-1] / clean[-21] - 1.0,
+        "return_60d": clean[-1] / clean[-61] - 1.0,
         "rsi14": float(rsi_series[-1]),
         "rsi14_min_20d": min(recent_rsi),
         "return_5d": clean[-1] / clean[-6] - 1.0,
@@ -174,13 +198,10 @@ def score_candidate(
     policy: GrowthDislocationSettings,
 ) -> dict[str, Any] | None:
     required = (
-        "rsi14",
-        "rsi14_min_20d",
-        "return_5d",
-        "return_10d",
-        "sector_return_5d",
-        "sector_return_10d",
-        "ma10",
+        "daily_close", "ma20", "ma50", "ma20_slope_5d", "ma50_slope_5d",
+        "breakout_level", "confirmation_index",
+        "return_20d", "return_60d", "sector_return_20d", "sector_return_60d",
+        "market_return_20d", "market_return_60d",
         "last",
         "spread_mid",
         "leaps_dte",
@@ -191,8 +212,6 @@ def score_candidate(
         "target_leaps_oi",
         "current_iv",
         "realized_vol_20d",
-        "ivp_13w",
-        "ivp_26w",
         "ivp_52w",
         "price_location_52w",
         "market_cap",
@@ -200,9 +219,11 @@ def score_candidate(
     )
     if any(data.get(key) is None or not math.isfinite(float(data[key])) for key in required):
         return None
+    if candidate_state(data, spot=float(data["last"])) != "TRIGGER":
+        return None
     if float(data["market_cap"]) <= 0.0 or float(data["dividend_yield"]) < 0.0:
         return None
-    if any(not 0.0 <= float(data[key]) <= 1.0 for key in ("ivp_13w", "ivp_26w", "ivp_52w")):
+    if not 0.0 <= float(data["ivp_52w"]) <= 1.0:
         return None
     spread = float(data["spread_mid"])
     if spread > policy.max_leaps_spread_mid:
@@ -229,58 +250,46 @@ def score_candidate(
     if time_value_ratio is None or time_value_ratio > policy.max_extrinsic_value_ratio:
         return None
 
-    iv_score = iv_cheapness_score(
-        float(data["ivp_13w"]),
-        float(data["ivp_26w"]),
-        policy,
-    )
     ivrv_score = iv_rv_score(current_iv, realized_vol_20d, policy)
-    rsi_score = rsi_recovery_score(
-        float(data["rsi14"]),
-        float(data["rsi14_min_20d"]),
-        policy,
+    excess = sum(
+        weight * (float(data[f"return_{window}d"]) - float(data[f"{benchmark}_return_{window}d"]))
+        for window, weight in ((20, 0.3), (60, 0.2))
+        for benchmark in ("sector", "market")
     )
-    rs_score = relative_strength_score(
-        float(data["return_5d"]),
-        float(data["return_10d"]),
-        float(data["sector_return_5d"]),
-        float(data["sector_return_10d"]),
-    )
-    quote_scores = quote_preference_scores(
-        float(data["price_location_52w"]), float(data["market_cap"]),
-        float(data["dividend_yield"]), policy,
-    )
+    rs_score = clamp(50.0 + 250.0 * excess, 0.0, 100.0)
+    cap_score = market_cap_score(float(data["market_cap"]), policy)
     ivp_52w_score = 100.0 / (1.0 + float(data["ivp_52w"]) / policy.max_ivp_52w)
-    timing_score = 0.4 * rsi_score + 0.6 * rs_score
+    # Saturating slopes reward repair, not unlimited distance above an average.
+    trend_score = 50.0 + 25.0 * clamp(float(data["ma20_slope_5d"]) / 0.03, 0.0, 1.0) + 25.0 * clamp(float(data["ma50_slope_5d"]) / 0.02, 0.0, 1.0)
+    support = max(float(data["breakout_level"]), float(data["ma50"]))
+    support_distance = max(0.0, float(data["last"]) / support - 1.0)
+    entry_score = 60.0 / (1.0 + support_distance / 0.10) + 40.0 / (1.0 + realized_vol_20d / 0.40)
     absolute_iv_score = 100.0 / (1.0 + current_iv / policy.max_current_leaps_iv)
-    vol_cost_score = 0.5 * absolute_iv_score + 0.5 * ivrv_score
+    vol_cost_score = 0.5 * ivp_52w_score + 0.25 * absolute_iv_score + 0.25 * ivrv_score
+    liquidity_score = 100.0 / (1.0 + spread / 0.04)
+    size_liquidity_score = 0.5 * cap_score + 0.5 * liquidity_score
     final_score = (
-        0.35 * quote_scores["price_dislocation_score"] + 0.30 * ivp_52w_score
-        + 0.10 * iv_score + 0.10 * quote_scores["market_cap_score"]
-        + 0.05 * quote_scores["dividend_score"] + 0.05 * timing_score + 0.05 * vol_cost_score
-    )
-    rs5_sector = float(data["return_5d"]) - float(data["sector_return_5d"])
-    state = candidate_state(
-        close=float(data["last"]),
-        ma10=float(data["ma10"]),
-        rs5_sector=rs5_sector,
+        0.35 * trend_score + 0.20 * rs_score + 0.20 * entry_score
+        + 0.15 * vol_cost_score + 0.10 * size_liquidity_score
     )
     return {
-        "iv_score": iv_score,
         "ivrv_score": ivrv_score,
         "rs_score": rs_score,
-        "rsi_score": rsi_score,
+        "trend_score": trend_score,
+        "entry_score": entry_score,
+        "size_liquidity_score": size_liquidity_score,
+        "support_level": support,
+        "distance_from_support": support_distance,
         "final_score": final_score,
-        **quote_scores,
+        "market_cap_score": cap_score,
         "ivp_52w_score": ivp_52w_score,
-        "timing_score": timing_score,
         "vol_cost_score": vol_cost_score,
         "absolute_iv_score": absolute_iv_score,
         "priority_score": final_score,
         "extrinsic_value_ratio": time_value_ratio,
-        "state": state,
-        "rs_5d_sector": rs5_sector,
-        "rs_10d_sector": float(data["return_10d"]) - float(data["sector_return_10d"]),
+        "state": "TRIGGER",
+        "rs_20d_sector": float(data["return_20d"]) - float(data["sector_return_20d"]),
+        "rs_60d_market": float(data["return_60d"]) - float(data["market_return_60d"]),
     }
 
 
@@ -318,7 +327,7 @@ def candidate_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, str]
 
 
 def priority_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, float, float, str]:
-    """Prefer complete 52-week dislocation and IVP priority for notifications."""
+    """Use the same complete opportunity score for notifications."""
 
     priority_score = candidate.get("priority_score")
     return (
@@ -327,17 +336,6 @@ def priority_sort_key(candidate: Mapping[str, Any]) -> tuple[float, float, float
         -float(candidate.get("final_score") or 0.0),
         -float(candidate.get("market_cap") or 0.0),
         str(candidate.get("symbol") or ""),
-    )
-
-
-def iv_cheapness_score(
-    ivp_13w: float,
-    ivp_26w: float,
-    policy: GrowthDislocationSettings,
-) -> float:
-    return (
-        60.0 / (1.0 + ivp_13w / policy.max_ivp_13w)
-        + 40.0 / (1.0 + ivp_26w / policy.max_ivp_26w)
     )
 
 
@@ -357,64 +355,23 @@ def iv_rv_score(
     )
 
 
-def rsi_recovery_score(
-    rsi_now: float,
-    rsi_min_20d: float,
-    policy: GrowthDislocationSettings,
-) -> float:
-    if rsi_min_20d >= policy.rsi_oversold_threshold:
-        return 30.0
-    if rsi_now < policy.rsi_oversold_threshold:
-        lower_anchor = policy.rsi_oversold_threshold - 10.0
-        progress = clamp(
-            (rsi_now - lower_anchor) / (policy.rsi_oversold_threshold - lower_anchor),
-            0.0,
-            1.0,
-        )
-        return 20.0 + 40.0 * progress
-    if rsi_now < policy.rsi_recovery_min:
-        progress = (rsi_now - policy.rsi_oversold_threshold) / (
-            policy.rsi_recovery_min - policy.rsi_oversold_threshold
-        )
-        return 60.0 + 20.0 * progress
-    if rsi_now < policy.rsi_recovery_optimal_low:
-        progress = (rsi_now - policy.rsi_recovery_min) / (
-            policy.rsi_recovery_optimal_low - policy.rsi_recovery_min
-        )
-        return 80.0 + 20.0 * progress
-    if rsi_now <= policy.rsi_recovery_optimal_high:
-        return 100.0
-    upper_anchor = policy.rsi_recovery_optimal_high + 20.0
-    progress = clamp(
-        (rsi_now - policy.rsi_recovery_optimal_high)
-        / (upper_anchor - policy.rsi_recovery_optimal_high),
-        0.0,
-        1.0,
-    )
-    return 100.0 - 80.0 * progress
-
-
-def relative_strength_score(
-    stock_ret_5d: float,
-    stock_ret_10d: float,
-    sector_ret_5d: float,
-    sector_ret_10d: float,
-) -> float:
-    rs_sector = 0.6 * (stock_ret_5d - sector_ret_5d) + 0.4 * (stock_ret_10d - sector_ret_10d)
-    return clamp(50.0 + 400.0 * rs_sector, 0.0, 100.0)
-
-
-def candidate_state(
-    *,
-    close: float,
-    ma10: float,
-    rs5_sector: float,
-) -> str:
-    if rs5_sector > 0.0 and close > ma10:
-        return "TRIGGER"
-    if rs5_sector > 0.0 or close > ma10:
+def candidate_state(data: Mapping[str, Any], *, spot: float | None = None) -> str:
+    """Price confirmation is independent of score; live prices can only veto."""
+    required = ("daily_close", "ma50", "ma20_slope_5d", "ma50_slope_5d")
+    if any(data.get(key) is None or not math.isfinite(float(data[key])) for key in required):
+        return "STALE"
+    if not (
+        float(data["daily_close"]) > float(data["ma50"])
+        and float(data["ma20_slope_5d"]) > 0.0
+        and float(data["ma50_slope_5d"]) >= 0.0
+    ):
+        return "WATCH"
+    level = float(data.get("breakout_level") or 0.0)
+    if data.get("confirmation_index") is None or not math.isfinite(level) or level <= 0.0 or float(data["daily_close"]) < level:
         return "ARMED"
-    return "WATCH"
+    if spot is not None and (not math.isfinite(spot) or spot < level or spot <= float(data["ma50"])):
+        return "ARMED"
+    return "TRIGGER"
 
 
 def _rsi_wilder(closes: Sequence[float], *, period: int) -> list[float | None]:
@@ -464,6 +421,10 @@ def core_display_row(
     row = dict(current or stored)
     if current is not None:
         today_state = str(current.get("state") or "WATCH")
+    elif observation and observation.get("trend_evaluated") and observation.get("today_state") in {"WATCH", "ARMED"}:
+        # Another symbol's partial data can freeze membership, not the known
+        # price verdict. The stored score/contract remain historical.
+        today_state = str(observation["today_state"])
     else:
         # A retained non-candidate has unknown eligibility, never a current buy
         # opportunity. Confirmed failures have already left the dynamic pool.

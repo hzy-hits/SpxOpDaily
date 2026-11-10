@@ -15,7 +15,7 @@ from spx_spark.analytics.growth_dislocation import (
     extrinsic_value_ratio,
     iv_rv_score,
     priority_sort_key,
-    rsi_recovery_score,
+    price_features,
     score_candidate,
     select_target_leaps,
 )
@@ -124,16 +124,12 @@ class FakeSchwabClient:
 
     def _candles(self, symbol: str) -> list[dict[str, object]]:
         base = 80.0 if symbol in {"SPY", "XLK"} else 90.0
-        closes: list[float] = []
-        price = base
-        for index in range(50):
-            price *= 1.03 if index % 2 == 0 else 0.97
-            closes.append(price)
+        closes = [base] * 60 + [base + (index + 1) * 0.13 + (0.05 if index % 2 else 0.0) for index in range(20)]
         day = self.now.date()
         if not DEFAULT_MARKET_CALENDAR.is_trading_day(day):
             day = DEFAULT_MARKET_CALENDAR.previous_trading_day(day)
         days = [day]
-        for _ in range(49):
+        for _ in range(79):
             days.append(DEFAULT_MARKET_CALENDAR.previous_trading_day(days[-1]))
         return [
             {
@@ -169,6 +165,12 @@ def _policy():
 
 def _eligible_score_row() -> dict[str, float | int]:
     return {
+        "daily_close": 101.0, "ma20": 99.0, "ma50": 95.0,
+        "ma20_slope_5d": 0.02, "ma50_slope_5d": 0.01,
+        "breakout_level": 100.0, "confirmation_index": 70,
+        "return_20d": 0.08, "return_60d": 0.10,
+        "sector_return_20d": 0.02, "sector_return_60d": 0.04,
+        "market_return_20d": 0.01, "market_return_60d": 0.03,
         "rsi14": 42.0,
         "rsi14_min_20d": 25.0,
         "return_5d": 0.04,
@@ -227,11 +229,7 @@ def test_v13_defaults_keep_tradeability_and_restore_one_year_leaps_floor() -> No
     policy = _policy()
 
     assert policy.min_market_cap == 10_000_000_000.0
-    assert (policy.max_ivp_13w, policy.max_ivp_26w, policy.max_ivp_52w) == (
-        0.20,
-        0.20,
-        0.20,
-    )
+    assert policy.max_ivp_52w == 0.20
     assert (policy.min_leaps_dte, policy.max_leaps_dte) == (365, 730)
     assert (policy.target_delta_min, policy.target_delta_max) == (0.68, 0.80)
     assert policy.max_leaps_spread_mid == 0.08
@@ -243,44 +241,151 @@ def test_v13_defaults_keep_tradeability_and_restore_one_year_leaps_floor() -> No
 
 
 def test_candidate_state_follows_watch_armed_trigger_contract() -> None:
-    assert (
-        candidate_state(
-            close=99.0,
-            ma10=100.0,
-            rs5_sector=0.01,
-        )
-        == "ARMED"
-    )
-    assert (
-        candidate_state(
-            close=101.0,
-            ma10=100.0,
-            rs5_sector=0.01,
-        )
-        == "TRIGGER"
-    )
-    assert (
-        candidate_state(
-            close=99.0,
-            ma10=100.0,
-            rs5_sector=-0.01,
-        )
-        == "WATCH"
-    )
+    row = _eligible_score_row()
+    assert candidate_state(row) == "TRIGGER"
+    assert candidate_state({**row, "confirmation_index": None}) == "ARMED"
+    assert candidate_state({**row, "ma50_slope_5d": -0.001}) == "WATCH"
+    assert candidate_state({**row, "daily_close": None}) == "STALE"
+    assert candidate_state(row, spot=99.0) == "ARMED"
 
 
-def test_rsi_recovery_score_is_continuous_at_state_thresholds() -> None:
-    policy = _policy()
+def test_low_position_and_oversold_rsi_cannot_improve_opportunity_rank() -> None:
+    row = _eligible_score_row()
+    before = score_candidate(row, _policy())
+    after = score_candidate({**row, "price_location_52w": 0.001, "rsi14": 20.0}, _policy())
+    assert before["final_score"] == after["final_score"]
+    assert score_candidate({**row, "confirmation_index": None}, _policy()) is None
 
-    assert [
-        rsi_recovery_score(value, 25.0, policy)
-        for value in (20.0, 30.0, 35.0, 40.0, 55.0, 75.0)
-    ] == [20.0, 60.0, 80.0, 100.0, 100.0, 20.0]
-    for boundary in (30.0, 35.0, 40.0, 55.0):
-        below = rsi_recovery_score(boundary - 0.001, 25.0, policy)
-        above = rsi_recovery_score(boundary + 0.001, 25.0, policy)
-        assert abs(above - below) < 0.02
-    assert rsi_recovery_score(45.0, 30.0, policy) == 30.0
+
+def test_breakout_requires_next_completed_close_and_keeps_fixed_level() -> None:
+    path = [100.0] * 80
+    first = price_features(path + [101.0])
+    assert candidate_state(first) == "ARMED"
+    assert first["breakout_level"] == 100.0
+    assert first["confirmation_index"] is None
+    held = price_features(path + [101.0, 101.2])
+    assert candidate_state(held) == "TRIGGER"
+    assert held["confirmation_index"] == 81
+    continued = price_features(path + [101.0, 101.2, 102.0])
+    assert continued["breakout_level"] == 100.0
+    assert continued["confirmation_index"] == 81
+    assert continued["confirmation_age_sessions"] == 1
+    failed = price_features(path + [101.0, 101.2, 102.0, 99.9])
+    assert candidate_state(failed) != "TRIGGER"
+    assert failed["confirmation_index"] is None
+    # A rebound below the prior high cannot resurrect the failed breakout.
+    assert candidate_state(price_features(path + [101.0, 101.2, 102.0, 99.9, 101.0])) != "TRIGGER"
+    renewed = price_features(path + [101.0, 101.2, 102.0, 99.9, 101.0, 103.0, 103.1])
+    assert candidate_state(renewed) == "TRIGGER"
+    assert renewed["breakout_level"] == 102.0
+    assert renewed["confirmation_index"] == 86
+
+
+def test_countertrend_bounce_cannot_be_bought_with_a_high_score() -> None:
+    features = price_features([200.0 - i * 0.6 for i in range(80)] + [155.0, 156.0])
+    assert features["ma50_slope_5d"] < 0
+    assert candidate_state(features) == "WATCH"
+    assert score_candidate({**_eligible_score_row(), **features}, _policy()) is None
+
+
+def test_truncated_history_does_not_invent_a_new_breakout_origin() -> None:
+    # An already trending history boundary is not a newly observed repair.
+    features = price_features([90.0 + i * 0.1 for i in range(100)])
+    assert candidate_state(features) == "ARMED"
+    assert features["breakout_level"] is None
+
+
+def test_partial_scan_keeps_known_price_state_separate_from_stale_data(tmp_path: Path) -> None:
+    class FaultyOther(FakeSchwabClient):
+        def _candles(self, symbol):
+            if symbol == "NEW":
+                raise TimeoutError("missing other symbol")
+            return super()._candles(symbol)
+
+    common = dict(now=NOW, mode="rth", policy=_policy(), data_root=tmp_path,
+                  iv_percentile_fetcher=_ivp_fetcher)
+    scan_once(client=FakeSchwabClient(NOW), universe=_universe(), **common)
+    client = FaultyOther(NOW)
+    client.test_last = 89.0
+    base = _universe().members[0]
+    result = scan_once(client=client, universe=Universe((base, replace(base, symbol="NEW", provider_symbol="NEW")), ()), **common).document
+    assert result["core_pool_status"] == "FROZEN"
+    assert result["core_pool"][0]["today_state"] == "ARMED"
+    assert result["core_pool"][0]["snapshot_status"] == "historical"
+    assert result["core_top_opportunities"] == []
+    assert result["counts"]["core_stale"] == 0
+    assert result["counts"]["core_observing"] == 1
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0.0, -1.0])
+def test_invalid_daily_close_is_not_silently_removed(bad: float) -> None:
+    assert price_features([100.0] * 70 + [bad] + [101.0] * 10) is None
+
+
+def test_intraday_cannot_confirm_or_spend_option_budget_early(tmp_path: Path) -> None:
+    class PendingBreakout(FakeSchwabClient):
+        def _candles(self, symbol):
+            rows = super()._candles(symbol)
+            if symbol == "TEST":
+                for row in rows:
+                    row["close"] = 100.0
+                rows[-2]["close"] = 101.0  # Yesterday's first breakout.
+                rows[-1]["close"] = 101.2  # Today's provisional bar.
+            return rows
+
+    client = PendingBreakout(NOW)
+    iv_calls = []
+
+    def fetch(symbols):
+        iv_calls.extend(symbols)
+        return _ivp_fetcher(symbols)
+
+    common = dict(client=client, policy=_policy(), universe=_universe(), data_root=tmp_path,
+                  iv_percentile_fetcher=fetch)
+    intraday = scan_once(now=NOW, mode="rth", **common).document
+    assert intraday["counts"]["trend_armed"] == 1
+    assert intraday["all_candidates"] == []
+    assert iv_calls == []
+    assert not any(path.endswith("/chains") for path, _ in client.requests)
+    daily = scan_once(now=NOW.replace(hour=20), mode="daily", **common).document
+    assert daily["all_candidates"][0]["confirmation_date"] == NOW.date().isoformat()
+    assert daily["all_candidates"][0]["breakout_level"] == 100.0
+    assert iv_calls == ["TEST"]
+
+
+def test_fresh_trend_failure_exits_core_without_becoming_data_warming(tmp_path: Path) -> None:
+    client = FakeSchwabClient(NOW)
+    common = dict(now=NOW, mode="rth", client=client, policy=_policy(), universe=_universe(),
+                  data_root=tmp_path, iv_percentile_fetcher=_ivp_fetcher)
+    assert scan_once(**common).document["added_symbols"] == ["TEST"]
+    client.test_last = 90.0  # Below the confirmed fixed level; bars remain valid.
+    result = scan_once(**common).document
+    assert result["scan_complete"]
+    assert result["core_changes"]["exited"] == [{"symbol": "TEST", "reason": "trend_armed"}]
+    assert result["counts"]["warming_rows"] == 0
+    assert not result["notification_top10"]
+    assert result["trend_observations"][0]["state"] == "ARMED"
+    _, text = render_notification(result, discoveries=True)
+    assert "TEST | ARMED" in text
+
+
+def test_missing_short_ivp_is_context_not_an_eligibility_gate(tmp_path: Path) -> None:
+    def fetch(symbols):
+        return {key: replace(value, ivp_13w=None, ivp_26w=None)
+                for key, value in _ivp_fetcher(symbols).items()}
+
+    result = scan_once(now=NOW, mode="rth", client=FakeSchwabClient(NOW), policy=_policy(),
+                       universe=_universe(), data_root=tmp_path, iv_percentile_fetcher=fetch).document
+    assert result["all_candidates"][0]["ivp_13w"] is None
+    assert result["all_candidates"][0]["ivp_52w"] == 0.08
+    assert result["all_candidates"][0]["final_score"] > 0
+
+
+@given(st.floats(min_value=0.01, max_value=1.0), st.floats(min_value=1e9, max_value=1e12))
+def test_opportunity_score_is_bounded_with_variable_iv_and_size(iv: float, cap: float) -> None:
+    result = score_candidate({**_eligible_score_row(), "current_iv": iv, "market_cap": cap}, _policy())
+    assert result is not None
+    assert 0.0 <= result["final_score"] <= 100.0
 
 
 def test_v13_score_is_bounded_and_shared_by_notification_priority() -> None:
@@ -556,7 +661,7 @@ def test_first_scan_uses_ibkr_iv_percentiles_without_multiweek_warmup(
     assert candidate["iv_rank_13w"] == 0.10
     assert candidate["iv_filter_source"] == "ibkr_tws_option_implied_volatility_history"
     assert candidate["current_iv"] == 0.20
-    assert candidate["iv_score"] > 0.0
+    assert candidate["vol_cost_score"] > 0.0
     assert candidate["iv_data_notes"] == []
 
 
@@ -731,6 +836,7 @@ def test_incomplete_daily_refresh_keeps_complete_cached_ivp(tmp_path: Path) -> N
             symbols,
             ivp_13w=None,
             ivp_26w=None,
+            ivp_52w=None,
         ),
     )
 
@@ -880,8 +986,8 @@ def test_partial_scan_preserves_membership_and_does_not_create_false_reentry(
     assert partial.document["core_changes"]["message"] == (
         "Membership frozen due to partial scan"
     )
-    assert partial.document["core_top_opportunities"][0]["symbol"] == "TEST"
-    assert partial.document["core_top_opportunities"][0]["today_state"] == "STALE"
+    assert partial.document["core_top_opportunities"] == []
+    assert partial.document["core_pool"][0]["today_state"] == "STALE"
     assert partial.document["added_symbols"] == []
     assert recovered.document["added_symbols"] == []
     assert len(deliveries) == 3
@@ -959,7 +1065,7 @@ def test_core_pool_exits_first_failed_scan_and_reenters_on_recovery(
 
 
 @pytest.mark.parametrize("period", ["13w", "26w", "52w"])
-def test_core_pool_each_ivp_preference_reduces_score_not_membership(tmp_path: Path, period: str) -> None:
+def test_only_52w_ivp_changes_cost_score_not_membership(tmp_path: Path, period: str) -> None:
     common = dict(now=NOW.replace(hour=20), mode="daily", client=FakeSchwabClient(NOW),
                   policy=_policy(), universe=_universe(), data_root=tmp_path)
     first = scan_once(iv_percentile_fetcher=_ivp_fetcher, **common).document
@@ -968,7 +1074,9 @@ def test_core_pool_each_ivp_preference_reduces_score_not_membership(tmp_path: Pa
         **common,
     ).document
     assert failed["exited_symbols"] == []
-    assert failed["core_top_opportunities"][0]["final_score"] < first["core_top_opportunities"][0]["final_score"]
+    old_score = first["core_top_opportunities"][0]["final_score"]
+    new_score = failed["core_top_opportunities"][0]["final_score"]
+    assert new_score < old_score if period == "52w" else new_score == old_score
     assert scan_once(iv_percentile_fetcher=_ivp_fetcher, **common).document["added_symbols"] == []
 
 
@@ -1126,7 +1234,7 @@ def test_v11_members_are_reevaluated_and_research_rejections_still_apply(tmp_pat
     assert scan_once(**common).document["added_symbols"] == []
     saved = json.loads(state_path.read_text())
     assert saved["schema_version"] == state["schema_version"]
-    assert saved["policy_version"] == "growth_dislocation_leaps.v13"
+    assert saved["policy_version"] == "growth_dislocation_leaps.v14"
     assert "entry_streaks" not in saved["core_pool"]
 
 
@@ -1220,7 +1328,7 @@ def test_scan_repairs_sparse_and_provisional_cached_daily_bars(tmp_path: Path) -
         assert all(b == DEFAULT_MARKET_CALENDAR.next_trading_day(a) for a, b in zip(days, days[1:]))
 
 
-@pytest.mark.parametrize("symbol", ["TEST", "XLK"])
+@pytest.mark.parametrize("symbol", ["TEST", "XLK", "SPY"])
 @pytest.mark.parametrize("fault", ["gap", "lag", "nonfinite", "unavailable"])
 def test_unrepaired_history_cannot_score_or_change_core_membership(
     tmp_path: Path, symbol: str, fault: str,
@@ -1254,7 +1362,8 @@ def test_unrepaired_history_cannot_score_or_change_core_membership(
     assert broken["core_pool"][0]["detail_refreshed_this_run"] is False
     row = broken["watchlist"][0]
     assert row["final_score"] is None
-    assert row["rsi14" if symbol == "TEST" else "sector_return_5d"] is None
+    key = {"TEST": "rsi14", "XLK": "sector_return_5d", "SPY": "market_return_20d"}[symbol]
+    assert row[key] is None
     assert any(f"history:{symbol}:" in error for error in broken["data_quality"]["errors"])
 
     recovered = scan_once(client=FakeSchwabClient(NOW), **common).document
@@ -1264,7 +1373,7 @@ def test_unrepaired_history_cannot_score_or_change_core_membership(
 
 
 @pytest.mark.parametrize("at", [NOW, datetime(2026, 9, 8, 15, 30, tzinfo=ET)])
-def test_daily_uses_broker_close_and_rth_uses_only_current_quote(tmp_path: Path, at: datetime) -> None:
+def test_daily_and_rth_features_use_only_completed_closes(tmp_path: Path, at: datetime) -> None:
     client = FakeSchwabClient(at)
     common = dict(client=client, policy=_policy(), universe=_universe(), data_root=tmp_path,
                   iv_percentile_fetcher=_ivp_fetcher)
@@ -1272,7 +1381,9 @@ def test_daily_uses_broker_close_and_rth_uses_only_current_quote(tmp_path: Path,
     daily = scan_once(now=at.replace(hour=20), mode="daily", **common).document["all_candidates"][0]
     candles = client._candles("TEST")
     assert daily["return_5d"] == pytest.approx(candles[-1]["close"] / candles[-6]["close"] - 1)
-    assert intraday["return_5d"] == pytest.approx(client.test_last / candles[-6]["close"] - 1)
+    assert intraday["return_5d"] == pytest.approx(candles[-2]["close"] / candles[-7]["close"] - 1)
+    assert intraday["daily_close"] == candles[-2]["close"]
+    assert intraday["price_history_as_of"] == DEFAULT_MARKET_CALENDAR.previous_trading_day(at.date()).isoformat()
     assert daily["price_history_as_of"] == at.date().isoformat()
 
 
@@ -1452,8 +1563,8 @@ def test_quote_and_iv_preferences_above_old_cutoffs_are_scored_end_to_end(tmp_pa
     row = result["all_candidates"][0]
     assert row["symbol"] == "TEST"
     assert row["market_cap"] < _policy().min_market_cap
-    assert row["price_location_52w"] > _policy().max_price_location_52w
-    assert row["dividend_yield"] > _policy().max_dividend_yield
+    assert row["price_location_52w"] > 0.20
+    assert row["dividend_yield"] > 0.015
     assert row["current_iv"] > _policy().max_current_leaps_iv
     assert 0 < row["final_score"] < 100
     assert result["added_symbols"] == ["TEST"]
@@ -1461,13 +1572,12 @@ def test_quote_and_iv_preferences_above_old_cutoffs_are_scored_end_to_end(tmp_pa
 
 def test_new_high_score_replaces_incumbent_and_old_name_can_reenter(tmp_path: Path) -> None:
     class RankedQuotes(FakeSchwabClient):
-        locations = {"TEST": 0.10, "NEW": 0.0}
+        caps = {"TEST": 10_000_000_000.0, "NEW": 100_000_000_000.0}
 
         def _quote(self, symbol):
             quote = super()._quote(symbol)
-            if symbol in self.locations:
-                low = 110.0 - 50.0 * self.locations[symbol]
-                quote["quote"].update({"52WeekLow": low, "52WeekHigh": low + 50.0})
+            if symbol in self.caps:
+                quote["fundamental"]["sharesOutstanding"] = self.caps[symbol] / 110.0
             return quote
 
     client = RankedQuotes(NOW)
@@ -1481,7 +1591,7 @@ def test_new_high_score_replaces_incumbent_and_old_name_can_reenter(tmp_path: Pa
     assert replacement["added_symbols"] == ["NEW"]
     assert replacement["core_changes"]["exited"] == [{"symbol": "TEST", "reason": "RANKED_OUT"}]
     assert [row["symbol"] for row in replacement["notification_top10"]] == ["NEW"]
-    client.locations = {"TEST": 0.0, "NEW": 0.8}
+    client.caps = {"TEST": 100_000_000_000.0, "NEW": 10_000_000_000.0}
     recovery = scan_once(universe=universe, **common).document
     assert recovery["added_symbols"] == ["TEST"]
     assert recovery["exited_symbols"] == ["NEW"]

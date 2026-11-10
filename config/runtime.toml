@@ -270,11 +270,7 @@ direction_confirmation_move_bps = { value = 5, description = "Minimum same-direc
 [growth_dislocation]
 enabled = { value = false, description = "Enables the additive Growth Dislocation LEAPS discovery job after its production shadow acceptance; disabled by default." }
 universe_path = { value = "config/growth_dislocation_universe.csv", description = "Tracked point-in-time union of official SPY, Nasdaq-100, IWB, and IWM constituents used for large/mid-cap fallen-angel discovery." }
-max_price_location_52w = { value = 0.20, description = "V13 half-score anchor for 52-week price location; legacy key retained, no longer an exclusion threshold." }
-max_dividend_yield = { value = 0.015, description = "V13 half-score anchor for dividend yield; legacy key retained, no longer an exclusion threshold." }
 min_market_cap = { value = 10000000000.0, description = "V13 half-score anchor for market capitalization; legacy key retained, no longer a minimum eligibility gate." }
-max_ivp_13w = { value = 0.20, description = "V13 half-score anchor for 13-week IBKR IV percentile; values above it are scored, not rejected." }
-max_ivp_26w = { value = 0.20, description = "V13 half-score anchor for 26-week IBKR IV percentile; values above it are scored, not rejected." }
 max_ivp_52w = { value = 0.20, description = "V13 half-score anchor for 52-week IBKR IV percentile; values above it are scored, not rejected." }
 ibkr_history_timeout_seconds = { value = 8.0, description = "Per-symbol timeout for the read-only IBKR TWS daily OPTION_IMPLIED_VOLATILITY history request." }
 ibkr_history_concurrency = { value = 5, description = "Maximum concurrent IBKR daily IV-history requests during scanner cache refresh." }
@@ -289,10 +285,6 @@ iv_rv_full_score_ratio = { value = 0.80, description = "Target-LEAPS IV/RV20 rat
 iv_rv_zero_score_ratio = { value = 2.00, description = "Target-LEAPS IV/RV20 ratio at or above which the smooth IV/RV score is zero." }
 min_target_leaps_open_interest = { value = 100, description = "Hard minimum open interest for the selected target LEAPS contract." }
 max_extrinsic_value_ratio = { value = 0.20, description = "Hard maximum target-LEAPS extrinsic value divided by the underlying spot price." }
-rsi_oversold_threshold = { value = 30.0, description = "RSI threshold that proves the stock was recently oversold." }
-rsi_recovery_min = { value = 35.0, description = "First RSI recovery level used as a state confirmation." }
-rsi_recovery_optimal_low = { value = 40.0, description = "Lower edge of the preferred recovered RSI range." }
-rsi_recovery_optimal_high = { value = 55.0, description = "Upper edge of the preferred recovered RSI range." }
 chain_strike_count = { value = 20, description = "Number of strikes around spot requested for long-dated single-option chain discovery." }
 rth_request_budget = { value = 30, description = "Maximum Schwab requests for one RTH scanner run so the SPX collector retains its planned reserve." }
 daily_request_budget = { value = 90, description = "Maximum Schwab requests for the 20:00 ET daily scan while cash options are closed." }
