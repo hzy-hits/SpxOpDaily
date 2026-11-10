@@ -21,12 +21,13 @@ from spx_spark.analytics.growth_dislocation import (
     POLICY_VERSION,
     apply_crowding,
     candidate_sort_key,
+    candidate_state,
     core_display_row,
     new_core_member,
     price_features,
     price_location_52w,
     priority_sort_key,
-    quote_preference_scores,
+    market_cap_score,
     score_candidate,
     select_target_leaps,
     spread_mid_ratio,
@@ -262,7 +263,7 @@ def _build_document(
     provider_symbols = list(
         dict.fromkeys(
             [member.provider_symbol for member in universe.members]
-            + [member.sector_benchmark for member in universe.members]
+            + [member.sector_benchmark for member in universe.members] + ["SPY"]
         )
     )
     for offset in range(0, len(provider_symbols), 500):
@@ -298,7 +299,7 @@ def _build_document(
 
     quotes_ready = len(price_hard_survivors)
     price_hard_survivors = _detail_order(
-        price_hard_survivors, state, policy=policy, request_budget=budget - requests_used,
+        price_hard_survivors, state, policy=policy, request_budget=budget - requests_used - 1,
     )
     selected_symbols = {member.symbol for member, _quote, _location in price_hard_survivors}
     for symbol, observation in membership_observations.items():
@@ -306,10 +307,46 @@ def _build_document(
         if observation["screen_reason"] is None and symbol not in selected_symbols:
             observation["screen_reason"] = "not_evaluated_this_run"
 
+    # Validate completed daily paths before spending IBKR/option-chain calls.
+    history_cache = _mapping_state(state, "price_histories")
+    histories: dict[str, Any] = {}
+    trend_observations: list[dict[str, Any]] = []
+    warming: list[dict[str, Any]] = []
+    trend_survivors: list[tuple[UniverseMember, EquityQuote, float]] = []
+    for member, quote, location in price_hard_survivors:
+        requests_used += 1
+        history, reason = _refresh_close_history(
+            client, member.provider_symbol, now=now, mode=mode, quote=quote,
+            max_quote_age=policy.quote_max_age_seconds,
+        )
+        observation = membership_observations[member.symbol]
+        if reason:
+            errors.append(f"history:{member.symbol}:{reason}")
+            observation["screen_reason"] = "price_history_warming"
+            rejection_counts["price_history_warming"] += 1
+            warming.append({"symbol": member.symbol, "final_score": None, "rsi14": None, "price_history_as_of": None,
+                            "data_quality_reasons": ["price_history_warming"]})
+            continue
+        histories[member.symbol] = _close_history_payload(history)
+        history_cache[member.symbol] = histories[member.symbol]
+        features = price_features([entry.close for entry in history])
+        assert features is not None  # validated 61 completed sessions
+        today_state = candidate_state(features, spot=quote.last)
+        observation.update({"today_state": today_state, "trend_evaluated": True})
+        if today_state != "TRIGGER":
+            observation["screen_reason"] = f"trend_{today_state.lower()}"
+            rejection_counts[observation["screen_reason"]] += 1
+            trend_observations.append({
+                **observation, **features, "state": today_state,
+                "price_history_as_of": history[-1].day.isoformat(),
+            })
+            continue
+        trend_survivors.append((member, quote, location))
+
     iv_cache = _mapping_state(state, "iv_percentiles")
     iv_snapshots = _fresh_iv_snapshots(iv_cache, trading_day=ny.date())
     price_survivor_symbols = [
-        _ibkr_provider_symbol(member.symbol) for member, _quote, _location in price_hard_survivors
+        _ibkr_provider_symbol(member.symbol) for member, _quote, _location in trend_survivors
     ]
     refresh_symbols = (
         price_survivor_symbols
@@ -325,11 +362,7 @@ def _build_document(
                 fetched = iv_percentile_fetcher(refresh_symbols)
                 for raw_symbol, snapshot in fetched.items():
                     symbol = _ibkr_provider_symbol(raw_symbol)
-                    if (
-                        snapshot.ivp_13w is None
-                        or snapshot.ivp_26w is None
-                        or snapshot.ivp_52w is None
-                    ):
+                    if snapshot.ivp_52w is None:
                         continue
                     iv_snapshots[symbol] = snapshot
                     iv_cache[symbol] = iv_percentile_snapshot_to_payload(snapshot)
@@ -338,7 +371,7 @@ def _build_document(
                 errors.append(f"ibkr_ivp:{type(exc).__name__}")
 
     hard_survivors: list[tuple[UniverseMember, EquityQuote, float]] = []
-    for item in price_hard_survivors:
+    for item in trend_survivors:
         member = item[0]
         snapshot = iv_snapshots.get(_ibkr_provider_symbol(member.symbol))
         observation = membership_observations[member.symbol]
@@ -357,28 +390,23 @@ def _build_document(
         )
         if (
             snapshot is None
-            or snapshot.ivp_13w is None
-            or snapshot.ivp_26w is None
             or snapshot.ivp_52w is None
         ):
             observation["screen_reason"] = "ibkr_iv_percentile_missing"
             rejection_counts["ibkr_iv_percentile_missing"] += 1
             continue
-        if any(not 0.0 <= value <= 1.0 for value in (snapshot.ivp_13w, snapshot.ivp_26w, snapshot.ivp_52w)):
+        if not 0.0 <= snapshot.ivp_52w <= 1.0:
             observation["screen_reason"] = "ibkr_iv_percentile_invalid"
             rejection_counts["ibkr_iv_percentile_invalid"] += 1
             continue
         observation["screen_reason"] = None
         hard_survivors.append(item)
 
-    history_cache = _mapping_state(state, "price_histories")
-    # Only this run's validated broker history may feed scores. A cached bar
-    # can be an earlier intraday observation, even when its date looks complete.
-    histories: dict[str, Any] = {}
     detail_cache = _mapping_state(state, "details")
     required_benchmarks = list(
         dict.fromkeys(
-            member.sector_benchmark for member, _quote, _location in hard_survivors
+            [member.sector_benchmark for member, _quote, _location in hard_survivors]
+            + (["SPY"] if hard_survivors else [])
         )
     )
     for symbol in required_benchmarks:
@@ -400,18 +428,6 @@ def _build_document(
     detail_evaluated_now: set[str] = set()
     target_leaps_rejected: set[str] = set()
     for member, quote, _location in prioritized:
-        if requests_used >= budget:
-            break
-        requests_used += 1
-        history, reason = _refresh_close_history(
-            client, member.provider_symbol, now=now, mode=mode, quote=quote,
-            max_quote_age=policy.quote_max_age_seconds,
-        )
-        if reason:
-            errors.append(f"history:{member.symbol}:{reason}")
-            continue
-        histories[member.symbol] = _close_history_payload(history)
-        history_cache[member.symbol] = histories[member.symbol]
         if requests_used >= budget:
             break
         requests_used += 1
@@ -479,7 +495,6 @@ def _build_document(
     now = scan_started_at + timedelta(seconds=monotonic() - started_clock)
     ny = now.astimezone(ET)
     strict_candidates: list[dict[str, Any]] = []
-    warming: list[dict[str, Any]] = []
     for member, quote, location in hard_survivors:
         if member.symbol in target_leaps_rejected:
             continue
@@ -570,6 +585,10 @@ def _build_document(
             ),
             "hard_survivors": len(hard_survivors),
             "detailed_this_run": len(detail_evaluated_now),
+            "trend_evaluated": sum(bool(row.get("trend_evaluated")) for row in membership_observations.values()),
+            "trend_confirmed": len(trend_survivors),
+            "trend_watch": rejection_counts["trend_watch"],
+            "trend_armed": rejection_counts["trend_armed"],
             "strict_candidates": len(strict_candidates),
             "warming_rows": len(warming),
         },
@@ -579,6 +598,7 @@ def _build_document(
         "notification_top10": notification_top,
         "reserve": reserve,
         "watchlist": warming[: max(policy.top_count * 3, policy.top_count)],
+        "trend_observations": trend_observations,
         "all_candidates": sorted(
             strict_candidates,
             key=candidate_sort_key,
@@ -592,7 +612,8 @@ def _build_document(
             "request_limited": request_limited,
             "ivp_incomplete": bool(rejection_counts["ibkr_iv_percentile_missing"]),
             "errors": sorted(set(errors)),
-            "volatility_contract": "13/26/52-week IBKR IV percentiles and absolute LEAPS IV are continuous score inputs, not exclusion thresholds; missing/invalid fields do not receive an invented score",
+            "volatility_contract": "52W IVP, absolute LEAPS IV and IV/RV are score inputs, not cutoffs; 13/26W IVP and RSI are context only; missing data never invents a pass",
+            "policy_validation": "forward_unvalidated; completed-close confirmation, not a buy instruction",
             "underlying_option_volume": "unavailable_from_current_schwab_endpoints",
             "classification": "official sector fallback; subindustry unavailable",
         },
@@ -794,7 +815,7 @@ def _apply_core_pool(
             warming=warming.get(str(row.get("symbol"))),
             observation=observations.get(str(row.get("symbol"))),
         )
-        for row in stored_top
+        for row in stored_top if str(row.get("symbol")) in candidates
     ]
     core_rows = [
         core_display_row(
@@ -850,6 +871,8 @@ def _apply_core_pool(
             "core_paused": sum(
                 row["snapshot_status"] != "current" for row in core_rows
             ),
+            "core_stale": sum(row["today_state"] == "STALE" for row in core_rows),
+            "core_observing": sum(row["today_state"] in {"WATCH", "ARMED"} for row in core_rows),
             "core_entry_pending": 0,
         }
     )
@@ -881,6 +904,7 @@ def _core_exit_signal(
     if reason in {
         "not_optionable",
         "iv_or_liquidity_hard_filter",
+        "trend_watch", "trend_armed",
     } or (reason == "target_leaps_hard_filter" and observation.get("strict_rejection_confirmed")):
         return reason
     return None
@@ -911,13 +935,12 @@ def _candidate_row(
     )
     if sector is None:
         reasons.append("sector_history_warming")
+    market = price_features([entry.close for entry in _close_history(benchmark_histories.get("SPY"))])
+    if market is None:
+        reasons.append("market_history_warming")
     if iv_snapshot is None:
         reasons.append("ibkr_iv_percentile_missing")
     else:
-        if iv_snapshot.ivp_13w is None:
-            reasons.append("ibkr_ivp_13w_missing")
-        if iv_snapshot.ivp_26w is None:
-            reasons.append("ibkr_ivp_26w_missing")
         if iv_snapshot.ivp_52w is None:
             reasons.append("ibkr_ivp_52w_missing")
     if not detail:
@@ -944,6 +967,7 @@ def _candidate_row(
     if detail and current_iv is None:
         reasons.append("target_leaps_iv_missing")
     row: dict[str, Any] = {
+        **features,
         "symbol": member.symbol,
         "company": member.company,
         "memberships": list(member.memberships),
@@ -977,8 +1001,11 @@ def _candidate_row(
         "return_10d": features.get("return_10d"),
         "sector_return_5d": sector.get("return_5d") if sector else None,
         "sector_return_10d": sector.get("return_10d") if sector else None,
-        "rs_5d_sector": None,
-        "rs_10d_sector": None,
+        **{f"{name}_return_{window}d": values.get(f"return_{window}d") if values else None
+           for name, values in (("sector", sector), ("market", market)) for window in (20, 60)},
+        "rs_5d_sector": features.get("return_5d", 0.0) - sector["return_5d"] if sector else None,
+        "rs_10d_sector": features.get("return_10d", 0.0) - sector["return_10d"] if sector else None,
+        "confirmation_date": history[features["confirmation_index"]].day.isoformat() if features.get("confirmation_index") is not None else None,
         "ma5": features.get("ma5"),
         "ma10": features.get("ma10"),
         "low_20d": features.get("low_20d"),
@@ -1073,8 +1100,11 @@ def render_notification(
             f"缺失 {counts.get('ivp_missing', 0)}。缓存不冒充本轮刷新。",
             f"Core Pool 本轮变化：新增 {added}；退出 {exited}",
             "仅做候选发现与排序；TRIGGER 不等于买入。按综合评分竞争 Core Top 名额；旧成员无留存加分。",
-            "评分：52W位置 35.00% + 52W IVP 30.00% + 13W/26W IVP 10.00% + 市值 10.00% "
-            "+ 股息 5.00% + 修复/行业RS 5.00% + IV成本 5.00%。偏好超限扣分，不单项淘汰。",
+            f"完整日线已评估 {counts.get('trend_evaluated', 0)}；WATCH {counts.get('trend_watch', 0)}；"
+            f"ARMED {counts.get('trend_armed', 0)}；价格确认 {counts.get('trend_confirmed', 0)}。未确认不请求 IVP／合约。",
+            "评分：趋势结构 35.00% + 行业/市场RS 20.00% + 入场位置/路径平稳度 20.00% "
+            "+ 期权成本 15.00% + 市值/流动性 10.00%。52W位置和RSI仅作背景，不替代价格确认。",
+            "初始参数未经前向收益验证；只使用完整收盘日线确认，盘中报价只能否决。",
             "\n## 淘汰与数据缺口\n",
         ]
         reason_labels = {
@@ -1097,6 +1127,9 @@ def render_notification(
             "not_optionable": "无期权",
             "price_history_warming": "股票日线未完成校验",
             "sector_history_warming": "行业基准日线未完成校验",
+            "market_history_warming": "市场基准日线未完成校验",
+            "trend_watch": "WATCH：中期结构尚未修复",
+            "trend_armed": "ARMED：已修复，尚无有效两日突破确认",
             "dte_out_of_range": "期限不符",
             "delta_missing": "Delta缺失",
             "delta_out_of_range": "Delta不符",
@@ -1137,9 +1170,21 @@ def render_notification(
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
     top = document.get("notification_top10" if discoveries else "core_top_opportunities", [])
+    if discoveries:
+        lines[-3:] = [
+            "\n## Top Opportunities（仅有效 TRIGGER，按分数排序）\n",
+            "| Symbol | Score | 趋势 | RS | 入场 | 成本 | 市值/流动性 | Market Cap | 52W位置 | IVP 52W | 确认日 | 突破位 | 距支撑 | LEAPS | IV | IV/RV20 | Spread |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---:|",
+        ]
     if isinstance(top, list) and top:
         for row in top:
             if not isinstance(row, Mapping):
+                continue
+            if discoveries:
+                fields = [str(row.get("symbol", "—"))]
+                fields += [_fmt(row.get(key)) for key in ("final_score", "trend_score", "rs_score", "entry_score", "vol_cost_score", "size_liquidity_score")]
+                fields += [_market_cap(row.get("market_cap")), _pct(row.get("price_location_52w")), _pct(row.get("ivp_52w")), str(row.get("confirmation_date") or "—"), _fmt(row.get("breakout_level")), _pct(row.get("distance_from_support")), str(row.get("leaps_symbol") or "—"), _pct(row.get("current_iv")), _fmt(row.get("iv_rv_ratio")), _pct(row.get("leaps_spread_mid"))]
+                lines.append("| " + " | ".join(fields) + " |")
                 continue
             lines.append(
                 "| {symbol} | {state} | {priority} | {market_cap} | {score} | {location} | {ivp_52w} | {ivp} | {rsi} | {sector_rs} | {contract} | {current_iv} | {iv_rv} | {oi} | {extrinsic} | {spread} |".format(
@@ -1162,23 +1207,34 @@ def render_notification(
                 )
             )
     elif discoveries:
-        lines.append("| — | 本轮无完成评分且可交易的候选，详见上方淘汰与数据缺口 |" + " — |" * 14)
+        lines.append("| — | 本轮无有效确认且数据齐全的可交易候选，详见观察名单与数据缺口 |" + " — |" * 15)
     else:
         lines.append(
             "| — | WATCH | — | — | — | — | — | 当前无 Active 严格候选；Core Pool 成员见上表 | — | — | — | — | — | — | — | — |"
         )
     if discoveries:
         if top:
-            lines.append("\n数据日期（ET；RTH日线末点是盘中观察，非最终收盘）：")
+            lines.append("\n证据与失效条件（ET；日线均为已完成交易日）：")
         for row in top:
             lines.append(
                 f"- {row['symbol']}：日线 {row.get('price_history_as_of') or '未知'}；"
                 f"IV历史 {row.get('iv_history_as_of') or '未知'}；"
-                f"IV获取时间 {row.get('iv_observed_at') or '未知'}"
+                f"IV获取时间 {row.get('iv_observed_at') or '未知'}；"
+                f"确认后 {_fmt(row.get('confirmation_age_sessions'))} 个交易日；"
+                f"跌破突破位 {_fmt(row.get('breakout_level'))} 或 MA50 {_fmt(row.get('ma50'))}、"
+                "均线修复失效则移出机会榜；盘中跌破先撤销当轮资格。"
             )
+        lines.extend(["\n## WATCH / ARMED · 等待确认（非机会榜）\n",
+                      "| Symbol | State | 52W位置 | RSI | 日线日期 |",
+                      "|---|---|---:|---:|---|"])
+        for row in document.get("trend_observations", []):
+            lines.append(f"| {row['symbol']} | {row['state']} | {_pct(row.get('price_location_52w'))} | {_fmt(row.get('rsi14'))} | {row.get('price_history_as_of', '—')} |")
+        if not document.get("trend_observations"):
+            lines.append("| — | 本轮无 | — | — | — |")
         lines.extend([
             "\n## Core Pool · 跟踪记录（非当日推荐）\n",
-            f"Active {counts.get('core_active', 0)}；STALE {counts.get('core_paused', 0)}；"
+            f"Active {counts.get('core_active', 0)}；STALE {counts.get('core_stale', 0)}；"
+            f"WATCH/ARMED {counts.get('core_observing', 0)}；"
             f"Changes：新增 {added}；退出 {exited}",
             str(changes.get("message", "")),
             "数据缺失不等于策略淘汰；STALE 成员不展示历史评分与历史合约，本轮未获取的字段留空。",
@@ -1225,7 +1281,7 @@ def _detail_order(
     ordered = sorted(
         survivors,
         key=lambda item: (
-            -quote_preference_scores(item[2], item[1].market_cap, item[1].dividend_yield, policy)["prefilter_score"],
+            -market_cap_score(item[1].market_cap, policy),
             item[0].symbol,
         ),
     )
@@ -1293,6 +1349,7 @@ def _valid_state(raw: dict[str, object]) -> dict[str, Any]:
         "growth_dislocation_leaps.v10",
         "growth_dislocation_leaps.v11",
         "growth_dislocation_leaps.v12",
+        "growth_dislocation_leaps.v13",
         POLICY_VERSION,
     }:
         return {}
@@ -1319,8 +1376,6 @@ def _fresh_iv_snapshots(
         )
         if (
             snapshot is None
-            or snapshot.ivp_13w is None
-            or snapshot.ivp_26w is None
             or snapshot.ivp_52w is None
         ):
             continue
@@ -1363,8 +1418,8 @@ def _refresh_close_history(
 ) -> tuple[list[DailyClose], str | None]:
     """Repair from broker bars, then validate actual exchange sessions, not row count.
 
-    Completed sessions always come from daily bars. Only RTH may append a fresh
-    same-session quote; after-hours prices never overwrite the official close.
+    Completed sessions always come from daily bars. RTH quotes can invalidate
+    confirmation but never stand in for a completed session.
     This deliberately replaces the old sparse/provisional cache on each scan.
     """
     ny = now.astimezone(ET)
@@ -1397,8 +1452,7 @@ def _refresh_close_history(
             or not 0.0 <= (now - quote.quote_at).total_seconds() <= max_quote_age
         ):
             return [], "current_quote_unavailable"
-        history = _upsert_close(history, ny.date(), quote.last)
-    if len(history) < 35:
+    if len(history) < 61:
         return [], "insufficient_sessions"
     return history, None
 
@@ -1407,11 +1461,6 @@ def _close_history_payload(history: list[DailyClose]) -> list[dict[str, Any]]:
     return [
         {"date": row.day.isoformat(), "close": row.close} for row in history[-MAX_CLOSE_HISTORY:]
     ]
-
-def _upsert_close(history: list[DailyClose], day: date, close: float) -> list[DailyClose]:
-    by_day = {row.day: row for row in history}
-    by_day[day] = DailyClose(day, close)
-    return [by_day[key] for key in sorted(by_day)][-MAX_CLOSE_HISTORY:]
 
 def _parse_datetime(value: Any) -> datetime | None:
     try:
@@ -1472,6 +1521,8 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
         "leaps_spread_mid",
         "target_leaps_oi",
         "extrinsic_value_ratio",
+        "confirmation_date", "breakout_level", "ma50", "distance_from_support",
+        "trend_score", "entry_score", "size_liquidity_score",
         "data_quality",
         "data_quality_reasons",
     )
@@ -1490,6 +1541,7 @@ def _material_fingerprint(document: Mapping[str, Any]) -> str:
         ],
         "reserve": [material_row(row) for row in document.get("reserve", [])],
         "watchlist": [material_row(row) for row in document.get("watchlist", [])],
+        "trend_observations": [material_row(row) for row in document.get("trend_observations", [])],
         "data_quality": document.get("data_quality"),
         "core_pool_status": document.get("core_pool_status"),
         "core_top_opportunities": [
