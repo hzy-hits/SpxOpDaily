@@ -1220,6 +1220,8 @@ def render_notification(
                 f"- {row['symbol']}：日线 {row.get('price_history_as_of') or '未知'}；"
                 f"IV历史 {row.get('iv_history_as_of') or '未知'}；"
                 f"IV获取时间 {row.get('iv_observed_at') or '未知'}；"
+                f"合约报价 {row.get('option_quote_status') or '未知'} @ {row.get('option_quote_at') or '未知'}；"
+                f"RSI {_fmt(row.get('rsi14'))}；13W/26W IVP {_iv_gate_label(row)}；"
                 f"确认后 {_fmt(row.get('confirmation_age_sessions'))} 个交易日；"
                 f"跌破突破位 {_fmt(row.get('breakout_level'))} 或 MA50 {_fmt(row.get('ma50'))}、"
                 "均线修复失效则移出机会榜；盘中跌破先撤销当轮资格。"
