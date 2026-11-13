@@ -131,6 +131,10 @@ impl BridgeRuntime {
                 return Ok(());
             }
         }
+        // A quote frame can be explicitly backpressured by the audit reserve.
+        // Forward independent, still-valid desk projections before retrying it;
+        // preserve the exact pending quote and its cursor until acknowledged.
+        self.handle_desk_map_source()?;
         if self.state.pending.is_some() {
             match self.send_pending()? {
                 SendDisposition::Acknowledged => {}
@@ -148,11 +152,9 @@ impl BridgeRuntime {
             Err(failure) => self.handle_source_failure(&failure.to_string()),
         };
         let research_result = self.handle_research_source();
-        let desk_map_result = self.handle_desk_map_source();
         self.handle_strategy_distribution_source();
         quote_result?;
         research_result?;
-        desk_map_result?;
         Self::sleep(self.config.poll_interval_ms, stop);
         Ok(())
     }
@@ -1259,12 +1261,15 @@ mod tests {
     #[test]
     fn busy_core_can_recover_after_more_than_the_permanent_rejection_limit() {
         let temp = TempDir::new().unwrap();
-        let config = config(&temp);
+        let mut config = config(&temp);
+        let desk_map_path = temp.path().join("desk-map.json");
+        config.desk_map_projection_path = Some(desk_map_path.clone());
         write_sources(&config);
         BridgeState::initialize(&config.state_path).unwrap();
         let listener = UnixListener::bind(&config.socket_path).unwrap();
         let server = std::thread::spawn(move || {
             let mut frames = Vec::new();
+            let mut desk_map_forwarded_under_pressure = false;
             for attempt in 0..6 {
                 let (mut stream, _) = listener.accept().unwrap();
                 loop {
@@ -1275,6 +1280,20 @@ mod tests {
                     let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
                     stream.read_exact(&mut bytes).unwrap();
                     let envelope: IngressEnvelopeV1 = serde_json::from_slice(&bytes).unwrap();
+                    if matches!(&envelope.message, IngressMessageV1::DeskMapProjection(_)) {
+                        desk_map_forwarded_under_pressure = attempt < 5;
+                        let ack = CoreAckV1::accepted(
+                            envelope.message_id,
+                            CoreAckDisposition::DeskMapUpdated,
+                            None,
+                        );
+                        let bytes = serde_json::to_vec(&ack).unwrap();
+                        stream
+                            .write_all(&u32::try_from(bytes.len()).unwrap().to_be_bytes())
+                            .unwrap();
+                        stream.write_all(&bytes).unwrap();
+                        continue;
+                    }
                     frames.push(bytes);
                     let ack = if attempt < 5 {
                         CoreAckV1::rejected(Some(envelope.message_id), CoreAckReason::ServerBusy)
@@ -1291,12 +1310,12 @@ mod tests {
                     }
                 }
             }
-            frames
+            (frames, desk_map_forwarded_under_pressure)
         });
         let mut runtime = BridgeRuntime::open(config).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let stop = AtomicBool::new(false);
-        while runtime.health.counters.accepted_frames == 0 && Instant::now() < deadline {
+        while runtime.health.last_matching_ack_at.is_none() && Instant::now() < deadline {
             let before = Utc::now();
             let rejected_before = runtime.health.counters.rejected_acks;
             runtime
@@ -1312,12 +1331,17 @@ mod tests {
                 assert_eq!(persisted["phase"], "degraded");
                 assert!(persisted["last_matching_ack_at"].is_null());
                 assert!(runtime.state.pending.is_some());
+                // Publish a new desk map after the quote is already pending.
+                if !desk_map_path.exists() {
+                    write_current_desk_map_fixture(&desk_map_path);
+                }
             }
         }
         assert!(runtime.health.counters.accepted_frames > 0);
         assert!(runtime.state.pending.is_none());
         drop(runtime);
-        let frames = server.join().unwrap();
+        let (frames, desk_map_forwarded_under_pressure) = server.join().unwrap();
+        assert!(desk_map_forwarded_under_pressure);
         assert!(frames.len() >= 6);
         assert!(frames[..6].iter().all(|frame| frame == &frames[0]));
     }
@@ -1641,10 +1665,9 @@ mod tests {
             runtime.health.strategy_distribution.status,
             StrategyDistributionLaneStatus::Rejected
         );
-        assert_eq!(
-            observed.lock().unwrap().as_slice(),
-            ["quote", "quote", "research", "desk_map"]
-        );
+        let mut kinds = observed.lock().unwrap().clone();
+        kinds.sort_unstable();
+        assert_eq!(kinds, ["desk_map", "quote", "quote", "research"]);
         drop(runtime);
         server.join().unwrap();
     }

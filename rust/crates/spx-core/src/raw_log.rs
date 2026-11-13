@@ -74,6 +74,9 @@ pub enum AppendDurability {
     Buffered,
     /// Flush the record and all preceding writes in the segment before return.
     Durable,
+    /// Durable operational messages may use the separately bounded reserve;
+    /// quote frames, evaluations and research cannot consume it.
+    DurableControl,
 }
 
 #[derive(Debug)]
@@ -81,6 +84,7 @@ pub struct RawLog {
     directory: PathBuf,
     max_segment_bytes: u64,
     min_free_bytes: u64,
+    control_min_free_bytes: u64,
     active_segment: Mutex<Option<PathBuf>>,
 }
 
@@ -162,13 +166,14 @@ struct RawRecord<'a, T> {
 impl RawLog {
     #[cfg(test)]
     pub fn new(directory: impl AsRef<Path>, max_segment_bytes: u64) -> Result<Self, RawLogError> {
-        Self::with_min_free_bytes(directory, max_segment_bytes, 0)
+        Self::with_min_free_bytes(directory, max_segment_bytes, 0, 0)
     }
 
     pub fn with_min_free_bytes(
         directory: impl AsRef<Path>,
         max_segment_bytes: u64,
         min_free_bytes: u64,
+        control_min_free_bytes: u64,
     ) -> Result<Self, RawLogError> {
         if max_segment_bytes == 0 {
             return Err(RawLogError::InvalidSegmentSize);
@@ -188,6 +193,7 @@ impl RawLog {
             directory,
             max_segment_bytes,
             min_free_bytes,
+            control_min_free_bytes: control_min_free_bytes.min(min_free_bytes),
             active_segment: Mutex::new(active_segment),
         })
     }
@@ -223,7 +229,7 @@ impl RawLog {
             &date_lock_path(&self.directory, &date_prefix),
             DirectoryLockMode::Shared,
         )?;
-        self.ensure_free_space(record_bytes)?;
+        self.ensure_free_space(record_bytes, durability)?;
 
         let mut active = self
             .active_segment
@@ -239,15 +245,24 @@ impl RawLog {
         }
         let mut file = open_append(&path)?;
         file.write_all(&encoded)?;
-        if durability == AppendDurability::Durable {
+        if durability != AppendDurability::Buffered {
             file.sync_data()?;
         }
         *active = Some(path);
         Ok(payload_sha256)
     }
 
-    fn ensure_free_space(&self, record_bytes: u64) -> Result<(), RawLogError> {
-        if self.min_free_bytes == 0 {
+    fn ensure_free_space(
+        &self,
+        record_bytes: u64,
+        durability: AppendDurability,
+    ) -> Result<(), RawLogError> {
+        let reserve = if durability == AppendDurability::DurableControl {
+            self.control_min_free_bytes
+        } else {
+            self.min_free_bytes
+        };
+        if reserve == 0 {
             return Ok(());
         }
         let statistics = rustix::fs::statvfs(&self.directory).map_err(std::io::Error::from)?;
@@ -255,8 +270,7 @@ impl RawLog {
             .f_bavail
             .checked_mul(statistics.f_frsize)
             .ok_or(RawLogError::FreeSpaceArithmeticOverflow)?;
-        let required_bytes = self
-            .min_free_bytes
+        let required_bytes = reserve
             .checked_add(record_bytes)
             .ok_or(RawLogError::FreeSpaceArithmeticOverflow)?;
         if available_bytes < required_bytes {
@@ -972,17 +986,23 @@ mod tests {
     #[test]
     fn free_space_reserve_refuses_append_before_creating_a_segment() {
         let temp = TempDir::new().expect("temporary directory");
-        let log =
-            RawLog::with_min_free_bytes(temp.path(), 4096, u64::MAX / 2).expect("guarded raw log");
+        let log = RawLog::with_min_free_bytes(temp.path(), 4096, u64::MAX / 2, u64::MAX / 2)
+            .expect("guarded raw log");
 
-        assert!(matches!(
-            log.append(
-                &Payload { value: "blocked" },
-                at("2026-08-01T00:00:00Z"),
-                AppendDurability::Buffered,
-            ),
-            Err(RawLogError::InsufficientFreeSpace { .. })
-        ));
+        for durability in [
+            AppendDurability::Buffered,
+            AppendDurability::Durable,
+            AppendDurability::DurableControl,
+        ] {
+            assert!(matches!(
+                log.append(
+                    &Payload { value: "blocked" },
+                    at("2026-08-01T00:00:00Z"),
+                    durability,
+                ),
+                Err(RawLogError::InsufficientFreeSpace { .. })
+            ));
+        }
         assert!(
             fs::read_dir(temp.path())
                 .expect("read raw directory")

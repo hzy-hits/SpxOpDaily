@@ -16,6 +16,10 @@ raw_segment_max_bytes = 67108864
 # Refuse an append before the filesystem would fall below this reserve. Keep at
 # least one full maximum segment available; production should reserve more.
 raw_log_min_free_bytes = 5368709120
+# Desk maps and operator notifications/cancellations still require a durable
+# audit append, but can use reserved space while quote/research ingress waits.
+# Defaults to 1 GiB, capped at raw_log_min_free_bytes; never below one segment.
+raw_control_min_free_bytes = 1073741824
 # The in-memory book is deliberately hot and bounded; replay history belongs in
 # the append-only frame segments, not in the live decision process.
 quote_cache_retention_seconds = 300

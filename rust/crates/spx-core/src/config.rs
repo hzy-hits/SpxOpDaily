@@ -32,6 +32,8 @@ pub struct CoreConfig {
     pub max_connections: usize,
     pub raw_segment_max_bytes: u64,
     pub raw_log_min_free_bytes: u64,
+    #[serde(default = "default_control_reserve_bytes")]
+    pub raw_control_min_free_bytes: u64,
     pub quote_cache_retention_seconds: u32,
     pub quote_cache_max_entries: usize,
     pub batch_identity_cache_max_entries: usize,
@@ -56,6 +58,10 @@ pub struct ReadinessConfig {
     pub quote_max_age_seconds: f64,
     pub max_side_skew_seconds: f64,
     pub allow_rth_ibkr_fallback: bool,
+}
+
+const fn default_control_reserve_bytes() -> u64 {
+    1024 * 1024 * 1024
 }
 
 impl CoreConfig {
@@ -112,6 +118,10 @@ impl CoreConfig {
         override_u64(
             "SPX_CORE_RAW_LOG_MIN_FREE_BYTES",
             &mut config.raw_log_min_free_bytes,
+        )?;
+        override_u64(
+            "SPX_CORE_RAW_CONTROL_MIN_FREE_BYTES",
+            &mut config.raw_control_min_free_bytes,
         )?;
         override_u32(
             "SPX_CORE_QUOTE_CACHE_RETENTION_SECONDS",
@@ -286,6 +296,13 @@ impl CoreConfig {
                 "raw_log_min_free_bytes must cover one maximum segment and be <= 10 TiB",
             ));
         }
+        if self.raw_control_min_free_bytes < self.raw_segment_max_bytes
+            || self.raw_control_min_free_bytes > 10 * 1024 * 1024 * 1024 * 1024
+        {
+            return Err(ConfigError::Invalid(
+                "raw_control_min_free_bytes must cover one maximum segment and be <= 10 TiB",
+            ));
+        }
         if !(60..=3600).contains(&self.quote_cache_retention_seconds) {
             return Err(ConfigError::Invalid(
                 "quote_cache_retention_seconds must be within 60..=3600",
@@ -392,6 +409,7 @@ mod tests {
             max_connections: 8,
             raw_segment_max_bytes: 64 * 1024 * 1024,
             raw_log_min_free_bytes: 64 * 1024 * 1024,
+            raw_control_min_free_bytes: default_control_reserve_bytes(),
             quote_cache_retention_seconds: 300,
             quote_cache_max_entries: 4096,
             batch_identity_cache_max_entries: 4096,
@@ -459,6 +477,21 @@ mod tests {
 
     #[test]
     fn raw_log_free_space_reserve_is_bounded() {
+        for reserve in [0, 10 * 1024_u64.pow(4) + 1] {
+            let mut config = valid_config();
+            config.raw_control_min_free_bytes = reserve;
+            assert!(config.validate().is_err());
+        }
+        let old_config = toml::to_string(&valid_config()).unwrap();
+        let old_config = old_config
+            .lines()
+            .filter(|line| !line.starts_with("raw_control_min_free_bytes"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: CoreConfig = toml::from_str(&old_config).unwrap();
+        assert_eq!(parsed.raw_control_min_free_bytes, 1024 * 1024 * 1024);
+        parsed.validate().unwrap();
+
         let mut config = valid_config();
         config.raw_log_min_free_bytes = config.raw_segment_max_bytes - 1;
         assert!(matches!(
