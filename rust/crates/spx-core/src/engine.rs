@@ -153,6 +153,7 @@ impl CoreEngine {
             &config.raw_log_dir,
             config.raw_segment_max_bytes,
             config.raw_log_min_free_bytes,
+            config.raw_control_min_free_bytes,
         )?;
         let projection = ProjectionStore::new(&config.projection_path);
         let research_projection = ResearchProjectionStore::open(&config.research_projection_path)?;
@@ -202,10 +203,12 @@ impl CoreEngine {
             IngressMessageV1::QuoteBatch(_) => AppendDurability::Buffered,
             IngressMessageV1::Evaluate(_)
             | IngressMessageV1::ResearchSignals(_)
-            | IngressMessageV1::DeskMapProjection(_)
-            | IngressMessageV1::StrategyDistributionForecast(_)
+            | IngressMessageV1::StrategyDistributionForecast(_) => AppendDurability::Durable,
+            IngressMessageV1::DeskMapProjection(_)
             | IngressMessageV1::OperatorNotification(_)
-            | IngressMessageV1::OperatorNotificationCancellation(_) => AppendDurability::Durable,
+            | IngressMessageV1::OperatorNotificationCancellation(_) => {
+                AppendDurability::DurableControl
+            }
         };
         let payload_sha256 = self.raw_log.append(&envelope, processing_at, durability)?;
         if envelope.emitted_at > processing_at {

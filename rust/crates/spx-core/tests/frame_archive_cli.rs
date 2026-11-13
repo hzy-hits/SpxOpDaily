@@ -30,6 +30,7 @@ fn config(temp: &TempDir, raw_log_dir: &Path) -> CoreConfig {
         max_connections: 8,
         raw_segment_max_bytes: 64 * 1024 * 1024,
         raw_log_min_free_bytes: 64 * 1024 * 1024,
+        raw_control_min_free_bytes: 64 * 1024 * 1024,
         quote_cache_retention_seconds: 300,
         quote_cache_max_entries: 4096,
         batch_identity_cache_max_entries: 4096,

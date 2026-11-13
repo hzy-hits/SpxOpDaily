@@ -51,6 +51,7 @@ fn config(temp: &TempDir) -> CoreConfig {
         max_connections: 8,
         raw_segment_max_bytes: 64 * 1024 * 1024,
         raw_log_min_free_bytes: 64 * 1024 * 1024,
+        raw_control_min_free_bytes: 64 * 1024 * 1024,
         quote_cache_retention_seconds: 300,
         quote_cache_max_entries: 4096,
         batch_identity_cache_max_entries: 4096,
@@ -1419,9 +1420,10 @@ fn research_context_v2_updates_and_reopens_the_durable_projection() {
 }
 
 #[test]
-fn desk_map_projection_updates_only_the_rust_report_source_projection() {
+fn desk_map_is_durably_projected_while_quote_audit_is_backpressured() {
     let temp = TempDir::new().expect("temp directory");
-    let core_config = config(&temp);
+    let mut core_config = config(&temp);
+    core_config.raw_log_min_free_bytes = 10 * 1024_u64.pow(4);
     let projection: DeskMapProjectionV1 = serde_json::from_str(include_str!(
         "../../../../contracts/golden/domain/v1/desk_map_projection.json"
     ))
@@ -1435,6 +1437,18 @@ fn desk_map_projection_updates_only_the_rust_report_source_projection() {
         message: IngressMessageV1::DeskMapProjection(Box::new(projection)),
     };
     let mut engine = CoreEngine::open(core_config.clone(), processing_at).expect("open core");
+    let quote = quote_envelope(
+        "message:quote-reserve",
+        Provider::Schwab,
+        MarketSession::Rth,
+        OperationalState::Live,
+        1,
+        processing_at,
+    );
+    assert!(matches!(
+        engine.process(quote, processing_at),
+        Err(CoreError::RawLog(_))
+    ));
     assert!(matches!(
         engine
             .process(envelope, processing_at)
@@ -1446,6 +1460,17 @@ fn desk_map_projection_updates_only_the_rust_report_source_projection() {
     ));
     engine.shutdown().expect("release core owner");
     drop(engine);
+
+    let frames: Vec<_> = std::fs::read_dir(&core_config.raw_log_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "ndjson"))
+        .collect();
+    assert_eq!(frames.len(), 1);
+    let audit = std::fs::read_to_string(&frames[0]).unwrap();
+    assert_eq!(audit.lines().count(), 1);
+    let record: serde_json::Value = serde_json::from_str(audit.trim()).unwrap();
+    assert_eq!(record["payload"]["message_id"], "message:desk-map:test");
 
     let latest: spx_core::LatestDeskMapProjectionV1 = serde_json::from_slice(
         &std::fs::read(&core_config.desk_map_projection_path).expect("desk map projection"),

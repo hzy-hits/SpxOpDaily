@@ -1,5 +1,38 @@
 # Headless Deployment Notes
 
+## Desk forwarding under audit disk pressure (2026-11-13)
+
+Phase 6 production-fault exception; Rust ownership remains frozen. On November 12
+at 21:09 UTC the core repeatedly returned `ServerBusy` with approximately 9.56 GiB
+available against the configured 10 GiB raw-log reserve. The bridge retried its
+exact pending quote before visiting the desk lane, so new Python desk maps could
+expire without reaching the report service. This is independent of broker quote
+readiness and report generation. The November 13 10:00 UTC report had confirmed
+channel receipts before this repair; that recovery did not remove the recurrence.
+
+The bridge now checks the current desk projection before retrying a pending quote.
+It preserves the original pending frame, provider cursor, freshness checks and
+idempotency. Core still writes and fsyncs the audit record before accepting a desk
+map or operator notification/cancellation. These operational messages use
+`raw_control_min_free_bytes` (default 1 GiB;
+`SPX_CORE_RAW_CONTROL_MIN_FREE_BYTES` environment override), capped at the existing
+`raw_log_min_free_bytes`. Both reserves must cover one maximum segment. Quote,
+evaluation and research records retain the ordinary reserve, including production's
+10 GiB floor. Below the control reserve, operational messages also fail closed.
+No wire schema, service, queue, database or delivery target changes.
+
+Regression coverage combines retryable socket rejection, successful audited desk
+projection during quote backpressure, forwarding a new desk map while an unchanged
+quote remains pending, exact quote retry after recovery, and rejection below the
+control floor. Old TOML remains valid through the bounded default. Release CI is
+the build/test gate; runtime acceptance must check new projection timestamps and
+actual channel receipts. Do not fill the production disk to exercise the failure.
+
+NAS remains a separate capacity dependency: the existing archive job still cannot
+reach the household Pi on November 13. Local source files must remain until remote
+verification succeeds; this forwarding repair is not a claim that archival or
+long-term disk capacity is solved.
+
 ## Storage maintenance migration (2026-11-07)
 
 This incident release advances `0005_notification_correlation` to
